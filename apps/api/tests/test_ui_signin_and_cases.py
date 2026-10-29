@@ -1,20 +1,14 @@
-"""Sign-in, the case list, the case chrome and the console's reach, held
-from the shipped files (review of 2026-09-22, fix pass of 2026-09-23).
+"""Sign-in, the case list, the case chrome and the console's reach, held from the shipped files.
 
-One check per finding, each written so it would have failed on the code
-the review measured:
-
-- ux01-firstrun: a lockout that read as a typo, a sign-out that left the
-  case in the page, case buttons that did nothing on the list, a live dot
-  that stayed green on a dead session, recovery copy that told analysts to
-  run a server script;
-- ux02-cases: a free-text status prompt, a case record nobody could see,
-  an address that never named the case, a list with nothing to triage by,
-  and a header that called everyone "analyst";
-- ux18-a11y: the graph pane at 200% zoom, a silent canvas, letter keys that
-  fired from anywhere, rail names that changed with the window height,
-  keyboard controls written only for screen readers, small text below AA,
-  banners over the app bar, and unnamed pickers on the Admin card.
+- Sign-in and first run: a lockout reads as a lockout, not a typo; a sign-out does not leave the case
+  in the page; case buttons do something on the list; the live dot does not stay green on a dead
+  session; recovery copy does not tell analysts to run a server script.
+- Cases: no free-text status prompt; the case record can be seen; the address names the case; the list
+  has something to triage by; the header does not call everyone "analyst".
+- Accessibility: the graph pane at 200% zoom, a canvas that speaks, no letter keys that fire from
+  anywhere, rail names that do not change with the window height, keyboard controls not written only
+  for screen readers, no small text below AA, banners clear of the app bar, and named pickers on the
+  Admin card.
 
 Pure, like test_ui_invariants.py beside it: static assets, and the real
 functions run under Node against stubs where the claim is about behaviour
@@ -119,9 +113,7 @@ function visibleText(s) { return s == null ? '' : String(s); }
 """
 
 
-# ---------------------------------------------------------------------------
-# ux01-firstrun:lockout-reads-as-typo
-# ---------------------------------------------------------------------------
+# A lockout reads as a lockout, not as a typo
 
 _WORDS = {3: "Three", 4: "Four", 5: "Five", 6: "Six", 10: "Ten"}
 
@@ -145,7 +137,7 @@ def test_the_sign_in_form_states_the_policy_the_server_enforces():
     # Placed under the button, inside the form.
     form = html[html.index('<form id="login-form"'):html.index("</form>")]
     assert form.index('id="login-submit"') < form.index('id="login-policy"')
-    # And the admin card really has the Unlock it names (ux16-admin's card).
+    # And the admin card really has the Unlock it names.
     js = _js()
     assert "admButton('Unlock')" in js
     assert "'/admin/users/' + u.id + '/unlock'" in js
@@ -209,9 +201,7 @@ console.log(JSON.stringify([
     assert "retryAfterSeconds(res.headers.get('Retry-After'), p.detail)" in _fn("_fetch")
 
 
-# ---------------------------------------------------------------------------
-# ux01-firstrun:logout-leaves-case-in-page
-# ---------------------------------------------------------------------------
+# Logging out leaves no case in the page
 
 _LEAVE = r"""
 const log = [];
@@ -233,14 +223,12 @@ const location = { pathname: '/ui/', replace(url) { log.push('replace:' + url); 
 
 
 def test_leaving_discards_the_page_however_the_server_answered():
-    """endSession hid the app and kept it: after Log out the previous
-    analyst's 146 nodes, 492 edges and the header's case and name stayed
-    in memory and in the hidden DOM of the sign-in screen. The first fix
-    reloaded only a sign-out the server accepted; the verifier found the
-    same page left behind on the two other ways an analyst leaves: a Log
-    out the server answers 401 (an administrator revoked the session, or
-    it idled out there first) and "Sign in as someone else" on a lapsed
-    sheet, which is the hand-over of the desk itself."""
+    """Every way an analyst leaves discards the page, however the server answered.
+
+    After Log out the previous analyst's nodes, edges and the header's case and name must not stay in
+    memory and in the hidden DOM of the sign-in screen. That covers a sign-out the server accepts, a Log
+    out the server answers 401 (an administrator revoked the session, or it idled out there first) and
+    "Sign in as someone else" on a lapsed sheet, which is the hand-over of the desk itself."""
     got = _run(_LEAVE + _fn("discardPage") + _fn("doLogout") + _fn("leaveReauth") + r"""
 (async () => {
   const out = {};
@@ -293,10 +281,7 @@ def test_leaving_discards_the_page_however_the_server_answered():
     assert "if (title) rememberResume();" in _fn("endSession")
 
 
-# ---------------------------------------------------------------------------
-# ux01-firstrun:dead-case-buttons-after-return and
-# ux02-cases:case-actions-linger-on-case-list
-# ---------------------------------------------------------------------------
+# The case chrome leaves with the case
 
 def test_the_case_chrome_and_the_live_dot_leave_with_the_case():
     got = _run(_DOM + r"""
@@ -310,8 +295,7 @@ for (const id of chrome) $(id).hidden = false;
 hideCaseChrome();
 console.log(JSON.stringify({ hidden: chrome.map((id) => $(id).hidden), log }));
 """)
-    # The Hold… button and the LEGAL HOLD chip leave with the case too
-    # (2026-10-08), and the hold dialog closes.
+    # The Hold... button and the LEGAL HOLD chip leave with the case too, and the hold dialog closes.
     assert got["hidden"] == [True] * 6
     assert got["log"] == ["closeRecord", "closeStatus", "closeHold"]
     listing = _fn("showCaseList")
@@ -321,9 +305,7 @@ console.log(JSON.stringify({ hidden: chrome.map((id) => $(id).hidden), log }));
     assert "showCaseChrome(rec);" in _fn("openCase")
 
 
-# ---------------------------------------------------------------------------
-# ux01-firstrun:live-dot-green-on-dead-session
-# ---------------------------------------------------------------------------
+# The live dot does not stay green on a dead session
 
 def test_the_live_dot_says_signed_out_when_the_server_ends_the_session():
     live = (SRC / "http" / "routers" / "live.py").read_text(encoding="utf-8")
@@ -418,13 +400,13 @@ const ended = { code: 1008, reason: 'session ended' };
 
 
 def test_a_sign_in_moves_the_live_socket_onto_the_new_session():
-    """The verifier's regression. The socket authenticates with the cookie
-    its upgrade carried; every sign-in (Sign in again now, a step-up, a
-    sibling tab's) makes a new session and leaves the old one to its own
-    timeout; and `sessionRenewed` reopened the socket only for a lapsed
-    tab. Once the server checked the socket's session on every ping, the
-    old one's expiry closed it as "session ended" and signed out an
-    analyst who had just signed in. Run through the real functions."""
+    """A sign-in moves the live socket onto the new session.
+
+    The socket authenticates with the cookie its upgrade carried. Every sign-in (Sign in again now, a
+    step-up, a sibling tab's) makes a new session and leaves the old one to its own timeout, and the
+    server checks the socket's session on every ping, so the old one's expiry would close the socket as
+    "session ended" and sign out an analyst who had just signed in. `sessionRenewed` therefore moves
+    the socket for a live tab, not only a lapsed one. Run through the real functions."""
     got = _run(r"""
 const calls = [];
 const els = {};
@@ -480,9 +462,7 @@ console.log(JSON.stringify(out));
     assert got["lapsed"] == ["connectLive"], got["lapsed"]
 
 
-# ---------------------------------------------------------------------------
-# ux01-firstrun:shell-only-recovery-copy
-# ---------------------------------------------------------------------------
+# Recovery messages give a step the analyst can take
 
 def test_recovery_messages_give_the_analyst_a_step_they_can_take():
     """Three banners told analysts to mint a `bootstrap.py session` link,
@@ -499,9 +479,7 @@ def test_recovery_messages_give_the_analyst_a_step_they_can_take():
         assert "ask" in strings.lower() or "Sign in" in strings, name
 
 
-# ---------------------------------------------------------------------------
-# ux02-cases:status-prompt-free-text-one-way-transitions
-# ---------------------------------------------------------------------------
+# The status control follows the server's transition table
 
 def test_the_server_names_the_legal_moves_from_its_own_table():
     from noctornal_api.cases import _TRANSITIONS, allowed_transitions
@@ -622,9 +600,8 @@ def test_purging_asks_for_a_fresh_sign_in_first():
 
 
 def test_a_refused_purge_names_its_own_verb():
-    """PURGED is gated on case.delete. g10's status sheet said so; g12's
-    dialog replaced it and said case.close for every 403 (merged
-    2026-09-24). The server's detail still comes first (refusalText)."""
+    """PURGED is gated on case.delete, so a refused purge names `case.delete`, not `case.close`. The
+    server's detail still comes first (refusalText)."""
     submit = _fn("submitStatus")
     # The two sentences are chosen into `why` first, and handed on.
     why = submit[submit.index("const why = "):]
@@ -637,9 +614,7 @@ def test_a_refused_purge_names_its_own_verb():
     assert "refusalText(err, why)" in said
 
 
-# ---------------------------------------------------------------------------
-# ux02-cases:case-record-invisible-and-uneditable
-# ---------------------------------------------------------------------------
+# The case record is shown and corrected
 
 def test_the_case_record_is_shown_and_corrected_within_the_servers_rules():
     html = _html()
@@ -683,9 +658,7 @@ console.log(JSON.stringify({
     assert got["raise"] == {"body": {"review_due": "2027-03-01", "classification": "RED"}}
 
 
-# ---------------------------------------------------------------------------
-# ux02-cases:reload-and-back-lose-the-case
-# ---------------------------------------------------------------------------
+# The address names the case and pane, and back returns to the list
 
 def test_the_address_names_the_case_and_pane_and_back_returns_to_the_list():
     got = _run(r"""
@@ -721,8 +694,7 @@ console.log(JSON.stringify({ calls, read, title,
     ], got["calls"]
     assert got["read"] == {"caseId": cid, "tab": "evidence"}
     assert got["title"] == "NocTORnal analyst console"
-    # Neither the code nor the marking: the browser keeps every title in
-    # its history, past Log out (final review u18, 2026-09-24).
+    # Neither the code nor the marking: the browser keeps every title in its history, past Log out.
     assert got["named"] == "Case · NocTORnal"
     assert "document.title = caseTitle();" in _fn("openCase")
     assert "writeLocation(state.caseId, name, false);" in _fn("selectTab")
@@ -731,9 +703,7 @@ console.log(JSON.stringify({ calls, read, title,
     assert "token" not in _fn("writeLocation")
 
 
-# ---------------------------------------------------------------------------
-# ux02-cases:case-list-lacks-triage-fields
-# ---------------------------------------------------------------------------
+# The case list leads with open work and flags an overdue review
 
 def test_the_case_list_leads_with_open_work_and_flags_an_overdue_review():
     heads = re.findall(r'<th scope="col"[^>]*>([^<]+)</th>',
@@ -773,9 +743,7 @@ console.log(JSON.stringify(out));
     assert "'overdue'" in rows or "' overdue'" in rows
 
 
-# ---------------------------------------------------------------------------
-# ux02-cases:header-says-analyst-no-permission-cues
-# ---------------------------------------------------------------------------
+# The header says role and clearance
 
 def test_the_header_says_role_and_clearance_not_analyst():
     html = _html()
@@ -802,9 +770,7 @@ console.log(JSON.stringify({ inCase, onList, empty: $('hdr-role').hidden }));
     assert "caseCan(rec, 'case.close')" in chrome and "caseCan(rec, 'case.update')" in chrome
 
 
-# ---------------------------------------------------------------------------
-# ux18-a11y:zoom-200-graph-clipped
-# ---------------------------------------------------------------------------
+# The graph pane scrolls instead of clipping at deep zoom
 
 def test_the_graph_pane_scrolls_instead_of_clipping_at_deep_zoom():
     """At 683x384 the pane was `overflow: hidden` with the scrubber and the
@@ -819,9 +785,7 @@ def test_the_graph_pane_scrolls_instead_of_clipping_at_deep_zoom():
         "the app bar overflows with no cue")
 
 
-# ---------------------------------------------------------------------------
-# ux18-a11y:canvas-selection-silent and ux18-a11y:canvas-keys-undocumented
-# ---------------------------------------------------------------------------
+# A keyboard selection on the canvas is announced, and the canvas keys are documented
 
 def test_a_keyboard_selection_on_the_canvas_is_announced():
     html = _html()
@@ -829,8 +793,8 @@ def test_a_keyboard_selection_on_the_canvas_is_announced():
     assert re.search(r'<p id="graph-say" class="sr-only" role="status"\s+aria-live="polite">',
                      wrap)
     key = _fn("onCanvasKey")
-    # Space is the whole graph tab's since ux03 space-needs-canvas-focus
-    # (onSpaceDown); the arrows run up to the U key that follows them.
+    # Space belongs to the whole graph tab (onSpaceDown); the arrows run up to the U key that follows
+    # them.
     arrows = key[key.index("if (e.key === 'ArrowRight'"):key.index("} else if ((e.key === 'u'")]
     assert arrows.count("saySelection();") == 2, "an arrow key changes the selection in silence"
     assert "sayGraph('Selection cleared')" in key
@@ -846,7 +810,7 @@ function edgeById() { return { edge_type: 'VOUCHED_FOR', src_label: 'a', dst_lab
 """ + _fn("describeNodeForSpeech") + _fn("describeEdgeForSpeech") + r"""
 console.log(JSON.stringify([describeNodeForSpeech('b'), describeEdgeForSpeech('e')]));
 """)
-    # The ring's Triage half (ux08-triage); the tie half is nodeUnreviewed.
+    # The ring's Triage half; the tie half is nodeUnreviewed.
     assert got == ["sable_marten, Persona, 11 ties, 1 proposal in Triage, 2 of 2",
                    "VOUCHED_FOR between a and b, inferred, LOW confidence"]
 
@@ -860,9 +824,7 @@ def test_the_canvas_key_strip_shows_the_keyboard_as_well_as_the_mouse():
         assert said in strip, f"the strip does not teach {said!r}: {strip}"
 
 
-# ---------------------------------------------------------------------------
-# ux18-a11y:triage-letter-keys-global
-# ---------------------------------------------------------------------------
+# The triage letters act only in the list
 
 def test_the_triage_letters_act_only_in_the_list_and_accept_asks_first():
     got = _run(r"""
@@ -882,8 +844,7 @@ function deferProposal() { calls.push('defer'); }
 function renderTriage() {}
 function visibleText(s) { return s; }
 """ + _fn("triageAcceptQuestion") + _fn("triageKeyTarget") + _fn("onTriageKey")
-    # The confirm names what it accepts through these (g01, final review
-    # c14, 2026-09-24).
+    # The confirm names what it accepts through these.
     + _fn("triageNamed") + _fn("triageTitle") + _fn("triageClaimValue") + r"""
 const press = (key, target) => onTriageKey({ key, target, preventDefault() {} });
 // A card as the queue draws one: the keys act on it, never on a button
@@ -914,9 +875,7 @@ console.log(JSON.stringify(out));
     assert 'tabindex="0"' in listing[:listing.index(">")]
 
 
-# ---------------------------------------------------------------------------
-# ux18-a11y:rail-laptop-labels
-# ---------------------------------------------------------------------------
+# The rail names its tabs the same at every height
 
 def test_the_rail_names_its_tabs_the_same_at_every_height():
     """`display: none` on the captions below 820px took them out of the
@@ -933,9 +892,7 @@ def test_the_rail_names_its_tabs_the_same_at_every_height():
     assert re.search(r"\.rail \{\s*background:[^}]*local", _css()), "the rail gives no scroll cue"
 
 
-# ---------------------------------------------------------------------------
-# ux18-a11y:tertiary-contrast-inspector
-# ---------------------------------------------------------------------------
+# Tertiary text contrast in the inspector
 
 def _tokens() -> dict[str, str]:
     theme = (STATIC / "theme.css").read_text(encoding="utf-8")
@@ -986,12 +943,10 @@ def test_small_inspector_text_clears_aa_on_the_stack_it_sits_on():
 
 
 def test_what_this_pass_wrote_clears_aa_where_it_is_drawn():
-    """The verifier's second and third regressions: the new lockout line,
-    the status consequences ("An archived case can never be reopened") and
-    the case record's rules were written in `.help`, tertiary, on the
-    sign-in card (4.07:1) and on a sheet's --surface-2 (3.75:1); the case
-    list's quiet ACTIVE chip was 10px tertiary on a chip wash on a card
-    (3.92:1). All below AA for text that size, on what the reader acts on."""
+    """The lockout line, the status consequences ("An archived case can never be reopened") and the
+    case record's rules clear AA where they are drawn: `.help`, tertiary, on the sign-in card and on a
+    sheet's --surface-2. The case list's quiet ACTIVE chip (10px tertiary on a chip wash on a card)
+    does too."""
     t = _tokens()
     ground = _rgb(t["--surface-0"])[0]
     sheet = _rgb(t["--surface-2"])[0]
@@ -1028,9 +983,7 @@ def test_what_this_pass_wrote_clears_aa_where_it_is_drawn():
     assert "el('span', 'help', statusConsequence(" in _fn("openStatus")
 
 
-# ---------------------------------------------------------------------------
-# ux18-a11y:banners-cover-appbar
-# ---------------------------------------------------------------------------
+# Banners sit below the app bar
 
 def test_banners_sit_below_the_app_bar_and_advice_expires():
     rule = re.search(r"\.banners \{([^}]*)\}", _css()).group(1)
@@ -1055,14 +1008,11 @@ console.log(JSON.stringify(shown));
     assert "setTimeout(() => b.remove(), expireMs);" in _fn("banner")
 
 
-# ---------------------------------------------------------------------------
-# ux18-a11y:admin-row-selects-unnamed
-# ---------------------------------------------------------------------------
+# The admin card pickers are named for the account
 
 def test_the_admin_card_pickers_are_named_for_the_account():
-    """Named for the account they change, beside their verbs: the Admin
-    card's pickers since ux16-admin restructured it the same day, each in
-    a labelled pair (clearancePair, grantPair)."""
+    """Named for the account they change, beside their verbs, each in a labelled pair (clearancePair,
+    grantPair)."""
     clearance = _fn("clearancePair")
     assert "clr.setAttribute('aria-label', 'New clearance for ' + visibleText(u.display_name));" in clearance
     grant = _fn("grantPair")

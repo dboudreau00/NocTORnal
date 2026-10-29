@@ -1,12 +1,9 @@
-"""The services that must see every row still do, as the request role (S1).
+"""The services that must see every row still do, as the request role.
 
-Each case here is run through the SERVICE on a connection SET ROLE to
-the request role and bound as the reader, with
-NOCTORNAL_TEST_ASSUME_ROLE set so that `db.system_connection` opens the
-system role exactly as production does. Until 2026-09-25 each of these
-read the caller's filtered view and got a wrong answer that looked right:
-a retirement allowed over hidden ties, "nothing withheld", a legal hold
-that held nothing.
+Each case here is run through the SERVICE on a connection SET ROLE to the request role and bound as the
+reader, with NOCTORNAL_TEST_ASSUME_ROLE set so that `db.system_connection` opens the system role exactly
+as production does. Reading the caller's filtered view would give a wrong answer that looks right: a
+retirement allowed over hidden ties, "nothing withheld", a legal hold that held nothing.
 """
 from __future__ import annotations
 
@@ -99,8 +96,8 @@ def test_a_legal_hold_reaches_an_exhibit_above_the_officer_and_refuses_a_ghost(o
             with pytest.raises(RetentionError, match="no such exhibit"):
                 RetentionService(sconn).set_legal_hold(
                     uuid4(), actor_id=scene["analyst"], on=True, reason="court order 7")
-        # On the request connection alone the same UPDATE is refused: the
-        # request role writes no hold column since 0178 (Beta 1.1).
+        # On the request connection alone the same UPDATE is refused: the request role writes no hold
+        # column (0178).
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             app.execute("UPDATE core.evidence SET legal_hold = true, "
                         "legal_hold_reason = 'x' WHERE id = %s", (exhibit,))

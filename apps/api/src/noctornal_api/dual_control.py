@@ -1,42 +1,28 @@
-"""The deployment's two-person policy, and the only way it changes (F9,
-2026-09-24).
+"""The deployment's two-person policy, and the only way it changes.
 
-Two things are policy here:
+Two things are policy here: which operations need a second signature (the catalogue in
+`approvals.OPERATIONS` sets each operation's floor, and `iam.dual_control_operation` can make a
+configurable one stricter, `node.merge`: PER_CASE, where each case asks with its own switch, or
+ALWAYS), and which permission pairs no role may hold together (`iam.separated_duty`, 0062): the two
+halves of a two-person control.
 
-- which operations need a second signature: the catalogue in
-  `approvals.OPERATIONS` sets each operation's floor, and
-  `iam.dual_control_operation` can make a configurable one stricter
-  (`node.merge`: PER_CASE, where each case asks with its own switch, or
-  ALWAYS);
-- which permission pairs no role may hold together (`iam.separated_duty`,
-  0062): the two halves of a two-person control.
+Changing either takes two people too. An administrator (`dual_control.manage`) PROPOSES a change,
+which raises a `dual_control.policy` approval; a Security officer (`dual_control.countersign`) who
+is not also an administrator COUNTERSIGNS it through the global approvals route; the administrator
+APPLIES it, which consumes the approval and inserts one row in `iam.dual_control_policy_change` in
+the same transaction. That insert is the only way the two policy tables move, and the database
+refuses it unless the approval it names was consumed there, for exactly that change, by two people
+who may still act (migration dual_control_policy).
 
-Changing either takes two people too. An administrator (`dual_control.
-manage`) PROPOSES a change, which raises a `dual_control.policy` approval;
-a Security officer (`dual_control.countersign`) who is not also an
-administrator COUNTERSIGNS it through the global approvals route; the
-administrator APPLIES it, which consumes the approval and inserts one row
-in `iam.dual_control_policy_change` in the same transaction. That insert is
-the only way the two policy tables move, and the database refuses it unless
-the approval it names was consumed there, for exactly that change, by two
-people who may still act (migration dual_control_policy).
+Each payload carries `based_on`: the change the operation's row, or the pair, was last set by. An
+approval is therefore for one version of the policy, and one approved but never applied cannot come
+back to life after later changes and be spent on a policy nobody was looking at (approvals.py: "an
+approval is spent, not held").
 
-## What a change is bound to
-
-Each payload carries `based_on`: the change the operation's row, or the
-pair, was last set by. An approval is therefore for one version of the
-policy, and one approved but never applied cannot come back to life after
-later changes and be spent on a policy nobody was looking at (approvals.py:
-"an approval is spent, not held").
-
-## Counts, and whose
-
-The screen says how many cases ask for a second signature on merges. Only
-ever over the cases the VIEWER can open: labels they dominate AND a live
-assignment (2026-09-24). A pure administrator holds no
-case, so sees no number at all; a count across cases someone has no
-relationship with would tell them when a case they cannot see turns its
-switch on. No deployment-wide total is returned anywhere.
+The screen says how many cases ask for a second signature on merges, only ever over the cases the
+VIEWER can open: labels they dominate AND a live assignment. A pure administrator holds no case, so
+sees no number at all; a count across cases someone has no relationship with would tell them when a
+case they cannot see turns its switch on. No deployment-wide total is returned anywhere.
 """
 from __future__ import annotations
 
@@ -107,13 +93,11 @@ class OtherControl:
     enforced_at: str
 
 
-#: Two-person controls held outside the approvals table: the collection
-#: authority (docs/00 decision 69), the lookup sign-off (docs/00 decision
-#: 75), the exposure change and the sandbox detonation sign-off.
-#: Append-only, one entry per control; the screen shows the section only
-#: when this is not empty.
+#: Two-person controls held outside the approvals table: the collection authority (docs/00 decision
+#: 69), the lookup sign-off (docs/00 decision 75), the exposure change and the sandbox detonation
+#: sign-off. Append-only, one entry per control; the screen shows the section only when this is not
+#: empty.
 OTHER_TWO_PERSON_CONTROLS: tuple[OtherControl, ...] = (
-    # The collection authority (2026-09-24; docs/00 decision 69).
     OtherControl(
         key="collection.authority",
         act="Reading a forum or Telegram source, public boards included",
@@ -122,8 +106,7 @@ OTHER_TWO_PERSON_CONTROLS: tuple[OtherControl, ...] = (
         second=("A security officer confirms the authority and each source, "
                 "never the person who recorded it or added the source"),
         enforced_at="collection_authority.py::CollectionAuthorityService.confirm"),
-    # F15.2 and F15.3 (2026-09-24; docs/00 decision 75). Held per row by
-    # CHECKs and a trigger (0098, 0099).
+    # The lookup sign-off (docs/00 decision 75). Held per row by CHECKs and a trigger (0098, 0099).
     OtherControl(
         "lookup.signoff",
         "Send a case selector to a vendor or public lookup provider",
@@ -137,10 +120,9 @@ OTHER_TWO_PERSON_CONTROLS: tuple[OtherControl, ...] = (
         "The administrator who asks, with a written basis",
         "A different administrator holding integration.manage, within 72 hours",
         "providers.py::ProviderRegistry.decide_exposure_change"),
-    # F14, 2026-09-24. Held per row on lab.detonation (0103's CHECKs
-    # and the service), not an approvals operation: the second person is a
-    # lead investigator on the sample's case, not a holder of the
-    # requester's verb.
+    # Held per row on lab.detonation (0103's CHECKs and the service), not an approvals operation:
+    # the second person is a lead investigator on the sample's case, not a holder of the requester's
+    # verb.
     OtherControl(
         key="sample.detonation.signoff",
         act="Send a sample to a sandbox whose exposure is not NONE, or whose "
@@ -246,9 +228,8 @@ class DualControlPolicyService:
             if op.configurable and "PER_CASE" in op.modes:
                 item["cases_requiring"] = requiring
             if op.signer_assignment_seasoned:
-                # F39 (2026-10-02): the window the second person must have
-                # held the permission on the case for, as the decide route
-                # reads it, and why a declared value was not used.
+                # The window the second person must have held the permission on the case for, as the
+                # decide route reads it, and why a declared value was not used.
                 window, problem = relax_seasoning()
                 item["signer_seasoning"] = {
                     "permission": op.signer_permission, "days": window,
@@ -292,9 +273,8 @@ class DualControlPolicyService:
                  "b_roles": roles.get(r[1], [])} for r in rows]
 
     def history(self, limit: int = 100) -> list[dict]:
-        """Every change applied, newest first, each in a past-tense sentence
-        with no count in it: a count of cases today says nothing about a
-        change made last month (2026-09-24)."""
+        """Every change applied, newest first, each in a past-tense sentence with no count in it: a
+        count of cases today says nothing about a change made last month."""
         rows = self._c.execute(
             """SELECT c.id, c.seq, c.change, c.operation, c.mode_from,
                       c.mode_to, c.permission_a, c.permission_b, c.why,
@@ -542,12 +522,10 @@ class DualControlPolicyService:
     def apply(self, request_id: UUID, *, actor_id: UUID) -> dict:
         """Spend a countersigned change and put it in force.
 
-        The consume is the FIRST write of the transaction (the module rule
-        in approvals.py), the ledger row follows it in the same one, and
-        the database checks everything again at that insert. A refusal
-        from the ledger rolls the consume back, so the signature is not
-        spent on a change that did not happen, and it is recorded out of
-        band only AFTER the rollback (2026-09-24), never
+        The consume is the FIRST write of the transaction (the module rule in approvals.py), the
+        ledger row follows it in the same one, and the database checks everything again at that
+        insert. A refusal from the ledger rolls the consume back, so the signature is not spent on a
+        change that did not happen, and it is recorded out of band only AFTER the rollback, never
         from inside a transaction that has already audited."""
         svc = ApprovalService(self._c)
         approval = svc.get(request_id)

@@ -1,35 +1,31 @@
-"""The CAPEv2 client and the report reader (F14, 2026-09-24).
+"""The CAPEv2 client and the report reader.
 
-CAPEv2 is a network peer reached over HTTP through the ONE outbound client
-(`pinned_http.fetch_response`, docs/00 decision 72) on the integration
-route `integration:sandbox` (docs/00 decision 68, docs/20 section 9).
-Nothing here opens a socket of its own, follows a redirect, or retries: a
-POST is sent at most once, and an answer that was lost is recorded as
-such, never resent (a possible orphan task beats a second disclosure).
+CAPEv2 is a network peer reached over HTTP through the one outbound client (`pinned_http.fetch_response`,
+docs/00 decision 72) on the integration route `integration:sandbox` (docs/00 decision 68, docs/20
+section 9). Nothing here opens a socket of its own, follows a redirect, or retries: a POST is sent at most
+once, and an answer that was lost is recorded as such, never resent (a possible orphan task beats a second
+disclosure).
 
-What leaves is the ZIP_INFECTED archive a download produces, named for its
-SHA-256, never the raw sample (invariant 10). The CAPE network route is
-ALWAYS sent, because CAPE's own routing.conf may default to the internet.
+What leaves is the ZIP_INFECTED archive a download produces, named for its SHA-256, never the raw sample
+(invariant 10). The CAPE network route is always sent, because CAPE's own routing.conf may default to the
+internet.
 
 ## The API used (upstream kevoreilly/CAPEv2 web/apiv2)
 
-- POST apiv2/tasks/create/file/: multipart `file` plus `route`, `timeout`
-  and optionally `package`, `platform` and `machine`; answers
-  `data.task_ids`.
+- POST apiv2/tasks/create/file/: multipart `file` plus `route`, `timeout` and optionally `package`,
+  `platform` and `machine`; answers `data.task_ids`.
 - GET apiv2/tasks/view/<id>/: `data.status`.
-- GET apiv2/tasks/get/report/<id>/json/ and, when that is larger than the
-  cap, the smaller apiv2/tasks/get/iocs/<id>/.
+- GET apiv2/tasks/get/report/<id>/json/ and, when that is larger than the cap, the smaller
+  apiv2/tasks/get/iocs/<id>/.
 - The token header is `Authorization: Token <key>`.
 
 ## The report is attacker-influenced input
 
-It is capped (NOCTORNAL_SANDBOX_MAX_REPORT_BYTES), parsed in the worker
-with nesting and memory failures caught, and reduced to a capped summary.
-A shape this reader does not know becomes an extraction gap, never a
-silent skip (invariant 12). A family detection goes into the findings,
-never into a family assessment; CAPE's own YARA rule names go into
-`findings.cape_yara`, never into `yara_hits`, which holds only this
-deployment's own rule matches (F12).
+It is capped (NOCTORNAL_SANDBOX_MAX_REPORT_BYTES), parsed in the worker with nesting and memory failures
+caught, and reduced to a capped summary. A shape this reader does not know becomes an extraction gap, never
+a silent skip (invariant 12). A family detection goes into the findings, never into a family assessment;
+CAPE's own YARA rule names go into `findings.cape_yara`, never into `yara_hits`, which holds only this
+deployment's own rule matches.
 """
 from __future__ import annotations
 
@@ -106,8 +102,7 @@ class ProbeResult:
 
 
 def _short(text) -> str:
-    # A structure from an answer is named, never stringified: str() of a
-    # nested value recurses (verifier, 2026-09-24).
+    # A structure from an answer is named, never stringified: str() of a nested value recurses.
     if isinstance(text, (dict, list, tuple)):
         text = "a structured answer"
     text = " ".join(str(text).split())[:EXCERPT]
@@ -162,16 +157,13 @@ class CapeV2Client:
                network_route: str, timeout_s: int, package: str | None = None,
                platform: str | None = None, machine: str | None = None
                ) -> SubmitOutcome:
-        """POST the archive once. The outcome is decided by what the client
-        knows was written: nothing of the request reached the target
-        (`request_sent` false: a refused route or destination, a name that
-        did not resolve, a proxy that refused the tunnel, a certificate or
-        handshake failure, a dial that never completed) is NOT_SENT; an
-        answer that refuses (an error field, or a 4xx) is
-        REJECTED_BY_TARGET; anything else after the first byte left is
-        UNCONFIRMED, however much of the body went (docs/20 section 9:
-        request_sent false is NOT_SENT, anything else UNCONFIRMED until
-        answered)."""
+        """POST the archive once. The outcome is decided by what the client knows was written.
+
+        Nothing of the request reached the target (`request_sent` false: a refused route or destination, a
+        name that did not resolve, a proxy that refused the tunnel, a certificate or handshake failure, a
+        dial that never completed): NOT_SENT. An answer that refuses (an error field, or a 4xx):
+        REJECTED_BY_TARGET. Anything else after the first byte left: UNCONFIRMED, however much of the body
+        went (docs/20 section 9)."""
         fields = {"route": network_route, "timeout": str(int(timeout_s))}
         if package:
             fields["package"] = package
@@ -227,12 +219,11 @@ class CapeV2Client:
             "the sandbox answered without a task id"))
 
     def status(self, task_id: int, *, context: str) -> str:
-        """CAPE's status word for a task. Raises OutboundError (the caller
-        retries on its next pass; HttpStatusError carries retry_after), or
-        ValueError for an answer that cannot be read: a 64 KiB answer can
-        still nest deep enough to raise RecursionError from the parser,
-        which is turned into the ValueError the worker already handles
-        (verifier, 2026-09-24)."""
+        """CAPE's status word for a task.
+
+        Raises OutboundError (the caller retries on its next pass; HttpStatusError carries retry_after), or
+        ValueError for an answer that cannot be read: a 64 KiB answer can still nest deep enough to raise
+        RecursionError from the parser, which is turned into the ValueError the worker already handles."""
         fetched = self._get(f"/tasks/view/{int(task_id)}/",
                             route=self.route(context), auth=True,
                             max_bytes=ANSWER_MAX_BYTES,
@@ -325,23 +316,20 @@ class SandboxFindings:
     tool_version: str | None = None
 
 
-#: What a section of a report the reader does not understand may raise while
-#: it is walked. Each is caught per section and becomes a named gap: one
-#: malformed section must never cost the rest of the report, nor raise out
-#: of the worker's pass, where it would poison that row on every later pass
-#: (verifier, 2026-09-24).
+#: What a section of a report the reader does not understand may raise while it is walked. Each is caught
+#: per section and becomes a named gap: one malformed section must never cost the rest of the report, nor
+#: raise out of the worker's pass, where it would poison that row on every later pass.
 _READ_ERRORS = (TypeError, AttributeError, KeyError, IndexError, ValueError,
                 RecursionError, MemoryError)
 
 
 def _text(value, limit: int = MAX_STRING) -> str:
-    """A scalar as capped text that Postgres will store; anything else as
-    nothing. A dict or a list is never stringified: str() of a deep
-    structure recurses, and of a wide one copies the whole report into a
-    finding. A NUL, which jsonb refuses, is dropped, and a lone surrogate
-    (a JSON escape like \\ud800), which no UTF-8 encoder writes, becomes
-    "?": either would otherwise fail the insert of the finding on every
-    pass (verifier, 2026-09-24)."""
+    """A scalar as capped text that Postgres will store; anything else as nothing.
+
+    A dict or a list is never stringified: str() of a deep structure recurses, and of a wide one copies the
+    whole report into a finding. A NUL, which jsonb refuses, is dropped, and a lone surrogate (a JSON
+    escape like \\ud800), which no UTF-8 encoder writes, becomes "?": either would otherwise fail the
+    insert of the finding on every pass."""
     if isinstance(value, bool) or value is None:
         return ""
     if not isinstance(value, (str, int, float)):

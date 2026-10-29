@@ -1,8 +1,7 @@
-"""Administration, Providers as the console ships it (F15.2,
-2026-09-24): the exposure has no default, the consequence of each
-level is shown, the key is typed into password inputs that are emptied
-before the request goes, enabling echoes the exposure the administrator
-read, and only a second administrator is offered Approve.
+"""Administration, Providers as the console ships it: the exposure has no default, the consequence of
+each level is shown, the key is typed into password inputs that are emptied before the request goes,
+enabling echoes the exposure the administrator read, and only a second administrator is offered
+Approve.
 
 Pure: reads the shipped source, as test_ui_invariants.py does.
 """

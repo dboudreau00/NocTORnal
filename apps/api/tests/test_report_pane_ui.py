@@ -1,22 +1,19 @@
 """Check egress asks for the sign-in it needs, and tells its refusals apart.
 
-Final review C15 (2026-09-23). `/report/release` is the only path to a
-report file and it is step-up gated. The console never checked the gate:
-every Check egress more than 15 minutes into a session came back "missing
-permission report.export on this case", which `releaseReport` showed as an
-egress refusal "audited as loudly as a permission would be", to a Lead
-investigator who holds the permission. Nothing offered the in-place sign-in
-(`confirmIdentity`) the recovery-code flow already used, so the way out was
-signing out and preparing the report again.
+`/report/release` is the only path to a report file and it is step-up gated. The console must not leave
+the gate unchecked: a Check egress more than 15 minutes into a session would come back "missing permission
+report.export on this case", which `releaseReport` would show as an egress refusal "audited as loudly as a
+permission would be", to a Lead investigator who holds the permission, with the only way out signing out
+and preparing the report again. The in-place sign-in (`confirmIdentity`) the recovery-code flow already
+uses is offered instead.
 
-Now: the sign-in is asked for before the request when this tab knows the
-gate is shut, and once more if the server says so; the server says so
-only when the sign-in is all that is missing, and still records the
-refusal against the case; and only the gate's own verdict ("Egress
-refused") is shown as an egress refusal.
+So: the sign-in is asked for before the request when this tab knows the gate is shut, and once more if the
+server says so; the server says so only when the sign-in is all that is missing, and still records the
+refusal against the case; and only the gate's own verdict ("Egress refused") is shown as an egress
+refusal.
 
-Pure: reads the shipped assets and runs the pane's code under node when it
-is installed, with the DOM, the API and the sign-in sheet faked.
+Pure: reads the shipped assets and runs the pane's code under node when it is installed, with the DOM, the
+API and the sign-in sheet faked.
 """
 from __future__ import annotations
 
@@ -83,8 +80,7 @@ def test_only_the_gate_s_verdict_is_shown_as_an_egress_refusal():
         "a permission or sign-in 403 is still presented as an egress refusal")
     assert "reportAccessRefusal(err)" in release
     refusal = _fn("reportAccessRefusal")
-    # The role, and no permission code (ux19-copy developer-speak-in-copy,
-    # 2026-09-23): an analyst acts on who can give access, not on a key.
+    # The role, and no permission code: an analyst acts on who can give access, not on a key.
     assert "Lead investigator" in refusal and "report.export" not in refusal
 
 
@@ -113,13 +109,11 @@ def _stale_sign_in_detail() -> str:
 
 
 def test_the_route_says_when_the_sign_in_is_all_that_is_missing():
-    """`report.export` is itself step-up, so the permission gate refused a
-    stale session with "missing permission". The route's permission gate
-    is now `_require_export`, which is the same five-part decision with
-    one sentence changed, and that sentence is `require_step_up`'s word
-    for word, so the console recognises it. The bare freshness check is
-    no longer first: run first it wrote the refusal with no case (final
-    review C15 follow-up, 2026-09-23). It stays on the route, after."""
+    """`report.export` is itself step-up, so the permission gate would refuse a stale session with "missing
+    permission". The route's permission gate is `_require_export`, the same five-part decision with one
+    sentence changed, and that sentence is `require_step_up`'s word for word, so the console recognises it.
+    The bare freshness check is not first (run first it would write the refusal with no case); it stays on
+    the route, after."""
     from noctornal_api.http.deps import require_step_up
     from noctornal_api.http.routers.reports import (
         STEP_UP_DETAIL,
@@ -137,7 +131,7 @@ def test_the_route_says_when_the_sign_in_is_all_that_is_missing():
 
 
 def test_the_preview_says_when_the_hypotheses_went_with_the_header():
-    """Final review C2: asked for is not the same as in the document."""
+    """Asked for is not the same as in the document."""
     assert "r.hypotheses_withheld" in _fn("renderRedaction")
     assert "r.hypothesis_evidence_withheld" in _fn("renderRedaction")
     body = _fn("renderReportBody")
@@ -321,10 +315,9 @@ def test_check_egress_signs_in_and_tells_its_refusals_apart():
 
 
 def test_a_withheld_header_does_not_call_its_dates_unrecorded():
-    """README screenshot review, 2026-09-23. A withheld case header sends
-    its retention and review dates as null, and the preview printed "not
-    recorded" for them, which says the case has none. It shows the same
-    withheld mark the markdown prints, taken from the server's own text."""
+    """A withheld case header sends its retention and review dates as null, and the preview must not print
+    "not recorded" for them, which says the case has none. It shows the same withheld mark the markdown
+    prints, taken from the server's own text."""
     body = _fn("renderReportBody")
     assert "body.redaction.header_withheld" in body
     assert "headerDate(c.retention_until)" in body

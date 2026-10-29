@@ -1,54 +1,35 @@
-"""The two-person collection authority and the classification ceilings
-(the collection foundation, 2026-09-24; docs/00 decision 69).
+"""The two-person collection authority and the classification ceilings (docs/00 decision 69).
 
-An authority is a written authorisation that exists outside this system: a
-warrant, a directed-surveillance or covert-source authorisation, an internal
-covert online authorisation. The software records it, records who declared
-it (a collection manager) and who confirmed it (a security officer, never
-the same person), and refuses every forum and Telegram read it does not
-cover, public boards included. RSS is unchanged. It cannot verify the
-document, exactly as samples.policy_declared records the L1 declaration,
-and every screen that shows an authority says so.
+An authority is a written authorisation that exists outside this system (a warrant, a
+directed-surveillance or covert-source authorisation, an internal covert online authorisation). The
+software records it, who declared it (a collection manager) and who confirmed it (a security
+officer, never the same person), and refuses every forum and Telegram read it does not cover, public
+boards included. RSS is unchanged. It cannot verify the document, exactly as samples.policy_declared
+records the L1 declaration, and every screen that shows an authority says so.
 
-## Scopes
+Scopes: PUBLIC_READ reads what the platform shows to anyone, without joining or signing in.
+MEMBER_READ reads as a member, covers PUBLIC_READ too, and needs a persona and a
+`member_authority_ref` (docs/16 L3 and L4), which is stricter than comms' exemption for
+PERSONA_PARTY, on purpose. There is deliberately no active scope: nothing in the product posts,
+messages or purchases, and a scope for it would imply something does.
 
-PUBLIC_READ: read what the platform shows to anyone, without joining and
-without signing in to a members' area. MEMBER_READ: read as a member; it
-covers PUBLIC_READ too, needs a persona, and needs `member_authority_ref`,
-the reference of the authority to read as a member (docs/16 L3 and L4).
-That is stricter than comms' exemption for PERSONA_PARTY, on purpose. There
-is deliberately NO active scope: nothing in the product posts, messages or
-purchases, and a scope for it would imply something does.
+An authority covers one persona, or no persona (public reading). Its sources are targets, each
+confirmed by a second person, because adding a source is the moment the reading set grows. A target
+covers its source only while the source is read through the binding the target was added for, at the
+address the confirmer was shown: a rebinding, a re-pointed exit or a changed address needs a new
+confirmed target. A persona's authority with no targets allows the persona's own acts (enrolling,
+looking up a chat) and no read.
 
-## Who it covers
+An authority carries its own classification, at least every target's, and it only rises. Every
+listing and write filters whole rows by it and says only that something was withheld, never how
+much; a sentence that carries an authority's date or scope is given only to a reader cleared for it,
+so a higher-labelled authority is never an existence or content oracle.
 
-One persona, or no persona (public reading with nothing signed in). Its
-sources are targets, each confirmed by a second person, because adding a
-source is the moment the reading set grows. A target covers its source
-only while the source is read through the binding the target was added
-for, at the address the confirmer was shown: a
-rebinding, a re-pointed exit or a changed address needs a new confirmed
-target. A persona's authority with no targets at all
-allows the persona's own acts (enrolling, looking up a chat) and no read.
-
-## Labels
-
-An authority carries its own classification, at least every target's, and
-it only rises. Every listing and every write filters whole rows by it, and
-says only that something was withheld, never how much. A sentence that
-carries an authority's date or scope is given only to a reader cleared for
-that authority; anyone else gets the generic sentence, so a higher-labelled
-authority is never an existence or content oracle.
-
-## Ceilings
-
-Every forum and Telegram source also needs a declared classification
-ceiling for its kind (NOCTORNAL_FORUM_SOURCE_CEILING,
-NOCTORNAL_TELEGRAM_SOURCE_CEILING), capped at AMBER by invariant 8 through
-egress Destination.COLLECTION_TARGET: the fact that an exit reads a source
-leaves the platform with every request, so a RED or AMBER_STRICT source is
-never read by an adapter, whatever a variable says. That work is collected
-by hand into its case.
+Every forum and Telegram source also needs a declared classification ceiling for its kind
+(NOCTORNAL_FORUM_SOURCE_CEILING, NOCTORNAL_TELEGRAM_SOURCE_CEILING), capped at AMBER by invariant 8
+through egress Destination.COLLECTION_TARGET: the fact that an exit reads a source leaves the
+platform with every request, so a RED or AMBER_STRICT source is never read by an adapter, whatever a
+variable says. That work is collected by hand into its case.
 """
 from __future__ import annotations
 
@@ -70,7 +51,6 @@ from noctornal_api.collection import (
     _utc,
     default_adapters,
 )
-from noctornal_api.wording import agree, count_of
 
 PUBLIC_READ = "PUBLIC_READ"
 MEMBER_READ = "MEMBER_READ"
@@ -195,8 +175,8 @@ def ceiling_refusal(source, env=None) -> str | None:
                 f"the ceiling declared for its kind, so it is collected by "
                 f"hand, not by the collector.")
     if decision.reason == DENY_ABOVE_PLATFORM_FLOOR:
-        # Invariant 8's floor, said in words: this sentence reaches the
-        # console, which cites no rule numbers (2026-09-24).
+        # Invariant 8's floor, said in words: this sentence reaches the console, which cites no rule
+        # numbers.
         return (f"This source is labelled TLP:{source.classification}, which "
                 f"never leaves this platform, so it is collected by hand, not "
                 f"by the collector.")
@@ -590,10 +570,9 @@ class CollectionAuthorityService:
     def _target_sources(self, source_ids: list[UUID], *, persona_id,
                         classification: str, clearance: str | None,
                         compartments=None) -> list[tuple]:
-        """Each source, visible to the caller, read by an authority adapter,
-        labelled no higher than the authority, and bound as the authority
-        covers. A source filed under a compartment the caller does not
-        hold (F43, 2026-10-02) is as absent as one above their ceiling."""
+        """Each source, visible to the caller, read by an authority adapter, labelled no higher than
+        the authority, and bound as the authority covers. A source filed under a compartment the
+        caller does not hold is as absent as one above their ceiling."""
         from noctornal_api.security.access import tlp_from_name
 
         rows = []
@@ -738,12 +717,11 @@ class CollectionAuthorityService:
 
     def _walled(self, authority_ids: list[UUID], clearance: str | None,
                 compartments=None) -> set[UUID]:
-        """The authorities with a target under a compartment the reader does
-        not hold (2026-10-03). Such an authority is
-        withheld whole, like one above the reader's ceiling: its free text
-        (what it covers, its member reference, its persona) names what the
-        compartment protects, and hiding only the targets array left that
-        text readable. A NULL clearance is the worker's and walls nothing."""
+        """The authorities with a target under a compartment the reader does not hold. Such an
+        authority is withheld whole, like one above the reader's ceiling: its free text (what it
+        covers, its member reference, its persona) names what the compartment protects, so hiding
+        only the targets array would leave that text readable. A NULL clearance is the worker's and
+        walls nothing."""
         if clearance is None or not authority_ids:
             return set()
         rows = self._c.execute(
@@ -822,8 +800,8 @@ class CollectionAuthorityService:
                      JOIN collect.source s ON s.id = t.source_id
                     WHERE t.id = %s AND t.authority_id = %s""",
                 (tid, authority_id)).fetchone()
-            # F43 (2026-10-02): a target under a compartment the confirmer
-            # does not hold is as absent as one above their ceiling.
+            # A target under a compartment the confirmer does not hold is as absent as one above
+            # their ceiling.
             if target is None or (limit is not None and (
                     _rank(target[4]) > limit
                     or not frozenset(target[5] or []) <= held)):
@@ -941,9 +919,8 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
 
     def _targets(self, authority_ids: list[UUID], clearance: str | None,
                  compartments=None) -> tuple[dict[UUID, list[dict]], set[UUID]]:
-        """Each authority's targets the caller may see, and the ids of the
-        authorities with a target above the caller's ceiling or under a
-        compartment they do not hold (F43, 2026-10-02)."""
+        """Each authority's targets the caller may see, and the ids of the authorities with a target
+        above the caller's ceiling or under a compartment they do not hold."""
         rows = self._c.execute(
             """SELECT t.id, t.authority_id, t.source_id, s.name, s.kind::text,
                       t.target_base_url, s.base_url, t.target_egress_profile_id,
@@ -1011,8 +988,8 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
         rows = [r for r in rows if r[0] not in walled]
         targets, hidden = self._targets([r[0] for r in rows], clearance,
                                         compartments)
-        # F5.3 (2026-09-24). A Telegram target has no address, so the
-        # confirmer is shown which chat it is and how it is read.
+        # A Telegram target has no address, so the confirmer is shown which chat it is and how it is
+        # read.
         from noctornal_api.telegram_service import attach_target_chats
         attach_target_chats(self._c, targets)
         views = []
@@ -1121,9 +1098,3 @@ def _reason(reason: str) -> str:
     if not 5 <= len(reason) <= 1000:
         raise CollectionError("Stopping an authority says why, in 5 to 1000 characters.")
     return reason
-
-
-def pending_summary(count: int) -> str:
-    """'{n} authorities wait for a second person', agreed."""
-    return (f"{count_of(count, 'collection authority', 'collection authorities')} "
-            f"{agree(count, 'waits', 'wait')} for a second person")

@@ -1,5 +1,4 @@
-"""Telegram's typed ids, chat references, the sealed secret's shape and the
-data-centre list (roadmap F5.2 and F5.3, telegram, 2026-09-24).
+"""Telegram's typed ids, chat references, the sealed secret's shape and the data-centre list.
 
 Pure: no database, no network, no Telethon.
 """

@@ -1,53 +1,27 @@
-"""Create and grant the two runtime roles on an existing cluster (S1).
+"""Create and grant the two runtime roles on an existing cluster.
 
     python scripts/runtime_roles.py ensure     create both roles if missing, grant them here
     python scripts/runtime_roles.py check      print each role's attributes and privileges
 
-## Why this exists
+The runtime roles are born at initdb (`db/init/10-app-role.sh`), which runs once, on an empty data
+directory, and only when the passwords are set. A cluster initialised without them (every
+development stack, or one older than `noctornal_worker`) has no such roles, and the migrations that
+grant them are no-ops there by design, because a GRANT to a missing role would break every
+developer's `alembic upgrade head`. Alembic never re-runs a recorded revision, so a role created
+afterwards holds nothing. `ensure` is the repair, and it replays the migrations' own SQL, so the
+two cannot disagree:
 
-The runtime roles are born at initdb (`db/init/10-app-role.sh`), which runs
-once, on an empty data directory, and only when the passwords are set. A
-cluster initialised before `noctornal_worker` existed, or without either
-password (every development stack), has no such roles, and the migrations
-that grant them are no-ops there by design (0060, 0108, 0109: a GRANT to a
-missing role would break every developer's `alembic upgrade head`).
-Alembic never re-runs a revision it has recorded, so creating a role
-afterwards leaves it holding nothing. `ensure` is the repair, and it
-replays exactly the migrations' own SQL, so the two cannot disagree.
+1. Refuses under NOCTORNAL_ENV=production unless `--production` is given: in production the roles
+   are an initdb decision, and this is a repair an operator runs deliberately.
+2. As a superuser, creates `noctornal_app` (NOBYPASSRLS) and `noctornal_worker` (BYPASSRLS) with
+   exactly the attributes and pinned log and message settings 10-app-role.sh gives them and no
+   password (the tests reach them with SET ROLE from the owner). Otherwise it prints the
+   statements for a superuser to run, and stops.
+3. On this database, replays 0108's runtime grants for both roles and 0109's IAM-plane lockdown
+   for the request role, then every later revision that takes back what 0108's blanket grant
+   hands out, each only when the database is at or past it.
 
-## What ensure does, in order
-
-1. Refuses under NOCTORNAL_ENV=production unless `--production` is given:
-   in production the roles are an initdb decision, and this is the repair
-   an operator runs deliberately.
-2. When the connected role is a superuser: creates `noctornal_app`
-   (NOBYPASSRLS) and `noctornal_worker` (BYPASSRLS) with exactly the
-   attributes 10-app-role.sh gives them and NO password (nothing in the
-   test suite logs in as them: it reaches them with SET ROLE from the
-   owner), and pins the log and message settings 10-app-role.sh pins.
-   Not a superuser: prints the statements for one to run, and stops.
-3. On THIS database: the runtime grants for both roles (0108's
-   `grants_sql`, the shape 0060 set plus every later revoke), then 0109's
-   IAM-plane lockdown for the request role when the database is at or past
-   0109, then the two later revisions that take columns back from it
-   (0143: the credential columns of iam.app_user; 0144: the step-up column
-   of iam.session) when the database is at or past them.
-   Then 0155's column grants on the ingest records, credentials and
-   authorisations when it is at or past 0155 (`grant`). 0108's replay hands
-   both roles table UPDATE on every table, so without the 0155 step a role
-   created after that revision ran would get back the columns it took away
-   (F51, 2026-10-02). And 0156's GRANTS_SQL when at or past 0156: the same
-   blanket grant hands DELETE on the persona act queue back, and no role may
-   have it (A collector process, 2026-10-02). And the revoke of the two ledger
-   sequences from both roles (0169), which the same blanket grant hands back.
-   And, from Beta 1.1, the Lab custody ledger's sequence (0175), the session
-   and break-glass columns (0177), the case material's narrowed UPDATE and
-   DELETE (0178), the read-only configuration tables (0179), the sealed
-   columns outside the accounts table (0180) and a person's delivery
-   settings (0182).
-
-It never drops or alters any other role, and it touches only the database
-DATABASE_URL names.
+It never drops or alters any other role, and it touches only the database DATABASE_URL names.
 """
 from __future__ import annotations
 
@@ -127,41 +101,35 @@ def grant(conn) -> None:
     conn.execute(grants.grants_sql(WORKER_ROLE))
     if _at_or_past(conn, "0109"):
         conn.execute(_migration("0109").UPGRADE_SQL)
-    # 0108's blanket grant hands back UPDATE and DELETE on core.assertion;
-    # the claims guard takes them off again (graph-assertion-claims-mutable,
-    # 2026-10-03). Found by name and read for its own revision id, so
-    # renumbering it when the branches are merged cannot break this replay
-    # (verify round, 2026-10-03).
+    # 0108's blanket grant hands back UPDATE and DELETE on core.assertion; the claims guard takes
+    # them off again. Found by name and read for its own revision id, so renumbering it cannot
+    # break this replay.
     guard = _migration_named("assertion_marked_once")
     if _at_or_past(conn, guard.revision):
         conn.execute(guard.GRANTS_SQL)
 
-    # 0108's grants hand table SELECT back on iam.app_user and 0109's the
-    # mfa_satisfied_at UPDATE, so the two revisions that take them away
-    # are replayed after them (rls-6 and rls-7, 2026-10-03).
+    # 0108's grants hand table SELECT back on iam.app_user and 0109's the mfa_satisfied_at UPDATE,
+    # so the two revisions that take them away are replayed after them.
     for revision in ("0143", "0144"):
         if _at_or_past(conn, revision):
             conn.execute(_migration(revision).PRIVILEGES_SQL)
     # 0155's GRANTS_SQL only: its guards are created once, by the migration.
     if _at_or_past(conn, "0155"):
         conn.execute(_migration("0155").GRANTS_SQL)
-    # 0156's too (A collector process, 2026-10-02): no DELETE on the persona
-    # act queue, which 0108's blanket grant hands back to a new role.
+    # 0156's too: no DELETE on the persona act queue, which 0108's blanket grant hands back to a new
+    # role.
     if _at_or_past(conn, "0156"):
         conn.execute(_migration("0156").GRANTS_SQL)
-    # The ledger sequences are drawn by the chain triggers as the owner, so
-    # neither runtime role holds them (2026-10-03). 0108's blanket grant hands
-    # every sequence back, so the revoke is replayed. Found by name, as the
-    # claims guard is above.
+    # The chain triggers draw the ledger sequences as the owner, so neither runtime role holds them;
+    # 0108's blanket grant hands every sequence back, so the revoke is replayed. Found by name.
     sequences = _migration_named("ledger_sequences_trigger_drawn")
     if _at_or_past(conn, sequences.revision):
         conn.execute(sequences.REVOKE_SQL)
-    # Beta 1.1 (2026-10-08): the Lab custody ledger's sequence, which the same
-    # blanket grant hands back; the session, break-glass and other sealed
-    # columns, which 0108's table SELECT hands back; and the case material's
-    # UPDATE and DELETE and the configuration tables' writes, which it hands
-    # back too. Each found by name.
-    for stem, attribute in (("sample_access_sequence_trigger_drawn", "REVOKE_SQL"),
+    # What else 0108's blanket grant hands back: the reference vocabulary's writes, the Lab custody
+    # ledger's sequence, the session, break-glass and other sealed columns, the case material's
+    # UPDATE and DELETE and the configuration tables' writes. Each found by name.
+    for stem, attribute in (("vocabulary_read_only", "PRIVILEGES_SQL"),
+                            ("sample_access_sequence_trigger_drawn", "REVOKE_SQL"),
                             ("iam_session_break_glass_columns_sealed", "PRIVILEGES_SQL"),
                             ("case_material_request_writes", "GRANTS_SQL"),
                             ("configuration_read_only", "PRIVILEGES_SQL"),

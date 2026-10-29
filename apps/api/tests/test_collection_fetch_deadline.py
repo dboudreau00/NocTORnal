@@ -1,22 +1,18 @@
-"""c2 (2026-09-24): one watched source could hold the collector for ever.
+"""One watched source cannot hold the collector for ever.
 
-`fetch(timeout=...)` bounded each socket operation and nothing bounded the
-call. A far end answering `Content-Length: 16000000` and then sending one
-byte every few seconds kept every single recv inside the timeout, so the
-read never returned: the source's poll lock and its RUNNING run row stayed
-held, the pass it was in never finished, and in the production cron loop
-the notification drain queued behind that pass never ran again. The same
-held for a header line that never ends.
+`fetch(timeout=...)` bounds each socket operation and nothing else. A far end answering
+`Content-Length: 16000000` and then sending one byte every few seconds keeps every recv inside the
+timeout, so the read never returns: the source's poll lock and its RUNNING run row stay held, the pass
+never finishes, and in the production cron loop the notification drain queued behind it never runs.
+The same holds for a header line that never ends.
 
-The fix is one wall-clock allowance per fetch, `max_seconds`, enforced by a
-watchdog that shuts the socket down under a read that outlives it. These
-tests drip on purpose and assert the call comes back inside its allowance
-with the allowance named as the reason.
+The bound is one wall-clock allowance per fetch, `max_seconds`, enforced by a watchdog that shuts the
+socket down under a read that outlives it. These tests drip on purpose and assert the call comes back
+inside its allowance with the allowance named as the reason.
 
-Every drip here is over TLS, or is a TLS record, on purpose. A desktop
-antivirus that inspects plain HTTP on loopback buffers the body before
-the client sees it, so a plain-HTTP drip looks like a per-operation
-timeout on such a host and the test would pass against the old code.
+Every drip here is over TLS, or is a TLS record, on purpose. A desktop antivirus that inspects plain
+HTTP on loopback buffers the body before the client sees it, so a plain-HTTP drip looks like a
+per-operation timeout on such a host and would pass without the allowance.
 
 Pure: no database, and no network beyond loopback.
 """
@@ -157,8 +153,8 @@ def _timed_fetch(server: _Drip, client: ssl.SSLContext):
 
 
 def test_a_body_dripped_a_byte_at_a_time_ends_inside_the_allowance(drip):
-    """The reported failure: a 200 declaring sixteen million bytes, then a
-    byte every DRIP_INTERVAL. Before the fix this read never returned."""
+    """A 200 declaring sixteen million bytes, then a byte every DRIP_INTERVAL, ends inside the
+    allowance."""
     server, client = drip(
         head=b"HTTP/1.1 200 OK\r\nContent-Length: 16000000\r\n\r\n")
 
@@ -187,15 +183,13 @@ def test_a_header_line_that_never_ends_ends_inside_the_allowance(drip):
 
 def test_a_tls_handshake_dripped_a_byte_at_a_time_ends_inside_the_allowance(
         drip):
-    """The server's first TLS record header, declaring a sixteen kilobyte
-    handshake record, then its body a byte at a time. OpenSSL waits for the
-    whole record before it parses any of it, so every recv succeeds and
-    the handshake never finishes.
+    """The server's first TLS record header, declaring a sixteen kilobyte handshake record, then its
+    body a byte at a time. OpenSSL waits for the whole record before it parses any of it, so every recv
+    succeeds and the handshake never finishes.
 
-    CPython already runs one handshake under one socket timeout, so this
-    was never unbounded; what is pinned here is that the ALLOWANCE governs
-    it when less of the allowance is left than a full timeout, and that
-    the error then names the allowance rather than a timeout."""
+    CPython runs one handshake under one socket timeout, so this is bounded anyway; what is pinned is
+    that the ALLOWANCE governs it when less of the allowance is left than a full timeout, and that the
+    error then names the allowance rather than a timeout."""
     server, client = drip(head=b"\x16\x03\x03\x40\x00", unit=b"\x00",
                           tls=False, read_request=False)
 

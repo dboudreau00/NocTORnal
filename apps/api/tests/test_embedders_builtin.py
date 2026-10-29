@@ -1,14 +1,9 @@
-"""The built-in wording embedder and its bands (F6.1 and F6.3, embeddings,
-2026-09-24).
+"""The built-in wording embedder and its bands.
 
-Measured on real-shaped, non-repeating prose with a natural vocabulary
-(fixtures/embeddings): two long marketplace posts, six short posts from the
-same marketplace as the negative class, and a Russian notice that carries
-every letter where transliteration schemes differ (the first measurements
-were taken on a word salad and on one sentence that avoided the hard and
-soft signs). The transliterations are generated here
-from the published tables of five schemes, so a fixture cannot be written
-to pass.
+Measured on real-shaped, non-repeating prose with a natural vocabulary (fixtures/embeddings): two long
+marketplace posts, six short posts from the same marketplace as the negative class, and a Russian notice
+that carries every letter where transliteration schemes differ. The transliterations are generated here
+from the published tables of five schemes, so a fixture cannot be written to pass.
 
 Pure: no database.
 """
@@ -212,7 +207,7 @@ def test_the_russian_fixture_carries_every_letter_the_schemes_disagree_on():
                                           ("ISO 9", ISO_9), ("BGN/PCGN", BGN),
                                           ("informal", INFORMAL)])
 def test_five_transliteration_schemes_meet_the_cyrillic(emb, scheme, table):
-    """Measured 1.00 for each on 2026-09-24; asserted at 0.95."""
+    """Measured 1.00 for each; asserted at 0.95."""
     ru = _text("russian_notice.txt")
     latin = transliterate(ru, table, bgn=table is BGN)
     assert latin != ru
@@ -252,8 +247,7 @@ def test_a_light_edit_is_a_near_duplicate(emb, name):
 
 @pytest.mark.parametrize("name", ["camera_shop.txt", "bicycle_workshop.txt"])
 def test_reposts_band_by_how_much_was_reposted(emb, name):
-    """Measured 2026-09-24: 2,000 of about 3,500 characters 0.79 and 0.88;
-    1,000, 0.58 and 0.66; 400, 0.37 and 0.42."""
+    """Measured: 2,000 of about 3,500 characters 0.79 and 0.88; 1,000, 0.58 and 0.66; 400, 0.37 and 0.42."""
     post = _text(name)
     head = "Repost from the old board: "
     s2000, b2000 = _band(emb, post, head + post[:2000])
@@ -336,13 +330,12 @@ def test_zero_padding_keeps_the_cosine():
 
 
 # ---------------------------------------------------------------------------
-# Shared passages as the hit writes them (2026-09-25)
+# Shared passages as the hit writes them
 # ---------------------------------------------------------------------------
 
 def test_a_shared_passage_is_quoted_from_the_hit_function_words_and_all():
-    """The verifier saw "crew named three separate forum threads distinct
-    crew", a string in neither text: the content tokens joined with the
-    function words between them dropped."""
+    """A shared passage is quoted from the hit, function words and all: joining only the content tokens
+    would give a string in neither text ("crew named three separate forum threads distinct crew")."""
     query = ("Last month the crew named three separate forum threads as the source "
              "of the leak, and a distinct crew later claimed it.")
     hit = ("Moderators note: the crew named   three separate\nforum threads as the "

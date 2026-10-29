@@ -1,14 +1,11 @@
-"""A member read whose sandbox fails is the sandbox's state, not the board's
-(the authenticated forum path merged with the isolated analysis worker,
-docs/17 F42, 2026-10-03). DATABASE_URL-gated.
+"""A member read whose sandbox fails is the sandbox's state, not the board's (the authenticated forum path
+with the isolated analysis worker, docs/17). DATABASE_URL-gated.
 
-Hostile pages, the sign-in page and the session answer included, are parsed
-by the runner's `forum_parse` kind, here or in the isolated worker. When the
-worker is busy, gone, refusing or answering garbage, a member read stops
-BLOCKED with `AnalysisUnavailable`, as the public adapters' does: no failure
-is counted against the source, nothing is posted (the credential is not
-sent on a page nothing could read), nothing is stored and the sealed session
-is as it was. A child that crashed is still the board's, a sentence that
+Hostile pages, the sign-in page and the session answer included, are parsed by the runner's `forum_parse`
+kind, here or in the isolated worker. When the worker is busy, gone, refusing or answering garbage, a
+member read stops BLOCKED with `AnalysisUnavailable`, as the public adapters' does: no failure is counted
+against the source, nothing is posted (the credential is not sent on a page nothing could read), nothing
+is stored and the sealed session is as it was. A child that crashed is still the board's, a sentence that
 says the answer could not be read.
 """
 from __future__ import annotations

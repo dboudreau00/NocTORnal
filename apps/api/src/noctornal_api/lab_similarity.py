@@ -1,34 +1,23 @@
-"""Similar samples: by imphash, Rich header, ssdeep, TLSH and shared YARA
-rules (F11 J and F12 G, 2026-09-24).
+"""Similar samples: by imphash, Rich header, ssdeep, TLSH and shared YARA rules.
 
-## Nothing hidden is returned or counted
+Nothing hidden is returned or counted. Candidates are found in SQL under `samples.lab_gate()`, the Lab's
+one label predicate: a sample the reader may not see is never a candidate, so it is neither listed nor
+counted, and a sample the Lab shows nobody (the screening matches) is excluded by the gate's own
+exclusion list. The route answers 404 for a query sample the reader may not see before any of this runs,
+identical to an id that does not exist. Shared YARA rules are read only from machine rows whose rule set
+the reader may also see.
 
-Candidates are found IN SQL under `samples.lab_gate()`, the Lab's one label
-predicate: a sample the reader may not see is never a candidate, so it is
-neither listed nor counted, and a sample the Lab shows nobody (the
-screening matches) is excluded by the gate's own exclusion list. The route
-answers 404 for a query sample the reader may not see before any of this
-runs, identical to an id that does not exist. Shared YARA rules are read
-only from machine rows whose rule set the reader may also see.
+Exact filters run before scores. ssdeep: libfuzzy scores a pair above zero only through its identity path
+or a shared seven-character run at a shared block size, and `fuzzyhash.ssdeep_tokens` gives every digest
+exactly those tokens, so the GIN overlap filter `ssdeep_tokens && query tokens` loses no pair that could
+score. TLSH: two digests whose length buckets differ by d are at least 12 * d apart once d is 2 or more,
+so only buckets within max(1, tlsh_max // 12) of the query's can be within the threshold. The candidates
+are ordered (newest first, then id) before the cap, so a cap cuts the same rows every time, and a capped
+or time-limited answer says so.
 
-## Exact filters before scores
-
-ssdeep: libfuzzy scores a pair above zero only through its identity path
-or a shared seven-character run at a shared block size, and
-`fuzzyhash.ssdeep_tokens` gives every digest exactly those tokens, so the
-GIN overlap filter `ssdeep_tokens && query tokens` loses no pair that
-could score. TLSH: two digests whose length buckets differ
-by d are at least 12 * d apart once d is 2 or more, so only buckets within
-max(1, tlsh_max // 12) of the query's can be within the threshold. The
-candidates are ordered (newest first, then id) BEFORE the cap, so a cap
-cuts the same rows every time, and a capped or time-limited answer says
-so.
-
-## A value search never leaves a trace
-
-The value is validated before any work, travels in the request body, and
-is never logged, audited or stored: a hash an analyst pastes can be the
-thing they are investigating.
+A value search never leaves a trace: the value is validated before any work, travels in the request body,
+and is never logged, audited or stored, because a hash an analyst pastes can be the thing they are
+investigating.
 """
 from __future__ import annotations
 

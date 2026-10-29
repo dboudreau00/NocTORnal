@@ -1,11 +1,9 @@
-"""The two collection readiness rows (docs/00 decision 69, 2026-09-24).
+"""The two collection readiness rows (docs/00 decision 69).
 
-collection_sources_configured and collection_authority_current: idle and
-green with no forum or Telegram source, failing with counts and never a
-name, passing with a caveat when raw markup has nowhere to go or an
-authority ends within 14 days. Not blocking and with no consequence entry.
-The registry is replaced with one holding a stub authority adapter.
-DATABASE_URL-gated.
+collection_sources_configured and collection_authority_current: idle and green with no forum or
+Telegram source, failing with counts and never a name, passing with a caveat when raw markup has
+nowhere to go or an authority ends within 14 days. Not blocking and with no consequence entry. The
+registry is replaced with one holding a stub authority adapter. DATABASE_URL-gated.
 """
 from __future__ import annotations
 

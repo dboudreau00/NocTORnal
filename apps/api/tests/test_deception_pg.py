@@ -1,14 +1,11 @@
 """The deception subsystem against a real database (docs/19).
 
-The pure logic lives in `test_deception.py`. What needs Postgres is
-everything that is enforced by the SCHEMA rather than by Python — and in
-this subsystem that is most of the safety argument, because every rule
-worth having is written twice: once in the service so the caller gets a
-sentence, once as a constraint so a migration or a psql session cannot
-route around it.
+The pure logic lives in `test_deception.py`. What needs Postgres is everything that is enforced by the
+SCHEMA rather than by Python, and in this subsystem that is most of the safety argument, because every
+rule worth having is written twice: once in the service so the caller gets a sentence, once as a
+constraint so a migration or a psql session cannot route around it.
 
-That doubling is not belt-and-braces for its own sake. F19 (docs/17)
-established the failure mode directly: a rule enforced only in application
+That doubling is not belt-and-braces for its own sake (docs/17): a rule enforced only in application
 code holds exactly until somebody writes the second caller.
 
 Env-gated on DATABASE_URL.
@@ -38,16 +35,12 @@ def conn():
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{EMAIL_LIKE}')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
-    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
-    # this teardown deleted them with the trigger stood down -- the idiom
-    # copied from `test_evidence_pg.py`, whose teardown now has the full
-    # account of why that only ever took the chain's tail and so never
-    # tripped `custody_verify.py`. What a custody row points at stays with
-    # it: the exhibit, its case, and the humans on the custody row, the
-    # exhibit and the case. `audit.event` is left alone entirely, as
-    # before: invariant 6 has no escape hatch, and a teardown that could
-    # tidy the audit trail would mean the invariant did not hold.
-    # NULL-guarded because one NULL in a NOT IN list silently deletes nothing.
+    # Custody rows stay and the chain trigger stays up: standing it down would only ever take the chain's
+    # tail and so never trip `custody_verify.py` (see `test_evidence_pg.py`). What a custody row points
+    # at stays with it: the exhibit, its case, and the humans on the custody row, the exhibit and the
+    # case. `audit.event` is left alone entirely: invariant 6 has no escape hatch, and a teardown that
+    # could tidy the audit trail would mean the invariant did not hold. NULL-guarded because one NULL in
+    # a NOT IN list silently deletes nothing.
     pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
     pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
     pinned_users = (
@@ -88,11 +81,8 @@ def _user(conn, clearance="RED", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"dcp-{uuid4().hex[:8]}@noctornal.test", "Dcp", "x" * 20)
-    # Since 0059 every compartment column is bound to iam.compartment, and
-    # this helper runs BEFORE _case (which registers) in every test that
-    # uses both -- so it must register what it is about to write. On the
-    # development database the keys were already there; on CI's fresh one
-    # this UPDATE was refused on the Alpha 5 release commit (2026-09-09).
+    # Every compartment column is bound to iam.compartment (0059), and this helper runs BEFORE _case
+    # (which registers) in every test that uses both, so it must register what it is about to write.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -106,12 +96,8 @@ def _user(conn, clearance="RED", compartments=()):
 def _register(conn, compartments) -> None:
     """Put the fixture's compartment keys in `iam.compartment` first.
 
-    0057 (2026-09-02) made the registry a closed vocabulary and
-    `CaseService.create` refuses a key that is not in it. Until this helper
-    existed the three compartment tests below passed only on a database
-    whose backfill had happened to find `OPX` already in an array, and
-    failed on every fresh one -- CI's included. Idempotent, because the
-    key survives its owner (`created_by` is ON DELETE SET NULL) and the
+    The registry is a closed vocabulary (0057) and `CaseService.create` refuses a key that is not in
+    it. Idempotent, because the key survives its owner (`created_by` is ON DELETE SET NULL) and the
     fixture runs once per test.
     """
     for key in compartments:
@@ -543,7 +529,7 @@ def test_a_call_cannot_end_before_it_starts(conn):
                 (case_id, NOW, NOW - timedelta(minutes=5), owner))
 
 
-# --- what the console reads (ux14-deception, 2026-09-22) -----------------
+# --- what the console reads -----------------------------------------------
 
 def _bec(conn, owner, case_id, *, trusted=("corp.example",), body=b"Body.\r\n",
          subject=b"Remittance update", display=b"Jane, CFO"):
@@ -571,10 +557,8 @@ def _bec(conn, owner, case_id, *, trusted=("corp.example",), body=b"Body.\r\n",
 
 
 def test_the_email_row_carries_the_host_the_recipients_relay_observed(conn):
-    """ux14-deception:email-durable-origin-missing. The row showed only
-    headers the sender typed; the first trusted Received hop (docs/19's
-    durable email origin) lived in a detail card. The LIST row now names
-    the host, and the detail agrees with it."""
+    """The LIST row names the first trusted Received hop (docs/19's durable email origin), not only
+    headers the sender typed, and the detail agrees with it."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     message_id = _bec(conn, owner, case_id)
@@ -611,9 +595,8 @@ def test_an_assumed_boundary_is_not_presented_as_a_confirmed_origin(conn):
 
 
 def test_the_email_detail_returns_its_body_defanged(conn):
-    """ux14-deception:body-url-not-defanged. The console renders only the
-    runs; the fanged `body_text` stays for a consumer that needs the bytes,
-    the same pairing as `extracted_urls` and `extracted_urls_defanged`."""
+    """The console renders only the runs; the fanged `body_text` stays for a consumer that needs the
+    bytes, the same pairing as `extracted_urls` and `extracted_urls_defanged`."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     message_id = _bec(conn, owner, case_id, body=(
@@ -629,8 +612,7 @@ def test_the_email_detail_returns_its_body_defanged(conn):
 
 
 def test_capture_and_call_notes_come_back_attributed(conn):
-    """ux14-deception:notes-never-rendered. The note is where the demo
-    records that the victim had already entered credentials; it is only
+    """The note is where the demo records that the victim had already entered credentials; it is only
     worth showing with who wrote it, and a UUID is not a name."""
     owner = _user(conn)
     case_id = _case(conn, owner)
@@ -658,11 +640,9 @@ def _marked(runs):
 
 
 def test_a_url_in_a_note_title_or_subject_comes_back_defanged(conn):
-    """Once notes were rendered, a note recording the link the victim
-    clicked put it on screen live, under help text promising that every URL
-    in the pane is defanged (the verifier of the 2026-09-22 notes fix). The
-    note, and the other free text the sender or the kit wrote (a page title,
-    a subject line, a display name), come back in a defanged form beside
+    """A note recording the link the victim clicked would put it on screen live, under help text
+    promising that every URL in the pane is defanged. The note, and the other free text the sender or
+    the kit wrote (a page title, a subject line, a display name), come back in a defanged form beside
     the raw one, and the console reads only that form."""
     owner = _user(conn)
     case_id = _case(conn, owner)

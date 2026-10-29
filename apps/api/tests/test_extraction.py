@@ -1,9 +1,8 @@
-"""Selector extraction from pasted text (docs/14 C2) — unit tests, no DB.
+"""Selector extraction from pasted text (docs/14 C2): unit tests, no DB.
 
-The regexes are the part most likely to be quietly wrong, and a bad
-extractor does not fail loudly: it fills the triage queue with plausible
-junk until an analyst stops reading it. So the tests are mostly about what
-must NOT be extracted.
+The regexes are the part most likely to be quietly wrong, and a bad extractor does not fail loudly: it
+fills the triage queue with plausible junk until an analyst stops reading it. So the tests are mostly about
+what must NOT be extracted.
 """
 from __future__ import annotations
 

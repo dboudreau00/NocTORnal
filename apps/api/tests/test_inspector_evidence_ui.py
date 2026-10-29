@@ -1,25 +1,17 @@
-"""The inspector and the custody log, as the console renders them (2026-09-22).
+"""The inspector and the custody log, as the console renders them.
 
-Four findings of the 2026-09-22 review live in the console rather than the
-API, and each was a sentence or a chip telling the analyst something false:
+Each of these was a sentence or a chip that could tell the analyst something false:
 
-- ux07 custody-failed-hash-shown-as-not-checked: a failed hash check
-  rendered as a grey "hash not checked", indistinguishable from a row that
-  attests no check at all.
-- ux05 retract-confirmation-wrong: the Retract prompt counted the RENDERED
-  list (dead rows included) and promised an as-of recovery that the
-  projection does not provide.
-- ux05 parallel-ties-unreachable / ux18 edges-mouse-only: a tie could be
-  opened only by a mouse click that found the first link within 6px.
-- ux05 assertion-drops-claim-and-source: the card never said what was
-  claimed, from what, or by whom.
+- a failed hash check renders as a red mismatch, distinct from a row that attests no check at all;
+- the Retract prompt counts live rows (not the rendered list, dead rows included) and promises no as-of
+  recovery the projection does not provide;
+- a tie, including a parallel one, can be opened without a mouse click that finds the first link within 6px;
+- the assertion card says what was claimed, from what, and by whom.
 
-Pure: no database, no browser. The static checks run everywhere. The
-checks marked `needs_node` EXECUTE the shipped functions under Node with a
-three-line DOM stub, because "the false branch renders red" is a claim
-about behaviour, and reading the source for a class name would pass on a
-function that never reaches it. CI's Python job has no Node, so they skip
-there and run on a developer machine.
+Pure: no database, no browser. The static checks run everywhere. The checks marked `needs_node` execute the
+shipped functions under Node with a small DOM stub, because "the false branch renders red" is a claim about
+behaviour, and reading the source for a class name would pass on a function that never reaches it. CI's
+Python job has no Node, so they skip there and run on a developer machine.
 """
 from __future__ import annotations
 
@@ -95,7 +87,7 @@ def _run(sources: list[str], body: str, tmp_path: Path):
 
 @needs_node
 def test_a_failed_hash_check_renders_as_a_red_mismatch(tmp_path):
-    """The test the finding asked for: render a hash_verified=false row."""
+    """Render a hash_verified=false row: it must show a red mismatch."""
     got = _run([_function("custodyHashChip"), _function("renderCustodyRow")], """
 const rows = [
   {action: 'HASH_VERIFIED', occurred_at: 'x', actor_id: 'abcdef0123', hash_verified: false},
@@ -120,8 +112,8 @@ console.log(JSON.stringify(rows.map((c) => {
 
 
 def test_no_custody_chip_decides_on_truthiness():
-    """Runs everywhere. The defect was a two-way truthiness test, which
-    folds `false` into `null`; the fix compares with === on purpose."""
+    """Runs everywhere. A two-way truthiness test folds `false` into `null`, so custody chips compare with
+    === on purpose."""
     js = _code()
     assert not re.search(r"hash_verified\s*\?", js), (
         "a custody chip is chosen by truthiness again: false and null "
@@ -138,9 +130,7 @@ def test_no_custody_chip_decides_on_truthiness():
 # ---------------------------------------------------------------------------
 
 def test_the_retract_prompt_counts_unretracted_rows_not_the_rendered_list():
-    """Counted as the projection counts live support: neither retracted
-    nor superseded (the superseded half since the final review, U11,
-    2026-09-23, when the projection's leg gained it)."""
+    """Counted as the projection counts live support: neither retracted nor superseded."""
     render = _function("renderAssertions")
     assert "retractAssertion(a.id, list.length)" not in render
     assert re.search(
@@ -203,12 +193,8 @@ def test_a_tie_can_be_opened_from_the_inspector_and_from_the_keyboard():
     assert 'id="insp-rel-sec"' in html and 'id="insp-rel"' in html
     assert "T moves to the selection's" in html, "the canvas label must name T"
     assert '<span class="kbd">T</span>' in html, "the ? sheet must list T"
-    # Every row carries what tells a vouch from a dispute. Not the raw
-    # `e.review` on every row since ux08-triage:graph-says-unreviewed-
-    # triage-says-nothing (2026-09-23), when nothing wrote that column and
-    # every tie read PROPOSED. gap-tie-review made it real, and the ring's
-    # "tie to review" is found here, so a PROPOSED or DISPUTED tie is
-    # marked, shown and spoken, through `tieReviewFlag` (merged 2026-09-24).
+    # Every row carries what tells a vouch from a dispute. Not the raw `e.review` on every row: a PROPOSED or
+    # DISPUTED tie is marked, shown and spoken through `tieReviewFlag`.
     button = _function("tieButton")
     for fact in ("e.edge_type", "e.sign", "e.confidence", "e.is_inferred"):
         assert fact in button, fact
@@ -221,11 +207,9 @@ def test_a_tie_can_be_opened_from_the_inspector_and_from_the_keyboard():
 
 
 def test_the_tie_list_is_read_for_the_entity_not_cut_at_the_case_page():
-    """The 2026-09-22 verifier: the undrawn rows came from `state.edges`,
-    the case-wide page that stops at 1000, so a list that says "every tie"
-    silently was not one in a larger case. It now reads the entity's own
-    ties, drops a reply for a selection or case that has moved on, and a
-    tie it found beyond the page can still be opened."""
+    """The rows come from the entity's own ties, not `state.edges`, the case-wide page that stops at 1000, so
+    a list that says "every tie" is complete in a larger case too. A reply for a selection or case that has
+    moved on is dropped, and a tie found beyond the page can still be opened."""
     rel = _function("renderRelationships")
     assert "/edges?node_id=" in rel and "REL_TIE_PAGE" in rel
     assert "seq !== state.inspSeq" in rel and "caseChanged(token)" in rel
@@ -341,8 +325,8 @@ console.log(JSON.stringify([
 
 @needs_node
 def test_a_missing_assertion_card_is_explained_by_what_actually_happened(tmp_path):
-    """The 2026-09-22 verifier: "Show assertion" always blamed the
-    checkbox, including while the section was loading or had failed."""
+    """"Show assertion" explains a missing card by what actually happened, not always by the checkbox: the
+    section may be loading or have failed."""
     got = _run([_function("assertionNotListedWords")], """
 const key = 'node:n1';
 const rows = [{id: 'a1', retracted_at: null, superseded_at: 'T'},

@@ -1,29 +1,21 @@
 """No count in anything the server says is hedged with a bracketed plural.
 
-The console prints a great deal of server text verbatim (an error's
-detail, a notice, a note, an audit or readiness evidence line, a purge
-warning), and the README screenshot set review (2026-09-23) found counts
-hedged with a bracketed "s" in it: the soft-delete note's incident edges,
-the unregistered-compartment refusal, the boot refusal's problem count,
-bootstrap's recovery codes. The number is known when each line is
-written, so the line agrees with it: `noctornal_api.wording.count_of` and
-`agree`, or an inline choice where a module imports nothing of the
+The console prints a great deal of server text verbatim (an error's detail, a notice, a note, an audit or
+readiness evidence line, a purge warning), and a count hedged with a bracketed "s" reads badly: the
+soft-delete note's incident edges, the unregistered-compartment refusal, the boot refusal's problem count,
+bootstrap's recovery codes. The number is known when each line is written, so the line agrees with it:
+`noctornal_api.wording.count_of` and `agree`, or an inline choice where a module imports nothing of the
 application's.
 
-The rule, read exactly as `test_server_copy_no_dashes.py` reads the dash
-rule (and with its reader): no string literal under `noctornal_api`, and
-none in scripts/bootstrap.py, holds a bracketed plural ending, unless the
-allow-list below names it. A docstring, or a note written under an
-assignment, is never seen by a reader and is skipped, as comments are;
-everything else is checked, the literal parts of an f-string included.
-A log line is checked too: an operator reads it.
+The rule, read exactly as `test_server_copy_no_dashes.py` reads the dash rule (and with its reader): no
+string literal under `noctornal_api`, and none in scripts/bootstrap.py, holds a bracketed plural ending,
+unless the allow-list below names it. A docstring, or a note written under an assignment, is never seen by
+a reader and is skipped, as comments are; everything else is checked, the literal parts of an f-string
+included. A log line is checked too: an operator reads it.
 
-The allow-list names notify_events.py's merge notifications. That module
-was being changed elsewhere when this pass ran and was not this pass's to
-edit. Each entry is keyed on the module and the exact literal, so no new
-sentence can shelter under it, and fails as stale once the line agrees.
-bootstrap.py has no allow-list: its messages are the product's first
-words.
+Each allow-list entry is keyed on the module and the exact literal, so no new sentence can shelter under
+it, and fails as stale once the line agrees. bootstrap.py has no allow-list: its messages are the
+product's first words.
 
 Pure: parses the source and imports two small modules; no database.
 """
@@ -52,9 +44,6 @@ _WHY_NOTIFY = (
 #: (module path under noctornal_api, exact literal) -> why it may keep
 #: its hedge.
 _ALLOWED: dict[tuple[str, str], str] = {
-    # F7 (2026-09-24): the four merge-notification entries
-    # are gone: the merge summaries agree their counts now, because they
-    # reach Jira as well as email.
 }
 
 

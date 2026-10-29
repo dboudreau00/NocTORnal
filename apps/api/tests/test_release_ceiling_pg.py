@@ -1,15 +1,12 @@
-"""A report's release is judged against the destination's configured ceiling
-(2026-10-08).
+"""A report's release is judged against the destination's configured ceiling.
 
-`POST /cases/{id}/report/release` judged the document against the ceiling the
-caller typed and nothing else, while the drain judges every delivery against
-the ceiling the deployment configured for the channel
-(`NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`, and for Jira the
-destination's own ceiling under `NOCTORNAL_JIRA_CEILING`). A release with no
-typed ceiling, or a higher one, allowed a document the destination would then
-refuse. It is now judged against the lower of the two, the audit row and the
-answer name the ceiling used, and a configured value that cannot be read
-refuses the release (the gate's own rule for a ceiling it cannot parse).
+`POST /cases/{id}/report/release` must not judge the document against the ceiling the caller typed and
+nothing else, since the drain judges every delivery against the ceiling the deployment configured for the
+channel (`NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`, and for Jira the destination's own ceiling
+under `NOCTORNAL_JIRA_CEILING`). A release with no typed ceiling, or a higher one, would allow a document
+the destination then refuses. So it is judged against the lower of the two, the audit row and the answer
+name the ceiling used, and a configured value that cannot be read refuses the release (the gate's own rule
+for a ceiling it cannot parse).
 
 Accounts `g44t-*`; DATABASE_URL-gated.
 """
@@ -19,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 import rls_support as s
 
 pytestmark = g.GATED

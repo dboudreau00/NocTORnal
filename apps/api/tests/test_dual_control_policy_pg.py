@@ -1,27 +1,21 @@
-"""The deployment's two-person policy against a database (F9, 2026-09-24;
-migration dual_control_policy).
+"""The deployment's two-person policy against a database (migration dual_control_policy).
 
-Which operations need a second signature and which permission pairs no role
-may hold now live in `iam.dual_control_operation` and `iam.separated_duty`,
-and the only way either moves is a row in `iam.dual_control_policy_change`
-that a consumed `dual_control.policy` approval accounts for, proposed by an
+Which operations need a second signature and which permission pairs no role may hold live in
+`iam.dual_control_operation` and `iam.separated_duty`, and the only way either moves is a row in
+`iam.dual_control_policy_change` that a consumed `dual_control.policy` approval accounts for, proposed by an
 administrator and countersigned by a Security officer who is not one.
 
 ## Isolation (the global policy is shared state)
 
-(a) A test whose change SUCCEEDS runs inside `with pytest.raises(_RollBack),
-    conn.transaction():`, so no mode or pair leaks. It asserts refusals
-    only: an out-of-band audit row written from inside that transaction
-    goes on the caller's connection (approvals.py, the chain-lock rule) and
-    rolls back with it.
-(b) "Consumed in an EARLIER transaction" runs on the autocommit fixture
-    with two real transactions.
-(c) The out-of-band rows themselves are proved on autocommit, where the
-    caller holds no transaction that has audited.
-(d) Teardown deletes notifications, then approvals the ledger does not hold,
-    then accounts nothing holds; an account the append-only ledger names
-    is DEACTIVATED, never deleted. No PENDING deployment-wide request
-    survives a test, and node.merge ends PER_CASE or the teardown says so.
+(a) A test whose change SUCCEEDS runs inside `with pytest.raises(_RollBack), conn.transaction():`, so no mode
+    or pair leaks. It asserts refusals only: an out-of-band audit row written from inside that transaction
+    goes on the caller's connection (approvals.py, the chain-lock rule) and rolls back with it.
+(b) "Consumed in an EARLIER transaction" runs on the autocommit fixture with two real transactions.
+(c) The out-of-band rows themselves are proved on autocommit, where the caller holds no transaction that
+    has audited.
+(d) Teardown deletes notifications, then approvals the ledger does not hold, then accounts nothing holds;
+    an account the append-only ledger names is DEACTIVATED, never deleted. No PENDING deployment-wide
+    request survives a test, and node.merge ends PER_CASE or the teardown says so.
 
 Email prefix `dcz-`, unique to this file (dcp- is test_deception_pg's); throwaway permissions `dcp.*`.
 Env-gated on DATABASE_URL.
@@ -97,8 +91,7 @@ def teardown(c, prefix: str) -> None:
                          AND id NOT IN {held}""")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub} "
                   f"OR user_id IN {sub}")
-        # The entities a merge request names (2026-10-03: a request must name
-        # real ones), with their claims, before the case goes.
+        # The entities a merge request names, with their claims, before the case goes.
         c.execute("ALTER TABLE core.assertion DISABLE TRIGGER USER")
         try:
             c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
@@ -324,16 +317,13 @@ def test_separated_duty_refuses_a_direct_insert_update_and_delete(conn):
 
 
 # ---------------------------------------------------------------------------
-# A write from some other trigger (F9, 2026-09-24)
+# A write from some other trigger
 #
-# The guard's depth test alone accepts a write from ANY trigger, and the
-# runtime role can make one without owning anything: PUBLIC holds TEMP, so
-# it can create a temporary table, a pg_temp function and a trigger that
-# runs whatever it is handed. A probe moved node.merge and added a
-# pair that way with no ledger row, no approval and no audit event. Every
-# refusal below must be the binding's ("matches none"), which is only
-# reached once the depth test has passed: that is what proves the probe
-# really wrote from inside a trigger.
+# The guard's depth test alone accepts a write from ANY trigger, and the runtime role can make one without
+# owning anything: PUBLIC holds TEMP, so it can create a temporary table, a pg_temp function and a trigger
+# that runs whatever it is handed. Such a probe can move node.merge and add a pair with no ledger row, no
+# approval and no audit event. Every refusal below must be the binding's ("matches none"), which is only
+# reached once the depth test has passed: that proves the probe wrote from inside a trigger.
 # ---------------------------------------------------------------------------
 
 def _probe(conn) -> None:
@@ -620,9 +610,8 @@ def test_the_proposer_cannot_countersign(conn):
 
 
 def test_an_account_holding_both_roles_cannot_countersign_at_all(conn):
-    """iam.separated_duty separates roles, not people (2026-09-24). An
-    account holding SYS_ADMIN and SECURITY_OFFICER may refuse a
-    change and never countersign one, and the ledger refuses it too."""
+    """iam.separated_duty separates roles, not people. An account holding SYS_ADMIN and SECURITY_OFFICER
+    may refuse a change and never countersign one, and the ledger refuses it too."""
     from noctornal_api.approvals import ApprovalError
     from noctornal_api.dual_control import PolicyError
     admin = user(conn, "SYS_ADMIN")
@@ -651,12 +640,10 @@ def test_an_account_holding_both_roles_cannot_countersign_at_all(conn):
 
 
 def test_the_first_run_shape_cannot_change_the_policy_alone(conn):
-    """The first-run shape (2026-09-24). The first-run account
-    holds SYS_ADMIN and SECURITY_OFFICER. It creates a second administrator,
-    proposes from it and countersigns as itself: refused at decide and by
-    the trigger at apply. With its own SYS_ADMIN then revoked it no longer
-    holds dual_control.manage, and the reverse seven-day rule refuses it:
-    it created the proposer's account with a role that proposes."""
+    """The first-run account holds SYS_ADMIN and SECURITY_OFFICER. It creates a second administrator,
+    proposes from it and countersigns as itself: refused at decide and by the trigger at apply. With its own
+    SYS_ADMIN then revoked it no longer holds dual_control.manage, and the reverse seven-day rule refuses
+    it: it created the proposer's account with a role that proposes."""
     from noctornal_api.approvals import ApprovalError
     from noctornal_api.dual_control import PolicyError
     from noctornal_api.iam_admin import IamAdminService
@@ -1067,9 +1054,8 @@ def test_awaiting_global_signature_counts_what_the_user_may_sign(conn):
 
 
 def test_the_case_counts_are_bounded_by_the_viewers_labels(conn):
-    """Counted over cases the viewer can OPEN, labels dominated and a
-    live assignment (2026-09-24); nothing at all for an administrator
-    with no case."""
+    """Counted over cases the viewer can OPEN (labels dominated, live assignment); nothing at all for an
+    administrator with no case."""
     comp = "DCP-RED-COMP"
     lead = user(conn, "CASE_OWNER", clearance="RED", compartments=(comp,))
     red_viewer = user(conn, "SECURITY_OFFICER", clearance="RED",

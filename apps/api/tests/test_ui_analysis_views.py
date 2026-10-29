@@ -1,12 +1,9 @@
-"""The Analysis pane's projection options (2026-09-24): the accepted-ties
-scope (L3) and venues projected to entities (F2).
+"""The Analysis pane's projection options: the accepted-ties scope and venues projected to entities.
 
-Behavioural where it matters: the shipped functions run under node with the
-fake DOM of `test_ui_analysis_pane.py`, whose prelude and extractors this
-file imports rather than copies. Static checks hold the wiring the harness
-does not run. The server halves are `test_review_scope*.py`,
-`test_affiliation.py`, `test_one_mode_*.py` and
-`test_analysis_options_http_pg.py`.
+Behavioural where it matters: the shipped functions run under node with the fake DOM of
+`test_ui_analysis_pane.py`, whose prelude and extractors this file imports rather than copies. Static
+checks hold the wiring the harness does not run. The server halves are `test_review_scope*.py`,
+`test_affiliation.py`, `test_one_mode_*.py` and `test_analysis_options_http_pg.py`.
 
 Pure: no database. The node halves skip when node is not installed.
 """
@@ -45,8 +42,8 @@ $('an-ties').value = 'accepted';
 out.accepted = anQuery().toString();
 console.log(JSON.stringify(out));
 """)
-    # The default query string is exactly what it was, so every stored
-    # projection name and the query a run is remembered under hold.
+    # The default query string is unchanged, so every stored projection name and the query a run is
+    # remembered under hold.
     assert got["plain"] == "preset=all&include_inferred=true&min_confidence=LOW"
     assert got["accepted"] == got["plain"] + "&review_scope=accepted"
 
@@ -116,9 +113,7 @@ def test_the_scope_is_said_on_the_projection_line_the_flags_and_the_history():
     assert "review_scope: p.review_scope, one_mode: p.one_mode" in _fn("shownTrendKey")
 
 
-# ---------------------------------------------------------------------------
-# F2: venues projected to entities
-# ---------------------------------------------------------------------------
+# Venues projected to entities
 
 def test_the_one_mode_controls_reach_the_query_only_when_set():
     got = _run(_views() + r"""
@@ -250,7 +245,7 @@ console.log(JSON.stringify(out));
     assert "' projected to entities: '" in line
     assert "', although stored inferred ties are left out'" in line
     assert "derived ties left out" not in _js()
-    # viewWords is the Graph pane's helper and is called as it was.
+    # viewWords is the Graph pane's helper.
     assert "viewWords(p)" in line
 
 
@@ -327,7 +322,7 @@ def test_the_currency_check_asks_once_for_every_run_on_screen():
     assert got["drawn"]["kpp"] == [False] and got["drawn"]["roles"] == [False]
     assert got["fresh"] == {"pending": True, "n": 4}
     assert got["rolesAfter"] is True
-    # The single-run route is no longer what the pane asks.
+    # The pane does not ask the single-run route.
     assert "/current?" not in _fn("checkAnalysisCurrency")
 
 

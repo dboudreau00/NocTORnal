@@ -1,10 +1,8 @@
-"""The similarity settings and their production refusals (F6.1 and F6.2,
-embeddings, 2026-09-24).
+"""The similarity settings and their production refusals.
 
-`embedders.configured()` is the one reader of every NOCTORNAL_EMBED_*
-variable; config.verify_environment borrows it, so the start refusal and
-the pass cannot disagree about what a usable value is. No refusal quotes a
-value (a URL- or key-shaped variable is scanned as a credential).
+`embedders.configured()` is the one reader of every NOCTORNAL_EMBED_* variable; config.verify_environment
+borrows it, so the start refusal and the pass cannot disagree about what a usable value is. No refusal
+quotes a value (a URL- or key-shaped variable is scanned as a credential).
 
 Pure.
 """

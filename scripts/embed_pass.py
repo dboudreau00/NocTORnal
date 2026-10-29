@@ -1,70 +1,25 @@
-"""Fill the similarity indexes: the embedding pass (F6.1 and F6.2,
-embeddings, 2026-09-24). In collection_poll.py's shape: one process, one
-connection, one pass per role, one counters line per role, an exit code.
+"""Fill the similarity indexes: one pass per embedding role, one counters line each, an exit code.
 
     python scripts/embed_pass.py                      # both roles
     python scripts/embed_pass.py --role wording       # the built-in embedder only
     python scripts/embed_pass.py --limit 0 --max-seconds 0   # a first backfill
     python scripts/embed_pass.py --dry-run            # counts, touches nothing
 
-Run it as its own compose service (embed-pass, a loop with a 60 second
-sleep), not inside the cron loop, so notify_drain and collection_poll keep
-their cadence. A first backfill on a large deployment is one manual run
-with no limit and no clock: about 40 minutes per million average
-documents for similar wording at the measured rate, plus the HNSW inserts.
+It runs as its own compose service (embed-pass), not in the cron loop, so notify_drain and
+collection_poll keep their cadence. A first backfill is one manual run with no limit and no clock,
+about 40 minutes per million documents for wording, plus the HNSW inserts.
 
-## What each role does
+WORDING embeds in this process and sends nothing anywhere. MEANING sends item text to an
+operator's endpoint, so before any send it needs clean settings, no failing blocking readiness
+check, a route to the endpoint and, for an endpoint off this host, the AUTHORITY declaration; every
+batch is audited with its ids before it is sent. Once an administrator has retired a role's last
+index, neither role registers a new one by itself (refused=retired): a new meaning index resends
+every eligible text, which is an operator's act. The counters line carries counts and codes only,
+never a title, text, source, document or case.
 
-WORDING runs the built-in embedder in this process. It sends nothing
-anywhere, so it does not wait on the readiness register: it collects
-nothing and discloses nothing. Its first index is registered active at
-once, and a new built-in version is rebuilt in a free slot automatically.
-Only the first: when an administrator has retired a role's last index,
-neither role registers a new one by itself (refused=retired), because a
-new similar meaning index sends every eligible text again and that is an
-operator's act (Administration, Embeddings, Rebuild).
-
-MEANING sends item text to an operator's model endpoint, so before ANY
-send it needs, in order: settings without problems, no failing BLOCKING
-readiness check (with no Security officer nobody can read the trail of
-what was sent), a route that reaches the endpoint, and for an endpoint
-outside this host the AUTHORITY declaration. A refusal writes no row and
-prints refused=<why>. Every batch is audited, with the ids it carries,
-before it is sent.
-
-## The counters line
-
-    role=wording space=1a2b3c4d selected=.. embedded=.. empty=.. excluded=..
-    withheld=.. failed=.. busy=.. deferred=.. cleared=.. no_free_slot=..
-    model_mismatch=.. refused=none locked=0 table_bytes=..
-
-Counts and codes only: never a title, a text, a source name, a document or
-a case. `table_bytes` is the size of the three vector tables with their
-indexes; this log is the operator's, read at host level, and no API route
-reports sizes. `busy` items were being changed by someone else and are
-first on the next pass; `deferred` items were not reached before the
-clock ran out; `locked` means another pass of the role was running, which
-is not a failure.
-
-## Exit code
-
-1 when any item FAILED, or when a configured MEANING role was refused
-(readiness, configuration, unrouted, route refused, no authority, an
-endpoint error, a changed model); 0 otherwise. A retired index
-(refused=retired) is an administrator's choice, not a failure.
-
-2 when, under NOCTORNAL_ENV=production, the environment is one this job
-will not run on (docs/17 F52 and infra-12, 2026-10-02 and 2026-10-03): a
-credential that carries a value this repository publishes, the schema
-owner's password or DSN, which no runtime process may hold, or the persona
-key (or the collector's mark), which only the collector may hold (A collector
-process, 2026-10-02). The pass prints
-one line per variable on stderr, `embed_pass: refusing to run: <NAME> ...`,
-naming the variable and never its value, and touches nothing: it refuses
-before it reads its arguments or connects. It is the one helper every job
-calls first (`config.refuse_unsafe_job_environment`) and the one code every
-job gives it (`config.JOB_REFUSAL_EXIT`), 2 and not 1 so that an alert can
-tell a job that would not start from a pass that ran and failed an item.
+Exit 1 when an item failed or a configured MEANING role was refused; refused=retired is not a
+failure. Exit 2 (`config.JOB_REFUSAL_EXIT`) when `config.refuse_unsafe_job_environment` refuses the
+production environment, before arguments are read or anything is connected.
 """
 from __future__ import annotations
 
@@ -87,11 +42,8 @@ load_env_local()
 
 
 def connect():
-    """Every script connects as the system role (S1, 2026-09-25). A
-    script serves no request and binds no user, so on the request role it
-    would see nothing under row-level security; `db.connect_system` refuses
-    rather than hand it a connection that silently sees part of the data.
-    Named `connect` so the tests that replace it still find it."""
+    """Connect as the system role: a script binds no user, so under row-level security the request
+    role would see nothing. Named `connect` because the tests replace it by that name."""
     return connect_system(SystemPurpose.EMBEDDINGS)
 
 DEFAULT_LIMIT = 5000
@@ -108,15 +60,9 @@ _TABLE_BYTES = """SELECT coalesce(sum(pg_total_relation_size(c.oid)), 0)
 
 
 def main(argv: list[str] | None = None) -> int:
-    # First, before anything is read or connected to (docs/17 F52 and
-    # infra-12): this is a compose service that starts without waiting for
-    # the API, so with the template's placeholders, or with the schema
-    # owner's credential still in secrets.env, it ran beside an API that
-    # refused. Under NOCTORNAL_ENV=production a published credential or the
-    # owner's refuses the pass, and so does a persona key (A collector
-    # process, 2026-10-02 and 2026-10-03: this Lab worker holds none and the
-    # vault guard alone stood between it and one), all through the one helper
-    # every job calls (config.py). See "Exit code" above for 2.
+    # Before anything is read or connected to: this service starts without waiting for the API, so
+    # it refuses an unsafe production environment itself (a published or owner credential, a
+    # persona key).
     refusals = refuse_unsafe_job_environment("embed_pass")
     if refusals:
         print("\n".join(refusals), file=sys.stderr)

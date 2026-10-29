@@ -1,41 +1,26 @@
-"""An exhibit's storage lock follows its case's retention date
-(x-lock-extension, 2026-09-24), and the inspector's exhibit list states
-the lock the way the Evidence pane's card does (x-inspector-chips).
+"""An exhibit's storage lock follows its case's retention date, and the inspector's exhibit list states the
+lock the way the Evidence pane's card does.
 
-Each exhibit was written under a COMPLIANCE lock for a fixed period from
-lodging (365 days by default). Nothing lengthened it, so a case whose
-retention ran longer kept exhibits the store would delete from day 366
-while the case date, the register and the chip all read as held. Now:
+Each exhibit is written under a COMPLIANCE lock for a fixed period from lodging (365 days by default).
+Without lengthening, a case whose retention ran longer would keep exhibits the store deletes from day 366
+while the case date, the register and the chip all read as held. So:
 
-- `PATCH /cases/{id}` with a retention date lengthens every live
-  exhibit's lock to the start of that date (the instant the purge treats
-  the case as due), writes a LOCK_EXTENDED custody row, and reports what
-  it did. A lock that could not be lengthened is reported and audited,
-  and never undoes the date.
+- `PATCH /cases/{id}` with a retention date lengthens every live exhibit's lock to the start of that date
+  (the instant the purge treats the case as due), writes a LOCK_EXTENDED custody row, and reports what it
+  did. A lock that could not be lengthened is reported and audited, and never undoes the date.
+- DISCLOSURE: the report counts only exhibits within the caller's ceiling, so an AMBER owner whose register
+  shows one exhibit is not told three were lengthened; every one is still locked.
+- OVERCLAIM: a lodging locks to the case's date, so an exhibit lodged into a case already retained past a
+  year does not keep the year (OP-NIGHTJAR-26's .eml, locked to 2027-09-23 in a case retained to
+  2028-12-31). An older lock short of the case is counted and said (`lock_short_of_case`, `locks_short`),
+  and `POST .../evidence/locks` lengthens it.
+- IRREVERSIBILITY: one `case.update` holder typing 2208 would lock every exhibit for ever. A lock is set at
+  most `LOCK_HORIZON` ahead in one step, and the report says when the horizon stopped it (`capped`).
 
-The verifier's round (2026-09-24) found three gaps, each held here:
-
-- DISCLOSURE: the report counted every exhibit, so an AMBER owner whose
-  register shows one exhibit was told three were lengthened. It now
-  counts only those within the caller's ceiling; every one is still
-  locked.
-- OVERCLAIM: only an extension moved a lock, so an exhibit lodged into a
-  case already retained past a year kept the year (OP-NIGHTJAR-26's .eml,
-  locked to 2027-09-23 in a case retained to 2028-12-31) while the policy
-  said the lock followed the case. A lodging now locks to the case's date;
-  an older lock short of the case is counted and said
-  (`lock_short_of_case`, `locks_short`), and `POST .../evidence/locks`
-  lengthens it.
-- IRREVERSIBILITY: one `case.update` holder typing 2208 would lock every
-  exhibit for ever. A lock is set at most `LOCK_HORIZON` ahead in one
-  step, and the report says when the horizon stopped it (`capped`).
-
-The service tests use a stand-in store and a transaction that is rolled
-back. The HTTP tests commit under the email prefix `lxh-` and remove what
-they wrote. The one test that measures the real store is gated on
-MINIO_ENDPOINT and locks its object for seconds, under the prefix
-`test_evidence_lock_live_pg.py` sweeps. `tests/conftest.py` sets the
-horizon to a day; the tests that need a real one set it here.
+The service tests use a stand-in store and a transaction that is rolled back. The HTTP tests commit under
+the email prefix `lxh-` and remove what they wrote. The one test that measures the real store is gated on
+MINIO_ENDPOINT and locks its object for seconds, under the prefix `test_evidence_lock_live_pg.py` sweeps.
+`tests/conftest.py` sets the horizon to a day; the tests that need a real one set it here.
 """
 from __future__ import annotations
 
@@ -250,16 +235,12 @@ def test_a_date_already_reached_sets_no_lock(conn, horizon):
     assert report["date_passed"] is True and store.calls == []
 
 
-# --- the verifier's round: disclosure --------------------------------------
-
 def test_the_answer_counts_only_the_exhibits_the_caller_may_see(
         conn, horizon, monkeypatch):
-    """An AMBER Lead investigator's register shows one exhibit; the case
-    holds three (one RED, one in a compartment they are not read into).
-    Saving the date locks all three and tells them about one, a refusal on
-    a hidden one included, which only the audit log names. Re-saving the
-    same date says the same thing: before this it repeated the true total
-    on demand."""
+    """An AMBER Lead investigator's register shows one exhibit; the case holds three (one RED, one in a
+    compartment they are not read into). Saving the date locks all three and tells them about one, a refusal
+    on a hidden one included, which only the audit log names. Re-saving the same date says the same thing,
+    not the true total."""
     import noctornal_api.evidence as evidence
     from noctornal_api.http.routers.cases import UpdateCaseBody, update_case
     from noctornal_api.http.routers.evidence import exhibit_register
@@ -295,8 +276,6 @@ def test_the_answer_counts_only_the_exhibits_the_caller_may_see(
     assert (again["exhibits"], again["already_held"], again["failed"]) == (1, 1, 0)
 
 
-# --- the verifier's round: the lock follows the case from lodging -----------
-
 def _lodge(conn, store, case_id, uid, now):
     from noctornal_api.evidence import EvidenceService
     svc = EvidenceService(conn, store, now=lambda: now)
@@ -313,11 +292,9 @@ def _lodge(conn, store, case_id, uid, now):
 
 
 def test_a_lodging_locks_to_the_case_date_as_far_as_the_horizon(conn, horizon):
-    """OP-NIGHTJAR-26's shape: retained to 2028-12-31, an exhibit lodged
-    in 2026. The lock now runs to the case's date, not a year; the store
-    was asked for exactly that instant, and the ACQUIRED row and the day
-    say it. Past the horizon it stops at the horizon; a case already due
-    gets the default."""
+    """OP-NIGHTJAR-26's shape: retained to 2028-12-31, an exhibit lodged in 2026. The lock runs to the
+    case's date, not a year; the store is asked for exactly that instant, and the ACQUIRED row and the day
+    say it. Past the horizon it stops at the horizon; a case already due gets the default."""
     import noctornal_api.evidence as evidence
     uid = _user(conn)
     now = datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc)
@@ -342,8 +319,6 @@ def test_a_lodging_locks_to_the_case_date_as_far_as_the_horizon(conn, horizon):
     _, _, ends = _lodge(conn, store, case_id, uid, after)
     assert ends == after + evidence.DEFAULT_RETENTION, "never shorter than the default"
 
-
-# --- the verifier's round: the horizon ---------------------------------------
 
 def test_the_horizon_stops_an_extension_and_the_report_says_so(conn, horizon):
     """A retention date of 2208 locks every exhibit no further than the

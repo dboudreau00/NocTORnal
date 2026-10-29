@@ -1,11 +1,9 @@
-"""A lookup's answer (F15.3, 2026-09-24): kept as case
-material byte for byte, never labelled below the question, withheld from a
-reader who does not dominate it, served from the cache only at or above
-the subject's label, and turned into proposals that cite it, never into
-graph.
+"""A lookup's answer: kept as case material byte for byte, never labelled below the question, withheld from
+a reader who does not dominate it, served from the cache only at or above the subject's label, and turned
+into proposals that cite it, never into graph.
 
-The fetcher and the routes are fakes; nothing reaches a provider. **The
-email prefix is `lkres-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. The email prefix is `lkres-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -229,9 +227,8 @@ def test_a_marking_past_the_fiftieth_attribute_labels_the_answer(conn):
 
 
 def test_an_answer_that_echoes_the_key_is_stored_without_it(conn):
-    """docs/17, the lookup's raw body: a vendor that echoed the API key it was
-    asked under had it stored in `raw_body`. The key is removed in each form
-    it takes, before anything reads the answer, and the hash is of what is
+    """A vendor that echoes the API key it was asked under must not have it stored in `raw_body` (docs/17).
+    The key is removed in each form it takes, before anything reads the answer, and the hash is of what is
     kept."""
     import base64
     import json
@@ -317,10 +314,9 @@ def test_the_answer_is_readable_over_http_and_no_value_travels_in_a_query_string
 
 
 def test_a_withheld_answer_does_not_say_whether_it_could_be_read(conn):
-    """An unreadable MISP answer is labelled RED (it may have carried a
-    marking nobody could read). An AMBER reader is told there is an answer
-    above their clearance, and nothing that says it failed to parse: no
-    error class, no FAILED, no 502 (2026-09-25)."""
+    """An unreadable MISP answer is labelled RED (it may have carried a marking nobody could read). An AMBER
+    reader is told there is an answer above their clearance, and nothing that says it failed to parse: no
+    error class, no FAILED, no 502."""
     import json
 
     from noctornal_api.http.routers import lookups as router

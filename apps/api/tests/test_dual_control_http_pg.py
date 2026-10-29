@@ -1,23 +1,18 @@
-"""The two-person policy over HTTP (F9, 2026-09-24): the global
-approvals routes (`/approvals`) and Administration, Two-person controls
-(`/admin/dual-control`).
+"""The two-person policy over HTTP: the global approvals routes (`/approvals`) and Administration,
+Two-person controls (`/admin/dual-control`).
 
-What the database file (`test_dual_control_policy_pg.py`) cannot show is
-the wiring: who each route lets in, the step-up words the console
-recognises, a countersigner told who took over their account and when, and
-a change that commits through the API's own connections and is restored
-the same way.
+The database file (`test_dual_control_policy_pg.py`) cannot show the wiring: who each route lets in, the
+step-up words the console recognises, a countersigner told who took over their account and when, and a
+change that commits through the API's own connections and is restored the same way.
 
 ## Isolation
 
-Rule (c) of the policy file: a change the API commits is visible to every
-connection, so each test that makes one takes it back through the same
-two-person flow in a `finally`, and if that fails the owner-level helper
-resets node.merge and the test fails loudly. Accounts are written directly
-(no USER_CREATED or ROLE_GRANTED audit row), so the seven-day rule does not
-apply to them unless a test produces the event on purpose. Teardown is the
-policy file's rule (d) for the prefix `dcq-`; no PENDING deployment-wide
-request survives a test.
+Rule (c) of the policy file: a change the API commits is visible to every connection, so each test that
+makes one takes it back through the same two-person flow in a `finally`, and if that fails the owner-level
+helper resets node.merge and the test fails loudly. Accounts are written directly (no USER_CREATED or
+ROLE_GRANTED audit row), so the seven-day rule does not apply to them unless a test produces the event on
+purpose. Teardown is the policy file's rule (d) for the prefix `dcq-`; no PENDING deployment-wide request
+survives a test.
 
 Env-gated on DATABASE_URL.
 """
@@ -401,16 +396,14 @@ def test_a_case_request_cannot_be_decided_or_withdrawn_through_the_global_routes
 
 
 def test_a_case_withdraw_is_bound_to_its_path_case(conn, client):
-    """case.read on case A no longer withdraws a request raised in case B
-    (2026-09-24)."""
+    """case.read on case A does not withdraw a request raised in case B."""
     lead_id = user(conn, "CASE_OWNER", "ANALYST")
     lead = session(conn, lead_id)
     case_a, case_b = _case(conn, lead_id), _case(conn, lead_id)
     from noctornal_api.approvals import ApprovalService
     from noctornal_api.graph import AssertionInput, GraphWriteService
-    # Real entities: a merge request that names ones the viewer cannot see is
-    # the missing request's 404 since the beta review (http_ui-011,
-    # 2026-10-03), withdrawal included.
+    # Real entities: a merge request that names ones the viewer cannot see gets the missing request's 404,
+    # withdrawal included.
     graph = GraphWriteService(conn)
     claim = AssertionInput(basis="DIRECT_OBSERVATION", created_by=lead_id)
     a = graph.create_node(case_id=case_b, node_type="IDENTITY", label="dch a",

@@ -1,11 +1,8 @@
 """No em or en dash reaches a reader of the console.
 
-The owner treats an em or en dash in shipped copy as an unacceptable tell,
-and round 1 of the README screenshots found them in almost every pane:
-headings ("Trend", "Key player"), help lines, option labels, tooltips and
-the lone dash the console printed for a missing value (README screenshot
-review, 2026-09-23). The Lab and a handful of rewritten functions already
-had narrow checks; this one covers everything a reader can see:
+An em or en dash in shipped copy is a tell: headings ("Trend", "Key player"), help lines, option
+labels, tooltips and the lone dash printed for a missing value. This covers everything a reader can
+see:
 
 * every string literal and every run of template-literal text in
   `app.js` (comments and regular expressions are skipped: a reader never
@@ -308,8 +305,7 @@ def test_the_lexer_accounts_for_every_dash_in_app_js():
     assert in_lits + in_comments == len(re.findall("[\u2013\u2014]", src))
     # And it read to the end in step, not just the first thousand lines.
     texts = {t for _, t in lits}
-    # The first: a literal near the top of app.js (the size metric's
-    # gloss since the option labels were shortened, 2026-09-23).
+    # The first is a literal near the top of app.js (the size metric's gloss).
     for known in ("how many others it is tied to: activity, visibility",
                   "Connecting to the live channel\u2026"):
         assert known in texts, f"the lexer never reached {known!r}"
@@ -461,10 +457,9 @@ console.log(JSON.stringify({
 
 @needs_node
 def test_the_trend_row_says_what_world_time_the_run_measured(tmp_path):
-    """README screenshot set review, 2026-09-23: runs at three as-of dates,
-    taken a minute apart, read as one minute three times. The row shows the
-    run's as_of beside its start, and a run with none measured the live
-    graph, so its start stands for both."""
+    """The trend row shows the run's as_of beside its start, and a run with none measured the live
+    graph, so its start stands for both. Runs at three as-of dates taken a minute apart must not read
+    as one minute three times."""
     got = _run("""
 const dated = histRow({ at: '2026-09-23T21:27:00Z', value: 7.8, rank: 2,
                         percentile: 90, node_count: 15, preset: 'all',
@@ -486,12 +481,10 @@ console.log(JSON.stringify({
 
 
 def test_the_canvas_hint_names_the_palette_key_for_this_platform():
-    """README screenshot set review, 2026-09-23: the hint strip under the
-    canvas said the Mac key on every platform, beside a header chip that
-    said Ctrl K. It now starts as Ctrl K and is set where the chip is."""
+    """The hint strip under the canvas names the palette key for the platform: it starts as Ctrl K and
+    is set where the header chip is."""
     html = _html()
-    # The word beside the key is the header control's own, "Jump to"
-    # (ux19-copy one-concept-many-names, 2026-09-23).
+    # The word beside the key is the header control's own, "Jump to".
     assert 'id="canvas-keys-palette">Ctrl K</span> jump to' in html
     assert "⌘K</span> jump to" not in html
     assert "$('canvas-keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';" in _js()

@@ -1,26 +1,18 @@
-"""The proxy's upload limit, the API's bounded /tmp, the console's compression
-and the `Server` header, held to the files that carry them (2026-10-08).
+"""The proxy's upload limit, the API's bounded /tmp, the console's compression and the `Server` header,
+held to the files that carry them.
 
-docs/17 "a junk credential is still read": a request that carries any bearer
-value or a session cookie is read, and spooled to a temporary file up to the
-route's cap, before the route judges it, because telling a live session from
-a junk one takes the database. The API container had no size-limited /tmp and
-the proxy set no body limit, so one request could write up to 256 MiB, as many
-as the per-address meter allowed. Now `infra/production/compose.yml` gives the
-API and the sample origin a size-limited tmpfs for /tmp, and the Caddyfile
-puts `request_body max_size` on the five routes that take a multipart file.
+docs/17 "a junk credential is still read": a request that carries any bearer value or a session cookie is
+read, and spooled to a temporary file up to the route's cap, before the route judges it, because telling a
+live session from a junk one takes the database. So `infra/production/compose.yml` gives the API and the
+sample origin a size-limited tmpfs for /tmp, and the Caddyfile puts `request_body max_size` on the five
+routes that take a multipart file.
 
-docs/17 "no compression of the console" and "`Server: uvicorn`": the Caddyfile
-compresses `/ui` and nothing else, and takes the `Server` header off every
-answer.
+docs/17 "no compression of the console" and "`Server: uvicorn`": the Caddyfile compresses `/ui` and nothing
+else, and takes the `Server` header off every answer.
 
-Static: the Caddyfile and the compose file are read as text, the route table
-is read from the application's own routers, and the proxy's pattern is run
-(Caddy reads RE2, and this pattern is the subset Python's `re` reads the same
-way) against every route there is. Caddy itself (the pinned image) was run
-against these files for the report: validation, the five routes at the limit
-and one byte over, the 413 body, the compressed `/ui` and the plain API, and
-no `Server` header on any answer, a 502 included.
+Static: the Caddyfile and the compose file are read as text, the route table is read from the
+application's own routers, and the proxy's pattern is run (Caddy reads RE2; this pattern is the subset
+Python's `re` reads the same way) against every route there is.
 """
 from __future__ import annotations
 

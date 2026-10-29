@@ -1,28 +1,22 @@
 """Break-glass, sharing and the way into Administration, over HTTP.
 
-The review of 2026-09-22 found each of these saying something the server
-did not do, or asking for something nobody could supply:
+Each of these holds a server half of a fix for a screen that said something the server did not do, or
+asked for something nobody could supply:
 
-- the console's break-glass grant named no level, so it raised nothing
-  while the console said "Granted" (ux15 breakglass-grant-raises-nothing);
-- the officer's review queue titled every card with a UUID and could not
-  say which case a grant covered (ux15 glass-review-queue-uninformative);
-- sharing a case needed an `iam.app_user.id` that no screen available to a
-  case owner showed, and nothing could take a colleague off again (ux02,
-  ux16, ux19);
-- confirming a retention rule said the category "now retains" for the new
-  period while every record on file kept its old clock (ux15
-  rule-confirm-misstates-effect);
-- the Destroyed list could not say who purged (ux15 tombstone-rows-blank);
-- Administration was reachable only from inside a case (ux16);
-- approvals named people by UUID (ux19 raw-ids-instead-of-names).
+- a break-glass grant names a level, so it raises something when the console says "Granted";
+- the officer's review queue says which case a grant covers, not only a UUID;
+- sharing a case does not need an `iam.app_user.id` that no screen available to a case owner shows,
+  and a colleague can be taken off again;
+- confirming a retention rule does not say the category "now retains" for the new period while every
+  record on file keeps its old clock;
+- the Destroyed list says who purged;
+- Administration is reachable from outside a case;
+- approvals name people, not UUIDs.
 
-Each test here holds one of the server halves of those fixes. The console
-halves are pinned by `test_ui_governance_invariants.py`.
+The console halves are pinned by `test_ui_governance_invariants.py`.
 
-**The email prefix is `bsa-` and must stay unique**: every fixture here
-cleans up by deleting on it, and two files sharing a prefix delete each
-other's rows mid-run.
+The email prefix is `bsa-` and must stay unique: every fixture here cleans up by deleting on it, and
+two files sharing a prefix delete each other's rows mid-run.
 
 Env-gated on DATABASE_URL.
 """
@@ -147,8 +141,8 @@ WHY = ("Incident 2026-0922: a RED exhibit on this case names the next "
 # ---------------------------------------------------------------------------
 
 def test_a_grant_on_a_case_says_what_it_raises_and_where(conn, client):
-    """The console's grant used to name no level and no case, and was
-    reported as "Granted" while no access decision read it."""
+    """A grant names a level and a case: the console must not report "Granted" for one that no access
+    decision reads."""
     _officer(conn)
     _, email = _user(conn, name="Alex Amber", clearance="AMBER",
                      roles=("CASE_OWNER",))
@@ -190,8 +184,8 @@ def test_a_level_the_caller_already_holds_raises_nothing(conn, client):
 
 
 def test_an_unknown_level_is_a_400_naming_the_levels_not_a_500(conn, client):
-    """`granted_classification` is a `core.tlp` enum column, so an unknown
-    value used to reach the database and surface as an unexplained 500."""
+    """`granted_classification` is a `core.tlp` enum column, so an unknown value is a 400 that names
+    the levels, not an unexplained 500 from the database."""
     _officer(conn)
     _, email = _user(conn, roles=("CASE_OWNER",))
     r = client.post("/api/v1/break-glass", headers=_session(conn, email),
@@ -262,9 +256,8 @@ def test_the_review_queue_names_the_person_the_case_and_the_level(conn, client):
 
 
 def test_review_stays_with_the_officer_and_is_never_your_own(conn, client):
-    """The console now names people and confirms verdicts; none of that may
-    loosen the two-person rule. An account that is both an officer and an
-    invoker still cannot review its own grant."""
+    """The console names people and confirms verdicts, but none of that may loosen the two-person
+    rule: an account that is both an officer and an invoker still cannot review its own grant."""
     _officer(conn)                                   # somebody else can review
     _, email = _user(conn, clearance="AMBER",
                      roles=("SYS_ADMIN", "SECURITY_OFFICER"))
@@ -283,13 +276,10 @@ def test_review_stays_with_the_officer_and_is_never_your_own(conn, client):
     assert r.status_code == 403
 
 
-# --- fix round, 2026-09-23 --------------------------------------------------
-
 def test_the_highest_live_grant_is_the_one_in_force(conn, client):
-    """An 8-hour AMBER grant, then a 1-hour RED one on a case. The notice
-    said "raised to RED" while the gate kept reading the AMBER row, because
-    it ends later (`ORDER BY expires_at DESC LIMIT 1`). The gate now reads
-    the highest live level, so the notice is true."""
+    """An 8-hour AMBER grant, then a 1-hour RED one on a case. The notice says "raised to RED", so the
+    gate must read the highest live level and not the row that ends later (`ORDER BY expires_at DESC
+    LIMIT 1`)."""
     from uuid import UUID
 
     from noctornal_api.security.access import evaluate
@@ -383,8 +373,6 @@ def test_the_review_card_knows_whether_the_grant_raised_anything(conn, client):
     assert q[held]["raised"] is False and q[held]["base_clearance"] == "RED"
 
 
-# --- verifier follow-up, 2026-09-23 ------------------------------------------
-
 def _exhibit(conn, case_id, owner, title, level):
     return conn.execute(
         """INSERT INTO core.evidence
@@ -433,12 +421,10 @@ def _what_they_see(client, auth, case_id, node, exhibit, label) -> dict:
 
 def test_a_case_grant_opens_what_the_console_reads_on_that_case_only(
         conn, client):
-    """The console's default scope is the open case. A RED grant on it was
-    announced as live emergency access, yet the graph, the entity and
-    exhibit lists, the inspector and search on that case still hid every
-    RED item, because they filtered on `deps.user_ceiling`, which ignored
-    case-scoped grants. Only opening an exhibit by id was raised, and no
-    list revealed the id. The 3am scenario of the finding survived."""
+    """The console's default scope is the open case. A RED grant on it is announced as live emergency
+    access, so the graph, the entity and exhibit lists, the inspector and search on that case must show
+    RED items too: they filter on `deps.user_ceiling`, which must count case-scoped grants. Raising
+    only the opening of an exhibit by id would not help, since no list reveals the id."""
     from uuid import UUID
 
     from noctornal_api.http.deps import user_ceiling
@@ -564,12 +550,10 @@ def test_the_case_list_offers_a_case_a_grant_opens(conn, client):
 
 
 def test_a_refused_grant_by_address_leaves_a_trace(conn, client):
-    """Verifier follow-up, 2026-09-23. By address, a missing account is a
-    404 and a known one that cannot open the case a 400: that answers
-    whether an account exists, which a successful grant does anyway and a
-    mistyped address has to be told. What was wrong is that the refusals
-    wrote nothing, so a `case.grant` holder could walk a list of
-    addresses unseen. Each is audited now, with the address asked about."""
+    """By address, a missing account is a 404 and a known one that cannot open the case a 400: that
+    answers whether an account exists, which a successful grant does anyway and a mistyped address has
+    to be told. The refusals must still be audited, with the address asked about, or a `case.grant`
+    holder could walk a list of addresses unseen."""
     owner, owner_email = _user(conn, roles=("CASE_OWNER",))
     auth = _session(conn, owner_email)
     case_id, _ = _case(client, auth)                             # AMBER
@@ -658,9 +642,8 @@ def test_a_tombstone_says_who_purged(conn, client):
 # ---------------------------------------------------------------------------
 
 def test_a_colleague_is_added_by_work_email_and_bound_by_id(conn, client):
-    """The only way in was a UUID no case owner could see. The address is
-    resolved once, at grant time; the row still stores the account id, so
-    the grant follows the person and not the mailbox (invariant 9)."""
+    """A colleague is added by work email. The address is resolved once, at grant time; the row still
+    stores the account id, so the grant follows the person and not the mailbox (invariant 9)."""
     _, owner_email = _user(conn, roles=("CASE_OWNER",))
     auth = _session(conn, owner_email)
     case_id, _ = _case(client, auth)
@@ -779,10 +762,9 @@ def test_the_roster_says_why_an_assignment_does_not_work(conn, client):
 
 
 def test_the_address_is_looked_up_only_after_the_request_is_valid(conn, client):
-    """Fix round, 2026-09-23. The address was resolved before the role was
-    checked, so a request with a bad role answered 404 for an unknown
-    address and 400 for a known one, wrote nothing and audited nothing: a
-    free account-existence probe."""
+    """The address is resolved after the role is checked. Resolving it first would answer 404 for an
+    unknown address and 400 for a known one on a bad role, with nothing written or audited: a free
+    account-existence probe."""
     _, owner_email = _user(conn, roles=("CASE_OWNER",))
     auth = _session(conn, owner_email)
     case_id, _ = _case(client, auth)
@@ -817,8 +799,8 @@ def test_a_refusal_reached_by_address_does_not_name_their_clearance(conn, client
 
 
 def test_the_roster_says_whether_the_caller_can_add_people(conn, client):
-    """Fix round, 2026-09-23: the Share panel offered Add and Remove to every
-    roster reader and each click was a 403. The hint gates nothing."""
+    """The roster says whether the caller can add people, so the Share panel does not offer Add and
+    Remove to every roster reader for a 403. The hint gates nothing."""
     _, owner_email = _user(conn, roles=("CASE_OWNER",))
     auth = _session(conn, owner_email)
     case_id, _ = _case(client, auth)
@@ -837,38 +819,36 @@ def test_the_roster_says_whether_the_caller_can_add_people(conn, client):
 # ---------------------------------------------------------------------------
 
 def test_the_way_in_is_answered_for_the_caller_alone(conn, client):
-    """SYS_ADMIN holds user.manage and no case.read; SECURITY_OFFICER holds
-    break_glass.review and no case. Both were stranded on an empty case
-    list. The answer is about the caller's own roles and gates nothing."""
+    """SYS_ADMIN holds user.manage and no case.read; SECURITY_OFFICER holds break_glass.review and no
+    case. Both must find the way into Administration instead of being stranded on an empty case list.
+    The answer is about the caller's own roles and gates nothing."""
     assert client.get("/api/v1/admin/access").status_code == 401
     _, analyst = _user(conn, roles=("ANALYST",))
     _, admin = _user(conn, roles=("SYS_ADMIN",))
     _, officer = _officer(conn)
-    # `blocking_failures` joined 2026-09-23 (ux16-admin
-    # blocking-banner-buried-under-account-list), and `readiness_caveats`
-    # the same day (security-officer-false-green), for an administrator
-    # alone: an account without user.manage is told nothing about either.
+    # `blocking_failures` and `readiness_caveats` are for an administrator alone: an account without
+    # user.manage is told nothing about either.
     assert client.get("/api/v1/admin/access", headers=_session(conn, analyst)
                       ).json() == {"user_manage": False,
                                    "break_glass_review": False,
                                    "blocking_failures": [],
                                    "readiness_caveats": [],
-                                   # The two-person policy (F9).
+                                   # The two-person policy.
                                    "dual_control_manage": False,
                                    "dual_control_countersign": False,
                                    "dual_control_awaiting": 0,
-                                   # F12, the officer's YARA activations.
+                                   # The officer's YARA activations.
                                    "sample_yara_activate": False,
                                    # The collection authorities an officer confirms.
                                    "collection_authority_confirm": False,
-                                   # S2, the Egress section's way in.
+                                   # The Egress section's way in.
                                    "egress_manage": False,
                                    "egress_log_read": False,
-                                   # F6.3, the similarity indexes.
+                                   # The similarity indexes.
                                    "embedding_manage": False,
                                    # Integrations and Providers.
                                    "integration_manage": False,
-                                   # F13, prohibited-content screening.
+                                   # Prohibited-content screening.
                                    "sample_screening_review": False,
                                    "sample_screening_manage": False}
     assert client.get("/api/v1/admin/access", headers=_session(conn, admin)
@@ -878,22 +858,22 @@ def test_the_way_in_is_answered_for_the_caller_alone(conn, client):
                                    "break_glass_review": True,
                                    "blocking_failures": [],
                                    "readiness_caveats": [],
-                                   # An officer countersigns (F9).
+                                   # An officer countersigns.
                                    "dual_control_manage": False,
                                    "dual_control_countersign": True,
                                    "dual_control_awaiting": 0,
-                                   # F12, the officer's YARA activations.
+                                   # The officer's YARA activations.
                                    "sample_yara_activate": True,
                                    # The collection authorities an officer confirms.
                                    "collection_authority_confirm": True,
-                                   # S2, an officer reads the connection log.
+                                   # An officer reads the connection log.
                                    "egress_manage": False,
                                    "egress_log_read": True,
-                                   # F6.3, a system administrator's.
+                                   # A system administrator's.
                                    "embedding_manage": False,
                                    # Integrations and Providers.
                                    "integration_manage": False,
-                                   # F13, the officer screens.
+                                   # The officer screens.
                                    "sample_screening_review": True,
                                    "sample_screening_manage": True}
     # ...and it opens nothing: the list still wants user.manage.
@@ -901,9 +881,7 @@ def test_the_way_in_is_answered_for_the_caller_alone(conn, client):
                       headers=_session(conn, analyst)).status_code == 403
 
 
-# ---------------------------------------------------------------------------
-# Names, not ids (ux19 raw-ids-instead-of-names)
-# ---------------------------------------------------------------------------
+# Names, not ids.
 
 def test_an_approval_names_who_asked(conn, client):
     """The approval card printed the payload's UUIDs and nothing about the
@@ -913,12 +891,10 @@ def test_an_approval_names_who_asked(conn, client):
     owner, owner_email = _user(conn, name="Rae Requester", roles=("CASE_OWNER",))
     auth = _session(conn, owner_email)
     case_id, _ = _case(client, auth)
-    # Two real entities the requester can read. A merge request is listed
-    # only to a viewer who sees both nodes it names (2026-10-03), and random
-    # ids name nothing, so the listing hid this request as it hides any it
-    # cannot show. That hidden case is covered by
-    # test_review_g42_merge_visibility_pg; this test is about the names on a
-    # request the viewer may see.
+    # Two real entities the requester can read. A merge request is listed only to a viewer who sees
+    # both nodes it names, and random ids name nothing, so the listing would hide this request as it
+    # hides any it cannot show. That hidden case is covered by test_merge_visibility_pg;
+    # this test is about the names on a request the viewer may see.
     graph = GraphWriteService(conn)
     source, target = (
         graph.create_node(

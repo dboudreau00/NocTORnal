@@ -1,50 +1,19 @@
-"""The classification egress gate (invariant 8, docs/07, Phase 5).
+"""The classification egress gate (invariant 8, docs/07).
 
-docs/07 opens with the rule that governs every integration:
+`can_egress(object, destination)` is the one function every outbound path (SMTP, Jira, webhooks, export) calls
+before it sends. AMBER_STRICT and RED never leave the platform boundary, whoever asked. It is pure: labels and a
+destination in, a decision out, so it can be tested exhaustively and no caller can hand it a live connection.
 
-    Every outbound path checks classification before it sends. One
-    function, `can_egress(object, destination)`, called by SMTP, Jira,
-    webhooks and export alike. AMBER_STRICT and RED never leave the
-    platform boundary, regardless of who clicked what.
+- Fail closed: an unknown classification, an unknown destination kind or a malformed ceiling is a DENY.
+- The destination's ceiling and the platform floor are both binding. Raising a case's classification does not make
+  a low-ceiling destination a home for it, and nothing makes AMBER_STRICT or RED sendable.
+- Compartments never cross the boundary: no external system models them, so compartmented material is refused
+  rather than downgraded.
 
-And the reason, which is worth keeping in view because it is not a
-hypothetical:
-
-    Integrations are the leak path in every system of this kind. Not
-    because anyone intends it, but because a Jira ticket auto-created from
-    a watch hit quietly copies intelligence into a system with a completely
-    different access model and a much wider audience.
-
-This module is that one function. It is deliberately pure — it takes
-labels and a destination and returns a decision — so it can be exhaustively
-tested and so no caller can accidentally pass it a live connection and get
-a different answer.
-
-Three properties the implementation defends:
-
-**Fail closed on anything unrecognised.** An unknown classification, an
-unknown destination kind or a malformed ceiling is a DENY, never a
-permit. A gate that fails open when it is confused is not a gate.
-
-**The destination's ceiling and the platform floor are both binding.** A
-Jira project configured for TLP:GREEN does not become a legitimate home for
-AMBER content because someone raised the case's classification; and
-nothing raises AMBER_STRICT or RED to sendable, ever, whatever a
-destination claims it can hold.
-
-**Compartments do not cross the boundary at all.** A compartment is
-need-to-know inside the platform, and no external system models it. Sending
-compartmented material anywhere outbound would silently discard the very
-control that protects it, so it is refused outright rather than downgraded.
-
-**The network path is a second question, answered below the gate**
-(2026-09-24). `can_egress` stays pure: labels in, a decision out.
-`route_for` is the one reader of the network path an outbound connection
-takes (docs/00 decision 68): a DIRECT route on which this process applies
-egress_policy.py itself, or a PROXY route through the egress proxy, which
-is then the only resolver and the only exit. The gate decides whether
-material may go; the route decides where the connection may go and
-through what. Neither answers the other's question.
+`route_for` is the one reader of the network path an outbound connection takes (docs/00 decision 68): a DIRECT
+route, on which this process applies egress_policy.py itself, or a PROXY route through the egress proxy, which is
+then the only resolver and the only exit. The gate decides whether material may go; the route decides where the
+connection may go and through what.
 """
 from __future__ import annotations
 
@@ -104,39 +73,30 @@ class Destination(Enum):
     SMTP = "smtp"
     JIRA = "jira"
     WEBHOOK = "webhook"
-    # A collection adapter reading a source (2026-09-24): the fact
-    # that an exit reads it leaves the platform with every request, so the
-    # floor applies and a declared ceiling is required (docs/00 decision 69).
+    # A collection adapter reading a source: every request leaves the platform, so the floor applies and a
+    # declared ceiling is required (docs/00 decision 69).
     COLLECTION_TARGET = "collection_target"
-    # A Web Key Directory; a lookup discloses the looked-up address to
-    # the directory's operator (F10c, comms, 2026-09-24).
+    # A Web Key Directory; a lookup discloses the looked-up address to the directory's operator.
     KEY_DIRECTORY = "key_directory"
-    # An operator's model server for similar meaning (F6.2,
-    # 2026-09-24). MODEL_HOST is a loopback endpoint on a DIRECT route,
-    # outside production, declared as this host's own model server: inside
-    # the boundary like IN_APP, but ceilinged and closed to compartments.
-    # Every other model endpoint is MODEL_REMOTE and crosses the boundary.
+    # An operator's model server for similar meaning. MODEL_HOST is a loopback endpoint on a DIRECT route,
+    # outside production, declared as this host's own model server: inside the boundary like IN_APP, but
+    # ceilinged and closed to compartments. Every other model endpoint is MODEL_REMOTE and crosses the boundary.
     MODEL_HOST = "model_host"
     MODEL_REMOTE = "model_remote"
-    # An outbound lookup provider (F15.3, 2026-09-24).
     LOOKUP = "lookup"
-    SANDBOX = "sandbox"  # F14, the self-hosted CAPEv2 (crosses the boundary).
+    SANDBOX = "sandbox"  # The self-hosted CAPEv2 (crosses the boundary).
 
 
 @dataclass(frozen=True)
 class GateRule:
-    """What the gate applies to one destination (2026-09-24).
+    """What the gate applies to one destination.
 
-    `crosses_boundary`: the destination is outside the platform, so
-    invariant 8's floor and the compartment refusal apply. `floor_applies`:
-    NEVER_EGRESS is refused. `requires_ceiling`: a destination with no
-    declared ceiling receives nothing. `compartments_allowed`: compartmented
-    material may go there (only IN_APP).
+    `crosses_boundary`: the destination is outside the platform, so invariant 8's floor and the compartment
+    refusal apply. `floor_applies`: NEVER_EGRESS is refused. `requires_ceiling`: a destination with no declared
+    ceiling receives nothing. `compartments_allowed`: compartmented material may go there (only IN_APP).
 
-    A crossing gate that drops the floor or allows compartments cannot be
-    built, so an appended destination cannot be declared half done: a new
-    destination is one added line, and the line is where the rule is
-    enforced."""
+    A crossing gate that drops the floor or allows compartments cannot be built, so a destination cannot be
+    declared half done: a new destination is one added line, and the line is where the rule is enforced."""
 
     crosses_boundary: bool
     floor_applies: bool
@@ -151,11 +111,8 @@ class GateRule:
                 "floor and refuses compartmented material")
 
 
-# One gate record per destination; a member without one is REFUSED, never
-# treated as in-app. Until 2026-09-24 the set below was the record, and
-# `can_egress` returned "in_app" for any member not in it, so a member
-# appended without its line failed OPEN. A new destination adds one line
-# here.
+# One gate record per destination; a member without one is REFUSED, never treated as in-app. A new destination
+# adds one line here.
 _GATES: dict[Destination, GateRule] = {
     Destination.IN_APP: GateRule(False, False, False, True),
     Destination.EXPORT: GateRule(True, True, False),
@@ -163,11 +120,11 @@ _GATES: dict[Destination, GateRule] = {
     Destination.JIRA: GateRule(True, True, False),
     Destination.WEBHOOK: GateRule(True, True, False),
     Destination.COLLECTION_TARGET: GateRule(True, True, True),  # the collection foundation
-    Destination.KEY_DIRECTORY: GateRule(True, True, True),  # F10c, NOCTORNAL_WKD_CEILING
-    Destination.MODEL_HOST: GateRule(False, False, True),  # F6.2
-    Destination.MODEL_REMOTE: GateRule(True, True, True),  # F6.2
-    Destination.LOOKUP: GateRule(True, True, True),   # F15: the provider's ceiling, always
-    Destination.SANDBOX: GateRule(True, True, True),  # F14, ceiling required.
+    Destination.KEY_DIRECTORY: GateRule(True, True, True),  # NOCTORNAL_WKD_CEILING
+    Destination.MODEL_HOST: GateRule(False, False, True),
+    Destination.MODEL_REMOTE: GateRule(True, True, True),
+    Destination.LOOKUP: GateRule(True, True, True),   # the provider's ceiling, always
+    Destination.SANDBOX: GateRule(True, True, True),
 }
 
 # Derived from the gates and kept under its name for anything that imports
@@ -251,8 +208,6 @@ def can_egress(
             return EgressDecision(False, DENY_UNKNOWN_DESTINATION,
                                   level.name, str(destination))
 
-    # A member with no gate record is refused (2026-09-24): the
-    # module global is read at call time, so the rule cannot be half built.
     gate = _GATES.get(destination)
     if gate is None:
         return EgressDecision(False, DENY_UNKNOWN_DESTINATION,
@@ -315,22 +270,17 @@ def enforce_egress(classification: str, destination: Destination | str, **kw):
     return decision
 
 
-# ===========================================================================
-# The route section (2026-09-24; docs/00 decisions 68 and 77, docs/20
-# sections 6 and 7). Fixed, except the append-only registries
-# INTEGRATIONS, INTEGRATION_FAMILIES and OUTBOUND_USES, which grow one
-# line per outbound use.
-# ===========================================================================
+# Routes (docs/00 decisions 68 and 77, docs/20 sections 6 and 7). Fixed, except the append-only registries
+# INTEGRATIONS, INTEGRATION_FAMILIES and OUTBOUND_USES, which grow one line per outbound use.
 
 #: One variable names the proxy for every client, and the one listener
 #: behind it serves HTTP CONNECT and SOCKS5 (docs/20 section 8.1), so there is
 #: no scheme to choose.
 PROXY_URL_ENV = "NOCTORNAL_EGRESS_PROXY_URL"
 
-#: The route provider, shipped with the egress proxy (S2). Its existence
-#: is the registration: no call registers it and app.py imports nothing,
-#: so the API, the cron scripts and the host scripts all see the same
-#: provider (docs/20 section 7).
+#: The route provider shipped with the egress proxy. Its existence is the registration: no call registers it
+#: and app.py imports nothing, so the API, the cron scripts and the host scripts all see the same provider
+#: (docs/20 section 7).
 ROUTE_PROVIDER_MODULE = "noctornal_api.egress_routes"
 PROVIDER_CONTRACT = 1
 
@@ -410,10 +360,10 @@ def _production(env=None) -> bool:
 INTEGRATIONS: dict[str, str] = {
     "smtp": "email notifications (transports.send_smtp)",
     "webhook": "webhook notifications (transports.send_webhook)",
-    "wkd": "Web Key Directory key lookups (pgp_keys, F10c)",  # F10c
-    "embeddings": "the model endpoint for similar meaning (embedders.py)",  # F6.2
-    "jira": "Jira work items (jira.JiraPass and the destination's Test)",  # F7
-    "sandbox": "detonations sent to the configured CAPEv2 (sandbox.dispatch_due)",  # F14
+    "wkd": "Web Key Directory key lookups (pgp_keys, F10c)",
+    "embeddings": "the model endpoint for similar meaning (embedders.py)",
+    "jira": "Jira work items (jira.JiraPass and the destination's Test)",
+    "sandbox": "detonations sent to the configured CAPEv2 (sandbox.dispatch_due)",
 }
 
 #: Families of integration routes: a prefix and a member key. APPEND-ONLY.
@@ -427,12 +377,10 @@ INTEGRATION_FAMILIES: dict[str, str] = {
 def _integration_name(name: str) -> str:
     """The canonical name of a registered integration route.
 
-    A family member's key comes from data (a provider row), so a key that
-    does not make a route name is configuration, RouteUnavailable
-    (route_unknown); only a name that is neither registered nor in a
-    family is a programming error. Underscores in a key become hyphens
-    (egress_policy.family_route_name), so `f"lookup-{provider.key}"` for
-    the key virustotal_v3 is the route lookup-virustotal-v3 (2026-09-24)."""
+    A family member's key comes from data (a provider row), so a key that does not make a route name is
+    configuration, RouteUnavailable (route_unknown); only a name that is neither registered nor in a family is a
+    programming error. Underscores in a key become hyphens (egress_policy.family_route_name), so
+    `f"lookup-{provider.key}"` for the key virustotal_v3 is the route lookup-virustotal-v3."""
     if not isinstance(name, str):
         raise ValueError("an integration route name is a string")
     if name in INTEGRATIONS:
@@ -481,14 +429,11 @@ def _reset_route_provider() -> None:
 
 
 def _route_provider():
-    """The route provider module, or None when the build has none.
-    Found by name, imported once per process.
+    """The route provider module, or None when the build has none. Found by name, imported once per process.
 
-    A module that exists and does not match the contract (another
-    PROVIDER_CONTRACT, a missing function) or that raises on import is
-    RouteUnavailable(no_route_provider) for every route, never None: a
-    broken provider must not read as "no provider" and drop the process
-    back to direct connections (2026-09-24)."""
+    A module that exists and does not match the contract (another PROVIDER_CONTRACT, a missing function) or that
+    raises on import is RouteUnavailable(no_route_provider) for every route, never None: a broken provider must
+    not read as "no provider" and drop the process back to direct connections."""
     global _provider_cache
     if _provider_cache is _PROVIDER_UNSET:
         try:
@@ -527,9 +472,8 @@ def _load_provider():
 def _route_parts(provider, kind: str, name: str, *, conn, mode: str,
                  production: bool, declared: tuple[Rule, ...], internal,
                  context: str | None) -> RouteParts:
-    """Ask the provider. The context is passed only to a provider whose
-    route_parts takes it, so a DIRECT run route could narrow to its source
-    (2026-09-24) without breaking the signature docs/20 section 7 fixes."""
+    """Ask the provider. The context is passed only to a provider whose route_parts takes it, so a DIRECT run
+    route can narrow to its source without breaking the signature docs/20 section 7 fixes."""
     kwargs = dict(conn=conn, mode=mode, production=production,
                   declared=declared, internal=internal)
     try:
@@ -673,22 +617,16 @@ COLLECTION_USE = "collection sources are polled from this host"
 def _collection_use(conn) -> str | None:
     """Whether the collector polls anything from this host.
 
-    Only a source with a parser_key is ever polled: run_once looks its
-    adapter up by that key and refuses the source before it opens a socket,
-    and the standing capture source every manual capture hangs off
-    (extraction.CaptureService.source_id, kind MANUAL or PASTE) has none.
-    Counting every active row made one manual capture read as outbound
-    collection, and a production host with no proxy failed this row and
-    the production start refusal for a source that never leaves the host
-    (2026-09-24). The test is the key, not a registered adapter:
-    a key this build cannot poll still errs toward asking for the proxy,
-    which is the safe side.
+    Only a source with a parser_key is ever polled: run_once looks its adapter up by that key and refuses the
+    source before it opens a socket, and the standing capture source every manual capture hangs off
+    (extraction.CaptureService.source_id, kind MANUAL or PASTE) has none. Counting every active row would make a
+    manual capture read as outbound collection and fail a production host with no proxy for a source that never
+    leaves the host. The test is the key, not a registered adapter: a key this build cannot poll still errs
+    toward asking for the proxy, the safe side.
 
-    A presence, not a count: due_sources, the Feeds pane and every other
-    reader hide a source labelled above the caller's clearance, and a
-    number here, read by any administrator, would say how many such
-    sources exist and when one is added. Whether anything polls at all is
-    the one fact the row and the start refusal need."""
+    A presence, not a count: due_sources, the Feeds pane and every other reader hide a source labelled above the
+    caller's clearance, and a number here, read by any administrator, would say how many such sources exist and
+    when one is added."""
     polled = conn.execute(
         "SELECT EXISTS (SELECT 1 FROM collect.source "
         "WHERE is_active AND coalesce(btrim(parser_key), '') <> '')").fetchone()[0]
@@ -708,15 +646,13 @@ def _webhook_use(_conn) -> str | None:
 
 
 def _jira_use(conn) -> str | None:
-    # F7 (2026-09-24). A live destination is a configured use, drafted
-    # or not: its Test reaches Jira.
+    # A live destination is a configured use, drafted or not: its Test reaches Jira.
     row = conn.execute("SELECT EXISTS (SELECT 1 FROM notify.jira_destination "
                        "WHERE state <> 'RETIRED')").fetchone()
     return "Jira work items are raised on a Jira destination" if row[0] else None
 
 
 def _lookup_use(conn) -> str | None:
-    # F15.2 (2026-09-24). An enabled provider under the host switch.
     if os.environ.get("NOCTORNAL_OUTBOUND_LOOKUPS", "").strip().lower() != "on":
         return None
     row = conn.execute("SELECT EXISTS (SELECT 1 FROM ingest.provider "
@@ -724,24 +660,22 @@ def _lookup_use(conn) -> str | None:
     return "case selectors are looked up on outbound providers" if row[0] else None
 
 
-#: (name, callable(conn) -> a sentence, or None when the use is not
-#: configured). A sentence may count and never names, and it never counts
-#: rows a label hides from some administrator (the collection use states
-#: presence only). APPEND-ONLY, one line per addition. The
-#: production start refusal and the egress_boundary row read
+#: (name, callable(conn) -> a sentence, or None when the use is not configured). A sentence may count and never
+#: names, and it never counts rows a label hides from some administrator (the collection use states presence
+#: only). APPEND-ONLY, one line per addition. The production start refusal and the egress_boundary row read
 #: `outbound_uses` and nothing else.
 OUTBOUND_USES: list[tuple[str, Callable]] = [
     ("collection", _collection_use),
     ("smtp", _smtp_use),
     ("webhook", _webhook_use),
-    # F10c. Lookups are on only with a ceiling; a presence, never a count.
+    # Lookups are on only with a ceiling; a presence, never a count.
     ("wkd", lambda _conn: "vendor keys may be looked up in Web Key Directories"
      if os.environ.get("NOCTORNAL_WKD_CEILING", "").strip() else None),
-    ("embeddings", lambda conn: importlib.import_module(  # F6.2
+    ("embeddings", lambda conn: importlib.import_module(
         "noctornal_api.embedders").outbound_use(conn)),
-    ("jira", _jira_use),        # F7
-    ("lookups", _lookup_use),   # F15.2
-    ("sandbox", lambda conn: importlib.import_module("noctornal_api.sandbox").outbound_use(conn)),  # F14, imported lazily (no cycle)
+    ("jira", _jira_use),
+    ("lookups", _lookup_use),
+    ("sandbox", lambda conn: importlib.import_module("noctornal_api.sandbox").outbound_use(conn)),  # imported lazily (no cycle)
 ]
 
 

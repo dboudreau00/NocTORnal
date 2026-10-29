@@ -1,29 +1,13 @@
-"""Search and selector lookup, scoped to a case and filtered by the
-caller's own clearance/compartments (an element may be classified above its
-case, so case-level authorization alone would leak labels and titles).
+"""Search and selector lookup, scoped to a case and filtered by the caller's own labels.
 
-`/search` (2026-09-02) is the combined box: nodes, evidence and collected
-documents in one ranked list. Each kind keeps the permission it has
-everywhere else -- `case.read` for nodes, `evidence.read` for evidence,
-global `collection.read` for documents, because that is what
-`/collection/documents` demands and a search that returned what the list
-refuses would be two halves wrong together. A kind the caller may not see
-is named in `omitted` rather than silently absent: an empty result that
-means "nothing collected" and one that means "you cannot see collected
-things" need opposite responses.
-
-Since 2026-09-22 (ux09-search) every search here matches word starts,
-fragments of names and file names, and the selectors attributed to an
-entity, which come back as the hit's `via`; `/search/selectors` is the
-selector-only form the command palette uses. The kind routes take
-`with_total=true` for `{hits, total, limit}`, so a capped list can say
-how many matched, and the combined `/search` always reports `total` and
-per-kind `totals`. How a query matches, and why, is in `curation.py`.
-
-Since 2026-09-23 the Search pane reads four columns, each from its own
-route: `/search/nodes`, `/search/evidence`, `/search/documents`
-(documents-unsearchable: the console never asked for them) and
-`/search/assertions` (assertions-unsearchable: no search reached a claim).
+An element may be classified above its case, so case-level authorization alone would leak labels
+and titles. Each kind keeps the permission it has everywhere else: `case.read` for nodes,
+`evidence.read` for evidence, global `collection.read` for documents; a kind the caller may not see
+is named in `omitted` rather than silently absent. Searches match word starts, fragments of names
+and file names, and an entity's selectors (the hit's `via`); `curation.py` says how and why. The
+Search pane reads `/search/nodes`, `/search/evidence`, `/search/documents` and
+`/search/assertions`; `/search/selectors` serves the command palette, and `with_total=true` adds
+how many matched.
 """
 from __future__ import annotations
 
@@ -52,9 +36,8 @@ router = APIRouter(prefix="/cases/{case_id}", tags=["search"])
 
 
 class SelectorViaOut(BaseModel):
-    """Which selector put an entity in the results (selectors-unsearchable,
-    2026-09-22). `value` is the selector as observed; `merged_from` names
-    the merged record that holds it when that is not the entity itself."""
+    """Which selector put an entity in the results. `value` is the selector as observed;
+    `merged_from` names the merged record that holds it when that is not the entity itself."""
     selector_type: str
     value: str
     exact: bool
@@ -63,26 +46,15 @@ class SelectorViaOut(BaseModel):
 
 
 class HitOut(BaseModel):
-    """`merged_name` is the label of a record merged into this entity
-    whose name matched when the entity's own did not, or matched less well
-    (2026-09-23), so the pane can say why a name it does
-    not show is here. Null otherwise.
+    """A search hit, with what explains why it is here.
 
-    `attribute` is the key of the entity's own attribute that matched,
-    when its name did not and neither `via` nor `merged_name` is set
-    (README screenshot review, 2026-09-23): "broker" found three entities
-    through role=broker, and nothing on screen said so. Null otherwise.
-
-    `node_type` (an entity's; null for an exhibit), `classification` and
-    `in_label` (the hit's own name or title matched) are what the pane
-    draws instead of the bare rank it printed until 2026-09-23
-    (hit-rows-unexplained): a type chip, a TLP chip and the reason.
-
-    `attributes` and `label_part` explain a query no single part holds:
-    the keys whose values hold the words the name does not, and whether
-    the name holds any. Without them the pane claimed the name for hits
-    whose names held none of the words (verifier of that fix, 2026-09-23).
-    Empty and false otherwise."""
+    `merged_name`: the label of a record merged into this entity whose name matched when the
+    entity's own did not, or matched less well. `attribute`: the key of the entity's own attribute
+    that matched, when its name did not and neither `via` nor `merged_name` is set. `node_type`
+    (null for an exhibit), `classification` and `in_label` (the hit's own name or title matched)
+    draw a type chip, a TLP chip and the reason. `attributes` and `label_part` explain a query no
+    single part holds: the keys whose values hold the words the name does not, and whether the
+    name holds any. Each is null, empty or false otherwise."""
     id: str
     label: str
     rank: float
@@ -97,10 +69,9 @@ class HitOut(BaseModel):
 
 
 class HitPage(BaseModel):
-    """`with_total=true`: the capped hits AND how many matched, so a caller
-    can say "showing 50 of 73" (silent-truncation-50, 2026-09-22). `total`
-    counts only rows the caller may see. The bare list stays the default
-    because it is the documented shape every existing client reads."""
+    """`with_total=true`: the capped hits and how many matched, so a caller can say "showing 50 of
+    73". `total` counts only rows the caller may see. The bare list stays the default because it
+    is the documented shape every existing client reads."""
     hits: list[HitOut]
     total: int
     limit: int
@@ -124,10 +95,9 @@ def _page_out(page, limit: int, with_total: bool) -> list[HitOut] | HitPage:
     return hits
 
 
-#: Longer than any selector an analyst pastes (an SSH public key is under
-#: 800 characters). Fragment matching since 2026-09-22 costs about one
-#: trigram lookup for every character of the query, so an unbounded query
-#: is an unbounded index scan, 120 times a minute under the `search` meter.
+#: Longer than any selector an analyst pastes (an SSH public key is under 800 characters).
+#: Fragment matching costs about one trigram lookup per character of the query, so an unbounded
+#: query is an unbounded index scan, 120 times a minute under the `search` meter.
 MAX_QUERY = 1024
 
 
@@ -153,8 +123,7 @@ def _allowed_on_case(conn, user: CurrentUser, case_id: UUID,
             permission_key=permission_key,
             object_classification=eff_cls, object_compartments=eff_comp,
             mfa_satisfied_at=user.session_mfa_at,
-            # A question, not an access: the request it serves was counted
-            # at its own gate (2026-09-23).
+            # A question, not an access: the request it serves was counted at its own gate.
             count_use=False)
     except AccessResolutionError:
         return False
@@ -190,18 +159,14 @@ def search_all(
 ) -> dict:
     """Nodes, evidence and collected documents, ranked together.
 
-    Documents were unreachable by search until 2026-09-02 -- the
-    collector's whole output, indexed since 0016 and queried by nothing.
-    They are filtered by the caller's own ceiling like everything else
-    here, and included only when the caller holds the global
-    `collection.read` that `/collection/documents` demands; otherwise
-    `omitted.documents` says so. Evidence likewise needs `evidence.read`
-    on the case. Nodes need `case.read`, which is the gate above.
+    Documents are filtered by the caller's own ceiling and included only when the caller holds the
+    global `collection.read` that `/collection/documents` demands; otherwise `omitted.documents`
+    says so. Evidence likewise needs `evidence.read` on the case; nodes need `case.read`, the gate
+    above.
     """
-    # The one search here that does NOT pass `case_id=` (2026-09-23): its
-    # documents are every source's, not this case's, so a break-glass grant
-    # on this case must not raise them. The per-kind routes below, which
-    # the console uses, read only this case and do.
+    # No `case_id=`: this search's documents are every source's, not this case's, so a break-glass
+    # grant on this case must not raise them. The per-kind node and evidence routes the console
+    # uses read only this case and do.
     clearance, compartments = user_ceiling(conn, user.user_id)
     omitted: dict[str, str] = {}
     with_evidence = _allowed_on_case(conn, user, case_id, "evidence.read")
@@ -265,13 +230,10 @@ def search_selectors(
     """Only the entities a selector matched, each with its `via`: the
     command palette's lookup, which matches names in memory and cannot see
     the selector table. Same gate as `/search/nodes`."""
-    # Case-scoped like `/search/nodes`, so a break-glass grant on this case
-    # raises both or neither. Written by the search group and the
-    # break-glass group in parallel on 2026-09-23; the merge found this route
-    # still reading the caller's ceiling alone, so under a grant the palette
-    # missed an entity the Search pane found. It reads only this case's
-    # rows (selector_page takes case_id), unlike the combined `/search`
-    # above, whose documents belong to every source.
+    # Case-scoped like `/search/nodes`, so a break-glass grant on this case raises both or neither
+    # and the palette finds what the Search pane finds. It reads only this case's rows
+    # (selector_page takes case_id), unlike the combined `/search`, whose documents are every
+    # source's.
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     page = SearchService(conn).selector_page(
         case_id=case_id, query=q, limit=limit,
@@ -325,16 +287,15 @@ class DocumentHitOut(BaseModel):
     posted_at: str | None = None
     author_handle: str | None = None
     classification: str | None = None
-    #: The document's compartments (L1, 2026-09-24): only a reader holding
-    #: every one of them is shown the hit, so they are the reader's keys.
+    #: The document's compartments: only a reader holding every one of them is shown the hit, so
+    #: they are the reader's keys.
     compartments: list[str] = Field(default_factory=list)
     rank: float
 
 
 class DocumentPage(BaseModel):
-    """`not_searched` says why the list is empty when it is empty because
-    the caller may not read collected documents, which is not the same
-    answer as "none matched" (documents-unsearchable, 2026-09-23)."""
+    """`not_searched` says why the list is empty when the caller may not read collected
+    documents, which is not the same answer as "none matched"."""
     hits: list[DocumentHitOut]
     total: int
     limit: int
@@ -350,25 +311,13 @@ def search_documents(
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> DocumentPage:
-    """Collected documents, the Search pane's third column
-    (documents-unsearchable, 2026-09-23).
+    """Collected documents, the Search pane's third column, with its own total and "show more".
 
-    The console searched `/search/nodes` and `/search/evidence` and never
-    this half of the combined `/search`, so the collector's whole output
-    was invisible to the box an analyst types a lead into. A route of its
-    own rather than the combined one, because a column needs its own total
-    and its own "show more", and the combined list caps all three kinds
-    together at one `limit`, so a column could show none of the twelve
-    exhibits that matched.
-
-    Read at the caller's CASE-LESS ceiling, as the combined route reads
-    them and for its reason: a document hangs off a source that any number
-    of cases cite, so a break-glass grant on this case must not raise
-    them. A caller without the global `collection.read` that
-    `/collection/documents` demands is answered, not refused, with
-    `not_searched` naming the roles that read them: the question is asked
-    on every search, and a refusal would be an audited AUTHZ_DENIED each
-    time an analyst typed a query."""
+    Read at the caller's case-less ceiling: a document hangs off a source that any number of cases
+    cite, so a break-glass grant on this case must not raise it. A caller without the global
+    `collection.read` that `/collection/documents` demands is answered, not refused, with
+    `not_searched` naming the roles that read them: the question is asked on every search, and a
+    refusal would be an audited AUTHZ_DENIED each time an analyst typed a query."""
     if not _holds_global(conn, user, "collection.read"):
         return DocumentPage(
             hits=[], total=0, limit=limit,
@@ -378,8 +327,8 @@ def search_documents(
                           + " role, held across the deployment, and your "
                           "account holds none of them. An administrator "
                           "grants it."))
-    # And the reader's compartments, case-less as the clearance is (L1,
-    # 2026-09-24): a capture into a compartmented case carries its keys.
+    # And the reader's compartments, case-less as the clearance is: a capture into a
+    # compartmented case carries its keys.
     clearance, held = user_ceiling(conn, user.user_id)
     rows, total = SearchService(conn).document_page(
         query=q, limit=limit, clearance=clearance.name, compartments=held)
@@ -395,9 +344,8 @@ def search_documents(
 
 
 class AssertionHitOut(BaseModel):
-    """A live claim as a Search hit, with the element it holds up
-    (assertions-unsearchable, 2026-09-23). `src_node_id` is a tie's source,
-    so the console can fetch a tie beyond the first page it holds."""
+    """A live claim as a Search hit, with the element it holds up. `src_node_id` is a tie's
+    source, so the console can fetch a tie beyond the first page it holds."""
     id: str
     element_kind: str
     element_id: str
@@ -479,14 +427,13 @@ def find_selector(
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SelectorOut | None:
-    """Exact-match selector lookup. The query value is normalised the same
-    way it was stored, so callers need not know the canonical form. A
-    selector row above the caller, or attributed to a node the caller cannot
-    see, is withheld: the selector is an observable ABOUT that node. What is
-    answered is the strictest row the caller may read, so a value held only
-    above them reads as none, exactly as `POST /selectors` leaves it
-    (graph-selector-record-oracle, 2026-10-03: their own sighting is a row
-    of their own, so a read after a post finds it either way)."""
+    """Exact-match selector lookup. The query value is normalised the same way it was stored, so
+    callers need not know the canonical form.
+
+    A selector row above the caller, or attributed to a node the caller cannot see, is withheld:
+    the selector is an observable about that node. The answer is the strictest row the caller may
+    read, so a value held only above them reads as none, as `POST /selectors` leaves it: their own
+    sighting is a row of their own, so a read after a post finds it either way."""
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     row = SelectorStore(conn).find_for_reader(
         case_id=case_id, selector_type=selector_type, raw_value=value,
@@ -508,17 +455,12 @@ def record_selector(
 ) -> SelectorOut:
     """Record one observation of a selector.
 
-    graph-selector-record-oracle, http_ui-002, rls-2 (2026-10-03, both
-    rounds): the upsert used to hand back the entity that held the value, the
-    stored spelling and the count, and bump the count of a row the caller
-    could not read, which made this route the membership oracle
-    `find_selector` refuses to be. The index is keyed by labels now (0134),
-    so a value held only above the caller is not among the rows they can read
-    and their sighting is a row of their own: a repeat post counts on the same
-    id, a read finds it, a second entity of the value is told of the first,
-    and the id is a real row a merge may cite, exactly as for a value held
-    nowhere. A named entity is gated at its own labels first, the same 400 for
-    one that is missing, in another case or above the caller."""
+    The index is keyed by labels (migration 0134), so a value held only above the caller is not
+    among the rows they can read and their sighting is a row of their own: a repeat post counts on
+    the same id, a read finds it, a second entity of the value is told of the first, and the id is
+    a real row a merge may cite. So the route is no membership oracle, as `find_selector` is not.
+    A named entity is gated at its own labels first, with the same 400 for one that is missing, in
+    another case or above the caller."""
     if body.node_id is not None:
         # The refusal this route has always given for a node that is not this
         # case's to name, one sentence for missing, another case's and above

@@ -1,14 +1,11 @@
-"""The selector store refuses an empty canonical form (2026-09-11).
+"""The selector store refuses an empty canonical form.
 
-`SelectorStore.record` stored whatever the normaliser returned, and for
-input the normaliser could not reduce that was '' -- a value to `UNIQUE
-(case_id, selector_type, norm_value)`, so every unreducible observation
-of one type in a case collapsed onto ONE row. On a strong type that row is
-a merge lead between strangers. The bare positive Telegram id, refused
-by the normaliser since the same day, is the case that made it explicit.
+`SelectorStore.record` must not store '' for input the normaliser cannot reduce: '' is a value to
+`UNIQUE (case_id, selector_type, norm_value)`, so every unreducible observation of one type in a case
+would collapse onto ONE row, and on a strong type that row is a merge lead between strangers. The bare
+positive Telegram id, which the normaliser refuses, is the case that made it explicit.
 
-Env-gated on DATABASE_URL. **The email prefix is `slr-` and must stay
-unique.**
+Env-gated on DATABASE_URL. **The email prefix is `slr-` and must stay unique.**
 """
 from __future__ import annotations
 
@@ -102,7 +99,7 @@ def test_a_bare_positive_telegram_id_is_refused_and_nothing_is_stored(conn, clie
 
 
 def test_nothing_unreducible_is_stored_as_the_empty_string(conn, client):
-    """Two junk observations of one strong type used to become ONE row."""
+    """Two junk observations of one strong type must not become ONE row."""
     from noctornal_api.selectors import SelectorError, SelectorStore
     case_id = _case(conn, client)
     store = SelectorStore(conn)

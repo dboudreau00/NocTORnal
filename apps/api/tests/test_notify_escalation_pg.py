@@ -1,18 +1,13 @@
-"""N3 (2026-09-02): an unacknowledged priority-1 escalates, and the drain
-can be run without a step-up session.
+"""An unacknowledged priority-1 escalates, and the drain can be run without a step-up session.
 
-Before this there was no escalation anywhere (`grep escalat` found
-nothing). docs/07 makes acknowledgement the signal that stops a thing
-nagging -- but nothing nagged. A break-glass alert or an integrity alarm
-that its recipient never acknowledged simply sat there, which is the
-"one alert that mattered" being muted by absence rather than by choice.
+docs/07 makes acknowledgement the signal that stops a thing nagging, so a break-glass alert or an integrity
+alarm that its recipient never acknowledges escalates rather than sitting there muted by absence.
 
-The only drain trigger was POST /notifications/dispatch behind
-`integration.manage`, a STEP-UP permission a cron entry cannot satisfy.
-`scripts/notify_drain.py` is the honest worker for this release: one
-process, one connection, one drain, an exit code.
+The only API drain trigger is POST /notifications/dispatch behind `integration.manage`, a step-up permission
+a cron entry cannot satisfy. `scripts/notify_drain.py` is the worker for cron: one process, one connection,
+one drain, an exit code.
 
-**The email prefix is `nesc-` and must stay unique.**
+The email prefix is `nesc-` and must stay unique.
 
 Env-gated on DATABASE_URL.
 """
@@ -46,21 +41,11 @@ def conn():
             f"  WHERE recipient_id IN {sub} OR actor_id IN {sub} "
             f"     OR case_id IN {csub})")
     with c.transaction():
-        # The officer copies FIRST, and before the originals they point at.
-        #
-        # `escalation_to_officer` is GREEN and case-less by design, and its
-        # recipient is a real SECURITY_OFFICER of this database, not one of
-        # this suite's users -- so none of the three clauses below reaches
-        # it and every officer escalation this suite provoked survived
-        # teardown. That was invisible while `dispatch_due` sent what it
-        # raised in the same pass (the rows were left SENT). Once the
-        # producers moved below the drain loop on 2026-09-02 the leftovers
-        # stayed PENDING and URGENT, so the NEXT suite's drain sent them
-        # first -- and `test_notifications_pg.py::
-        # test_amber_strict_never_leaves_and_the_stub_goes_instead`, which
-        # asserts on `sent[0]` of a global drain, read somebody else's
-        # escalation stub. A test suite that leaves priority-1 rows behind
-        # is a suite that decides what the next one sees.
+        # The officer copies first, and before the originals they point at. `escalation_to_officer` is GREEN
+        # and case-less by design, and its recipient is a real SECURITY_OFFICER of this database, not one of
+        # this suite's users, so none of the three clauses below reaches it. Rows left behind stay PENDING and
+        # URGENT, so the next suite's drain sends them first and a test that asserts on `sent[0]` of a global
+        # drain reads somebody else's escalation stub.
         esc = (f"(SELECT id FROM notify.notification WHERE kind = 'ESCALATION' "
                f"   AND object_type = 'notification' AND object_id IN {ours})")
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN {esc}")
@@ -251,33 +236,23 @@ def test_the_drain_escalates_and_sweeps_reviews_and_reports_both(conn):
 
 
 def test_the_drain_does_not_send_what_its_own_producers_raised(conn):
-    """A drain sends what was ALREADY due when it started. What the
-    producers raise goes out on the NEXT pass.
+    """A drain sends what was already due when it started. What the producers raise goes out on the next
+    pass.
 
-    This test reads both sides of one contract on purpose, because the
-    contract crosses two files and each half was internally consistent:
+    This test reads both sides of one contract that crosses two files:
 
-    - `transports.dispatch_due` evaluated `escalate_unacknowledged(conn)`
-      inside the `counters` literal, i.e. BEFORE `for out in due(conn,
-      limit)`;
-    - `notifications.deliver_after` returns `now` for priority 1, and
-      ESCALATION is registered URGENT in `KINDS`.
+    - `transports.dispatch_due` runs `escalate_unacknowledged(conn)` below the `for out in due(conn, limit)`
+      loop, not inside the `counters` literal before it;
+    - `notifications.deliver_after` returns `now` for priority 1, and ESCALATION is registered URGENT in
+      `KINDS`.
 
-    Neither is wrong alone. Together they made "drain the outbox" also
-    manufacture its own outbound mail and send it in the same call, which
-    silently converted the untouched
-    `test_notifications_pg.py::test_a_deferred_delivery_is_not_drained_early`
-    (`assert sent == []`) into a test that fails whenever the database
-    holds one unacknowledged URGENT older than an hour -- the exact state
-    the escalation feature exists to serve. It survived review because the
-    database it was written against held zero escalation candidates and
-    zero cases due for review, so both producers were inert and every new
-    test passed over a no-op. Fixed 2026-09-02 by moving both producers
-    below the drain loop.
+    With the producers above the loop, "drain the outbox" would also manufacture its own outbound mail and
+    send it in the same call, so `test_notifications_pg.py::test_a_deferred_delivery_is_not_drained_early`
+    (`assert sent == []`) would fail whenever the database holds one unacknowledged URGENT older than an
+    hour.
 
-    Asserted on the delivery ROW rather than on the length of `sent`,
-    because the drain is global and a backlog another suite left behind is
-    legitimately sent in the same pass and is not this test's business.
+    Asserted on the delivery row rather than the length of `sent`, because the drain is global and a backlog
+    another suite left behind is legitimately sent in the same pass.
     """
     from noctornal_api.transports import dispatch_due
 
@@ -342,23 +317,18 @@ def test_the_drain_does_not_send_what_its_own_producers_raised(conn):
 # ---------------------------------------------------------------------------
 
 def test_two_concurrent_drains_escalate_one_silence_once(conn):
-    """`escalate_unacknowledged`'s dedupe is a SELECT followed by INSERTs on
-    an autocommit connection, and `notify.notification` has NO unique index
-    to fall back on -- `notification_object_idx` (migration 0029) is a plain
-    partial btree on `object_id`. So the docstring's original unqualified
-    claim of idempotence "by construction" was a read-then-write TOCTOU, and
-    the concurrency it fails under is the ordinary one the same change
-    introduced: `scripts/notify_drain.py` on a cron overlapping an
-    operator's POST /notifications/dispatch, on a drain that takes minutes
-    against a real relay. Duplicate ESCALATIONs are URGENT -- the one tier
-    that overrides quiet hours and mails every security officer -- so the
-    consequence is the alert fatigue this module argues against.
+    """`escalate_unacknowledged`'s dedupe is a SELECT followed by INSERTs on an autocommit connection, and
+    `notify.notification` has no unique index to fall back on (`notification_object_idx`, migration 0029, is
+    a plain partial btree on `object_id`). Without serialisation that is a read-then-write race, hit by
+    `scripts/notify_drain.py` on a cron overlapping an operator's POST /notifications/dispatch on a drain
+    that takes minutes against a real relay. Duplicate ESCALATIONs are URGENT, the tier that overrides quiet
+    hours and mails every security officer, so the consequence is the alert fatigue this module argues
+    against.
 
-    Fixed 2026-09-02 by serialising the whole drain on a session advisory
-    lock in `transports.dispatch_due`, so the loser returns an immediate
-    all-zero drain rather than blocking behind somebody else's SMTP. This
-    test reads both sides: the lock lives in transports.py and the property
-    it guarantees is claimed in notifications.py.
+    The whole drain is serialised on a session advisory lock in `transports.dispatch_due`, so the loser
+    returns an immediate all-zero drain rather than blocking behind somebody else's SMTP. This test reads
+    both sides: the lock lives in transports.py and the property it guarantees is claimed in
+    notifications.py.
     """
     import threading
 

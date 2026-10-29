@@ -1,11 +1,9 @@
-"""The seams every Lab step builds on (F11, 2026-09-24; docs/00 decision 70).
+"""The seams every Lab step builds on (docs/00 decision 70).
 
-One row shape by name, one label gate with one exclusions list, one path
-that decrypts and verifies with an alarm that survives, a custody model
-that names a person or says nobody asked, one writer for machine findings,
-derived gaps, and one proposal entry point. Screening (F13) and the
-sandbox (F14) fill these by adding lines; these tests fail if a reader
-bypasses the gate or a seam changes shape.
+One row shape by name, one label gate with one exclusions list, one path that decrypts and verifies with an
+alarm that survives, a custody model that names a person or says nobody asked, one writer for machine
+findings, derived gaps, and one proposal entry point. Screening and the sandbox fill these by adding lines;
+these tests fail if a reader bypasses the gate or a seam changes shape.
 
 Email prefix `lcs-`. Env-gated on DATABASE_URL.
 """
@@ -83,14 +81,11 @@ def _preserve(conn, sample_id):
 # --- the one gate ----------------------------------------------------------------
 
 def test_every_lab_reader_goes_through_the_one_gate(conn, store, monkeypatch):
-    """An exclusion that holds everything back empties every Lab reader,
-    the system readers included, and leaves the officer's list alone.
+    """An exclusion that holds everything back empties every Lab reader, the system readers included, and
+    leaves the officer's list alone.
 
-    Each reader is first shown to FIND the samples without the exclusion,
-    so an empty answer under it proves the gate rather than an empty
-    query: until 2026-09-24 the similarity check asked for a hash no
-    sample had, which passed with or without the exclusion, and this test
-    had no retrohunt at all."""
+    Each reader is first shown to find the samples without the exclusion, so an empty answer under it
+    proves the gate rather than an empty query."""
     from noctornal_api import lab_similarity, lab_triage, samples
     from noctornal_api.samples import SampleService
     from noctornal_api.yara_rules import RulesetService, parse_bundle
@@ -372,9 +367,7 @@ def test_analyses_name_what_produced_a_machine_row():
     from noctornal_api.samples import MACHINE_PRODUCERS, PROPOSAL_ORIGINS
     assert MACHINE_PRODUCERS == {"STATIC": "NocTORnal static triage",
                                  "YARA": "YARA scan",
-                                 # F14 fills the sandbox's seam.
                                  "SANDBOX": "CAPEv2 sandbox",
-                                 # Phase 8 (2026-10-02): archive expansion.
                                  "ARCHIVE": "NocTORnal archive expansion"}
     assert PROPOSAL_ORIGINS[("analyst", None)] == "lab/analysis"
     assert PROPOSAL_ORIGINS[("machine", "STATIC")] == "lab/static-triage"
@@ -395,8 +388,7 @@ def test_the_screening_gap_is_derived_not_stored(conn, store):
     svc = SampleService(conn)
     row = _named(svc, [svc.get(s.id)])[0]
     derived = [g for g in row["triage_gaps"] if g["step"] in DERIVED_GAP_STEPS]
-    # F13 owns the body; with no list loaded the sentence says
-    # nothing was compared (the demo estate and this suite load none).
+    # With no list loaded the sentence says nothing was compared (the demo estate and this suite load none).
     assert derived == [{"step": "prohibited_content_screening",
                         "status": "unavailable",
                         "reason": "no prohibited-content hash list is loaded; "

@@ -1,12 +1,10 @@
-"""Similarity spaces: registration, rebuild, activation, retirement and
-clean-up (F6.1, embeddings, 2026-09-24).
+"""Similarity spaces: registration, rebuild, activation, retirement and clean-up.
 
-A space is one embedder fingerprint; per role at most one ACTIVE and one
-BUILDING, three slots, a slot held until the retired space's rows are
-cleared. The first space of a role is active at once; a new built-in
-version is rebuilt in a free slot while the old one keeps receiving new
-items in its own version; the rebuild activates itself when nothing is
-left to do, and the old space's rows are cleared in bounded chunks.
+A space is one embedder fingerprint; per role at most one ACTIVE and one BUILDING, three slots, a slot held
+until the retired space's rows are cleared. The first space of a role is active at once; a new built-in
+version is rebuilt in a free slot while the old one keeps receiving new items in its own version; the
+rebuild activates itself when nothing is left to do, and the old space's rows are cleared in bounded
+chunks.
 
 Env-gated on DATABASE_URL. Prefix `esp-`.
 """

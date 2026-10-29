@@ -1,56 +1,38 @@
-"""YARA rule sets: intake, storage, labels, activation and the compiled
-build cache (F12, 2026-09-24).
+"""YARA rule sets: intake, storage, labels, activation and the compiled build cache.
 
-A rule set is a unit's statement of what it hunts, so it is LABELLED
-(classification and compartments, only ever raised) and every read of it
-checks both beside each other (docs/05, Binding a compartment column,
-rule 7). A version is an immutable upload: its licence is recorded, and a
-set becomes live only when
-a DIFFERENT person activates a version (a Security Officer, holding
-`sample.yara.activate`, which no role may hold with `sample.yara.manage`),
-writing down the licence clearance when the source asks for review. The
-software records a clearance; it cannot give one (docs/18 C14).
+A rule set is a unit's statement of what it hunts, so it is labelled (classification and
+compartments, only ever raised) and every read checks both beside each other (docs/05, Binding a
+compartment column, rule 7). A version is an immutable upload with its licence recorded. A set
+becomes live only when a different person activates a version (a Security Officer holding
+`sample.yara.activate`, which no role may hold with `sample.yara.manage`), writing down the licence
+clearance when the source asks for review. The software records a clearance; it cannot give one
+(docs/18 C14).
 
-Findings are machine analyses (`samples.record_machine_analysis`), gated by
-the set's labels as well as the sample's, and never write the graph: a
-family reaches a case only as a person's assessment with a confidence.
+Findings are machine analyses (`samples.record_machine_analysis`), gated by the set's labels as well
+as the sample's, and never write the graph: a family reaches a case only as a person's assessment
+with a confidence.
 
-## Hostile input in the API process
+Hostile input in the API process: an upload is a .yar/.yara file or a .zip of them, parsed here with
+the standard library only, in a worker thread. The zip's end-of-central-directory record and any
+zip64 record a locator points at are read first, and the entry count and directory size are refused
+before `zipfile.ZipFile` builds one object per entry. Zipfile reads the upload through a guard that
+counts the directory it is actually handed, so no bound rests on a record the uploader wrote. Each
+entry is read through a bounded reader that never trusts header sizes, with a ratio and a total cap.
+Encrypted and nested archives are refused, and so is any path that is absolute, climbs, carries a
+control character, is too long or collides with another by case, each named with its escapes visible.
 
-An upload is a .yar/.yara file or a .zip of them, parsed here with the
-standard library only, in a worker thread rather than on the event loop.
-The zip's end-of-central-directory record and any zip64 record a locator
-points at are read FIRST and the entry count and directory size refused
-before `zipfile.ZipFile` builds one object per entry (2026-09-24), and
-zipfile reads the upload through a guard that counts the directory it is
-actually handed before it parses it, so no
-bound rests on a record the uploader wrote; each entry is read through a
-bounded reader that never trusts header sizes, with a ratio and a total
-cap; encrypted and
-nested archives are refused, and so is any path that is absolute, climbs,
-carries a control character, is too long or collides with another by case,
-each named with its escapes visible.
+Storage: the canonical source (JSON, files sorted by path) is what the SHA-256 and the duplicate
+check are over. It is stored as one gzip member per file with each file's offset and length, so
+viewing one file decompresses one file and rule text (which carries malicious byte patterns) is
+never plain at rest (docs/18 D3).
 
-## Storage
-
-The canonical source (JSON, files sorted by path) is what the SHA-256 and
-the duplicate check are over; it is STORED as one gzip member per file,
-with each file's offset and length recorded, so viewing one file
-decompresses one file and rule text (which carries malicious byte patterns)
-is never plain at rest (docs/18 D3).
-
-## Compiled builds carry native code
-
-yara-x serialises rules with wasmtime-precompiled machine code, so a build
-read back from the database is code a child will run. Builds are a
-history, insert-only, and each carries an HMAC keyed from the KEK ring over
-its version, engine, platform, host fingerprint and blob digest. The parent
-verifies it before a blob reaches a child; a build that fails it, or that
-the child cannot load (another CPU), is recorded in
-`lab.yara_compiled_rejected` and a newer build is compiled and chosen. An
-attacker who can write rows but not read the KEK cannot get code into a
-child this way; the child's own residual exposure is `lab_static`'s
-docstring.
+Compiled builds carry native code: yara-x serialises rules with wasmtime-precompiled machine code,
+so a build read back from the database is code a child will run. Builds are insert-only history, and
+each carries an HMAC keyed from the KEK ring over its version, engine, platform, host fingerprint and
+blob digest. The parent verifies it before a blob reaches a child; a build that fails it, or that the
+child cannot load (another CPU), is recorded in `lab.yara_compiled_rejected` and a newer build is
+compiled and chosen. An attacker who can write rows but not read the KEK cannot get code into a child
+this way; the child's own residual exposure is in `lab_static`'s docstring.
 """
 from __future__ import annotations
 
@@ -315,17 +297,13 @@ def _end_record_at(data: bytes) -> int:
 
 
 def _zip_preflight(data: bytes) -> None:
-    """Refuse on the entry count and the directory size, read from the
-    end-of-central-directory record AND from any zip64 record a locator
-    points at, BEFORE `zipfile` parses the whole directory into objects.
+    """Refuse on the entry count and the directory size before `zipfile` parses the directory.
 
-    CPython's zipfile honours a zip64 locator whenever one sits just
-    before the end record, whatever the plain record says; on 2026-09-24
-    a 600,000-entry directory hidden behind a plain record claiming one
-    entry got past the old preflight (reading zip64 only on
-    0xFFFF markers). The larger of the two claims is checked.
-    `_DirectoryGuard` then bounds what zipfile actually parses, whatever
-    record it trusts."""
+    Both are read from the end-of-central-directory record and from any zip64 record a locator points
+    at, and the larger claim is checked. CPython's zipfile honours a zip64 locator whenever one sits
+    just before the end record, whatever the plain record says, so a huge directory can hide behind a
+    plain record claiming one entry. `_DirectoryGuard` then bounds what zipfile actually parses.
+    """
     at = _end_record_at(data)
     if at < 0 or at + 22 > len(data):
         raise BundleError("the upload is not a readable zip (no end of "
@@ -382,14 +360,12 @@ def _count_directory(data: bytes) -> int:
 
 
 class _DirectoryGuard(io.BytesIO):
-    """The upload as zipfile reads it. Every read is checked BEFORE zipfile
-    parses what it returns: none may be longer than a rule bundle's
-    central directory could be, and one that holds a central directory
-    has its records counted. So the objects zipfile builds are bounded by
-    what it is actually handed, whichever end record it chose to trust
-    and whatever count that record claimed (on 2026-09-24 a plain record
-    understating the count by ~90,000 entries was still parsed in full
-    under the old directory-size cap alone)."""
+    """The upload as zipfile reads it, with every read checked before zipfile parses it.
+
+    No read may be longer than a rule bundle's central directory could be, and one that holds a
+    central directory has its records counted. The objects zipfile builds are therefore bounded by
+    what it is actually handed, whichever end record it trusts and whatever count that record claims.
+    """
 
     def read(self, n: int | None = -1) -> bytes:
         if n is None or n < 0:
@@ -577,10 +553,9 @@ def seal_build(version_id, key: BuildKey, blob: bytes
 
 def verify_build(version_id, key: BuildKey, blob: bytes, blob_sha256: bytes,
                  key_id: str, mac: bytes) -> bool | None:
-    """True when the blob is what a process holding the KEK built for this
-    version and key; False on any mismatch; None when the ring no longer
-    holds the key it was sealed under (a retired key dropped: recompile,
-    nothing to alarm about)."""
+    """True when the blob is what a process holding the KEK built for this version and key; False on
+    any mismatch; None when the ring no longer holds the key it was sealed under (a retired key was
+    dropped: recompile, nothing to alarm about)."""
     sealed = verify_seal(version_id, key, blob_sha256, key_id, mac)
     if sealed is not True:
         return sealed
@@ -589,11 +564,12 @@ def verify_build(version_id, key: BuildKey, blob: bytes, blob_sha256: bytes,
 
 def verify_seal(version_id, key: BuildKey, blob_sha256: bytes, key_id: str,
                 mac: bytes) -> bool | None:
-    """The MAC over a build's recorded digest, without reading its blob:
-    what a listing may afford on every request. It proves the row was
-    sealed by a process holding the KEK; `verify_build` also proves the
-    blob is the one sealed, and only a build that passes that reaches a
-    child. None when the ring no longer holds the key."""
+    """The MAC over a build's recorded digest, without reading its blob.
+
+    Cheap enough for every listing request. It proves the row was sealed by a process holding the KEK;
+    `verify_build` also proves the blob is the one sealed, and only a build that passes that reaches a
+    child. None when the ring no longer holds the key.
+    """
     k = _mac_key(key_id)
     if k is None:
         return None
@@ -719,20 +695,17 @@ class RulesetService:
                 "activated_by_name": row[5], "activated_by_email": row[6]}
 
     def build_status(self, version_id, key: BuildKey | None) -> dict:
-        """The newest build of this version for this host, as a listing
-        shows it: `{status, rule_count, warning_count, report,
-        compiled_at}`, or `{status: 'compiling' | 'compile_failed' |
-        'rebuild_needed' | 'engine_absent'}`.
+        """The newest build of this version for this host, as a listing shows it.
 
-        READ ONLY AND CHEAP, because every listing, version view and the
-        officer's pending list calls it for every version on every request
-        (until 2026-09-24 each call loaded and hashed the whole compiled
-        blob, up to 256 MiB, and could write rejections and compile jobs
-        from a GET). It never reads the blob: it checks the
-        MAC over the recorded digest, and a build whose seal does not
-        verify is shown as needing a rebuild, which happens when the
-        version is next activated or scans (`usable_build`, which writers
-        call, rejects it and queues the compile)."""
+        Returns `{status, rule_count, warning_count, report, compiled_at}`, or `{status:
+        'compiling' | 'compile_failed' | 'rebuild_needed' | 'engine_absent'}`.
+
+        Read only and cheap, because every listing, version view and the officer's pending list calls
+        it for every version on every request: it never reads the blob and never writes. It checks the
+        MAC over the recorded digest, and a build whose seal does not verify is shown as needing a
+        rebuild, which happens when the version is next activated or scans (`usable_build`, which
+        writers call, rejects it and queues the compile).
+        """
         if key is None:
             return {"status": "engine_absent"}
         row = self._c.execute(
@@ -771,12 +744,13 @@ class RulesetService:
 
     def usable_build(self, version_id, key: BuildKey, *,
                      with_blob: bool = True) -> dict | None:
-        """The newest build of this version for this key that has not been
-        rejected: FAILED as recorded, or a COMPILED/PARTIAL one whose MAC
-        verifies. A MAC mismatch under a key the ring still holds is
-        rejected, audited and queued for a recompile, and the next older
-        build is not used either (it was superseded); an unknown key
-        queues a recompile without an alarm."""
+        """The newest build of this version for this key that has not been rejected.
+
+        That is a FAILED build as recorded, or a COMPILED/PARTIAL one whose MAC verifies. A MAC
+        mismatch under a key the ring still holds is rejected, audited and queued for a recompile, and
+        the next older build is not used either (it was superseded). An unknown key queues a recompile
+        without an alarm.
+        """
         rows = self._c.execute(
             """SELECT c.id, c.status, c.rule_count, c.warning_count, c.report,
                       c.compiled, c.blob_sha256, c.mac_key_id, c.mac,
@@ -810,8 +784,8 @@ class RulesetService:
         return out
 
     def reject_build(self, compiled_id, version_id, reason: str) -> None:
-        """Record that a build must not be used, queue a recompile, and
-        say so in the audit chain when it was a MAC mismatch."""
+        """Record that a build must not be used, queue a recompile, and audit it when it was a MAC
+        mismatch."""
         with self._c.transaction():
             self._c.execute(
                 "INSERT INTO lab.yara_compiled_rejected (compiled_id, reason) "
@@ -882,9 +856,8 @@ class RulesetService:
         return out
 
     def version_out(self, version_id: UUID, key: BuildKey | None) -> dict | None:
-        """One version as the listing shows it, and its set's open
-        activation, without building the whole listing (the version view
-        used to). The caller has already checked the set's labels."""
+        """One version as the listing shows it, and its set's open activation, without building the
+        whole listing. The caller has already checked the set's labels."""
         v = self._c.execute(_VERSION_ROW_SQL + " WHERE v.id = %s",
                             (version_id,)).fetchone()
         if v is None:
@@ -919,12 +892,12 @@ class RulesetService:
     def create(self, *, key: str, display_name: str, description: str | None,
                classification: str, compartments, actor_id: UUID | None,
                via: str = "console", host_user: str | None = None) -> dict:
-        """A new, empty set. Its key is unique among the sets carrying the
-        same labels only (migration 0080's index): the caller may read every
-        set at the labels it writes, so the refusal below never confirms a
-        set it cannot see (until 2026-09-24 a 409 named a RED set's key to
-        an AMBER caller). A script's creation records the
-        host user, as its version's does."""
+        """A new, empty set.
+
+        The key is unique among the sets carrying the same labels only (migration 0080's index): the
+        caller may read every set at the labels it writes, so the refusal below never confirms a set it
+        cannot see. A script's creation records the host user, as its version's does.
+        """
         key = (key or "").strip()
         if not KEY_RE.match(key):
             raise RulesetInvalid(
@@ -1117,9 +1090,8 @@ class RulesetService:
                            (ruleset_id, version_id, activated_by,
                             licence_acknowledgement)
                        VALUES (%s, %s, %s, %s) RETURNING id""",
-                    # A note on a version that needs no review is kept when
-                    # it says something, and dropped when it is too short
-                    # to be a clearance (the CHECK's floor).
+                    # A note on a version that needs no review is kept when it says something, and
+                    # dropped when it is too short to be a clearance (the CHECK's floor).
                     (ruleset_id, version_id, actor_id,
                      ack if ack and len(ack) > 20 else None)).fetchone()
                 _audit(self._c, "YARA_RULESET_ACTIVATED",

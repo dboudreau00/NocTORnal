@@ -305,18 +305,16 @@ def test_line_numbers_are_the_ones_in_the_artefact():
     "\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a",  # Posrednik
 ])
 def test_a_cyrillic_third_party_label_is_not_the_vendors(label):
-    """Russian-language forums are the primary venue in this domain, and
-    the label defence was structurally ASCII-only in two places.
+    """Russian-language forums are the primary venue in this domain, so the label defence must not be
+    ASCII-only.
 
-    `_LINE` demanded `[A-Za-z]`, so a Cyrillic label did not match AT ALL
-    and the line fell through to shape resolution -- where non-hex
-    characters are stripped and a 76-hex Tox ID resolves cleanly out of
-    the whole line. `_looks_third_party` then split on `[^a-z]+`, reducing
-    any Cyrillic label to the empty set.
+    `_LINE` must accept a Cyrillic label, or the line falls through to shape resolution, where non-hex
+    characters are stripped and a 76-hex Tox ID resolves cleanly out of the whole line.
+    `_looks_third_party` must not split on `[^a-z]+`, which reduces any Cyrillic label to the empty set.
 
-    Net effect: the transliterated `Garant:` was caught and the native
-    `Гарант:` was attributed to the vendor at a score high enough to raise
-    a proposal binding the forum guarantor's key to the vendor's identity.
+    Otherwise the native `Гарант:` is attributed to the vendor at a score high enough to raise a
+    proposal binding the forum guarantor's key to the vendor's identity, though the transliterated
+    `Garant:` is caught.
     """
     entry = parse(f"{label}: {TOX_ID}")[0]
     assert entry.role == ROLE_THIRD_PARTY

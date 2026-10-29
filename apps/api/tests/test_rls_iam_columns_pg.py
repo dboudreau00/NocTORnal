@@ -1,12 +1,9 @@
-"""The request role reads no session's token, binding or address, and no
-break-glass justification (rls-6, 0177).
+"""The request role reads no session's token, binding or address, and no break-glass justification (0177).
 
-Every refusal is paired with the legitimate reader still working: the HTTP
-validation (strict binding included) reads a session through
-`iam.session_by_token`, `/break-glass/mine` shows the holder their own
-justification and the officer's queue shows every one. Run as the request
-role bound by a real session's proof, and over HTTP in production's shape.
-Account prefix `rlscol-`.
+Every refusal is paired with the legitimate reader still working: the HTTP validation (strict binding
+included) reads a session through `iam.session_by_token`, `/break-glass/mine` shows the holder their own
+justification and the officer's queue shows every one. Run as the request role bound by a real session's
+proof, and over HTTP in production's shape. Account prefix `rlscol-`.
 """
 from __future__ import annotations
 

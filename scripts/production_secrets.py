@@ -8,60 +8,33 @@ it prints carries a value.
 release/install.sh --production-secrets and release/install.ps1
 -ProductionSecrets run this; running it by hand does the same.
 
-## What it changes, and only when it has to
+1. Creates secrets.env, postgres-init.env and migrate.env from their templates when one is missing
+   (mode 600).
+2. Moves POSTGRES_PASSWORD from secrets.env to postgres-init.env, which only the database reads,
+   and NOCTORNAL_MIGRATION_DATABASE_URL to migrate.env, which only the migration job reads: the
+   owner is not bound by row-level security and can switch off the append-only triggers. A
+   destination that already holds a different value is a refusal, because which one the database
+   was initialised with is the operator's question, not a script's guess.
+3. Writes REDIS_PASSWORD when it is missing, a placeholder or not URL-safe (the production Redis
+   rebuilds its ACL from it at every start), and makes REDIS_URL sign in as noctornal_limiter with
+   it, since the production Redis disables its default user. Every REDIS_URL the redis service's
+   start check would refuse is one this rewrites, so the two never send an operator in a circle; a
+   REDIS_URL naming another host is the operator's own Redis, left alone and said.
+4. With --new-database, and only when no owner password was ever chosen, generates one into
+   postgres-init.env and migrate.env. The installers pass it when the database volume does not
+   exist yet: initdb fixes the owner's password for good.
 
-docs/17 F52 and the limiter's Redis ACL, both 2026-10-02.
+Every file it changes is first copied to NAME.backup-UTCSTAMP (mode 600), the way back
+(release/secrets-upgrade/README.md). It writes nothing when it refuses. Exit 0 when the files are
+ready, 1 when it refused or something is left for the operator, each said in one line.
 
-1. Creates secrets.env, postgres-init.env and migrate.env from their
-   templates when one is missing (mode 600).
-2. Moves POSTGRES_PASSWORD from secrets.env to postgres-init.env, which
-   the database alone reads, and NOCTORNAL_MIGRATION_DATABASE_URL to
-   migrate.env, which the migration job alone reads. Until then every
-   application service and caddy read the owner's credential, and the
-   owner is not bound by row-level security and can switch off the
-   append-only triggers. A destination that already holds a DIFFERENT
-   value is a refusal: which one the database was initialised with is a
-   question for the operator, not a guess for a script.
-3. Writes REDIS_PASSWORD when it is missing, a placeholder or not URL-safe
-   (the production Redis rebuilds its ACL from it at every start, so a new
-   one costs nothing), and makes REDIS_URL sign in as noctornal_limiter
-   with it: the production Redis disables its default user, and a URL with
-   no user name is refused there. Every REDIS_URL the redis service's start
-   check would refuse is one this rewrites (host `redis` in any scheme, no
-   host, not a URL), so the two never send an operator round in a circle.
-   A REDIS_URL naming another host is the operator's own Redis, left alone
-   and said, and the start check lets it through (review of 2026-10-02).
-4. With --new-database, and only when no owner password was ever chosen,
-   generates one into postgres-init.env and migrate.env. The installers
-   pass it when Docker says the database volume does not exist yet:
-   initdb fixes the owner's password for good, so a password written
-   after the volume exists would not be the one it holds.
-
-Every file it changes is copied first to NAME.backup-UTCSTAMP (mode 600),
-which is the way back: copy them over the current files and check out the
-previous release (release/secrets-upgrade/README.md). It writes nothing at
-all when it refuses. Exit status 0 when the files are ready, 1 when it
-refused or something is left for the operator, each said in one line.
-
-secrets.env is written LAST, after the files its lines move into, and each
-file is replaced whole (written beside it, then renamed). A write that
-fails part way therefore leaves secrets.env as it was, with the moved lines
-in it, and running this again finishes the job: it finds the same value in
-both places, which is agreement (2026-10-03).
-
-A file it cannot read or write, which is what the root-owned, mode 600
-files the README asks for are to anybody but root, is one sentence naming
-the file and the fix (run it with sudo), never a traceback (review of
-2026-10-02). A file that is not UTF-8 text, a comment saved as Windows-1252
-for one, is refused in one sentence naming it and the byte's position,
-nothing written (2026-10-03).
-
-Comments the pre-2026-10-02 template put above a line it moves or rewrites
-go with the line, or are replaced by the current template's, so an old
-secrets.env does not go on saying "Nothing compares them" above a line
-that is no longer there. They are recognised by a phrase only that
-template's comment carried, and anything else stays as the operator wrote
-it; the backup holds the original either way.
+Each file is replaced whole (written beside it, then renamed), and secrets.env is written last, so
+a write that fails part way leaves secrets.env as it was and a re-run finishes the job, finding the
+same value in both places. A file it cannot read or write (root-owned, mode 600) or that is not
+UTF-8 text is refused in one sentence naming the file and the fix, never a traceback. Comments an
+older template put above a line it moves or rewrites go with the line or are replaced by the
+current template's; they are recognised by a phrase only that template carried (STALE_COMMENTS),
+and anything else stays as the operator wrote it.
 """
 from __future__ import annotations
 
@@ -95,8 +68,8 @@ MIGRATE = "migrate.env"
 MOVES = (("POSTGRES_PASSWORD", POSTGRES_INIT), ("NOCTORNAL_MIGRATION_DATABASE_URL", MIGRATE))
 #: The compose service the bundled Redis answers as.
 BUNDLED_REDIS_HOST = "redis"
-#: The comment the pre-2026-10-02 secrets.env.example put above each line
-#: this script moves or rewrites, by a phrase only that comment carried.
+#: The comment an older secrets.env.example put above each line this script moves or rewrites, by
+#: a phrase only that comment carried.
 STALE_COMMENTS = {
     "POSTGRES_PASSWORD": "The OWNER role's password, given to the Postgres image",
     "NOCTORNAL_MIGRATION_DATABASE_URL": "What Alembic connects as. Read ONLY by",
@@ -145,8 +118,8 @@ class EnvFile:
         try:
             text = raw.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
-            # A comment saved as Windows-1252 (2026-10-03): one
-            # sentence, not a traceback. Where the byte is, never what it is.
+            # A comment saved as Windows-1252, say: one sentence, not a traceback. Where the byte
+            # is, never what it is.
             raise Refused(f"{path.name} in {path.parent} is not UTF-8 text "
                           f"({exc.reason}, at byte {exc.start}); save it as UTF-8 "
                           f"and run this again.") from None
@@ -212,9 +185,8 @@ class EnvFile:
         return self.lines[start:found[0]]
 
     def replace_stale_comment(self, key: str, replacement: list) -> bool:
-        """Swap the comment above `key` for `replacement` when it is the
-        one the pre-2026-10-02 template wrote there (STALE_COMMENTS), and
-        leave any other comment as the operator wrote it."""
+        """Swap the comment above `key` for `replacement` when it is the one an older template
+        wrote there (STALE_COMMENTS); leave any other comment as the operator wrote it."""
         block = self.comment_above(key)
         phrase = STALE_COMMENTS.get(key)
         if not phrase or not any(phrase in line for line in block):
@@ -239,11 +211,8 @@ def _write_private(path: Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        # Before the replace, not after it (2026-10-03): the
-        # last step is then the one that cannot half-succeed, so the file
-        # at `path` is the old one or the finished new one, and apply()'s
-        # "secrets.env is written last, so it still holds every line" is
-        # true whichever call fails.
+        # Before the replace, not after it: the last step is then the one that cannot half-succeed,
+        # so the file at `path` is the old one or the finished new one whichever call fails.
         os.chmod(str(temp), 0o600)
         os.replace(str(temp), str(path))
     except BaseException:
@@ -334,8 +303,8 @@ def plan(directory: Path, *, new_database: bool = False):
                 files[name] = EnvFile.from_template(path)
                 said.append(f"created {name} from {name}.example (mode 600)")
         except OSError as exc:
-            # A root-owned mode 600 file read by anybody else (review of
-            # 2026-10-02): one sentence and the fix, not a traceback.
+            # A root-owned mode 600 file read by anybody else: one sentence and the fix, not a
+            # traceback.
             raise Refused(_cannot("read", Path(exc.filename or path), exc)) from None
     sec = files[SECRETS]
 
@@ -362,9 +331,8 @@ def plan(directory: Path, *, new_database: bool = False):
                 f"Keep the one the database was initialised with in {home}, delete "
                 f"the line from secrets.env, and run this again.")
         dest.put(key, sec.line(key))
-        # The old template's comment above the line goes with it (review
-        # of 2026-10-02): left, it said "Nothing compares them" above a
-        # line that is not there.
+        # The old template's comment above the line goes with it, or it would describe a line that
+        # is not there.
         sec.replace_stale_comment(key, [])
         sec.drop(key, note)
         said.append(f"moved {key} from secrets.env to {home}")
@@ -409,9 +377,8 @@ def plan(directory: Path, *, new_database: bool = False):
         said.append(f"generated REDIS_PASSWORD (it was {why})")
     url = sec.get("REDIS_URL")
     if not _names_another_redis(url):
-        # The bundled service, in the one scheme it speaks: a `rediss://`
-        # URL naming it was left alone until 2026-10-02 while the start
-        # check refused it, each pointing at the other.
+        # The bundled service, in the one scheme it speaks: the start check refuses a `rediss://`
+        # URL naming it, so the scheme is rewritten too.
         try:
             keep = None if _published(url) or not urlsplit(url or "").hostname else url
         except ValueError:
@@ -426,9 +393,8 @@ def plan(directory: Path, *, new_database: bool = False):
                     "and the bundled redis service starts with no client; that Redis "
                     "needs the limiter's own ACL user (infra/production/README.md, The "
                     "limiter's Redis, which also says how to leave the bundled one out)")
-    # The old template's comments above the two Redis lines described
-    # `--requirepass` and a URL with no user name (review of 2026-10-02):
-    # the current template's replace them.
+    # The old template's comments above the two Redis lines describe `--requirepass` and a URL with
+    # no user name; the current template's replace them.
     for key in ("REDIS_PASSWORD", "REDIS_URL"):
         sec.replace_stale_comment(key, _template_comment(directory, key))
 
@@ -451,14 +417,9 @@ def apply(directory: Path, *, new_database: bool = False, out=print,
         return 1
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     changed = [f for f in files.values() if f.changed]
-    # The files the owner's lines move INTO first, secrets.env, which they
-    # leave, last (2026-10-03). Written the other way round,
-    # a failure on the second file left the lines gone from secrets.env and
-    # not yet anywhere else: a re-run then found nothing to move, made
-    # migrate.env from its template and sent the operator after a mismatch
-    # while the real DSN sat only in a backup. Now a stop at any point
-    # leaves secrets.env as it was, and a re-run finds the same value in
-    # both places, which it already treats as agreement. sorted() is stable.
+    # The files the owner's lines move into first, secrets.env, which they leave, last: a stop at
+    # any point leaves secrets.env as it was, and a re-run finds the same value in both places,
+    # which is agreement. The other order could leave the DSN only in a backup. sorted() is stable.
     ordered = sorted(changed, key=lambda f: f.path.name == SECRETS)
     written: list[str] = []
     envfile = None
@@ -471,9 +432,8 @@ def apply(directory: Path, *, new_database: bool = False, out=print,
             _write_private(envfile.path, envfile.text().encode("utf-8"))
             written.append(envfile.path.name)
     except OSError as exc:
-        # Named by the file being written, never the temporary beside it
-        # (review of 2026-10-02). Backups are taken before any file is
-        # changed, so a stop before the first write changed nothing.
+        # Named by the file being written, never the temporary beside it. Backups are taken before
+        # any file is changed, so a stop before the first write changed nothing.
         done = ("No secrets file was changed, so run this again once that is fixed."
                 if not written else
                 f"Already changed, each with its backup beside it: {', '.join(written)}. "

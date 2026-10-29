@@ -1,36 +1,30 @@
-"""Row-level security on the ingest records, the victims' credentials, the
-dead letters and the reveal authorisations (F51, 2026-10-02).
+"""Row-level security on the ingest records, the victims' credentials, the dead letters and the reveal
+authorisations.
 
-0154 puts the four tables under policy; 0153 gives the routes the facts
-they decide on; 0152 indexes the walk over a batch's cases. Each test runs
-the policy, a service or a route as the request role, bound by a real
-session's proof, or as the system role, with the fixtures seeded as the
-owner (rls_support); the routes run in production's shape
-(NOCTORNAL_TEST_ASSUME_ROLE):
+0154 puts the four tables under policy; 0153 gives the routes the facts they decide on; 0152 indexes the
+walk over a batch's cases. Each test runs the policy, a service or a route as the request role, bound by
+a real session's proof, or as the system role, with the fixtures seeded as the owner (rls_support); the
+routes run in production's shape (NOCTORNAL_TEST_ASSUME_ROLE):
 
-- a record is read through its case at its own labels, or by the operator
-  in quarantine; a credential follows its record; a dead letter is seen
-  through the cases its batch fed, whatever those records' labels, or by
-  the operator when it fed none; an authorisation is read in its case,
-  granted by its officer and counted by its grantee alone;
-- the request role inserts no record, credential or dead letter, so no
-  duplicate key or dangling reference tells it a hidden row exists, and
-  the definers' arguments only ever narrow;
-- a parse and a replay write rows above their operator and dedupe against
-  rows the operator cannot see; every scoring pass tells the case's owner
-  whoever scored; the fingerprint correlation keeps its quarantine leg;
-- what each caller could do before still works: the queue and its copy
-  total, the gate's refusal and its audit row, the dead-letter listing and
-  replay, the queue's verbs, the unauthenticated submit, the retention
-  counts, and the stealer-log compartment with its masked and revealed
-  forms, the step-up reveal and the two-person authorisation;
-- a write that changed no row is refused: a category correction, and a
-  reveal whose authorisation lapsed before it was counted;
-- a record's expiry only ever moves later (0155): never brought forward,
-  cleared, given to a record that has none or set past what can be read
-  back, and a correction that lost a race for it keeps the later one;
-- the policies are initplans but for the dead letter's one predicate, and
-  the walk uses its index.
+- a record is read through its case at its own labels, or by the operator in quarantine; a credential
+  follows its record; a dead letter is seen through the cases its batch fed, whatever those records'
+  labels, or by the operator when it fed none; an authorisation is read in its case, granted by its
+  officer and counted by its grantee alone;
+- the request role inserts no record, credential or dead letter, so no duplicate key or dangling
+  reference tells it a hidden row exists, and the definers' arguments only ever narrow;
+- a parse and a replay write rows above their operator and dedupe against rows the operator cannot see;
+  every scoring pass tells the case's owner whoever scored; the fingerprint correlation keeps its
+  quarantine leg;
+- what each caller could do before still works: the queue and its copy total, the gate's refusal and its
+  audit row, the dead-letter listing and replay, the queue's verbs, the unauthenticated submit, the
+  retention counts, and the stealer-log compartment with its masked and revealed forms, the step-up
+  reveal and the two-person authorisation;
+- a write that changed no row is refused: a category correction, and a reveal whose authorisation lapsed
+  before it was counted;
+- a record's expiry only ever moves later (0155): never brought forward, cleared, given to a record that
+  has none or set past what can be read back, and a correction that lost a race for it keeps the later
+  one;
+- the policies are initplans but for the dead letter's one predicate, and the walk uses its index.
 
 Gated like the other row-security tests. Account prefix `rlsig-`.
 """
@@ -288,8 +282,7 @@ def test_the_request_role_plants_no_record_and_learns_nothing_from_a_key(owner):
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             app.execute("UPDATE ingest.record SET classification = 'RED' WHERE id = %s",
                         (a_in,))
-        # No DELETE at all since 0178 (Beta 1.1): records are destroyed on
-        # system connections only.
+        # No DELETE at all (0178): records are destroyed on system connections only.
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             app.execute("DELETE FROM ingest.record WHERE id = %s", (a_in,))
     finally:
@@ -447,14 +440,11 @@ _PII_FIELDS = ("'credentials of the victim organisation only', 'order 2026-1'")
 
 
 def test_a_grantee_counts_their_authorisation_and_changes_nothing_else(owner):
-    """The verification of 2026-10-02 (finding 1): the count policy
-    pinned no column, so the grantee of a live authorisation could push its
-    window out (the 30-day CHECK is counted from a granted_at they could
-    move), re-attribute it to another officer and retarget it to another of
-    their cases. 0155 leaves the request role query_count alone, raised by
-    one at a time, and the system role no other column either; 0154's
-    grant check dates a grant at the moment it is made, so the CHECK bounds
-    the window from then."""
+    """The count policy pins a column: a grantee of a live authorisation must not push its window out
+    (the 30-day CHECK is counted from a granted_at they could move), re-attribute it to another officer
+    or retarget it to another of their cases. 0155 leaves the request role query_count alone, raised by
+    one at a time, and the system role no other column either; 0154's grant check dates a grant at the
+    moment it is made, so the CHECK bounds the window from then."""
     lead = s.user(owner, "RED", (STEALER,), prefix=P)
     s.grant_global(owner, lead, "CASE_OWNER")
     officer = s.user(owner, "RED", (STEALER,), prefix=P)
@@ -511,12 +501,10 @@ def test_a_grantee_counts_their_authorisation_and_changes_nothing_else(owner):
 
 
 def test_a_record_is_attached_once_and_its_expiry_never_brought_forward(owner):
-    """Finding 2 (2026-10-02): an ingest.manage holder on a case could
-    detach its record into quarantine by a raw UPDATE, out of the case and
-    its legal hold, and any reader could move a record between two of their
-    cases, lower its classification or empty it. 0155 leaves the request role
-    the columns the queue's verbs write, and its guard lets a case be set
-    only from quarantine and an expiry only move later."""
+    """An ingest.manage holder on a case cannot detach its record into quarantine by a raw UPDATE, out of
+    the case and its legal hold, and no reader can move a record between two of their cases, lower its
+    classification or empty it. 0155 leaves the request role the columns the queue's verbs write, and its
+    guard lets a case be set only from quarantine and an expiry only move later."""
     w = _world(owner)
     s.assign(owner, w.case, w.operator)
     second = s.case(owner, w.boss)
@@ -560,17 +548,13 @@ def test_a_record_is_attached_once_and_its_expiry_never_brought_forward(owner):
 
 
 def test_a_record_with_no_expiry_is_given_none_by_a_request_or_a_correction(owner):
-    """2026-10-03: the guard compared a request's expiry
-    with the stored one only when there was one. For a record with NO expiry
-    (legacy or hand-made: the application always stamps one, and
-    retention.due reads NULL as never due) any reader of its case could set
-    a date in the past and make the next purge destroy it. NULL is the
-    longest expiry there is, so a request leaves it alone, and so does the
-    category correction, which used to give such a record the new
-    category's clock from arrival: a destruction decision, and
-    retention's, not a relabel's. An expiry no later than the application
-    can read back is the same rule's other end: 'infinity' poisons the
-    record's listing (psycopg cannot load it) as well as its retention."""
+    """The guard judges a request's expiry against the stored one even when the record has none (legacy
+    or hand-made: the application always stamps one, and retention.due reads NULL as never due). Otherwise
+    any reader of its case could set a date in the past and make the next purge destroy it. NULL is the
+    longest expiry there is, so a request leaves it alone, and so does the category correction: giving
+    such a record the new category's clock from arrival is a destruction decision, retention's, not a
+    relabel's. An expiry no later than the application can read back is the same rule's other end:
+    'infinity' poisons the record's listing (psycopg cannot load it) as well as its retention."""
     from noctornal_api.ingest import IngestService
 
     w = _world(owner)
@@ -605,12 +589,10 @@ def test_a_record_with_no_expiry_is_given_none_by_a_request_or_a_correction(owne
 
 
 def test_an_expiry_the_application_cannot_read_back_is_refused(owner):
-    """2026-10-03: a reader could push a record's expiry
-    to 'infinity', which psycopg cannot load (DataError: timestamp too large)
-    and so poisons every listing that reads the record, besides defeating its
-    retention rule. 0155's guard refuses a date past 1 December 9999, the
-    furthest the application reads in any time zone; a later date within
-    that bound is still an extension a verb may make."""
+    """A reader cannot push a record's expiry to 'infinity': psycopg cannot load it (DataError: timestamp
+    too large), so it poisons every listing that reads the record, besides defeating its retention rule.
+    0155's guard refuses a date past 1 December 9999, the furthest the application reads in any time
+    zone; a later date within that bound is still an extension a verb may make."""
     w = _world(owner)
     _b, [rec] = _parse(owner, w.amber, [_p("forever")], case_id=w.case)
     until = owner.execute("SELECT retain_until FROM ingest.record WHERE id = %s",
@@ -632,11 +614,10 @@ def test_an_expiry_the_application_cannot_read_back_is_refused(owner):
 
 def test_a_correction_that_lost_a_race_for_the_expiry_keeps_the_later_one(
         owner, monkeypatch):
-    """2026-10-03: the correction computed its expiry from
-    a read a concurrent correction had since overtaken, and the guard, which
-    judges a write against the CURRENT row, raised a raw 42501 the API maps
-    to a 500. The verb now writes the greater of the stored expiry and its
-    own, in the statement, so it can never look like a bring-forward."""
+    """A correction that computed its expiry from a read a concurrent correction has since overtaken
+    must not trip the guard, which judges a write against the CURRENT row (a raw 42501 the API maps to a
+    500). The verb writes the greater of the stored expiry and its own, in the statement, so it can never
+    look like a bring-forward."""
     from noctornal_api.ingest import IngestService
 
     w = _world(owner)
@@ -668,11 +649,10 @@ def test_a_correction_that_lost_a_race_for_the_expiry_keeps_the_later_one(
 
 
 def test_a_reader_of_a_credential_can_count_a_reveal_and_nothing_else(owner):
-    """Finding 2 (2026-10-02): any reader of a record could update its
-    credentials, and the encrypted-or-absent CHECK caught only some of it:
-    clearing the value and its key together, or moving the credential to
-    another record, went through. 0155 leaves the request role the reveal's
-    two counters, and its guard lets them only count one reveal, now."""
+    """Any reader of a record could otherwise update its credentials, and the encrypted-or-absent CHECK
+    catches only some of it: clearing the value and its key together, or moving the credential to another
+    record, would go through. 0155 leaves the request role the reveal's two counters, and its guard lets
+    them only count one reveal, now."""
     from noctornal_api.ingest import IngestService
 
     w = _world(owner)
@@ -708,10 +688,8 @@ def test_a_reader_of_a_credential_can_count_a_reveal_and_nothing_else(owner):
 
 
 def test_a_walled_dead_letter_is_seen_only_with_its_compartment(owner):
-    """Finding 3 (2026-10-02): no test walled a dead letter, so the
-    policy's compartments term could be dropped with every test passing. A
-    stealer-log feed's dead letter carries the feed's compartment, through
-    its case and in quarantine alike."""
+    """The policy's compartments term is exercised: a stealer-log feed's dead letter carries the feed's
+    compartment, through its case and in quarantine alike."""
     w = _world(owner)
     reader = s.user(owner, "AMBER", (STEALER,), prefix=P)
     s.assign(owner, w.case, reader)
@@ -740,11 +718,9 @@ def test_a_walled_dead_letter_is_seen_only_with_its_compartment(owner):
 
 
 def test_a_dead_letter_above_its_reader_is_seen_under_a_grant_that_reaches_it(owner):
-    """Finding 3 (2026-10-02): the break-glass branch of
-    iam.ingest_dead_letter_visible had no test. A grant on the case raises
-    that case's ceiling over the dead letters its batches fed, and nothing
-    in quarantine; another case's grant raises nothing; a global grant
-    raises the case-less ceiling over quarantine."""
+    """The break-glass branch of iam.ingest_dead_letter_visible. A grant on the case raises that case's
+    ceiling over the dead letters its batches fed, and nothing in quarantine; another case's grant raises
+    nothing; a global grant raises the case-less ceiling over quarantine."""
     w = _world(owner)
     fed, _r = _parse(owner, w.red, [_p("red fed"), "not json, red"], case_id=w.case)
     none, _r = _parse(owner, w.red, ["not json, red and nobody's"])
@@ -836,13 +812,10 @@ def test_a_parse_writes_records_above_its_operator_and_dedupes_against_hidden_on
 
 
 def test_a_parse_that_names_a_case_is_told_where_the_case_step_is(owner, api):
-    """docs/17 "`parse` with a case id" (2026-10-08). The route took a case and
-    asked `ingest.manage` on it, a permission only SYS_ADMIN holds and no case
-    assignment carries, so every call that named a case was a 403 and the
-    triage flow (parse into the unattached queue, then attach on the word of
-    the case's own team) was the only way in. The field is refused by name,
-    with the way to the case in the sentence, and the batch is left unparsed;
-    the same call without a case parses as it did."""
+    """docs/17 "`parse` with a case id". The route asks `ingest.manage` on a case, a permission only
+    SYS_ADMIN holds and no case assignment carries, so a call that names a case is refused by name, with
+    the way to the case in the sentence (parse into the unattached queue, then attach on the word of the
+    case's own team), and the batch is left unparsed. The same call without a case parses."""
     w = _world(owner)
     operator = _person(owner, "AMBER", "SYS_ADMIN")
     batch, _raw = _accept(owner, w.amber, [_p("named")])
@@ -929,13 +902,10 @@ def _watch(owner, case, boss, selector: str) -> None:
 
 
 def test_the_selector_hit_notice_is_labelled_by_the_record_and_skips_quarantine(owner):
-    """Finding 3 (2026-10-02): `_notify_selector_hits` was pinned only
-    by the text of its query. What it does, on the INGEST connection
-    `score_records` opens (which is what lets an operator off every case
-    reach those cases at all): one notice per case to its owner, labelled by
-    the record, so an owner without a walled record's compartment is not
-    told; and a quarantined record, which has no case, is scored and tells
-    nobody, without failing the pass."""
+    """`_notify_selector_hits` runs on the INGEST connection `score_records` opens (which is what lets an
+    operator off every case reach those cases at all): one notice per case to its owner, labelled by the
+    record, so an owner without a walled record's compartment is not told; and a quarantined record, which
+    has no case, is scored and tells nobody, without failing the pass."""
     from noctornal_api.ingest import IngestService
 
     blind_owner = s.user(owner, "RED", prefix=P)
@@ -1246,11 +1216,9 @@ def test_a_reveal_whose_authorisation_lapsed_before_its_count_reveals_nothing(
 
 def test_a_reveal_whose_credential_left_its_reach_before_its_count_reveals_nothing(
         owner, monkeypatch):
-    """Finding 3 (2026-10-02): the credential half of the uncounted
-    reveal had no behavioural test. The record is walled further between
-    the scope read and the count, so the count reaches no row: the reveal is
-    'no such credential', as the scope read would have said, and neither
-    count moves nor a PII_REVEALED row is written."""
+    """The credential half of the uncounted reveal. The record is walled further between the scope read
+    and the count, so the count reaches no row: the reveal is 'no such credential', as the scope read would
+    have said, and neither count moves nor a PII_REVEALED row is written."""
     from noctornal_api.ingest import IngestError, IngestService
 
     w = _stealer_world(owner)

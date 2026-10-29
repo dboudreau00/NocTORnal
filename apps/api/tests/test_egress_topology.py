@@ -1,11 +1,9 @@
-"""The production topology makes the egress proxy the only way out (S2,
-2026-09-24; docs/00 decision 68).
+"""The production topology makes the egress proxy the only way out (docs/00 decision 68).
 
-Pure: PyYAML is not a dependency, so infra/production/compose.yml is read by
-a reader for the YAML subset it uses, extended from test_compose_exposure.py's
-idea to resolve `&anchor`, `*alias` and `<<: *anchor` merges and the
-`{path, required}` env_file form. It fails closed: a construct it does not
-understand is a test failure, never a silent pass.
+Pure: PyYAML is not a dependency, so infra/production/compose.yml is read by a reader for the YAML subset
+it uses, extended from test_compose_exposure.py's idea to resolve `&anchor`, `*alias` and `<<: *anchor`
+merges and the `{path, required}` env_file form. It fails closed: a construct it does not understand is a
+test failure, never a silent pass.
 """
 from __future__ import annotations
 
@@ -23,10 +21,10 @@ COMPOSE = ROOT / "infra" / "production" / "compose.yml"
 SECRETS_EXAMPLE = ROOT / "infra" / "production" / "secrets.env.example"
 APP_ONLY = ("postgres", "redis", "minio", "minio-init", "migrate", "api",
             "sample-origin", "cron",
-            "lab-triage",  # static triage's own loop (F11, 2026-09-25)
-            "lab-cron",    # screening and the sandbox dispatch (F13, F14)
-            "embed-pass",  # the similarity pass (F6)
-            "collector")   # the persona key's one holder (2026-10-02)
+            "lab-triage",  # static triage's own loop
+            "lab-cron",    # screening and the sandbox dispatch
+            "embed-pass",  # the similarity pass
+            "collector")   # the persona key's one holder
 
 
 class Unparseable(ValueError):
@@ -261,13 +259,11 @@ def test_the_internal_subnets_equal_the_policys_default(doc):
 
 
 def test_the_fixed_addresses_sit_outside_the_networks_dynamic_range(doc):
-    """2026-10-12, on a fresh box: after a host reboot Caddy and the egress proxy
-    failed with "Address already in use" and stayed down, and the console did not
-    come back. Docker deals an address to every container without a fixed one from
-    the bottom of the subnet, ten of them reach .10 and .11, and a reboot starts
-    everything at once in no order, so two of those took the addresses Caddy and
-    the proxy own. The network now deals only from its upper half (`ip_range`),
-    keeps the gateway at .1, and every fixed address lies outside the range."""
+    """After a host reboot Caddy and the egress proxy must not fail with "Address already in use". Docker
+    deals an address to every container without a fixed one from the bottom of the subnet, ten of them reach
+    .10 and .11, and a reboot starts everything at once in no order, so two could take the addresses Caddy
+    and the proxy own. The network therefore deals only from its upper half (`ip_range`), keeps the gateway
+    at .1, and every fixed address lies outside the range."""
     conf = doc["networks"]["noctornal"]["ipam"]["config"][0]
     subnet = ipaddress.ip_network(conf["subnet"])
     dealt_from = ipaddress.ip_network(conf["ip_range"])
@@ -304,8 +300,7 @@ def test_only_the_proxy_joins_exits_and_models_and_only_it_and_caddy_join_edge(d
     assert members["exits"] == {"egress-proxy"}
     assert members["models"] == {"egress-proxy"}
     assert members["edge"] == {"caddy", "egress-proxy"}
-    # The analysis worker joins no network at all (docs/17 F42):
-    # test_analysis_worker_compose.py holds it there.
+    # The analysis worker joins no network at all: test_analysis_worker_compose.py holds it there.
     assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy",
                                                     "analysis-worker"}
     assert not _nets(doc["services"]["analysis-worker"])
@@ -317,8 +312,8 @@ def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):
     assert set(nets) == {"noctornal", "edge"}
     assert nets["noctornal"]["ipv4_address"] == doc["x-caddy-ip"]
     assert caddy["ports"] == ["80:80", "443:443"]
-    # caddy.env, not secrets.env (infra-5, 2026-10-03): the TLS terminator
-    # holds its three values and none of the platform's secrets.
+    # caddy.env, not secrets.env: the TLS terminator holds its three values and none of the platform's
+    # secrets.
     assert _env_files(caddy) == [("caddy.env", True)]
 
 
@@ -377,12 +372,10 @@ def test_the_reader_fails_closed_on_what_it_does_not_read():
 
 
 def test_the_readme_names_every_place_that_carries_a_movable_subnet():
-    """2026-10-07: the README's answer to `Pool
-    overlaps` said to change the subnet in two places, and five more keys
-    (the egress address and the internal networks, on six services) carry it.
-    A move done as written left the proxy listening on an address its network
-    no longer had. Every key that names the noctornal or the edge subnet is
-    in that section, and the two subnets the code holds are said to be fixed."""
+    """The README's answer to `Pool overlaps` must name every key that carries a movable subnet (the egress
+    address and the internal networks, on six services), not only two: a move done as written would leave
+    the proxy listening on an address its network no longer had. Every key that names the noctornal or the
+    edge subnet is in that section, and the two subnets the code holds are said to be fixed."""
     readme = (ROOT / "infra" / "production" / "README.md").read_text(encoding="utf-8")
     section = readme.split("### If `up` fails creating the network", 1)[1].split("\n## ", 1)[0]
     keys = set()

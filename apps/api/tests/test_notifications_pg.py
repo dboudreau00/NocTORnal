@@ -60,14 +60,10 @@ def _user(conn, clearance="AMBER", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"ntfy-{uuid4().hex[:8]}@noctornal.test", "Recipient", "x" * 20)
-    # Registered before the array is written. Since 2026-09-09 (migration
-    # 0059) `iam.app_user.compartments` -- and `notify.notification.
-    # compartments`, which `_raise` writes -- are bound to `iam.compartment`,
-    # so the raw UPDATE below, the out-of-band path the registry did not
-    # gate before then, is refused for a key nobody registered. Three tests
-    # here failed on exactly that refusal. ON CONFLICT and never deleted:
-    # OPERATION-X is shared by every test in this file, and the registry
-    # refuses to drop a key while any row still carries it.
+    # Registered before the array is written: `iam.app_user.compartments` and `notify.notification.
+    # compartments` (which `_raise` writes) are bound to `iam.compartment` (0059), so the raw UPDATE below is
+    # refused for a key nobody registered. ON CONFLICT and never deleted: OPERATION-X is shared by every test
+    # in this file, and the registry refuses to drop a key while any row still carries it.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -168,10 +164,8 @@ def test_a_revoked_compartment_hides_them_too(conn, svc):
 
 
 def test_a_case_raised_above_the_recipient_hides_its_notifications(conn, svc):
-    """2026-10-07: the filter read only the labels the notification was
-    raised with, so an AMBER analyst shut out of a case raised to RED still
-    read its notices in the centre, and the outbox still sent them. Read
-    against the case as it stands, as a lowered clearance is."""
+    """The filter reads the case as it stands, as a lowered clearance is: an AMBER analyst shut out of a case
+    raised to RED must not read its notices in the centre, and the outbox must not send them."""
     from noctornal_api.transports import dispatch_due
 
     alice, bob = _user(conn, clearance="AMBER"), _user(conn)
@@ -514,11 +508,9 @@ def _smtp_row(conn, recipient):
 
 
 def test_a_case_raised_after_queueing_is_gated_at_its_new_label(conn, svc):
-    """2026-10-07: the drain judged a delivery by the labels the
-    notification was raised with, so a case raised to RED between the queue
-    and the drain (a digest, quiet hours, a retry) sent its code and summary
-    out marked TLP:AMBER. The case's labels are composed in as they stand at
-    the drain, as an export composes them."""
+    """The drain composes the case's labels as they stand, as an export does: a case raised to RED between
+    the queue and the drain (a digest, quiet hours, a retry) must not send its code and summary out marked
+    TLP:AMBER."""
     from noctornal_api.transports import dispatch_due
 
     alice, bob = _user(conn, clearance="RED"), _user(conn)
@@ -565,10 +557,9 @@ def _exhibit(conn, case_id, actor, classification="AMBER"):
 ])
 def test_an_exhibit_raised_after_queueing_is_gated_at_its_new_label(
         conn, svc, change, detail):
-    """docs/17, "a notice raised after it was queued": the drain composed the
-    case's labels as they stand and not the element's, so an exhibit raised
-    (or put in a compartment) while its notice waited had the notice's summary
-    sent under the label the exhibit had when it was queued."""
+    """The drain composes the element's labels too (docs/17, "a notice raised after it was queued"): an
+    exhibit raised (or put in a compartment) while its notice waited must not have the notice's summary sent
+    under the label the exhibit had when it was queued."""
     from noctornal_api.transports import dispatch_due
 
     alice, bob = _user(conn, clearance="RED", compartments=("OPERATION-X",)), _user(conn)
@@ -748,9 +739,8 @@ def test_a_deferred_delivery_is_not_drained_early(conn, svc):
 # --- the events docs actually require -----------------------------------
 
 def test_a_merge_notifies_the_case_owner(conn):
-    """docs/01 by name: "Merges ... generate an audit event and a case-owner
-    notification." The audit event has existed since decision 41; this is
-    the half that was missing."""
+    """docs/01: "Merges ... generate an audit event and a case-owner notification." The audit event comes
+    from decision 41; this test holds the notification half."""
     from noctornal_api.graph import AssertionInput, GraphWriteService
     from noctornal_api.merges import MergeService
     from noctornal_api.notifications import NotificationService
@@ -860,23 +850,17 @@ def test_every_registered_kind_has_a_sane_priority():
     for kind in KINDS.values():
         assert 1 <= kind.default_priority <= 3
     urgent = {k for k, v in KINDS.items() if v.default_priority == 1}
-    # ESCALATION joined the list on 2026-09-02 (N3): it is raised by
-    # `escalate_unacknowledged` only when a priority-1 notification has
-    # already gone unanswered past the window, so it is urgent by
-    # construction -- a quieter escalation would defeat the thing it
-    # exists to do. `notifications.py` says so at the kind itself. This
-    # assertion was not updated with it, so the file failed on any
-    # database and for a reason that had nothing to do with one.
-    # F13 (2026-09-24): a prohibited-content screening match is the
-    # fourth. It is an event whose handling (report, preserve, tell the
-    # designated person) cannot wait for the morning, and it is coalesced to
-    # one open alert per recipient per hour, so a bulk match stays one.
+    # ESCALATION is raised by `escalate_unacknowledged` only when a priority-1 notification has already gone
+    # unanswered past the window, so it is urgent by construction: a quieter escalation would defeat its
+    # purpose. A prohibited-content screening match is the fourth: its handling (report, preserve, tell the
+    # designated person) cannot wait for the morning, and it is coalesced to one open alert per recipient per
+    # hour, so a bulk match stays one.
     assert urgent == {"EVIDENCE_INTEGRITY_ALARM", "BREAK_GLASS_INVOKED",
                       "ESCALATION",
                       # A persona credential in use from two
                       # places at once, to the security officers.
                       "PERSONA_CREDENTIAL_ALERT",
-                      # F13, a prohibited-content match.
+                      # A prohibited-content match.
                       "SAMPLE_SCREENING_MATCH"}, (
         "priority 1 overrides quiet hours; it has to stay a short list")
 
@@ -895,19 +879,11 @@ def test_the_notification_labels_match_the_access_gates(conn):
     from noctornal_api.http.deps import effective_labels
     from noctornal_api.notifications import effective_labels_for_notification
 
-    # These were "A" and "B" until 2026-09-02. "A" is a one-character key,
-    # which 0057's CHECK (`^[A-Z0-9_-]{2,32}$`) can NEVER accept -- so this
-    # fixture manufactured a value the registry cannot hold, and a database
-    # left holding it (an interrupted run, a teardown that rolled back)
-    # cannot be migrated past 0057 at all: `upgrade()` refuses rather than
-    # strand every case filed under an unregistrable key. Renamed at the
-    # source, because the fixture, not the migration, is what was wrong.
-    #
-    # Only CASE_KEY is registered: it is written to `core."case"` through
-    # `CaseService.create`, which 0057 gates. ELEMENT_KEY never reaches a
-    # column -- it is handed straight to two pure functions -- so there is
-    # nothing for the registry to gate, and registering it would imply a
-    # read-in that does not exist.
+    # Only CASE_KEY is registered: it is written to `core."case"` through `CaseService.create`, which 0057
+    # gates. ELEMENT_KEY never reaches a column (it is handed straight to two pure functions), so registering
+    # it would imply a read-in that does not exist. Keys must satisfy 0057's CHECK (`^[A-Z0-9_-]{2,32}$`); a
+    # one-character key can never be registered, and a database left holding one cannot be migrated past
+    # 0057.
     case_key, element_key = "NTFY-CASE", "NTFY-ELEM"
     conn.execute(
         "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "

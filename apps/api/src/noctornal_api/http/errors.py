@@ -1,22 +1,10 @@
-"""problem+json error model (RFC 9457 / docs/02).
+"""problem+json error model (RFC 9457, docs/02): every error the API emits, mapped in one place.
 
-Every error the API emits is application/problem+json so clients get a
-machine-readable, uniform shape. Domain exceptions map to problems here, in
-ONE place.
-
-Two rules adversarial review forced into this file:
-
-1. **Never stringify a database exception into a client-visible message.**
-   psycopg's str() is the raw PQ error, which carries DETAIL/CONTEXT lines:
-   constraint names, offending column values, and PL/pgSQL function names
-   and line numbers. Those describe the schema and echo case data. Service
-   errors that wrap a DB error are replaced with a fixed, analyst-facing
-   catalogue entry chosen by SQLSTATE/constraint, and the raw text is logged
-   server-side against a correlation id.
-2. **Never echo submitted input.** Pydantic's error list includes an
-   `input` key holding the offending value — on the login endpoint that is
-   the submitted password and live TOTP code, which would land in every
-   proxy and APM access log. Only `loc` and `msg` are returned.
+Two rules. Never put a database exception's text in a client-visible message: psycopg's str()
+carries constraint names, column values and PL/pgSQL function names, so a wrapped DB error is
+replaced by a fixed catalogue entry chosen by SQLSTATE or constraint, and the raw text is
+logged against a correlation id. Never echo submitted input: Pydantic's `input` key holds the
+offending value (on login, the password and live TOTP code), so only `loc` and `msg` return.
 """
 from __future__ import annotations
 
@@ -72,7 +60,7 @@ _CONSTRAINT_MESSAGES = {
     "case_retention_sane": "retention date must be after creation",
     "assertion_inference_needs_rationale":
         "an inference-based assertion requires a rationale",
-    # The two-person policy ledger (F9, 2026-09-24).
+    # The two-person policy ledger.
     "dual_control_change_two_people":
         "a change is proposed and countersigned by two different people",
     "dual_control_policy_change_approval_request_id_key":
@@ -80,9 +68,8 @@ _CONSTRAINT_MESSAGES = {
 }
 
 
-# Row-level security (S1, 2026-09-25). What a refused write is told.
-# The gate should have refused first, so every one of these is a finding:
-# it is audited as RLS_REFUSED.
+# Row-level security: what a refused write is told. The gate should have refused first, so each
+# one is audited as RLS_REFUSED.
 RLS_REFUSED_DETAIL = ("The database refused this change because it would write a "
                       "row you could not read back.")
 #: The server's text for a WITH CHECK refusal, in the C locale the runtime
@@ -108,12 +95,9 @@ def is_rls_refusal(exc: BaseException) -> bool:
     return any(f'table "{name}"' in text for name in names)
 
 
-#: What a request is told when one of its statements overran the limit a
-#: request connection is opened with (`db.request_statement_timeout`).
-#: 504 and not 503: the console waits out a 503 and asks again by itself
-#: (the metrics retry), and a statement that overran once will overrun again,
-#: so a 503 would have every open console re-running it. The reason is the
-#: sentence; the cause is logged against the reference.
+#: What a request is told when a statement overran the request connection's limit
+#: (`db.request_statement_timeout`). 504, not 503: the console retries a 503 by itself, and a
+#: statement that overran once will overrun again. The cause is logged against the reference.
 STATEMENT_TIMEOUT_DETAIL = (
     "The database did not finish within the time this deployment allows one "
     "statement, so the request was stopped. Ask for less at once (a smaller "
@@ -138,26 +122,10 @@ def statement_timeout_problem(exc: BaseException,
 def _db_cause(exc: Exception, depth: int = 8) -> psycopg.Error | None:
     """The psycopg error underneath `exc`, however deeply it is wrapped.
 
-    WALKS THE CHAIN. This used to look exactly one level down
-    (`exc.__cause__`), which was enough for a service that wraps psycopg
-    directly and wrong the moment one service wraps another.
-
-    `proposals.py:327` does exactly that:
-
-        except GraphWriteError as exc:
-            raise ProposalError(f"could not apply proposal: {exc}") from exc
-
-    so accepting a proposal produced ProposalError -> GraphWriteError ->
-    psycopg. The one-level check found a GraphWriteError, concluded there
-    was no database cause, and returned `str(exc)` — which by then had the
-    raw PQ text interpolated into it twice over. Reproduced against the
-    live database: one level sanitised correctly, two levels returned
-    `... violates foreign key constraint "node_case_id_fkey" DETAIL: Key
-    (case_id)=(…)`.
-
-    Bounded and cycle-guarded: an exception chain is not guaranteed
-    acyclic, and this runs on the error path where a hang is least
-    affordable.
+    Walks the whole chain, because services wrap each other (a ProposalError wrapping a
+    GraphWriteError wrapping psycopg), and stopping one level down would return raw PQ text.
+    Bounded and cycle-guarded: a chain is not guaranteed acyclic, and this runs on the error
+    path, where a hang is least affordable.
     """
     seen: set[int] = set()
     cur: BaseException | None = exc
@@ -171,26 +139,14 @@ def _db_cause(exc: Exception, depth: int = 8) -> psycopg.Error | None:
 
 
 def safe_detail(exc: Exception) -> str:
-    """A client-safe message for a service error, with a correlation id when
-    the underlying cause was a database error.
+    """A client-safe message for a service error, with a correlation id when the underlying cause
+    was a database error.
 
-    PUBLIC, and every router that turns a service error into a `Problem`
-    must use it instead of `str(exc)`.
-
-    Rule 1 at the top of this file was enforced only for exceptions that
-    reached the registered handlers below. A router that CAUGHT a service
-    error and re-raised `Problem(400, ..., str(exc))` bypassed all of it —
-    and 74 sites across 13 routers did exactly that. Six services
-    (`cases`, `graph`, `proposals`, `retention`, `samples`,
-    `contact_blocks`) wrap psycopg errors as `XError(str(exc)) from exc`,
-    so the raw PQ text — constraint names, the offending column VALUES,
-    PL/pgSQL function names and line numbers — was already inside the
-    message the router then handed to the client.
-
-    Authored messages pass through untouched: when `__cause__` is not a
-    psycopg error this returns `str(exc)` exactly as before. Only the
-    DB-wrapped ones are replaced, and their raw text is logged against the
-    correlation id that goes back to the caller.
+    Every router that turns a service error into a `Problem` must use this instead of
+    `str(exc)`: several services wrap psycopg errors as `XError(str(exc)) from exc`, so the raw
+    PQ text is already inside the message. Authored messages pass through untouched; a
+    DB-wrapped one is replaced, and its raw text is logged against the correlation id that goes
+    back to the caller.
     """
     cause = _db_cause(exc)
     if cause is None:
@@ -209,7 +165,7 @@ def safe_detail(exc: Exception) -> str:
     sqlstate = getattr(cause, "sqlstate", None)
     if sqlstate in _SQLSTATE_MESSAGES:
         return f"{_SQLSTATE_MESSAGES[sqlstate]} (ref {cid})"
-    if is_rls_refusal(cause):  # S1: row-level security
+    if is_rls_refusal(cause):
         return f"{RLS_REFUSED_DETAIL} (ref {cid})"
     # A plpgsql RAISE (e.g. the ontology/TLP/invariant triggers) carries an
     # authored first line; take only that, never DETAIL/CONTEXT.
@@ -240,9 +196,8 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(psycopg.errors.QueryCanceled)
     async def _statement_timeout(request: Request, exc: Exception):
-        """A statement overran the limit a request connection is opened
-        with, or was cancelled by an operator: a clean 504 with a reference,
-        never the 500 and the logged traceback it was."""
+        """A statement overran the request connection's limit, or was cancelled by an operator:
+        a clean 504 with a reference, never a 500 and a logged traceback."""
         problem = statement_timeout_problem(exc, request)
         return problem_response(problem.status, problem.title, problem.detail)
 
@@ -262,16 +217,14 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(ExhibitUnavailable)
     async def _exhibit_unavailable(_: Request, exc: Exception):
-        # Retention destroyed the bytes, or is destroying them now: a plain
-        # answer, and never a tamper alarm (verify-destroyed-exhibit,
-        # 2026-10-03). The sentence is fixed text, not the exception's cause.
+        # Retention destroyed the bytes, or is destroying them now: a plain answer, never a
+        # tamper alarm. The sentence is fixed text, not the exception's cause.
         return problem_response(409, "Exhibit unavailable", str(exc))
 
     @app.exception_handler(StoreUnavailable)
     async def _store_unavailable(_: Request, exc: Exception):
-        # The object store did not answer: the caller did nothing wrong and
-        # may try again, which a 400 would not tell them and a 500 would
-        # report as the server's own defect (2026-10-08).
+        # The object store did not answer: the caller did nothing wrong and may try again, which
+        # a 400 would not tell them and a 500 would report as the server's own defect.
         return problem_response(503, "Service unavailable", str(exc),
                                 headers={"Retry-After": "5"})
 
@@ -286,7 +239,7 @@ def install_error_handlers(app) -> None:
         # Fail closed: an unresolvable context is a denial, not a 500.
         return problem_response(403, "Forbidden", "access could not be resolved")
 
-    # Row-level security (S1, 2026-09-25).
+    # Row-level security.
     from noctornal_api.db import SystemContextUnavailable
 
     @app.exception_handler(psycopg.errors.InsufficientPrivilege)
@@ -305,14 +258,10 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(psycopg.errors.DataError)
     async def _unstorable_value(_: Request, exc: Exception):
-        """A value the database cannot hold (http_ui-014, 2026-10-03): text
-        with a NUL, a number out of range, a timestamp past year 10000. It
-        is the caller's input, so it is a 422 and not the 500 and the
-        logged traceback it was; `body_ceiling.py` refuses the commonest
-        case (a NUL in a JSON body) before a route parses it, and this is
-        what remains (a query string, a path part). The raw text goes to
-        the log against the reference and never to the caller (rule 1
-        above)."""
+        """A value the database cannot hold (text with a NUL, a number out of range, a timestamp
+        past year 10000): the caller's input, so a 422. `body_ceiling.py` refuses the commonest
+        case before a route parses it; this catches the rest (a query string, a path part). The
+        raw text goes to the log against the reference, never to the caller."""
         cid = uuid.uuid4().hex[:12]
         log.warning("unstorable value %s: %s", cid, exc)
         return problem_response(
@@ -322,14 +271,11 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(UnicodeEncodeError)
     async def _unencodable_text(request: Request, exc: UnicodeEncodeError):
-        """Text no UTF-8 encoder will take (2026-10-07): a lone
-        surrogate in a string the caller sent, which the driver refuses
-        before a statement leaves the process. The caller's input, so a 422
-        and not a 500 with a logged traceback. `body_ceiling.py` refuses the
-        commonest case (an unpaired surrogate escape in a UTF-8 JSON body)
-        before a route parses it; this is what remains (a JSON body sent in
-        another encoding, which the byte scan cannot read). Any other
-        encoding failure is the server's own and stays the 500."""
+        """Text no UTF-8 encoder will take: a lone surrogate the caller sent, which the driver
+        refuses before a statement leaves the process, so a 422. `body_ceiling.py` refuses the
+        commonest case before a route parses it; this catches the rest (a JSON body in another
+        encoding, which the byte scan cannot read). Any other encoding failure is the server's
+        own and stays a 500."""
         if "surrogates not allowed" not in exc.reason:
             return await _unhandled(request, exc)
         cid = uuid.uuid4().hex[:12]
@@ -346,29 +292,14 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception):
-        """Catch-all so an unexpected failure is still problem+json with no
-        internals — and still carries the security headers.
+        """Catch-all so an unexpected failure is still problem+json with no internals, and still
+        carries the security headers.
 
-        ## CR17 (2026-07-26): the headers half of that promise was false
-
-        Starlette routes the `Exception` handler to the OUTERMOST
-        `ServerErrorMiddleware`, which sits *above* the `_headers`
-        middleware in `app.py`. So an exception with no registered handler
-        — a raw `psycopg.Error`, a `TypeError` — propagates up through
-        `_headers` and `_blanket` (neither of which catches), is turned
-        into a 500 out there, and that response never travels back DOWN
-        through the header middleware.
-
-        The result shipped with no CSP, no `nosniff`, no `Referrer-Policy`,
-        no `Cache-Control`. The docstring above claimed otherwise and was
-        only ever true of the body.
-
-        Stamped explicitly here rather than by restructuring the middleware
-        into a pure-ASGI `send()` wrapper: this is the one response class
-        that escapes, the fix is local to it, and the alternative touches
-        every response in the product to fix the rarest one. `setdefault`
-        semantics are preserved by constructing the headers first and
-        letting `problem_response` win on any key it sets.
+        Starlette routes the `Exception` handler to the outermost `ServerErrorMiddleware`, above
+        the `_headers` middleware in `app.py`, so this response never passes back through it and
+        the headers are stamped here. That is local to the one response class that escapes,
+        where a pure-ASGI `send()` wrapper would touch every response. The headers are built
+        first and `problem_response` wins on any key it sets, as `setdefault` would.
         """
         cid = uuid.uuid4().hex[:12]
         log.exception("unhandled error %s", cid)
@@ -381,14 +312,13 @@ def install_error_handlers(app) -> None:
 
 
 def _audit_rls_refused(request: Request, exc: BaseException, cid: str) -> None:
-    """The RLS_REFUSED row (S1). Out of band, on a fresh request-role
-    connection; never raises, because the answer is already decided."""
+    """The RLS_REFUSED row. Out of band, on a fresh request-role connection; never raises,
+    because the answer is already decided."""
     from psycopg.types.json import Json
 
     from noctornal_api.db import connect_request
     actor = getattr(request.state, "noctornal_user_id", None)
-    # The request's own binding, so the database can verify the actor this
-    # row names (0150, evidence-ledger-actor-time-forgeable, 2026-10-03).
+    # The request's own binding, so the database can verify the actor this row names (0150).
     proof = getattr(request.state, "noctornal_rls_proof", None)
     try:
         with connect_request() as side:

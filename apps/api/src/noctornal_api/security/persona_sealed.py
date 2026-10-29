@@ -1,39 +1,31 @@
-"""The persona ring's sealed column, and the move onto it (ROADMAP-REMAINING
-"A collector process", 2026-10-02).
+"""The persona ring's sealed column, and the move onto it.
 
-`security/sealed.py` inventories and re-wraps the columns the TOTP ring
-seals. `collect.collection_account.secret_ciphertext` left that list on
-2026-10-02: a persona credential seals under NOCTORNAL_PERSONA_KEK
-(persona_envelope.py), which in production only the collector holds, so the
-API's readiness register could not open one if it tried and must not try.
+`security/sealed.py` inventories and re-wraps the columns the TOTP ring seals.
+`collect.collection_account.secret_ciphertext` is not on that list: a persona credential seals under
+NOCTORNAL_PERSONA_KEK (persona_envelope.py), which in production only the collector holds, so the API's
+readiness register could not open one if it tried and must not try.
 
-A persona's forum session (`session_ciphertext`, 0161, the authenticated
-forum path) seals under the same ring and is listed beside the credential
-(2026-10-03). It is a credential of the same standing and is NOT a second
-inventory: it is disposable (a persona whose session cannot be opened signs
-in again), so the readers below that count and open credentials leave it
-out, and `reseal_sessions` moves it with the credentials when the ring turns.
+A persona's forum session (`session_ciphertext`, 0161, the authenticated forum path) seals under the same
+ring and is listed beside the credential. It is a credential of the same standing and is not a second
+inventory: it is disposable (a persona whose session cannot be opened signs in again), so the readers
+below that count and open credentials leave it out, and `reseal_sessions` moves it with the credentials
+when the ring turns.
 
 Four readers here, one per process that has a question:
 
-- `key_groups` counts rows by key id and opens nothing. The API's readiness
-  row `collector_split` reads it: how many persona credentials are still
-  sealed under the TOTP ring, from before the split.
-- `ring_verdict` opens a sample per persona key id with the persona ring,
-  in the collector at start, which records the counts in its heartbeat
-  for the register (2026-10-03).
-- `inventory` opens rows with the persona ring (and the TOTP ring for the
-  rows sealed before the split), for the collector's start and for
-  `scripts/rewrap_secrets.py --persona`, which hold both.
-- `move_and_rewrap` is that script's `--apply`: every credential sealed
-  before the split is opened under the TOTP ring and sealed under the
-  persona ring, and every persona credential under a retired persona key is
-  re-sealed under the active one. A compare-and-set on the ciphertext, row
-  by row, as `sealed.rewrap_table`, so a credential re-enrolled meanwhile
-  is never overwritten.
+- `key_groups` counts rows by key id and opens nothing. The API's readiness row `collector_split` reads
+  it: how many persona credentials are still sealed under the TOTP ring.
+- `ring_verdict` opens a sample per persona key id with the persona ring, in the collector at start, which
+  records the counts in its heartbeat for the register.
+- `inventory` opens rows with the persona ring (and the TOTP ring for the rows still sealed under it), for
+  the collector's start and for `scripts/rewrap_secrets.py --persona`, which hold both.
+- `move_and_rewrap` is that script's `--apply`: every credential sealed under the TOTP ring is opened
+  there and sealed under the persona ring, and every persona credential under a retired persona key is
+  re-sealed under the active one. A compare-and-set on the ciphertext, row by row, as `sealed.rewrap_table`,
+  so a credential re-enrolled meanwhile is never overwritten.
 
-An EMPTY ciphertext is a destroyed credential (PersonaVault.destroy_secret)
-and is never counted or sealed, for `sealed.inventory`'s reason.
+An empty ciphertext is a destroyed credential (PersonaVault.destroy_secret) and is never counted or sealed,
+for `sealed.inventory`'s reason.
 """
 from __future__ import annotations
 
@@ -119,15 +111,13 @@ class RingVerdict:
 
 def ring_verdict(conn: psycopg.Connection, *,
                  sample: int = SAMPLE_ROWS) -> RingVerdict:
-    """The readiness probe the persona column lost when it left the TOTP
-    inventory (2026-10-03), run where the key is: the
-    collector, at start. Up to `sample` blobs per persona key id, opened
-    with this process's persona ring, as `sealed.inventory` opens the TOTP
-    ring's. A key changed under its id (a wrong or restored collector.env)
-    is then a red register row by name, not a run of failed acts. Rows
-    sealed before the split are left out: the register counts them itself
-    and the move needs the TOTP ring. Raises PersonaKeyError when this
-    process has no usable persona ring."""
+    """The readiness probe for the persona column, run where the key is: the collector, at start.
+
+    Up to `sample` blobs per persona key id, opened with this process's persona ring, as
+    `sealed.inventory` opens the TOTP ring's. A key changed under its id (a wrong or restored collector.env)
+    is then a red register row by name, not a run of failed acts. Rows still sealed under the TOTP ring are
+    left out: the register counts them itself and the move needs the TOTP ring. Raises PersonaKeyError
+    when this process has no usable persona ring."""
     ids = persona_envelope.key_ids()
     sampled = unopenable = 0
     problem = None

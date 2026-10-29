@@ -1,42 +1,27 @@
 """The live socket's two ORIGIN refusals, driven rather than read.
 
-Both stand between a page this server does not serve and a case's
-activity stream, and neither has anything to do with the credential the
-socket would have gone on to check.
+Both stand between a page this server does not serve and a case's activity stream, and neither has anything
+to do with the credential the socket would go on to check.
 
-**Cross-site.** `_cross_site_upgrade` is the control that does not depend
-on a word: `__Host-session` is `SameSite=strict`, so a compliant browser
-will not attach it to a cross-site upgrade at all, and in a compliant
-browser that is the whole attack. This check is what holds when that
-sentence is wrong -- an old browser, a proxy, a future relaxation of the
-attribute -- and it became load-bearing the moment `_handshake` started
-ACCEPTING that cookie. Until then a hijacked socket carried a cookie this
-file never read and got nothing for it.
+**Cross-site.** `_cross_site_upgrade` is the control that does not depend on a word: `__Host-session` is
+`SameSite=strict`, so a compliant browser will not attach it to a cross-site upgrade at all. This check
+holds when that sentence is wrong (an old browser, a proxy, a future relaxation of the attribute), and it is
+load-bearing because `_handshake` accepts that cookie.
 
-**The sample origin.** Invariant 10 says the process serving hostile
-bytes serves nothing else, and `_allowed_on_sample_origin` (`http/app.py`)
-is what makes that true of the PROCESS rather than of a proxy allow-list.
-It is an `@app.middleware("http")`, and Starlette hands a `websocket`
-scope to the router without running http middleware, so that gate has
-never seen an upgrade: until the check in `live()` existed, a
-sample-origin process would accept a socket, authenticate it and stream
-one case's changes out of the one process that is supposed to hold no
-session at all. The tests below drive both scopes through one assembled
-app, because "the http gate does not see this" is the entire reason the
-second check is not redundant and is exactly what a reader deleting it
-would have assumed.
+**The sample origin.** Invariant 10 says the process serving hostile bytes serves nothing else, and
+`_allowed_on_sample_origin` (`http/app.py`) makes that true of the process rather than of a proxy
+allow-list. It is an `@app.middleware("http")`, and Starlette hands a `websocket` scope to the router without
+running http middleware, so that gate never sees an upgrade: without the check in `live()`, a sample-origin
+process would accept a socket, authenticate it and stream one case's changes out of the one process that is
+supposed to hold no session at all. The tests drive both scopes through one assembled app, because "the http
+gate does not see this" is the reason the second check is not redundant.
 
-Pure, and deliberately so. The behavioural tests for the cookie live in
-`test_live_cookie_pg.py`, which needs Postgres, a user, a case and a real
-upgrade -- so on a laptop with no database they are skipped, and the only
-thing checking the newest security controls in the socket is a test
-nobody runs. Nothing below opens a database connection or a socket, and
-nothing below reaches one: both refusals are decided from two headers and
-the environment, before `accept()` and before any handshake, so a
-synthetic ASGI scope and a recording `send` are enough to watch the whole
-decision. What this file cannot prove is the part that is not code --
-that a browser always sends `Origin` on an upgrade and cannot be made to
-omit it, which is what the no-Origin allowance rests on.
+Pure, deliberately. The behavioural tests for the cookie are in `test_live_cookie_pg.py`, which needs
+Postgres and is skipped on a laptop with no database, which would leave the newest security controls in the
+socket unchecked. Nothing below opens a database connection or a socket: both refusals are decided from two
+headers and the environment, before `accept()` and before any handshake, so a synthetic ASGI scope and a
+recording `send` are enough. What this file cannot prove is that a browser always sends `Origin` on an
+upgrade and cannot be made to omit it, which the no-Origin allowance rests on.
 """
 from __future__ import annotations
 
@@ -85,35 +70,20 @@ def _upgrade(*, cookie: str | None = None, origin: str | None = None,
              inbound: tuple[dict, ...] = ()) -> WebSocket:
     """One upgrade, as Starlette sees it.
 
-    `Host` used to be set on every one of these to a value that matched
-    nothing, because the check compared against configuration alone and
-    a Host agreeing with it would have passed against a check reading
-    the wrong thing -- the defect the download route had until
-    2026-09-09, when it decided the origin split from `request.url`.
+    Half the rule compares `Origin` with `Host` deliberately (`_request_origin`), so on the default upgrade
+    the two agree and an `Origin` of `APP` is accepted whatever the configuration says. Every test about the
+    configured comparison therefore passes its own `host=` that matches neither side. `host=None` omits the
+    header, the only way to reach the branch where this process cannot name its own origin at all.
 
-    Half the rule now compares `Origin` WITH `Host` deliberately
-    (`_request_origin`), so on the DEFAULT upgrade below the two agree
-    and an `Origin` of `APP` is accepted whatever the configuration
-    says. That is the point of the second half, and it is why every
-    test here that is about the CONFIGURED comparison passes its own
-    `host=` that matches neither side, and says so. `host=None` omits
-    the header entirely, which is the only way to reach the branch
-    where this process cannot name its own origin at all.
+    `scheme` is the scope's own: `wss` by default, as a deployed console is. A test comparing against an
+    `http` origin must say `scheme="ws"`, since `_request_origin` maps the socket's scheme onto the
+    http/https pair an `Origin` header is written with, and a plain socket claiming an https origin is a
+    mismatch.
 
-    `scheme` is the scope's own -- `wss` by default, because that is
-    what a deployed console is. A test comparing against an `http`
-    origin has to say `scheme="ws"`, since `_request_origin` maps the
-    socket's scheme onto the http/https pair an `Origin` header is
-    always written with, and a plain socket claiming an https origin
-    is a mismatch rather than a courtesy.
-
-    `sent` and `inbound` are for the tests that drive `live()` itself
-    rather than one predicate: appending every ASGI message the endpoint
-    sends is the only way to see whether a refusal came before or after
-    `accept()`, which is the difference between a dropped transport and
-    ten seconds of uvicorn's close timeout (`_PendingBudget`). A
-    `TestClient` cannot show it -- it completes the close handshake in
-    process.
+    `sent` and `inbound` are for the tests that drive `live()` itself: recording every ASGI message is the
+    only way to see whether a refusal came before or after `accept()`, which is the difference between a
+    dropped transport and ten seconds of uvicorn's close timeout (`_PendingBudget`). A `TestClient`
+    completes the close handshake in process and cannot show it.
     """
     headers = [] if host is None else [(b"host", host.encode())]
     if cookie is not None:
@@ -142,12 +112,10 @@ def _upgrade(*, cookie: str | None = None, origin: str | None = None,
 def _sent_by_live(**upgrade) -> list[dict]:
     """Run the endpoint over one synthetic upgrade; return what it sent.
 
-    The peer disconnects immediately after connecting, so a socket that
-    gets PAST the pre-accept refusals accepts and then closes
-    "no credentials" without ever reaching a database: `_handshake` needs
-    a hello frame it will never get. That is what makes the admitted case
-    assertable in a file with no Postgres -- the interesting message is
-    the first one either way.
+    The peer disconnects immediately after connecting, so a socket that gets past the pre-accept refusals
+    accepts and then closes "no credentials" without reaching a database: `_handshake` needs a hello frame
+    it never gets. That makes the admitted case assertable with no Postgres; the interesting message is the
+    first one either way.
     """
     sent: list[dict] = []
     ws = _upgrade(sent=sent,
@@ -173,15 +141,12 @@ def _configured(monkeypatch, *, app: str = APP, this: str | None = None,
 
 
 def test_a_caller_with_no_session_cookie_is_never_refused_here(monkeypatch):
-    """The check fires on the cookie being PRESENT, and on nothing else.
+    """The check fires on the cookie being present, and on nothing else.
 
-    A caller with no cookie has nothing this check protects: it will be
-    made to prove itself with a token in the first frame, which is a
-    credential a page on another origin cannot obtain by making a browser
-    connect. Refusing it on its origin would break `scripts/bootstrap.py
-    session` -- a shell, no cookie jar, no `Origin` -- and protect
-    nothing. So a hostile origin with no cookie goes through to the token
-    path exactly as it always did.
+    A caller with no cookie must prove itself with a token in the first frame, a credential a page on
+    another origin cannot obtain by making a browser connect. Refusing it on its origin would break
+    `scripts/bootstrap.py session` (a shell, no cookie jar, no `Origin`) and protect nothing, so a hostile
+    origin with no cookie goes through to the token path.
     """
     _configured(monkeypatch)
     assert _cross_site_upgrade(_upgrade(origin="https://evil.example")) is None
@@ -214,18 +179,14 @@ def test_the_consoles_own_upgrade_is_admitted_however_it_is_spelled(monkeypatch)
 
 
 def test_a_cookie_bearing_upgrade_from_anywhere_else_is_refused(monkeypatch):
-    """The attack in one line: a page on any origin may open a socket to
-    this one, the upgrade is not a `fetch` so there is no preflight to
-    withhold, and every cookie the browser holds for this host rides
-    along. `_handshake` now accepts one of those cookies as a credential.
+    """The attack in one line: a page on any origin may open a socket to this one, the upgrade is not a
+    `fetch` so there is no preflight to withhold, and every cookie the browser holds for this host rides
+    along.
 
-    Each case below is a way an `Origin` can fail to be ours, and every
-    one of them must fail CLOSED. `null` is the opaque origin a sandboxed
-    frame or a redirected navigation sends and reads as "the browser will
-    not say who this is"; a scheme downgrade is a different origin to
-    every browser and to this check; a subdomain is a different host; and
-    an `Origin` carrying a path is not an origin at all, which is why
-    `allow_path` is passed for OUR value and never for theirs.
+    Each case below is a way an `Origin` can fail to be ours, and each must fail closed. `null` is the
+    opaque origin a sandboxed frame or a redirected navigation sends; a scheme downgrade is a different
+    origin; a subdomain is a different host; an `Origin` carrying a path is not an origin at all, which is
+    why `allow_path` is passed for our value and never for theirs.
     """
     _configured(monkeypatch)
     for origin in ("https://evil.example",
@@ -249,29 +210,23 @@ def test_a_cookie_bearing_upgrade_from_anywhere_else_is_refused(monkeypatch):
 
 
 def test_an_upgrade_with_no_origin_header_is_deliberately_allowed(monkeypatch):
-    """Pinned because it is the one hole, and a hole nobody wrote down is
-    a hole somebody closes by accident or widens by accident.
+    """Pinned because it is the one hole, and a hole nobody wrote down gets closed or widened by accident.
 
-    A browser always sends `Origin` on an upgrade and cannot be made to
-    omit it, so its absence means the caller is not a browser -- and such
-    a caller holds the cookie's value only because it was given it, which
-    is the same string it could have put in the first frame instead.
-    Refusing it would protect nothing and would break the token path.
+    A browser always sends `Origin` on an upgrade and cannot be made to omit it, so its absence means the
+    caller is not a browser, and such a caller holds the cookie's value only because it was given it, the
+    same string it could put in the first frame. Refusing it would protect nothing and break the token path.
     """
     _configured(monkeypatch)
     assert _cross_site_upgrade(_upgrade(cookie="__Host-session=abc")) is None
 
 
 def test_a_process_that_cannot_name_its_own_origin_refuses_every_cookie(monkeypatch):
-    """Fails CLOSED, which is the direction that matters and the one a
-    misconfiguration usually gets wrong.
+    """Fails closed, the direction a misconfiguration usually gets wrong.
 
-    `NOCTORNAL_BASE_URL` set to something that is not an origin -- or set
-    to the empty string, which `os.environ.get` returns in preference to
-    the default -- leaves this process unable to say what "the same
-    origin" means. The answer is to refuse, not to skip the check: a
-    comparison against nothing that returned None would turn one typo in
-    one variable into the silent removal of this control.
+    `NOCTORNAL_BASE_URL` set to something that is not an origin, or to the empty string (which
+    `os.environ.get` returns in preference to the default), leaves this process unable to say what "the same
+    origin" means. The answer is to refuse, not to skip the check: a comparison against nothing that returned
+    None would turn one typo into the silent removal of this control.
     """
     for broken in ("not-an-origin", "", "ftp://console.example",
                    "https://"):
@@ -293,22 +248,16 @@ def test_a_process_that_cannot_name_its_own_origin_refuses_every_cookie(monkeypa
 
 
 def test_the_sample_process_compares_against_the_origin_it_serves(monkeypatch):
-    """`public_origin()`, not `app_origin()`, and the difference is only
-    visible here.
+    """`public_origin()`, not `app_origin()`, and the difference is only visible here.
 
-    `http/app.py` 404s everything but the download on a process configured
-    as the sample origin -- but it does that in an `@app.middleware("http")`,
-    and middleware never runs for a `websocket` scope, so `/live` is
-    routable on such a process. Comparing against `app_origin()` there
-    would admit an `Origin` naming a host this process does not serve and
-    refuse the one it does.
+    `http/app.py` 404s everything but the download on a process configured as the sample origin, but in an
+    `@app.middleware("http")`, which never runs for a `websocket` scope, so `/live` is routable on such a
+    process. Comparing against `app_origin()` there would admit an `Origin` naming a host this process does
+    not serve and refuse the one it does.
 
-    `live()` refuses that process its socket outright now, before this
-    predicate is consulted at all, so nothing below decides a real upgrade
-    any more -- which is why the two are tested apart, and why this one is
-    still tested. A predicate that is only correct while a check in
-    another function holds is one that goes wrong silently the day that
-    check moves.
+    `live()` refuses that process its socket outright before this predicate is consulted, so the two are
+    tested apart: a predicate that is only correct while a check in another function holds goes wrong
+    silently the day that check moves.
     """
     _configured(monkeypatch, this=SAMPLE)
     # `host=` is the sample host, so the arrival origin is SAMPLE too
@@ -325,18 +274,13 @@ def test_the_sample_process_compares_against_the_origin_it_serves(monkeypatch):
 
 
 def test_the_refusal_is_sent_before_a_pending_slot_is_taken(monkeypatch):
-    """Read from the source, because the ORDER is the property and no
-    synthetic scope can show it.
+    """Read from the source, because the order is the property and no synthetic scope can show it.
 
-    Two things about where this call sits. It is ahead of
-    `_pending.reserve`, so a cross-site flood cannot spend the budget
-    analysts need on its way to being refused -- this check reads two
-    headers and one environment variable, which is nothing the budget
-    exists to protect. And it is ahead of `accept()`, with the other
-    credential-free refusals: a close sent after `accept()` leaves the
-    transport up for the backend's ten-second close timeout, so a refusal
-    a hostile PAGE can cause at will would be one any visited site could
-    aim at this server.
+    The call is ahead of `_pending.reserve`, so a cross-site flood cannot spend the budget analysts need on
+    its way to being refused: the check reads two headers and one environment variable, which the budget does
+    not exist to protect. It is ahead of `accept()` with the other credential-free refusals: a close sent
+    after `accept()` leaves the transport up for the backend's ten-second close timeout, so a refusal a
+    hostile page can cause at will would be one any visited site could aim at this server.
     """
     src = LIVE_PY.read_text(encoding="utf-8")
     call = src.index("cross_site = _cross_site_upgrade(ws)")
@@ -359,25 +303,19 @@ def test_the_refusal_is_sent_before_a_pending_slot_is_taken(monkeypatch):
 
 def test_the_sample_origin_process_is_refused_its_socket_before_accept(
         monkeypatch):
-    """The process that serves hostile bytes gets no live channel, and is
-    told so before the handshake completes.
+    """The process that serves hostile bytes gets no live channel, and is told so before the handshake
+    completes.
 
-    Invariant 10 exists so that no page carrying an analyst's session ever
-    runs beside the bytes a suspect uploaded. `_allowed_on_sample_origin`
-    (`http/app.py`) is what makes that a property of the process rather
-    than of a proxy allow-list -- and it is an `@app.middleware("http")`,
-    which Starlette does not run for a `websocket` scope. So a
-    sample-origin process would accept this socket, authenticate it
-    against the cookie and stream one case's activity out of the one
-    process that is meant to hold no session at all. That is not a stray
-    route; it is the invariant inverted.
+    Invariant 10: no page carrying an analyst's session ever runs beside the bytes a suspect uploaded.
+    `_allowed_on_sample_origin` (`http/app.py`) makes that a property of the process, but it is an
+    `@app.middleware("http")`, which Starlette does not run for a `websocket` scope; without this refusal a
+    sample-origin process would authenticate the socket against the cookie and stream one case's activity out
+    of the one process meant to hold no session at all.
 
-    Driven rather than read, because the ORDER is the property: the whole
-    message stream is one close, with no `websocket.accept` in front of
-    it. Under uvicorn's `websockets` backend a pre-accept close is an HTTP
-    403 and an immediate `transport.close()`, while a post-accept one
-    writes a frame and then holds the transport for ten seconds waiting
-    for an echo the peer need never send (`_PendingBudget`).
+    Driven rather than read, because the order is the property: the whole message stream is one close, with
+    no `websocket.accept` in front of it. Under uvicorn's `websockets` backend a pre-accept close is an HTTP
+    403 and an immediate `transport.close()`, while a post-accept one holds the transport for ten seconds
+    waiting for an echo the peer need never send (`_PendingBudget`).
     """
     _configured(monkeypatch, this=SAMPLE)
 
@@ -394,12 +332,10 @@ def test_the_sample_origin_process_is_refused_its_socket_before_accept(
     # keeps reconnecting to the wrong process cannot fill a budget on it.
     assert module._pending.count == 0
 
-    # A cookie changes nothing: this refusal is about which process this
-    # is and never about the caller, so it lands identically on the
-    # console's own upgrade and on a hostile one. Asserted because the
-    # tempting simplification -- folding it into `_cross_site_upgrade`,
-    # which fires only when a cookie is PRESENT -- would let a socket with
-    # no cookie straight through to the token path on the sample origin.
+    # A cookie changes nothing: this refusal is about which process this is, never the caller, so it lands
+    # identically on the console's own upgrade and a hostile one. Folding it into `_cross_site_upgrade`,
+    # which fires only when a cookie is present, would let a socket with no cookie through to the token path
+    # on the sample origin.
     for extra in ({"cookie": "__Host-session=abc", "origin": SAMPLE},
                   {"cookie": "__Host-session=abc", "origin": APP},
                   {"origin": "https://evil.example"}):
@@ -411,23 +347,17 @@ def test_the_sample_origin_process_is_refused_its_socket_before_accept(
 
 def test_every_deployment_that_is_not_the_sample_origin_keeps_its_socket(
         monkeypatch):
-    """The fail direction, which for this check costs an outage rather
-    than a breach.
+    """The fail direction, which for this check costs an outage rather than a breach.
 
-    `origin_split()` has five verdicts and only one of them means "this
-    process serves the bytes". The other four are a deployment with no
-    split configured, one whose `NOCTORNAL_SAMPLE_ORIGIN` is not an
-    origin, one that names the application origin, and the application
-    process itself -- and every one of them still runs the console. A
-    check written as "is a sample origin configured" rather than "am I
-    it" would read three of those the same way and take the live channel
-    down for every analyst, silently: a pre-accept close reaches a browser
-    as 1006 with neither code nor reason, so the console would report only
-    that live is off and the answer would exist nowhere but in a diff.
+    `origin_split()` has five verdicts and only one means "this process serves the bytes". The other four
+    are a deployment with no split configured, one whose `NOCTORNAL_SAMPLE_ORIGIN` is not an origin, one
+    that names the application origin, and the application process itself, and each still runs the console.
+    A check written as "is a sample origin configured" rather than "am I it" would read three of those the
+    same way and take the live channel down for every analyst, silently: a pre-accept close reaches a
+    browser as 1006 with neither code nor reason.
 
-    Getting past the refusal is the whole assertion, and is all this file
-    can watch without a database: with no hello frame the socket accepts
-    and then closes "no credentials" one step into `_handshake`.
+    Getting past the refusal is the whole assertion, and all this file can watch without a database: with no
+    hello frame the socket accepts and then closes "no credentials" one step into `_handshake`.
     """
     from noctornal_api.samples import origin_split
     for role, config in (("unconfigured", {"sample": ""}),
@@ -485,29 +415,20 @@ def _scope(kind: str, path: str) -> dict:
 
 
 def test_the_http_gate_never_sees_the_upgrade_the_socket_refuses(monkeypatch):
-    """Why the check in `live()` is not a duplicate, measured on one
-    assembled app rather than asserted in a comment.
+    """Why the check in `live()` is not a duplicate, measured on one assembled app.
 
-    Both scopes go to the SAME `create_app()`, at the same moment, under
-    the same configuration. On the sample-origin process the http scope is
-    refused by `_allowed_on_sample_origin`'s 404 and the websocket scope
-    reaches the endpoint untouched, because Starlette runs an
-    `@app.middleware("http")` for an `http` scope only. Anyone who reads
-    the socket's check as redundant with that middleware and deletes it
-    can run this: the http half will still pass and the websocket half
-    will not.
+    Both scopes go to the same `create_app()` under the same configuration. On the sample-origin process the
+    http scope is refused by `_allowed_on_sample_origin`'s 404 and the websocket scope reaches the endpoint
+    untouched, because Starlette runs an `@app.middleware("http")` for an `http` scope only. Anyone who
+    deletes the socket's check as redundant with that middleware fails the websocket half.
 
-    The two answers are then held to AGREE across every verdict
-    `origin_split()` produces, which is what reading the one verdict buys.
-    An edit that gives either file a comparison of its own -- against
-    `sample_origin()` alone, say, or against `app_origin()` -- makes them
-    disagree for at least one of these five deployments, and this names
-    which.
+    The two answers are then held to agree across every verdict `origin_split()` produces. An edit that
+    gives either file a comparison of its own (against `sample_origin()` alone, or `app_origin()`) makes them
+    disagree for at least one of the five deployments, and this names which.
 
-    `/api/v1/no-such-route` deliberately routes nowhere, so every
-    configuration answers 404 and the sample-origin refusal is told apart
-    by its DETAIL rather than by its status. It also keeps this file's
-    promise: an unrouted path touches no database.
+    `/api/v1/no-such-route` deliberately routes nowhere, so every configuration answers 404 and the
+    sample-origin refusal is told apart by its detail rather than its status. An unrouted path also touches
+    no database.
     """
     from noctornal_api.http.app import create_app
     from noctornal_api.samples import origin_split
@@ -541,17 +462,12 @@ def test_the_http_gate_never_sees_the_upgrade_the_socket_refuses(monkeypatch):
 
 
 def test_the_origin_the_request_arrived_on_is_accepted(monkeypatch):
-    """The half that was added after the first half was measured.
+    """The origin the request arrived on is accepted, not only the configured one.
 
-    On the shipped laptop configuration `scripts/launch.ps1` binds
-    `127.0.0.1:8000` and leaves `NOCTORNAL_BASE_URL` at its matching
-    default, while the console is opened at `localhost:8000`. Those are
-    two origins and no browser treats them as one, so comparing against
-    configuration alone refused every live socket -- before `accept()`,
-    which reaches the browser with neither code nor reason, so the console
-    could only report that live was off. Measured in a browser against
-    this tree on 2026-09-10, which is how it was found rather than
-    reasoned about.
+    On the shipped laptop configuration `scripts/launch.ps1` binds `127.0.0.1:8000` and leaves
+    `NOCTORNAL_BASE_URL` at its matching default, while the console is opened at `localhost:8000`. Those are
+    two origins and no browser treats them as one, so comparing against configuration alone would refuse
+    every live socket before `accept()`, which reaches the browser with neither code nor reason.
     """
     _configured(monkeypatch, app="http://127.0.0.1:8000")
     assert _cross_site_upgrade(_upgrade(

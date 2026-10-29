@@ -1,11 +1,9 @@
-"""The Deception pane's later fixes (review of 2026-09-22, closed
-on 2026-09-23): the channels pivot on what they share, the Received chain
-says where trust ends, the call row says what the network recorded and
-how far it vouches, the web capture shows its durable identifiers, and
-all three channels can be recorded from the console.
+"""The Deception pane's console behaviour: the channels pivot on what they share, the Received chain
+says where trust ends, the call row says what the network recorded and how far it vouches, the web
+capture shows its durable identifiers, and all three channels can be recorded from the console.
 
-Pure: the shipped console and the service's pure helpers. The database
-half is `test_deception_crosschannel_pg.py`.
+Pure: the shipped console and the service's pure helpers. The database half is
+`test_deception_crosschannel_pg.py`.
 """
 from __future__ import annotations
 
@@ -40,10 +38,6 @@ def _fn(name: str) -> str:
 def _router() -> str:
     return (SRC / "http" / "routers" / "deception.py").read_text(encoding="utf-8")
 
-
-# ---------------------------------------------------------------------------
-# ux14-deception:ecrime-no-cross-channel-pivot
-# ---------------------------------------------------------------------------
 
 def test_every_record_says_where_else_its_hosts_and_addresses_appear():
     for fn in ("captureRow", "emailRow", "callRow", "openCapture",
@@ -83,8 +77,7 @@ def test_proposing_from_a_record_names_a_key_and_nothing_else():
     assert 'permission_key="evidence.upload"' in route
     assert "check_writable_labels(" in route
     assert "svc.propose(case_id, channel, record, body.key," in route
-    # Proposed under the reader's own ceiling, so "already an entity" is
-    # said only of one they may see (the verifier, 2026-09-23).
+    # Proposed under the reader's own ceiling, so "already an entity" is said only of one they may see.
     assert "clearance=clearance, compartments=comps)" in route
     service = (SRC / "deception.py").read_text(encoding="utf-8")
     body = service[service.index("    def propose(self"):]
@@ -95,8 +88,7 @@ def test_proposing_from_a_record_names_a_key_and_nothing_else():
 
 
 def test_case_search_reaches_the_deception_records():
-    """ux14-deception:ecrime-no-cross-channel-pivot, its last part (2026-09-23):
-    "index deception hosts, IPs and URLs in case search"."""
+    """Case search indexes deception hosts, IPs and URLs."""
     from noctornal_api.deception import (
         SEARCH_MIN,
         _observe,
@@ -194,11 +186,9 @@ def test_the_presented_number_and_an_unconfirmed_sender_are_never_proposed():
 
 
 def test_the_victims_end_of_a_call_is_never_proposed_as_the_actors():
-    """Final review u17 (2026-09-24): the SIP To host was offered as INFRA
-    whatever the call's direction. On a vishing call the To URI is the
-    callee, so the victim's own PBX was one Triage click from the actor's
-    graph. When the victim placed the call, From and P-Asserted-Identity
-    are the victim's instead."""
+    """The SIP To host is not offered as INFRA whatever the call's direction. On a vishing call the To
+    URI is the callee, so the victim's own PBX would be one Triage click from the actor's graph. When
+    the victim placed the call, From and P-Asserted-Identity are the victim's instead."""
     from noctornal_api.deception import proposal_candidates
     call = {"id": "k1", "source_ip": "203.0.113.44",
             "sip_from_uri": "sip:44471@trunk-04.example",
@@ -224,10 +214,6 @@ def test_the_sip_host_and_url_host_helpers():
     assert _host_of("a.example/login") == "a.example"
 
 
-# ---------------------------------------------------------------------------
-# ux14-deception:received-chain-above-below
-# ---------------------------------------------------------------------------
-
 def test_the_chain_says_where_trust_ends_in_words_and_not_in_green():
     body = _code(_fn("openDeceptionEmail"))
     assert "'chip good', 'trust boundary'" not in body, (
@@ -240,9 +226,8 @@ def test_the_chain_says_where_trust_ends_in_words_and_not_in_green():
 
 
 def test_the_chain_note_points_at_the_line_only_when_it_is_drawn():
-    """The verifier's nit (2026-09-23): the note named a line marked "trust
-    ends here" on a chain with no hop below the boundary, where no line is
-    drawn, and on an assumed boundary, where the line reads otherwise."""
+    """The note points at the "trust ends here" line only where it is drawn: not on a chain with no hop
+    below the boundary, and not on an assumed boundary, where the line reads otherwise."""
     body = _code(_fn("openDeceptionEmail"))
     note = body[body.index("note.textContent ="):body.index("chain.appendChild(note)")]
     assert '"trust ends here"' not in note
@@ -257,8 +242,8 @@ def test_the_chain_note_points_at_the_line_only_when_it_is_drawn():
 
 
 def test_the_first_lure_is_dated_by_infrastructure_and_says_which_time():
-    """The verifier (2026-09-23): the first lure was ordered by the Date
-    header, the sender's to write."""
+    """The first lure is dated by infrastructure, not by the Date header, which is the sender's to
+    write."""
     service = (SRC / "deception.py").read_text(encoding="utf-8")
     lure = service[service.index("    def first_lure(self"):]
     lure = _code(lure[:lure.index("\n    def ", 10)])
@@ -269,10 +254,6 @@ def test_the_first_lure_is_dated_by_infrastructure_and_says_which_time():
     age = _fn("certificateAge")
     assert "LURE_BASIS_WORDS[lure.basis]" in age
 
-
-# ---------------------------------------------------------------------------
-# ux14-deception:calls-vouched-and-tooltip-only
-# ---------------------------------------------------------------------------
 
 def test_the_call_block_is_neutral_and_says_what_the_attestation_means():
     row = _fn("callRow")
@@ -310,10 +291,6 @@ def test_the_presented_number_is_shown_as_displayed_first():
         "the E.164 form is shown as what the victim saw")
 
 
-# ---------------------------------------------------------------------------
-# ux14-deception:no-deception-ingest-ui
-# ---------------------------------------------------------------------------
-
 def test_all_three_channels_can_be_recorded_from_the_console():
     html = _html()
     for form in ("dcp-cap-new", "dcp-eml-new", "dcp-call-new"):
@@ -340,7 +317,7 @@ def test_the_forms_hold_the_legal_fields_the_table_holds():
 def test_each_empty_state_says_how_records_arrive():
     html = _html()
     for empty in ("dcp-cap-empty", "dcp-eml-empty", "dcp-call-empty"):
-        # `hidden` until the list answers (ux17-failure:loading-shows-empty-claims).
+        # `hidden` until the list answers.
         text = re.search(r'<p id="' + empty + r'" class="empty"[^>]*>([^<]*)</p>', html)
         assert text and "ingest API" in text.group(1), f"#{empty} gives no next step"
 
@@ -354,10 +331,6 @@ def test_the_forms_are_emptied_on_a_case_switch():
     for form in ("dcp-cap-new", "dcp-eml-new", "dcp-call-new"):
         assert f"dcpResetForm('{form}')" in m.group(1)
 
-
-# ---------------------------------------------------------------------------
-# ux14-deception:web-durable-ids-missing
-# ---------------------------------------------------------------------------
 
 def test_the_capture_shows_asn_certificate_age_and_favicon():
     detail = _fn("openCapture")

@@ -1,16 +1,12 @@
 """A fresh install's operator can add their team, over HTTP.
 
-Final review U18 (2026-09-23). Account creation and TOTP re-enrolment
-shared the administrator's own `auth.recovery_codes` meter: three at
-once, then one every twelve minutes. First run spends one of the three
-issuing the operator's recovery codes, so the operator could add two
-colleagues and the third was a 429. A refused request spends from a meter
-too (the limit runs before the gate's step-up check), so every click from
-a session whose step-up had lapsed also used up a chance to reissue their
-own codes.
+Account creation and TOTP re-enrolment must not share the administrator's own `auth.recovery_codes`
+meter (three at once, then one every twelve minutes). First run spends one of the three issuing the
+operator's recovery codes, so the third colleague would be a 429. A refused request spends from a
+meter too (the limit runs before the gate's step-up check), so every click from a session whose
+step-up had lapsed would also use up a chance to reissue their own codes.
 
-Both tests fail on 1667cc1. Email prefix `acl-`, unique to this file.
-Env-gated on DATABASE_URL.
+Email prefix `acl-`, unique to this file. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -86,8 +82,7 @@ def _create(client, auth):
 
 def test_after_first_run_the_operator_can_add_a_team_and_still_reissue_codes(
         conn, client):
-    """The finding's sequence: first-run codes, then colleagues. Six is
-    double what the shared bucket allowed after first run."""
+    """First-run codes, then colleagues. Six is double what the shared bucket allowed after first run."""
     auth = _auth(conn, _admin(conn))
     first_run = client.post("/api/v1/auth/recovery-codes", headers=auth)
     assert first_run.status_code == 200, first_run.text

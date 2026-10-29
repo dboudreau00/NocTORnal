@@ -1,39 +1,20 @@
-"""Where an outbound connection may go: the one address classifier, the
-destination rules, the route policy, the closed table of egress codes and
-the route data every client and the egress proxy share (2026-09-24;
-docs/00 decisions 68 and 77, docs/20 section 2).
+"""Where an outbound connection may go: the one address classifier, the destination rules, the route policy, the
+closed table of egress codes and the route data every client and the egress proxy share (docs/00 decisions 68
+and 77, docs/20 section 2).
 
-## Why this is its own module
+Two address classifiers are two answers to "may this process reach that address", and the one that drifts is
+the leak, so the rule has one home that the pinned client (pinned_http), the route layer (egress) and the egress
+proxy process all import. The proxy must not import an HTTP client, which is why the classifier is not in
+pinned_http either. This module opens no socket except the ONE `socket.getaddrinfo` inside `resolve_and_pin`
+(looked up as a module attribute so the test suites' fake resolvers still intercept it), reads no environment
+variable (`internal_networks` takes the mapping it reads), and imports no psycopg, http.client or ssl. It changes
+only together with docs/20 (section 1): every code, grammar rule and field a consumer needs is here.
 
-The SSRF classifier lived privately in collection.py, and three
-integrations, as first planned, each carried a second one of their own (a
-notification relay admitting all of RFC 1918, an embeddings locality
-table, a lookup `inside=` argument). Two classifiers are two answers to "may this process
-reach that address", and the one that drifts is the leak. So the rule has
-one home, and the pinned client (pinned_http), the route layer (egress) and
-the egress proxy process (S2) all import it. The proxy must not import
-an HTTP client, which is why the classifier is not in pinned_http either.
-
-## What it touches
-
-It opens no socket except the ONE `socket.getaddrinfo` inside
-`resolve_and_pin`, which is looked up as a module attribute so the test
-suites' fake resolvers still intercept it. It reads no environment
-variable: `internal_networks` takes the mapping it reads. It imports no
-psycopg, http.client or ssl. It changes only together with docs/20
-(section 1): every code, grammar rule and field a consumer needs is here,
-so a need it does not meet is a change to that document first.
-
-## Private space is reachable only through a rule that names it
-
-Decision 68 allows a private-range destination ONLY when an allowlist
-entry names it explicitly; nothing else private is reachable. So admitting a
-private address takes an integration route whose rule names the host AND
-the network its answers must fall in (`jira.corp.example@10.20.0.0/24:443`),
-or a network rule that an IP-literal target falls in. Never a blanket
-"private is fine", which was the defect in the notification relay's own
-classifier. Cloud metadata addresses and the deployment's own networks are
-refused on every route, whatever a rule says.
+Private space is reachable only through a rule that names it (decision 68). Admitting a private address takes an
+integration route whose rule names the host AND the network its answers must fall in
+(`jira.corp.example@10.20.0.0/24:443`), or a network rule that an IP-literal target falls in. Never a blanket
+"private is fine". Cloud metadata addresses and the deployment's own networks are refused on every route,
+whatever a rule says.
 """
 from __future__ import annotations
 
@@ -53,11 +34,8 @@ import idna
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
-#: Every user-facing sentence that cites the egress decision cites it
-#: through this constant, and the tests build the expected text from it.
-#: One constant (2026-09-24), because a literal citation written into
-#: twenty strings would be twenty edits, and the one that is missed is a
-#: wrong citation.
+#: Every user-facing sentence that cites the egress decision cites it through this constant, and the tests build
+#: the expected text from it, so a citation written into many strings cannot be left wrong by a missed edit.
 DECISION_REF = "decision 68"
 
 
@@ -65,16 +43,11 @@ DECISION_REF = "decision 68"
 # The classifier, moved verbatim from collection.py (docs/20 section 2.2)
 # ---------------------------------------------------------------------------
 
-#: Private ranges an outbound fetch must never reach. Since
-#: sec-ssrf-rebinding (2026-09-23) the address judged here is the address
-#: connected to, so this list guards the socket and not just the lookup.
-#:
-#: docs/17 F15(f): the enumerated list missed `::ffff:127.0.0.1` (the
-#: IPv4-mapped form of loopback, which `ip_address` parses as IPv6 and
-#: which no entry here matched), the unspecified address `::`, and the
-#: 100.64/10, 192.0.0/24 and 198.18/15 ranges. Enumerating was the
-#: mistake -- `is_blocked` below asks the address what it IS and uses
-#: this list only for the cases the stdlib does not classify.
+#: Private ranges an outbound fetch must never reach. The address judged here is the address connected to, so
+#: this list guards the socket and not just the lookup. `is_blocked` below asks the address what it IS and uses
+#: this list only for the cases the stdlib does not classify: an enumerated list alone misses `::ffff:127.0.0.1`
+#: (the IPv4-mapped form of loopback), the unspecified address `::`, and the 100.64/10, 192.0.0/24 and 198.18/15
+#: ranges.
 BLOCKED_NETWORKS = [
     ipaddress.ip_network(n) for n in (
         "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
@@ -91,12 +64,9 @@ BLOCKED_NETWORKS = [
         # The unspecified address. `http://[::]/` and `http://0.0.0.0/`
         # both reach the local host on most stacks.
         "::/128",
-        # Deprecated IPv6 site-local. RFC 3879 deprecated it, so Python's
-        # `ipaddress` reports is_private=False, is_global=TRUE and
-        # is_reserved=False -- none of the stdlib predicates fire, and
-        # `fc00::/7` does not cover it. Still routed internally on any
-        # network that predates ULA, which is most of the ones that have
-        # an internal IPv6 plan at all.
+        # Deprecated IPv6 site-local (RFC 3879). Python's `ipaddress` reports is_private=False, is_global=True and
+        # is_reserved=False for it, so no stdlib predicate fires, and `fc00::/7` does not cover it. Still routed
+        # internally on any network that predates ULA.
         "fec0::/10",
     )
 ]
@@ -114,10 +84,9 @@ METADATA_HOSTS = frozenset({
 def is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Ask the address what it is, then check the ranges the stdlib misses.
 
-    `ipv4_mapped` is the load-bearing line: `::ffff:127.0.0.1` parses as an
-    IPv6Address, is not `is_loopback`, and matched no entry in the
-    enumerated list -- so it was a complete bypass of this check with a
-    two-character prefix.
+    `ipv4_mapped` is the load-bearing line: `::ffff:127.0.0.1` parses as an IPv6Address, is not `is_loopback`
+    and matches no entry in the enumerated list, so without it the check is bypassed with a two-character
+    prefix.
     """
     mapped = getattr(address, "ipv4_mapped", None)
     if mapped is not None:
@@ -139,13 +108,10 @@ def is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 # New facts (docs/20 section 2.2)
 # ---------------------------------------------------------------------------
 
-#: Instance metadata services, refused on every route, in every mode, even
-#: inside a rule's network. Every one but the last is already `is_blocked`,
-#: so the collector's verdicts do not change for them; they matter wherever
-#: a rule admits private space. 168.63.129.16 is Azure's platform endpoint
-#: (WireServer, and the host agent on 32526): PUBLIC space, so the
-#: classifier alone would admit it from an Azure VM, and it is a documented
-#: SSRF target (2026-09-24).
+#: Instance metadata services, refused on every route, in every mode, even inside a rule's network. Every one
+#: but the last is already `is_blocked`; they matter wherever a rule admits private space. 168.63.129.16 is
+#: Azure's platform endpoint (WireServer, and the host agent on 32526): PUBLIC space, so the classifier alone
+#: would admit it from an Azure VM, and it is a documented SSRF target.
 METADATA_ADDRESSES = frozenset(ipaddress.ip_address(a) for a in (
     "169.254.169.254",   # AWS, GCP, Azure and OpenStack instance metadata
     "169.254.170.2",     # AWS ECS task metadata
@@ -164,10 +130,8 @@ PRIVATE_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "100.64.0.0/10",
 ))
 
-#: What `localhost` means: both loopback networks. A dual-stack resolver
-#: (Windows) answers ::1 and 127.0.0.1 for the name, and a rule that
-#: implied only one of them refused the whole host on the other answer
-#: (the Mailpit relay, 2026-09-24).
+#: What `localhost` means: both loopback networks. A dual-stack resolver (Windows) answers ::1 and 127.0.0.1 for
+#: the name, and a rule that implied only one of them would refuse the whole host on the other answer.
 LOOPBACK_NETWORKS = (ipaddress.ip_network("127.0.0.0/8"),
                      ipaddress.ip_network("::1/128"))
 
@@ -251,14 +215,11 @@ def locality(address: IPAddress) -> str:
 
 
 def internal_networks(env: Mapping[str, str], *, production: bool) -> tuple[IPNetwork, ...]:
-    """The deployment's own networks, which no rule may overlap and no
-    answer may fall in, on any route.
+    """The deployment's own networks, which no rule may overlap and no answer may fall in, on any route.
 
-    Blank is UNSET, and unset in production is the compose default: a
-    compose file writing `VAR: ""` or `${VAR:-}` must not turn the guard
-    off (2026-09-24). A malformed value is ValueError with
-    one sentence; config refuses it in production and route_for turns it
-    into RouteUnavailable(config_error)."""
+    Blank is UNSET, and unset in production is the compose default: a compose file writing `VAR: ""` or
+    `${VAR:-}` must not turn the guard off. A malformed value is ValueError with one sentence; config refuses it
+    in production and route_for turns it into RouteUnavailable(config_error)."""
     raw = env.get(INTERNAL_CIDRS_ENV)
     if raw is None or not raw.strip():
         if production:
@@ -487,23 +448,18 @@ def _literal(host: str) -> IPAddress | None:
 def normalise_host(host: str | None) -> str:
     """One spelling per destination, or Refusal(bad_host).
 
-    Strip, drop ONE trailing dot, and brackets around an IPv6 literal. An
-    IP literal becomes its compressed form (a zone id is refused: it names
-    an interface on this host). An ASCII name is lower-cased, and every
-    label must match the name pattern (underscores allowed, internal names
-    carry them). A non-ASCII name becomes its UTS-46 A-label, the ontology's
-    DOMAIN rule, so a rule and a URL naming the same IDN agree.
+    Strip, drop ONE trailing dot, and brackets around an IPv6 literal. An IP literal becomes its compressed form
+    (a zone id is refused: it names an interface on this host). An ASCII name is lower-cased, and every label
+    must match the name pattern (underscores allowed, internal names carry them). A non-ASCII name becomes its
+    UTS-46 A-label, the ontology's DOMAIN rule, so a rule and a URL naming the same IDN agree.
 
-    A name whose LAST label is all digits or begins with 0x is refused:
-    the WHATWG URL parser's "ends in a number" rule. `2130706433`, `127.1`,
-    `0x7f.1` and `0177.0.0.1` are not `ipaddress` literals and every label
-    of them matches the name pattern, and an inet_aton-style resolver at a
-    chained exit reads each as 127.0.0.1.
+    A name whose LAST label is all digits or begins with 0x is refused: the WHATWG URL parser's "ends in a
+    number" rule. `2130706433`, `127.1`, `0x7f.1` and `0177.0.0.1` are not `ipaddress` literals and every label
+    of them matches the name pattern, and an inet_aton-style resolver at a chained exit reads each as 127.0.0.1.
 
-    Idempotent (2026-09-24): the literal and numeric checks
-    run on the UTS-46 OUTPUT, because the mapping turns an ideographic
-    full stop into a dot and fullwidth digits into digits, and a
-    non-ASCII spelling of an address is an attempt, not a name.
+    Idempotent: the literal and numeric checks run on the UTS-46 OUTPUT, because the mapping turns an
+    ideographic full stop into a dot and fullwidth digits into digits, and a non-ASCII spelling of an address is
+    an attempt, not a name.
     """
     if host is None:
         raise Refusal("bad_host", "the destination names no host")
@@ -559,9 +515,8 @@ class Target(NamedTuple):
 
 
 def split_url(url: str) -> Target:
-    """The collector's URL checks, in its order and with its messages
-    (collection._resolve_and_check before this module), each raised as a Refusal
-    carrying its code; then the host normalised and the selector built."""
+    """The collector's URL checks, in its order and with its messages, each raised as a Refusal carrying its
+    code; then the host normalised and the selector built."""
     try:
         parsed = urllib.parse.urlsplit(url)
     except ValueError:
@@ -627,15 +582,12 @@ def _single(address: IPAddress) -> IPNetwork:
 
 @dataclass(frozen=True)
 class Rule:
-    """Where a route may go, in one of four shapes: a host; a host plus a
-    network (a NAMED destination whose every answer must fall in the
-    network); a suffix; a network alone (IP-literal targets).
+    """Where a route may go, in one of four shapes: a host; a host plus a network (a NAMED destination whose every
+    answer must fall in the network); a suffix; a network alone (IP-literal targets).
 
-    An address written as a host becomes a network rule of that one
-    address (/32 or /128). That is the one decision for literal hosts
-    (2026-09-24): an IP-literal target is matched only by
-    a network-alone rule that contains it, on a listed port, and a
-    host@network rule is reached by its name and never by an address.
+    An address written as a host becomes a network rule of that one address (/32 or /128). That is the one
+    decision for literal hosts: an IP-literal target is matched only by a network-alone rule that contains it, on
+    a listed port, and a host@network rule is reached by its name and never by an address.
     """
 
     ports: frozenset[int]
@@ -979,11 +931,9 @@ def check_destination(policy: RoutePolicy, host: str, port: int, *,
             raise Refusal("port_not_allowed", f"{h}: " + explain("port_not_allowed"),
                           host=h)
     if literal is not None and policy.admission == "local":
-        # The collector's seam decides a literal exactly as it decides a
-        # resolved answer, so a suite that stands 127.0.0.1 in for a public
-        # address reaches the redirect logic (the IP-literal seam). Under
-        # "proxy" a literal is only matched: the proxy
-        # classifies.
+        # The collector's seam decides a literal exactly as it decides a resolved answer, so a suite that stands
+        # 127.0.0.1 in for a public address reaches the redirect logic. Under "proxy" a literal is only matched:
+        # the proxy classifies.
         try:
             admit(literal, policy=policy, rule=rule, _blocked_override=_blocked_override)
         except Refusal as refusal:
@@ -1113,14 +1063,11 @@ def resolve_and_pin(host: str, port: int, *, policy: RoutePolicy,
 PASSIVE_PROFILE = "passive"
 PERSONA_CONTEXTS = ("run", "act", "stop")
 INTEGRATION_CONTEXTS = ("delivery", "lookup", "detonation", "embed", "wkd", "check")
-#: The integration route name, as a pattern string so the egress proxy's
-#: CHECK on its route table uses the same text (docs/20 section 4.1), at
-#: most 40 characters. A lookup route is "lookup-" plus the provider key
-#: through `family_route_name`, so a provider key that is to have a route
-#: is at most 33 characters; a longer one is refused as configuration by
-#: route_for, never widened here, because the proxy's table and this
-#: pattern must not disagree (2026-09-24). The longest wire username the
-#: grammar emits is 100 characters.
+#: The integration route name, as a pattern string so the egress proxy's CHECK on its route table uses the same
+#: text (docs/20 section 4.1), at most 40 characters. A lookup route is "lookup-" plus the provider key through
+#: `family_route_name`, so a provider key that is to have a route is at most 33 characters; a longer one is
+#: refused as configuration by route_for, never widened here, because the proxy's table and this pattern must
+#: not disagree. The longest wire username the grammar emits is 100 characters.
 INTEGRATION_NAME = r"^[a-z][a-z0-9-]{1,39}$"
 _INTEGRATION_NAME = re.compile(INTEGRATION_NAME)
 WIRE_USERNAME_MAX = 128
@@ -1136,16 +1083,12 @@ def canonical_uuid(text: str) -> str | None:
 
 
 def family_route_name(prefix: str, key: str) -> str:
-    """The integration route name of one member of a family: the prefix
-    and the key with each underscore written as a hyphen, because a route
-    name carries no underscore and lookup provider keys do
-    ("virustotal_v3" is "lookup-virustotal-v3"). The lookup providers
-    (F15) and the egress administration both call this, so the name the
-    client asks for and the name the administrator's route row carries
-    cannot disagree. A provider key carries no hyphen, so the mapping
-    never makes two keys one name.
-    ValueError when the result is not a route name (a key over 33
-    characters with the "lookup-" prefix)."""
+    """The integration route name of one member of a family: the prefix and the key with each underscore written
+    as a hyphen, because a route name carries no underscore and lookup provider keys do ("virustotal_v3" is
+    "lookup-virustotal-v3"). The lookup providers and the egress administration both call this, so the name the
+    client asks for and the name the administrator's route row carries cannot disagree. A provider key carries
+    no hyphen, so the mapping never makes two keys one name.
+    ValueError when the result is not a route name (a key over 33 characters with the "lookup-" prefix)."""
     name = f"{prefix}{key.replace('_', '-')}"
     if not key or not _INTEGRATION_NAME.match(name):
         raise ValueError(f"{prefix!r} plus that key is not an integration route name")

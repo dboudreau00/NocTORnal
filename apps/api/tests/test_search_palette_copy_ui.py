@@ -1,12 +1,9 @@
-"""The Search pane, the Ctrl+K palette and the copy findings closed with
-them (ux09-search and ux19-copy, 2026-09-23), held by reading and running
-the shipped files.
+"""The Search pane, the Ctrl+K palette and their copy, held by reading and running the shipped files.
 
-Pure, like test_ui_invariants.py beside it: no database and no browser.
-The checks marked `needs_node` EXECUTE the shipped functions under Node
-with small stubs, because "a jump centres the entity" or "a refusal names
-the roles" is a claim about what a function does; they skip where Node is
-not installed. The database half is test_search_columns_pg.py.
+Pure, like test_ui_invariants.py beside it: no database and no browser. The checks marked `needs_node`
+EXECUTE the shipped functions under Node with small stubs, because "a jump centres the entity" or "a
+refusal names the roles" is a claim about what a function does; they skip where Node is not installed.
+The database half is test_search_columns_pg.py.
 """
 from __future__ import annotations
 
@@ -211,14 +208,10 @@ def _server_strings() -> list[tuple[str, str]]:
 
 
 def test_nothing_a_reader_sees_sends_them_to_lifecycle():
-    """u23 (2026-09-24): the rail tab became Records and two strings
-    written in the same pass still said Lifecycle. The readiness register
-    told an operator to confirm retention rules "under Lifecycle,
-    Retention" one line above the console's own "then Records, Retention",
-    and a case review notification offered "Open Lifecycle". No tab, pane
-    or section is called that, so every word a reader can see is checked:
-    the console's strings, the page's text, the server's strings and the
-    manual's headings."""
+    """No tab, pane or section is called Lifecycle (the rail tab is Records), so every word a reader can
+    see is checked: the console's strings, the page's text, the server's strings and the manual's
+    headings. The readiness register must not send an operator "under Lifecycle, Retention", nor a case
+    review notification offer "Open Lifecycle"."""
     word = re.compile(r"\bLifecycle\b")
     js = [s for s in re.findall(r"'(?:[^'\\\n]|\\.)*'", _code(_js()))
           if word.search(s)]
@@ -235,8 +228,7 @@ def test_nothing_a_reader_sees_sends_them_to_lifecycle():
 
 
 def test_the_pane_a_rail_tile_opens_is_headed_in_the_tiles_words():
-    """The rail said "Add link" and the pane it opened "Add relationship"
-    (verifier of one-concept-many-names, 2026-09-23)."""
+    """A pane a rail tile opens is headed in the tile's own words ("Add link", not "Add relationship")."""
     html = _visible(_html())
     pane = html[html.index('id="pane-add-edge"'):]
     pane = pane[:pane.index("</section>")]
@@ -247,10 +239,8 @@ def test_the_pane_a_rail_tile_opens_is_headed_in_the_tiles_words():
 
 
 def test_the_analysis_pane_calls_an_entity_an_entity():
-    """"Actor" was the Analysis pane's word for what every other pane
-    calls an entity, 13 times in the console and 13 in the page
-    (verifier of one-concept-many-names, 2026-09-23). The Deception pane's
-    "the actor's tracking pixel" is the sender, a person, not an entity."""
+    """The Analysis pane calls an entity an entity, as every other pane does. The Deception pane's "the
+    actor's tracking pixel" is the sender, a person, not an entity."""
     html = _visible(_html())
     an = html[html.index('id="pane-analytics"'):]
     an = an[:an.index("</section>")]
@@ -410,11 +400,9 @@ def test_a_hit_row_carries_chips_and_a_reason_and_no_bare_rank():
 
 @needs_node
 def test_every_hit_says_why_it_is_there(tmp_path):
-    """A query split across parts names the parts, and never claims the
-    name unless the server says the name holds a word: "meridian exchange"
-    found 18 personas through crew and first_seen_forum, and every row said
-    "via the name and attributes together" (verifier of
-    hit-rows-unexplained, 2026-09-23)."""
+    """A query split across parts names the parts, and never claims the name unless the server says the
+    name holds a word: "meridian exchange" matches personas through crew and first_seen_forum, and no row
+    may say "via the name and attributes together"."""
     got = _run([_fn("nameReason"), _fn("exhibitReason"), _fn("assertionReason"),
                 _fn("listWords"),
                 "function visibleText(s) { return String(s); }"], """
@@ -501,7 +489,7 @@ def test_an_assertion_hit_opens_its_element_and_its_card():
 
 
 # ---------------------------------------------------------------------------
-# ux19-copy: raw enums, opacity, the readout, refusals, help and banners
+# Copy: raw enums, opacity, the readout, refusals, help and banners
 # ---------------------------------------------------------------------------
 
 @needs_node
@@ -585,8 +573,8 @@ console.log(JSON.stringify([
   roleWords('The case.read permission opens it.'),
 ]));
 """, tmp_path)
-    # A code that opens a sentence opens it with a capital: "Refused. the
-    # Security officer role is granted to ..." (verifier, 2026-09-23).
+    # A code that opens a sentence opens it with a capital: "Refused. the Security officer role is granted
+    # to ..." is wrong.
     assert got[6] == ("The Analyst or Lead investigator role opens it. So does "
                       "the Analyst or Lead investigator role.")
     assert got[7] == "The Analyst or Lead investigator role opens it."
@@ -662,8 +650,8 @@ def test_no_string_in_the_console_cites_a_design_document_or_invariant():
 
 @needs_node
 def test_a_lapsed_session_says_why_in_words(tmp_path):
-    """The sign-in sheet printed "Your session has ended (the server said:
-    no session token)." (verifier of developer-speak-in-copy, 2026-09-23)."""
+    """The sign-in sheet says why a session lapsed in words, not "Your session has ended (the server
+    said: no session token)."."""
     got = _run([_fn("lapseReason")], """
 console.log(JSON.stringify([
   lapseReason('no session token'), lapseReason('invalid or expired session'),
@@ -679,21 +667,18 @@ console.log(JSON.stringify([
     assert "lapseReason(info.detail)" in lapse and "(the server said: '" not in lapse
 
 
-#: Server files whose strings are the OPERATOR's: startup refusals and log
-#: lines (config, limits) and the readiness register, a checklist for
-#: whoever deploys, who has the documents it cites. And egress's "invariant
-#: 8", which that module keeps on purpose (the tests that tie the refusal
-#: to the rule assert on it).
+#: Server files whose strings are the OPERATOR's: startup refusals and log lines (config, limits) and the
+#: readiness register, a checklist for whoever deploys, who has the documents it cites. And egress's
+#: "invariant 8", which that module keeps on purpose (the tests that tie the refusal to the rule assert on
+#: it).
 _OPERATOR_COPY = {"config.py", "readiness.py", "http/limits.py", "egress.py"}
 
 
 def test_no_server_string_a_console_user_reads_cites_a_design_document():
-    """The verifier of developer-speak-in-copy (2026-09-23) found the L4
-    notice fixed and its twin, "docs/16 L2 is BLOCKING and unresolved",
-    printed when a key is issued, with "docs/10:", "(docs/12)", "(docs/08)"
-    and "(invariant 12)" in refusals, proposal rationales and notifications.
-    Docstrings, comments and OpenAPI descriptions are not read in the
-    console and are not checked."""
+    """No string a console user reads cites a design document ("docs/16 L2 is BLOCKING and unresolved",
+    "docs/10:", "(docs/12)", "(docs/08)", "(invariant 12)" in refusals, proposal rationales and
+    notifications). Docstrings, comments and OpenAPI descriptions are not read in the console and are not
+    checked."""
     import ast
     cited = []
     for path in sorted(SRC.rglob("*.py")):

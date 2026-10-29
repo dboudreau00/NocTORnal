@@ -1,23 +1,20 @@
-"""The catalog and the row-level security registry agree (S1, 2026-09-25).
+"""The catalog and the row-level security registry agree.
 
-`noctornal_api/rls_registry.py` classifies every table in the product
-schemas as under policy, exempt with a reason, or deferred with the reader
-work still owed. These tests hold the database to it, so that:
+`noctornal_api/rls_registry.py` classifies every table in the product schemas as under policy, exempt
+with a reason, or deferred with the reader work still owed. These tests hold the database to it, so that:
 
-- a table a later migration adds that carries case_id, classification,
-  compartments, read_compartments, visibility_clearance or
-  visibility_compartments, or a foreign key to a policied table, and is in
-  none of the three maps, FAILS BY NAME (a table added later, such as the
-  forum and Telegram side tables, is what this must catch);
-- the tables with row security enabled are exactly the POLICY set, none
-  forced, each with a policy that governs SELECT;
+- a table a later migration adds that carries case_id, classification, compartments, read_compartments,
+  visibility_clearance or visibility_compartments, or a foreign key to a policied table, and is in none
+  of the three maps, FAILS BY NAME (a table added later, such as the forum and Telegram side tables, is
+  what this must catch);
+- the tables with row security enabled are exactly the POLICY set, none forced, each with a policy that
+  governs SELECT;
 - a policy never decides with a caller-settable value or an anti-join;
-- every SECURITY DEFINER function pins its search path, and every trigger
-  function that reads a policied table sees the truth (definer) or is
-  allow-listed with a reason.
+- every SECURITY DEFINER function pins its search path, and every trigger function that reads a policied
+  table sees the truth (definer) or is allow-listed with a reason.
 
-Catalog reads over the owner's connection: they run in the main suite and
-on every developer database, with or without the runtime roles.
+Catalog reads over the owner's connection: they run in the main suite and on every developer database,
+with or without the runtime roles.
 """
 from __future__ import annotations
 
@@ -219,9 +216,8 @@ def test_the_egress_role_reads_only_exempt_tables(conn):
 
     exists = conn.execute(
         "SELECT 1 FROM pg_roles WHERE rolname = 'noctornal_egress'").fetchone()
-    # The tables the proxy's grant list names are all EXEMPT. Collected
-    # documents and proposals are policied since 0118 (S1, 2026-09-25) and
-    # the proxy reads neither, so the rule is the grant list, not the schema.
+    # The tables the proxy's grant list names are all EXEMPT. Collected documents and proposals are
+    # policied (0118) and the proxy reads neither, so the rule is the grant list, not the schema.
     granted = sorted({obj for kind, obj, _priv, _cols in EGRESS_GRANTS
                       if kind == "table"})
     tables = [t for t in granted if t not in reg.EXEMPT]

@@ -1,12 +1,9 @@
-"""The SNA maths (Phase 3, docs/03) -- unit tests, no database.
+"""The SNA maths (docs/03): unit tests, no database.
 
-`analytics.py` is deliberately database-free: it takes a projected
-Subgraph and returns numbers. That makes the maths testable against
-hand-computed values, which is the only way to know a centrality is right
--- a plausible-looking number from a graph library is not evidence.
-
-Every value asserted here is derived from the published definition, not
-from running the code and recording what it printed.
+`analytics.py` is database-free: it takes a projected Subgraph and returns numbers, so the maths is
+testable against hand-computed values, the only way to know a centrality is right. Every value
+asserted here is derived from the published definition, not from running the code and recording what
+it printed.
 """
 from __future__ import annotations
 
@@ -327,12 +324,9 @@ def test_a_field_of_identical_values_sits_at_the_middle():
     assert ranks == [1, 1, 1] and pct == [50.0, 50.0, 50.0]
 
 
-# --- the simple-graph contract Phase 2 established ------------------------
-
 def test_parallel_edges_collapse_to_one_dyad():
-    """Inherited from Phase 2: metrics are defined over neighbour sets, so
-    two ties between the same pair are one dyad. Both counts are reported so
-    the difference does not read as a bug."""
+    """Metrics are defined over neighbour sets, so two ties between the same pair are one dyad. Both
+    counts are reported so the difference does not read as a bug."""
     sub, _ = build(["a", "b"], [("a", "b", 1), ("a", "b", 1), ("b", "a", 1)])
     out = run_suite(sub, proj())
     assert out["edge_count"] == 3

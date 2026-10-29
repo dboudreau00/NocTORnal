@@ -1,4 +1,4 @@
-"""scripts/yara_db.py against the product (F12 N, 2026-09-24).
+"""scripts/yara_db.py against the product.
 
 `build` compiles with the product's own two-pass compile, so "compiles"
 means there what it means in the Lab: a file with any error contributes
@@ -110,9 +110,7 @@ def test_import_never_activates_records_system_and_needs_adoption(script, tmp_pa
                  JOIN lab.yara_ruleset r ON r.id = e.object_id
                 WHERE r.key = %s""", (name,)).fetchall()}
         assert kinds == {"SYSTEM"}
-        # Both the set's creation and its version name the host user who
-        # ran the import (the verifier of 2026-09-24 found the creation's
-        # audit without it).
+        # Both the set's creation and its version name the host user who ran the import.
         details = {r[0]: r[1] for r in conn.execute(
             """SELECT e.action, e.detail FROM audit.event e
                  JOIN lab.yara_ruleset r ON r.id = e.object_id

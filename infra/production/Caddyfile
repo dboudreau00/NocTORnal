@@ -1,123 +1,50 @@
-# Caddy for the production deployment. Two site blocks, because invariant
-# 10 is two hostnames: the application and the origin sample bytes are
-# served from. They must be different names, and Caddy is where that
-# becomes true on the wire.
+# Caddy for the production deployment. Two site blocks, because invariant 10 is two hostnames: the
+# application, and the origin sample bytes are served from.
 #
-# {$VAR} is Caddy's own environment placeholder, resolved when the config
-# loads. All three come from infra/production/caddy.env by way of the
-# caddy service's env_file, and that file holds those three and nothing
-# else: this is the one process the internet reaches before any sign-in,
-# and until 2026-10-03 it was handed the whole of secrets.env (infra-5).
+# The {$VAR} placeholders (the two hostnames and NOCTORNAL_TLS_MODE) resolve at load from
+# infra/production/caddy.env, which holds those three and nothing else: this is the one process
+# the internet reaches before any sign-in.
 #
-# ## The TLS switch
+# NOCTORNAL_TLS_MODE is one token. `internal` (the default) uses Caddy's own CA, untrusted, for a
+# local run against /etc/hosts names, so a forgotten variable never hammers Let's Encrypt. An
+# e-mail address selects ACME with that account address; both hostnames must then resolve to this
+# host and reach port 80. Certificates and the ACME key live in the caddy-data volume, and
+# re-issuing is rate-limited per hostname per week.
 #
-# One variable, NOCTORNAL_TLS_MODE, and it is always a single token so the
-# `tls` directive is never left without an argument:
+# Caddy appends the address it saw to X-Forwarded-For, so the application must run with
+# NOCTORNAL_TRUSTED_PROXY_HOPS=1 to read that last entry; entries a client invents go unread.
+# At 0 or unset, the client is uvicorn's peer, which compose.yml's --forwarded-allow-ips makes the
+# client's own; started any other way, every request appears to come from Caddy, and the rate
+# limiter, the sign-in audit and session IP binding all see one address. Readiness reports the
+# unset count in production (proxy_hops_declared).
 #
-#   NOCTORNAL_TLS_MODE=internal          Caddy's own CA. Certificates are
-#                                        not publicly trusted, so a browser
-#                                        warns and `curl` needs -k. This is
-#                                        for a local verification run
-#                                        against hostnames in /etc/hosts,
-#                                        and it is the DEFAULT below --
-#                                        forgetting the variable produces a
-#                                        working stack with an untrusted
-#                                        certificate rather than a stack
-#                                        that hammers Let's Encrypt for a
-#                                        hostname that does not resolve.
+# `request_body max_size` stands on the five multipart file routes only, because the application
+# spools such a body to a temporary file before it knows who sent it (docs/17, "a junk credential
+# is still read"). The application's caps stay the authority; this is the ceiling in front and
+# the api service's /tmp the bound behind. 256MiB is the default of NOCTORNAL_MAX_EVIDENCE_BYTES
+# and NOCTORNAL_MAX_SAMPLE_BYTES and counts the whole body; raise it with either, and /tmp
+# (infra/production/README.md, Upload sizes). Write MiB: Caddy reads 256MB as 256,000,000 bytes.
+# An oversize body gets the application's problem+json; test_proxy_upload_limits.py fails on any
+# file route not covered.
 #
-#   NOCTORNAL_TLS_MODE=ops@example.org   ACME. The value is the account
-#                                        e-mail Let's Encrypt uses for
-#                                        expiry notices. Both hostnames
-#                                        must already resolve to this host
-#                                        on the public internet and reach
-#                                        port 80, or issuance fails.
-#
-# Issued certificates and the ACME account key live in the caddy-data
-# volume. Destroying it means re-issuing, and issuance is rate-limited per
-# hostname per week.
-#
-# ## X-Forwarded-For
-#
-# Caddy APPENDS the address it actually saw to any X-Forwarded-For the
-# client sent. That is what makes the header trustworthy from the right and
-# untrustworthy from the left, and it is why the application must be told
-# NOCTORNAL_TRUSTED_PROXY_HOPS=1: with one hop it reads the LAST entry --
-# Caddy's own observation -- and a client that invents earlier entries only
-# lengthens a list nothing reads. Set that variable to 0, or leave it
-# unset, and the client's address is whatever uvicorn reports as the peer:
-# compose.yml starts it with --forwarded-allow-ips for Caddy, which makes that
-# the client's own, and where a process is started any other way every request
-# appears to come from Caddy: the rate limiter meters the whole internet as
-# one subject, the sign-in audit records the proxy as the origin of every
-# login, and session IP binding pins every session to the same address. The
-# readiness register reports the unset count in production (proxy_hops_declared).
-#
-# ## Upload sizes (2026-10-08)
-#
-# `request_body max_size` stands on the five routes that take a multipart
-# file (an exhibit, a sample, an e-mail exhibit, a YARA rule set version, a
-# hash list) and on no other. The application writes such a body to a
-# temporary file before the route has looked at who sent it, and a request
-# that carries any bearer value or a session cookie is read that way to the
-# route's cap whether or not the credential is live (docs/17, "a junk
-# credential is still read"). The caps the application declares stay the
-# authority, and its own refusal names the cap; this is the ceiling in front
-# of them, and the api service's /tmp (compose.yml) is the bound behind.
-#
-# 256MiB is the default of both NOCTORNAL_MAX_EVIDENCE_BYTES and
-# NOCTORNAL_MAX_SAMPLE_BYTES, and like theirs it counts the whole body,
-# framing included. A deployment that declares either above it raises this
-# line with it and the size of /tmp (infra/production/README.md, Upload
-# sizes). Write it as MiB: Caddy reads 256MB as 256,000,000 bytes, which is
-# under the application's own 256 MiB. A body over the limit is answered
-# with the problem+json the application sends, in place of Caddy's bare 413,
-# which named nothing. The pattern follows the application's own routes: a
-# test reads the route table and fails on a file route it does not cover
-# (apps/api/tests/test_proxy_upload_limits.py).
-#
-# ## Compression (2026-10-08)
-#
-# The console, and only the console, is compressed: /ui is 2.3 MiB of
-# static text that crossed the wire whole on every visit and is about 0.7 MiB
-# compressed. An API answer is what the caller may read, with what they sent
-# in it, which is what a compression side channel (BREACH) needs, so none
-# is compressed.
-#
-# ## The Server header (2026-10-08)
-#
-# uvicorn names itself on every answer and Caddy passed it on. `header
-# -Server` takes it off both hostnames (it runs after reverse_proxy has
-# copied the upstream's headers), and the same line under `handle_errors`
-# takes Caddy's own off the answers Caddy makes itself, a 502 while the API
-# restarts among them.
+# Only the console (/ui) is compressed: an API answer carries what the caller sent, which is what
+# a compression side channel (BREACH) needs. `header -Server` drops uvicorn's and Caddy's own
+# Server header on both hostnames, under `handle_errors` too.
 
-# ## Transport (infra-6, 2026-10-03)
+# ## Transport
 #
-# The application never sends Strict-Transport-Security (http/app.py leaves
-# it to the terminator) and this is the terminator, so it is sent HERE, on
-# both hostnames: a first visit, or one after a browser forgot, over plain
-# http could otherwise be stripped by anything on the path, which then
-# proxies the console including its login form. One year, subdomains
-# included, no `preload`: preload is a commitment that cannot be taken back
-# and is the operator's to make. apps/api/tests/test_g48_image_context.py
-# holds the header and the two settings below to this file, since it is the
-# only place they can come from.
+# The application leaves Strict-Transport-Security to the terminator (http/app.py), so it is sent
+# here on both hostnames: a first plain-http visit could otherwise be stripped by anything on the
+# path, which then proxies the login form. One year, subdomains included, no `preload`, which
+# cannot be taken back and is the operator's to make. TLS 1.3 only (docs/05). HTTP/3 is off:
+# 443/udp is not published (compose.yml), so Alt-Svc must not advertise it.
+# apps/api/tests/test_g48_image_context.py holds the header and the two settings below to this file.
 #
-# TLS 1.3 only, as docs/05's hardening checklist asks. A client that cannot
-# speak it cannot reach the console.
+# ## The log
 #
-# HTTP/3 is off. 443/udp is not published (compose.yml), so advertising it
-# in Alt-Svc sent browsers to a port nothing answers on.
-#
-# ## The log (2026-10-07)
-#
-# Caddy writes no access log here, but on an upstream failure (a 502 while
-# the API restarts) it logs the request with its headers. It redacts Cookie
-# and Authorization by itself, and nothing else: X-Csrf-Token (the value of
-# the __Host-csrf cookie) and X-Setup-Token (the first-run door's secret)
-# reached `docker logs` verbatim, measured with Caddy 2.11.4. The filter takes
-# both out of every log line this process writes.
+# Caddy writes no access log, but logs a request with its headers on an upstream failure, and
+# redacts only Cookie and Authorization by itself. The filter also takes X-Csrf-Token and
+# X-Setup-Token (the first-run door's secret) out of every log line this process writes.
 {
 	servers {
 		protocols h1 h2
@@ -176,10 +103,7 @@
 		header -Server
 	}
 
-	# A SEPARATE upstream, not a path on the one above. If this ever
-	# pointed at api:8000 the deployment would look correct and every
-	# sample download would be refused by the application itself, because
-	# `origin_split()` decides from configuration and the api process is
-	# configured as the application.
+	# A separate upstream, never api:8000: `origin_split()` decides from configuration, and the
+	# api process, configured as the application, would refuse every sample download.
 	reverse_proxy sample-origin:8000
 }

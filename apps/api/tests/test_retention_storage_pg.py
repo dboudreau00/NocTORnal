@@ -1,53 +1,36 @@
 """Purge <-> object store: what the store ANSWERED is what the tombstone says.
 
-Two defects, found 2026-09-02, both of the shape "a failure reported as
-the wrong thing, not a crash":
+Each defect here is of the shape "a failure reported as the wrong thing, not a crash":
 
-1. `retention._purge_evidence` called `EvidenceStorage.delete()`, which on
-   the versioned, lock-enabled evidence bucket inserts a DELETE MARKER and
-   returns success. The purge recorded DELETED, marked the row `purged_at`,
-   and every byte stayed retrievable by version id. `delete_all_versions`
-   -- the method that enumerates versions and reports a refusal as a
-   refusal -- existed, was verified live, and had an AST test asserting
-   that NOTHING called it. This file is the wiring's regression test; the
-   AST guard is inverted in `test_evidence_versioned_delete.py`.
+1. `retention._purge_evidence` must not call `EvidenceStorage.delete()`, which on the versioned,
+   lock-enabled evidence bucket inserts a DELETE MARKER and returns success: the purge would record
+   DELETED, mark the row `purged_at`, and every byte stay retrievable by version id. It calls
+   `delete_all_versions`, which enumerates versions and reports a refusal as a refusal. This file is the
+   wiring's regression test; the AST guard is in `test_evidence_versioned_delete.py`.
 
-2. `_is_retention_refusal` returned True on a bare `AccessDenied` (and on
-   `ObjectLockConfigurationNotFoundError`, which literally means "this
-   bucket has NO lock configuration"). A read-only key or a bucket policy
-   denying `s3:DeleteObject` was therefore written into an append-only
-   tombstone as LOCKED_UNTIL_RETENTION -- a specific claim about a
-   retention lock that a permissions failure is not.
+2. `_is_retention_refusal` must not return True on a bare `AccessDenied` (or on
+   `ObjectLockConfigurationNotFoundError`, which means "this bucket has NO lock configuration"). A
+   read-only key or a bucket policy denying `s3:DeleteObject` would otherwise be written into an
+   append-only tombstone as LOCKED_UNTIL_RETENTION, a specific claim about a retention lock that a
+   permissions failure is not.
 
-3. The fix for (1) then reported `storage_deleted` / `storage_locked` in
-   OBJECT VERSIONS while `evidence_purged` stayed in exhibit rows, and two
-   docstrings plus the governance router went on saying all three account
-   for the batch. An exhibit with one version removed and one refused
-   answered `evidence_purged: 1, storage_deleted: 1, storage_locked: 1`
-   with its row unpurged and every byte readable -- "one object deleted"
-   for an exhibit that is entirely intact. The counters are exhibit rows
-   again; `_assert_counters_account_for_the_batch` binds the arithmetic so
-   the docstrings cannot drift from it a second time, and the version
-   detail lives in the warning that names its key.
+3. The counters are exhibit rows: `storage_deleted` / `storage_locked` must not count OBJECT VERSIONS
+   while `evidence_purged` counts exhibit rows, or an exhibit with one version removed and one refused
+   would answer `evidence_purged: 1, storage_deleted: 1, storage_locked: 1` with its row unpurged and every
+   byte readable. `_assert_counters_account_for_the_batch` binds the arithmetic so the docstrings cannot
+   drift from it, and the version detail lives in the warning that names its key.
 
-4. `purge_out_of_schedule` took (1)'s "leave a refused row unmarked"
-   behaviour together with `purge_due`'s justification for it -- "it stays
-   due, and the next sweep finishes the job" -- which is false on that
-   path: `due()` returns evidence only when `case.retention_until <= now`,
-   and an out-of-schedule purge is for exhibits whose retention has NOT
-   expired. A refused early destruction therefore returned
-   `evidence_purged: 1, warnings: []`, left the bytes and the row alone,
-   put the exhibit on no sweep at all, and spent the four-eyes approval.
-   Every out-of-schedule test here used `_expired_case`, a case that is
-   ALSO due on schedule, so none of them could see it; the new ones use
-   `_live_case`.
+4. `purge_out_of_schedule` leaves a refused row unmarked, but `purge_due`'s justification for that ("it
+   stays due, and the next sweep finishes the job") is false on that path: `due()` returns evidence only
+   when `case.retention_until <= now`, and an out-of-schedule purge is for exhibits whose retention has NOT
+   expired. A refused early destruction must not return `evidence_purged: 1, warnings: []`, leave the
+   exhibit on no sweep at all, and spend the four-eyes approval. The out-of-schedule tests use
+   `_live_case`, not `_expired_case`, which is ALSO due on schedule.
 
-Everything here uses a STUB store on purpose: a stub can be scripted to
-answer with exactly the counts under test, and it never adds a
-COMPLIANCE-locked object to the real bucket. The live half of the same
-contract -- that MinIO really does refuse a locked version with
-`InvalidRequest` / "Object is WORM protected", and that the keyless delete
-really does return success while holding the bytes -- is
+Everything here uses a STUB store on purpose: a stub can be scripted to answer with exactly the counts
+under test, and it never adds a COMPLIANCE-locked object to the real bucket. The live half of the same
+contract (MinIO really does refuse a locked version with `InvalidRequest` / "Object is WORM protected",
+and the keyless delete really does return success while holding the bytes) is
 `tests/test_evidence_lock_live_pg.py`.
 
 Env-gated on DATABASE_URL.
@@ -139,11 +122,9 @@ def _expired_case(conn, owner):
 def _live_case(conn, owner):
     """A case whose retention has NOT expired.
 
-    This is the only kind of case `purge_out_of_schedule` exists for: the
-    scheduled sweep already handles the expired ones. Every out-of-schedule
-    test in this file used `_expired_case`, which is ALSO due on schedule,
-    so none of them could see that a refused out-of-schedule row is never
-    retried by anything -- `due()` gates evidence on
+    This is the only kind of case `purge_out_of_schedule` exists for: the scheduled sweep already handles
+    the expired ones. An `_expired_case` is ALSO due on schedule, so it cannot show that a refused
+    out-of-schedule row is never retried by anything: `due()` gates evidence on
     `case.retention_until <= now`, and here it never is.
     """
     from noctornal_api.cases import CaseService
@@ -176,12 +157,10 @@ def _s3_error(code: str, message: str, *, object_name: str | None = None):
 class _VersionedStore:
     """Answers the way `EvidenceStorage` does once it can enumerate versions.
 
-    `delete_all_versions` returns the scripted counts. `delete` -- the
-    keyless delete -- records the call and RETURNS SUCCESS, because that is
-    exactly what a keyless delete on a versioned bucket does: it inserts a
-    marker and reports nothing wrong. A purge that falls back to it
-    therefore records DELETED while this stub still "holds" every byte,
-    which is the defect the wiring exists to end.
+    `delete_all_versions` returns the scripted counts. `delete`, the keyless delete, records the call and
+    RETURNS SUCCESS, because that is exactly what a keyless delete on a versioned bucket does: it inserts a
+    marker and reports nothing wrong. A purge that falls back to it therefore records DELETED while this
+    stub still "holds" every byte.
     """
 
     def __init__(self, *, seen: int, removed: int, locked: int):
@@ -203,13 +182,9 @@ class _VersionedStore:
 class _PerKeyStore:
     """Like `_VersionedStore`, but the answer depends on the KEY.
 
-    `_VersionedStore` gives every key in a batch the same answer, and with
-    a batch of one exhibit a per-ROW counter and a per-VERSION counter are
-    numerically identical for most scripts. That is how the units of
-    `storage_deleted` / `storage_locked` were switched from rows to object
-    versions on 2026-09-02 with all sixteen tests in this file still
-    green. A batch that mixes a released row with a refused one tells them
-    apart.
+    `_VersionedStore` gives every key in a batch the same answer, and with a batch of one exhibit a per-ROW
+    counter and a per-VERSION counter are numerically identical for most scripts. A batch that mixes a
+    released row with a refused one tells them apart.
     """
 
     def __init__(self, answers: dict[str, tuple[int, int, int]]):
@@ -268,16 +243,13 @@ def _key(conn, evidence_id) -> str:
 
 
 def _assert_counters_account_for_the_batch(result):
-    """The invariant `PurgeResult.evidence_purged` and the governance
-    router both state in prose, asserted so it cannot drift again.
+    """The invariant `PurgeResult.evidence_purged` and the governance router both state in prose, asserted
+    so it cannot drift.
 
-    `retention.PurgeResult.evidence_purged` says "`storage_deleted` is
-    [the number of rows marked purged], and the two differ by exactly
-    `storage_locked + storage_failed`", and
-    `http/routers/governance.py::_purge_response` tells the operator "the
-    three account for the batch". Both were false between two commits on
-    2026-09-02, when `deleted`/`locked` became sums of object VERSIONS,
-    and no test in this file read the arithmetic, so nothing caught it.
+    `retention.PurgeResult.evidence_purged` says "`storage_deleted` is [the number of rows marked purged],
+    and the two differ by exactly `storage_locked + storage_failed`", and
+    `http/routers/governance.py::_purge_response` tells the operator "the three account for the batch".
+    Both are false if `deleted`/`locked` become sums of object VERSIONS.
     """
     assert (result.storage_deleted + result.storage_locked
             + result.storage_failed) == result.evidence_purged, (
@@ -294,20 +266,14 @@ def _assert_counters_account_for_the_batch(result):
 # ---------------------------------------------------------------------------
 
 def test_a_locked_answer_is_recorded_as_locked_and_the_exhibit_stays(conn):
-    """Two versions, both refused. The tombstone says LOCKED_UNTIL_RETENTION,
-    `storage_locked` is 1 -- the one EXHIBIT the store refused, in the unit
-    `evidence_purged` and the tombstone's `object_count` use -- and the row
-    is NOT marked purged: a row marked purged while its bytes are
-    retrievable is precisely the false record this file exists to end,
-    and an unmarked row stays due so the next sweep after the lock
-    expires actually destroys it.
+    """Two versions, both refused. The tombstone says LOCKED_UNTIL_RETENTION, `storage_locked` is 1 (the one
+    EXHIBIT the store refused, in the unit `evidence_purged` and the tombstone's `object_count` use) and the
+    row is NOT marked purged: a row marked purged while its bytes are retrievable is a false record, and an
+    unmarked row stays due so the next sweep after the lock expires destroys it.
 
-    That both versions were refused is not lost, it is in the warning that
-    names the key. See
-    `test_one_refusal_in_a_batch_of_three_counts_one_row_not_its_versions`
-    for the reason a count of 1 here is not just the batch size: the
-    original defect was `storage_locked = len(evidence_ids)`, and a batch
-    of one cannot tell the two apart."""
+    That both versions were refused is in the warning that names the key. See
+    `test_one_refusal_in_a_batch_of_three_counts_one_row_not_its_versions` for why a count of 1 here is not
+    just the batch size: a batch of one cannot tell `storage_locked = len(evidence_ids)` apart."""
     owner = _user(conn)
     case_id = _expired_case(conn, owner)
     ev = _evidence(conn, case_id, owner)
@@ -375,15 +341,10 @@ def test_a_removed_version_is_recorded_as_deleted(conn):
 
 
 def test_a_partial_refusal_marks_nothing_purged(conn):
-    """One version gone, one locked: bytes remain, so the row is not
-    purged, the batch is LOCKED, and the exhibit counts as REFUSED, not as
-    a deletion. The removed version is still reported -- in the warning
-    naming the key, where it cannot be read as an exhibit destroyed.
-
-    This asserted `(storage_deleted, storage_locked) == (1, 1)` until
-    2026-09-02, which encoded the object-version unit into the suite: it
-    is the response "1 exhibit attempted, 1 object deleted" for an exhibit
-    that is entirely intact."""
+    """One version gone, one locked: bytes remain, so the row is not purged, the batch is LOCKED, and the
+    exhibit counts as REFUSED, not as a deletion. The removed version is still reported, in the warning
+    naming the key, where it cannot be read as an exhibit destroyed. Counting object versions would answer
+    "1 exhibit attempted, 1 object deleted" for an exhibit that is entirely intact."""
     owner = _user(conn)
     case_id = _expired_case(conn, owner)
     ev = _evidence(conn, case_id, owner)
@@ -401,12 +362,10 @@ def test_a_partial_refusal_marks_nothing_purged(conn):
 
 
 def test_a_locked_exhibit_stays_due_and_the_next_sweep_finishes_the_job(conn):
-    """Why the row is left unmarked. With `purged_at` set on a refusal
-    (the behaviour until 2026-09-02) the exhibit vanished from every read
-    path and from `due()`, so nothing ever retried it: the lock expired
-    and the bytes sat in the bucket forever, under a tombstone saying
-    LOCKED. Left due, the next sweep after expiry destroys it and writes
-    the DELETED record."""
+    """Why the row is left unmarked. With `purged_at` set on a refusal the exhibit would vanish from every
+    read path and from `due()`, so nothing would retry it: the lock would expire and the bytes sit in the
+    bucket forever, under a tombstone saying LOCKED. Left due, the next sweep after expiry destroys it and
+    writes the DELETED record."""
     owner = _user(conn)
     case_id = _expired_case(conn, owner)
     ev = _evidence(conn, case_id, owner)
@@ -467,9 +426,8 @@ def test_a_worm_refusal_is_a_retention_lock(conn):
 
 
 @pytest.mark.parametrize("exc, expected", [
-    # What MinIO actually says for a COMPLIANCE-locked version, measured
-    # against the live stack 2026-09-02 (not AccessDenied, as the evidence
-    # module's docstring had it).
+    # What MinIO actually says for a COMPLIANCE-locked version, measured against the live stack (not
+    # AccessDenied).
     (_s3_error("InvalidRequest",
                "Object is WORM protected and cannot be overwritten"),
      STORAGE_LOCKED),
@@ -541,20 +499,15 @@ def test_the_out_of_schedule_path_reports_the_same_counts(conn):
 # ---------------------------------------------------------------------------
 
 def test_a_partly_refused_exhibit_is_never_counted_as_deleted(conn):
-    """One version removed, one refused: the exhibit is intact and still
-    readable, so NOTHING may be reported as deleted for it.
+    """One version removed, one refused: the exhibit is intact and still readable, so NOTHING may be
+    reported as deleted for it.
 
-    Between two commits on 2026-09-02 `storage_deleted` summed
-    `versions_removed` across keys and did so BEFORE the locked check, so
-    this exact case answered `evidence_purged: 1, storage_deleted: 1,
-    storage_locked: 1` with zero rows marked purged -- an API response
-    reading "1 exhibit attempted, 1 object deleted" for an exhibit whose
-    bytes are all still in the bucket. That is the same misreport the
-    versioned delete was wired in to end, restated in a different unit.
+    `storage_deleted` must not sum `versions_removed` across keys before the locked check, or this exact
+    case would answer `evidence_purged: 1, storage_deleted: 1, storage_locked: 1` with zero rows marked
+    purged: "1 exhibit attempted, 1 object deleted" for an exhibit whose bytes are all still in the bucket.
 
-    Reachable in production: evidence keys are content-addressed per case
-    (`f"{case_id}/{shahex}"`), so a re-acquisition after an earlier purge
-    leaves an old locked version, a delete marker and the new version
+    Reachable in production: evidence keys are content-addressed per case (`f"{case_id}/{shahex}"`), so a
+    re-acquisition after an earlier purge leaves an old locked version, a delete marker and the new version
     under one key.
     """
     owner = _user(conn)
@@ -575,13 +528,10 @@ def test_a_partly_refused_exhibit_is_never_counted_as_deleted(conn):
 def test_one_refusal_in_a_batch_of_three_counts_one_row_not_its_versions(conn):
     """The counters are the unit the router and the tombstone speak.
 
-    A single-exhibit batch cannot tell a per-row counter from a per-version
-    one, which is why all sixteen tests here stayed green when the units
-    changed. Three exhibits, one of them refused across three versions:
-    `storage_locked` must be 1 (the exhibit the store refused), not 3 (its
-    versions) and not 3 (the batch size, which is the ORIGINAL defect this
-    file was written for), and `storage_deleted` must be 2 (the rows marked
-    purged), not 3 (the versions removed from them).
+    A single-exhibit batch cannot tell a per-row counter from a per-version one. Three exhibits, one of
+    them refused across three versions: `storage_locked` must be 1 (the exhibit the store refused), not 3
+    (its versions, or the batch size), and `storage_deleted` must be 2 (the rows marked purged), not 3 (the
+    versions removed from them).
     """
     owner = _user(conn)
     case_id = _expired_case(conn, owner)
@@ -608,8 +558,8 @@ def test_one_refusal_in_a_batch_of_three_counts_one_row_not_its_versions(conn):
     assert _purged_at(conn, gone_a) is not None
     assert _purged_at(conn, gone_b) is not None
     assert _purged_at(conn, refused) is None
-    # One tombstone per outcome since 2026-10-07 (this asserted a single
-    # LOCKED tombstone for the batch, the destroyed two included).
+    # One tombstone per outcome, not a single LOCKED tombstone for the batch with the destroyed two
+    # included.
     assert _outcomes(conn, case_id) == [(STORAGE_DELETED, 2), (STORAGE_LOCKED, 1)]
 
 
@@ -619,12 +569,11 @@ def _outcomes(conn, case_id) -> list[tuple[str, int]]:
 
 
 def test_each_storage_outcome_gets_its_own_tombstone(conn):
-    """2026-10-07. The batch wrote ONE tombstone carrying its worst
-    outcome and counting every exhibit, so a sweep that destroyed two
-    exhibits and was refused on a third recorded three LOCKED and no
-    destruction at all; the sweep that later destroyed the third recorded
-    it again. Every destroyed exhibit must be recorded once, as DELETED, and
-    a refusal must not swallow the destructions beside it."""
+    """A batch writes one tombstone per outcome. A single tombstone carrying the worst outcome and counting
+    every exhibit would record three LOCKED and no destruction for a sweep that destroyed two exhibits and
+    was refused on a third, and the sweep that later destroyed the third would record it again. Every
+    destroyed exhibit is recorded once, as DELETED, and a refusal does not swallow the destructions beside
+    it."""
     owner = _user(conn)
     case_id = _expired_case(conn, owner)
     gone_a = _evidence(conn, case_id, owner)
@@ -650,10 +599,9 @@ def test_each_storage_outcome_gets_its_own_tombstone(conn):
 
 
 def test_a_destroyed_exhibit_says_so_in_its_own_custody_trail(conn):
-    """2026-10-07: an exhibit's custody trail ended at its last read,
-    so the record that goes to court did not say who destroyed it, when or
-    under what rule; only `purged_at` did. A refused one is not destroyed,
-    and its trail says nothing of the kind."""
+    """An exhibit's custody trail records its destruction: the record that goes to court must say who
+    destroyed it, when and under what rule, not only `purged_at`. A refused one is not destroyed, and its
+    trail says nothing of the kind."""
     owner = _user(conn)
     case_id = _expired_case(conn, owner)
     gone = _evidence(conn, case_id, owner)
@@ -708,19 +656,16 @@ def test_an_out_of_schedule_purge_records_each_outcome_apart(conn):
 def test_a_refused_out_of_schedule_purge_says_nothing_will_retry_it(conn):
     """Both halves of one contract, read in one test.
 
-    `_purge_evidence` leaves a refused row unmarked and justifies it with
-    "it stays due, and the sweep after the lock expires finishes the job".
-    That justification is true only of `purge_due`. `due()` gates evidence
-    on `case.retention_until <= now`, and `purge_out_of_schedule` exists
-    precisely for exhibits whose retention has NOT expired -- so a refused
-    out-of-schedule row is not due, will not become due, and nothing will
-    ever retry it, while the four-eyes approval that authorised the
-    destruction has been consumed inside the same transaction.
+    `_purge_evidence` leaves a refused row unmarked and justifies it with "it stays due, and the sweep
+    after the lock expires finishes the job". That is true only of `purge_due`. `due()` gates evidence on
+    `case.retention_until <= now`, and `purge_out_of_schedule` exists precisely for exhibits whose
+    retention has NOT expired, so a refused out-of-schedule row is not due, will not become due, and
+    nothing will ever retry it, while the four-eyes approval that authorised the destruction has been
+    consumed inside the same transaction.
 
-    Until 2026-09-02 that path copied `purge_due`'s counts but none of its
-    warnings, so a court-ordered early destruction refused by a
-    COMPLIANCE lock returned `evidence_purged: 1, warnings: []`, changed
-    nothing at all, and burned the signature in silence.
+    So that path carries `purge_due`'s warnings as well as its counts: a court-ordered early destruction
+    refused by a COMPLIANCE lock must not return `evidence_purged: 1, warnings: []` and burn the signature
+    in silence.
     """
     from noctornal_api.approvals import ApprovalService
 

@@ -1,12 +1,9 @@
-"""The pinned client against the egress proxy's wire contract (2026-09-24;
-docs/20 section 8).
+"""The pinned client against the egress proxy's wire contract (docs/20 section 8).
 
-Every case of egress_contract_cases runs here against its loopback stub;
-the egress proxy's own suite runs the same cases against the real
-listener. The tests below them are the client-side cases only a scripted
-proxy can stage: a head dripped a byte at a time, a head too big to be one,
-a reason phrase carrying markup, a TLS handshake dripped through the
-tunnel.
+Every case of egress_contract_cases runs here against its loopback stub; the egress proxy's own suite runs
+the same cases against the real listener. The tests below them are the client-side cases only a scripted
+proxy can stage: a head dripped a byte at a time, a head too big to be one, a reason phrase carrying
+markup, a TLS handshake dripped through the tunnel.
 
 Pure: no database, and no network beyond loopback.
 """

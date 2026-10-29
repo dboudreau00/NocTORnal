@@ -1,38 +1,10 @@
-"""Case endpoints. Creation needs a global case.create; everything else is
-case-scoped through the five-part gate.
+"""Case endpoints: creation needs a global case.create; the rest pass the five-part case gate.
 
-## 2026-07-30: the case file could not be corrected, shared or closed
-
-`CaseService` has had `update_metadata`, `assign_user_checked` and
-`revoke_user` since Phase 1 and migration 0053 recorded that `case.update`,
-`case.close` and `case.grant` were seeded, granted, and checked by nothing
-— the service methods existed, no router exposed them. In practice that
-meant: a typo'd case title was permanent, a case could only ever be worked
-by the person who created it (assignment happened once, inside `create`),
-and the lifecycle endpoint below was the only reachable mutation.
-
-This module now exposes the four missing operations. Three of them needed
-guards that the service layer does not provide, and those guards are the
-interesting part of this file:
-
-1. **Classification may be raised, never lowered here** (`update_case`).
-2. **A case assignment that confers nothing is refused** rather than
-   written and silently ignored by every read path (`assign_case_user`).
-3. **`ARCHIVED -> PURGED` is re-gated onto `case.delete`** (`transition`),
-   because marking a case for destruction is not a "close".
-
-`revoke_case_user` joined them on 2026-09-22: `revoke_user` had no route
-either, so a case shared from the console could not be unshared from it.
-It refuses to remove the owner, for the same reason the grant route
-refuses to regrade them.
-
-## Where the audit rows come from
-
-Every mutation here is audited *inside* `CaseService`, in the same
-transaction as the write (`CASE_UPDATED`, `CASE_STATUS_CHANGED`,
-`CASE_ACCESS_GRANTED`). This router deliberately does not write its own
-audit rows for the success path — two rows per action, one of which can
-commit without the other, is worse than one.
+Guards the service layer does not provide: classification may be raised, never lowered here; an
+assignment that confers nothing is refused; ARCHIVED to PURGED, a mark for destruction rather than
+a close, is checked again under `case.delete`; the owner cannot be removed or regraded. Every
+mutation is audited inside `CaseService`, in the write's transaction, so this router writes no
+success rows of its own.
 """
 from __future__ import annotations
 
@@ -92,45 +64,30 @@ class CaseOut(BaseModel):
     retention_until: date
     review_due: date
     created_at: datetime
-    # When the case was last closed. The workspace header states the case's
-    # lifecycle state and, for a closed case, since when: material added
-    # after this instant postdates the close, which matters for disclosure
-    # (ux02-cases:case-status-invisible-in-workspace, 2026-09-22).
+    # When the case was last closed, for the workspace header: material added after it postdates
+    # the close, which matters for disclosure.
     closed_at: datetime | None = None
-    # True while the case's CONTENT is read-only (`CONTENT_READ_ONLY_STATES`),
-    # which the gate enforces with a 409. Sent rather than re-derived so the
-    # console's read-only mode and the server's refusal cannot disagree on
-    # which states count (gap-closed-case-writes, 2026-09-23).
+    # True while the case's content is read-only (`CONTENT_READ_ONLY_STATES`), which the gate
+    # enforces with a 409. Sent rather than re-derived so the console and the server cannot
+    # disagree on which states count.
     read_only: bool = False
     # The rest of the case record, for the console's Case details panel.
-    # Lawful basis, authority, retention and review were written at
-    # creation and never shown again, so an analyst could not check what
-    # their collection rested on without leaving the console
-    # (ux02-cases:case-record-invisible-and-uneditable, 2026-09-23).
     summary: str | None = None
     authority_ref: str | None = None
-    # The legal moves from `status`, in lifecycle order: the Status dialog
-    # offers these and nothing else (ux02-cases:status-prompt-free-text-
-    # one-way-transitions, 2026-09-23). The transition route still decides.
+    # The legal moves from `status`, in lifecycle order: the Status dialog offers these and nothing
+    # else. The transition route still decides.
     allowed_transitions: list[str] = []
-    # The owner by name, and the CALLER's own standing on this case: the
-    # role that opens it for them, its display name (CASE_OWNER reads as
-    # Lead investigator), and what that role may do here. The console
-    # showed Status… and the edit controls to everyone and let a refusal
-    # say who could use them (ux02-cases:header-says-analyst-no-permission-
-    # cues, 2026-09-23). A hint for the console, never a gate: every route
-    # still runs the five-part check. Null and empty for a caller with no
-    # live assignment on the case.
+    # The owner by name, and the caller's own standing on this case: the role that opens it for
+    # them, its display name (CASE_OWNER reads as Lead investigator) and what it may do here.
+    # A hint for the console, never a gate. Null and empty for a caller with no live assignment.
     owner_name: str | None = None
     my_role: str | None = None
     my_role_name: str | None = None
     my_permissions: list[str] = []
-    # Whether the case is under a legal hold, for the header's chip and its
-    # Hold control (2026-10-08). The reason it was placed for goes only to a
-    # caller who holds `retention.manage` on the case, as the due list's
-    # does, and `may_hold` says whether the Hold control is offered: the
-    # global role and the case's, asked as if the sign-in were fresh (the
-    # route asks for one). A hint for the console, never a gate.
+    # Whether the case is under a legal hold, for the header's chip and its Hold control. The
+    # reason goes only to a caller who holds `retention.manage` on the case, as the due list's
+    # does. `may_hold` says whether the Hold control is offered, asked of the global role and the
+    # case's as if the sign-in were fresh (the route asks for one). A hint, never a gate.
     legal_hold: bool = False
     legal_hold_reason: str | None = None
     may_hold: bool = False
@@ -202,11 +159,9 @@ def create_case(body: CreateCaseBody,
                 user: CurrentUser = Depends(require_global("case.create")),
                 conn: psycopg.Connection = Depends(get_conn)) -> CaseOut:
     svc = CaseService(conn)
-    # The case and its owner's assignment are written together, and the
-    # assignment is an IAM write the request role may only read (0109, S1
-    # 2026-09-25), so the creation runs on a system connection after the
-    # case.create gate. The read-back is the request's own, under the
-    # policy the new assignment now opens.
+    # The case and its owner's assignment are written together, and the assignment is an IAM write
+    # the request role may only read (0109), so creation runs on a system connection after the
+    # case.create gate. The read-back is the request's own, under the policy the assignment opens.
     with system_connection(SystemPurpose.CASE_MEMBERSHIP, reuse=conn) as sconn:
         case_id = CaseService(sconn).create(
             code=body.code, title=body.title, legal_basis=body.legal_basis,
@@ -222,8 +177,7 @@ def create_case(body: CreateCaseBody,
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_cases(user: CurrentUser = Depends(current_user),
                conn: psycopg.Connection = Depends(get_conn)) -> list[CaseOut]:
-    # With the caller's role on each, for the case list's "Your role"
-    # column (ux02-cases:case-list-lacks-triage-fields, 2026-09-23).
+    # With the caller's role on each, for the case list's "Your role" column.
     return _with_caller(conn, CaseService(conn).list_for_user(user.user_id),
                         user.user_id, holds=False)
 
@@ -246,18 +200,10 @@ def get_case(case_id: UUID,
 class UpdateCaseBody(BaseModel):
     """Every field optional; omitted means "leave alone".
 
-    Deliberately absent:
-
-    - `code` — the case's durable identifier (invariant 9). It is quoted in
-      warrants, exhibit labels and other agencies' correspondence. Renaming
-      it would silently invalidate every external reference.
-    - `status` — the lifecycle has a validated transition table; it moves
-      through `POST /cases/{case_id}/status`, not through a metadata edit.
-    - `compartments` — `update_metadata` cannot write them, and adding a
-      compartment locks out every assignee not read into it. That needs its
-      own endpoint with the same "who loses access" reporting as below.
-    - `owner_user_id` — changing the owner is a grant, not a metadata edit;
-      it belongs on `POST /cases/{case_id}/users`.
+    Deliberately absent: `code`, the durable identifier quoted in warrants and exhibit labels
+    (invariant 9); `status`, which moves through `POST /cases/{case_id}/status`; `compartments`,
+    since adding one locks out every assignee not read into it; and `owner_user_id`, which is a
+    grant on `POST /cases/{case_id}/users`.
     """
     # min_length=1: `update_metadata` treats None as "not supplied", so an
     # empty string is not a no-op — it would write an untitled case.
@@ -276,47 +222,12 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
                 conn: psycopg.Connection = Depends(get_conn)) -> dict:
     """Edit governance and descriptive metadata.
 
-    ## Classification: raising is allowed, lowering is refused
-
-    These two directions are not the same operation wearing different signs.
-
-    RAISING is safe for disclosure. `effective_labels` (deps.py) decides
-    every access on the STRICTER of the case's label and the element's, so
-    the moment the case becomes RED every node, edge and exhibit inside it
-    is read as RED too, whatever its own label says. The DB floor trigger
-    (`core.enforce_tlp_floor`) deliberately does not re-check pre-existing
-    rows on a case raise, precisely so the case can be raised without
-    stranding them.
-
-    LOWERING is a DECLASSIFICATION of everything the case protects, and it
-    is not recoverable by lowering it back: whoever read it in the meantime
-    has read it. It also widens silently — the elements that were forced up
-    to the old floor keep their own labels, but everything protected ONLY
-    by the case label (the case file itself, and every child table without
-    its own classification column) drops in one statement, with no review
-    and no second signature. `case.update` is "Edit case metadata" in the
-    seed, held by CASE_OWNER; it was never meant to carry that.
-
-    So this endpoint refuses it. Declassification needs its own verb with
-    step-up and dual control, the way `evidence.purge` and `case.delete`
-    have them. Until that verb exists the honest answer is 400 with the
-    reason, not a quiet downgrade.
-
-    ## Raising is still capped by the caller's own clearance
-
-    `check_writable_labels` refuses to author content above the caller's
-    clearance. Without it a CASE_OWNER cleared to AMBER could raise their
-    case to RED and instantly lose the case they were mid-way through
-    running — the same "wrote it, cannot see it" trap the helper was built
-    for on the node path.
-
-    ## Who loses access, reported rather than discovered
-
-    Raising the classification silently evicts every assignee cleared below
-    the new level: they simply stop seeing the case, with no error anywhere
-    (`list_for_user` filters them out; the gate 404s them). Invariant 12 —
-    nothing is silently dropped — so the response names them. The caller
-    may well intend it; they should not have to find out by being asked.
+    Classification may be raised: access is decided on the stricter of the case's and the
+    element's label, and `core.enforce_tlp_floor` does not re-check existing rows on a raise.
+    Lowering is refused with a 400: it declassifies everything protected only by the case label,
+    cannot be undone, and needs its own verb with step-up and dual control. A raise is capped at
+    the caller's own clearance (`check_writable_labels`), and the response names the assignees it
+    locks out (invariant 12).
     """
     svc = CaseService(conn)
     current = svc.get(case_id)
@@ -326,41 +237,24 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
         # missing row must never fall through to an AttributeError 500.
         raise Problem(404, "Not found", "case does not exist")
 
-    # PURGED is terminal and means "this case has been marked for
-    # destruction". Editing its governance record after that point would
-    # rewrite the very metadata a retention review reads to justify the
-    # purge. Every other status stays editable — an archived case with a
-    # wrong authority_ref should still be correctable.
+    # PURGED marks the case for destruction, and editing its governance record would rewrite the
+    # metadata that justifies the purge. Every other status stays editable.
     if current.status == "PURGED":
         raise Problem(400, "Invalid request",
                       "a PURGED case is a closed record and cannot be edited")
 
-    # `update_metadata` reads None as "not supplied", so a JSON null cannot
-    # clear a field — it is indistinguishable from omitting the key. Rather
-    # than let `{"summary": null}` 200 while doing nothing, drop the nulls
-    # here and let the emptiness check below refuse the request. Clearing a
-    # field back to NULL needs a service-layer change (see `concerns`).
+    # `update_metadata` reads None as "not supplied", so a JSON null cannot clear a field. Drop the
+    # nulls here so the emptiness check below refuses `{"summary": null}` rather than a silent 200.
+    # Clearing a field back to NULL needs a service-layer change (see `concerns`).
     supplied = {k: v for k, v in body.model_dump(exclude_unset=True).items()
                 if v is not None}
 
     access_lost: list[dict] = []
     classification = body.classification
-    # RETENTION MAY BE EXTENDED, NEVER SHORTENED HERE.
-    #
-    # `retention.py:201` selects evidence for destruction with
-    # `c.retention_until <= today`, and `evidence.purge` is registered as an
-    # unconditional DUAL-CONTROL operation (decision 44). So a caller
-    # holding only `case.update` — which ANALYST does not have but any
-    # CASE_OWNER does, on a verb described in the seed as "Edit case
-    # metadata" — could set this date into the past and have the next purge
-    # run destroy the case's evidence with ONE signature instead of two.
-    #
-    # That is not a retention edit, it is the four-eyes gate walked around,
-    # and the audit trail would show a metadata change rather than a
-    # destruction. Same shape as the classification rule above and refused
-    # the same way: shortening a retention period is a real operation, it
-    # just needs its own verb with step-up and a second authoriser, and that
-    # verb does not exist yet.
+    # Retention may be extended, never shortened here. The purge selects evidence by
+    # `retention_until <= today` and `evidence.purge` is dual control (decision 44), so a date
+    # moved into the past would let one `case.update` signature destroy evidence. Shortening needs
+    # its own verb with step-up and a second authoriser.
     if (body.retention_until is not None
             and body.retention_until < current.retention_until):
         raise Problem(
@@ -402,9 +296,8 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
             access_lost = _assignees_below(conn, case_id, new_tlp)
 
     if not supplied:
-        # `update_metadata` returns early and writes no audit row when
-        # nothing changed, so this would otherwise 200 having done nothing
-        # and left no trace that it was attempted (invariant 12).
+        # `update_metadata` returns early and writes no audit row when nothing changed, so this
+        # would otherwise 200 having done nothing and left no trace of the attempt (invariant 12).
         raise Problem(400, "Invalid request",
                       "nothing to change: supply a non-null title, summary, "
                       "authority_ref, review_due, retention_until, or a "
@@ -416,16 +309,11 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
         authority_ref=body.authority_ref, review_due=body.review_due,
         retention_until=body.retention_until, classification=classification,
     )
-    # The exhibits' storage locks follow the date, AFTER it has committed
-    # (x-lock-extension, 2026-09-24). Each exhibit is locked at lodging for
-    # a fixed period and nothing lengthened it, so a case kept for longer
-    # kept exhibits the store would delete from day 366. Run whenever the
-    # date is supplied, not only when it moves, so saving the same date
-    # again retries an exhibit whose lock could not be lengthened: it is
-    # idempotent, and an exhibit already held that long is left alone.
-    # A failure never undoes the date; it is counted here and audited per
-    # exhibit (`EvidenceService.extend_locks` says why). The counts are of
-    # the exhibits THIS caller may see (verifier, 2026-09-24).
+    # The exhibits' storage locks follow the date, after it has committed: each is locked for a
+    # fixed period at lodging, which a case kept longer would outlive. Run whenever the date is
+    # supplied, so saving the same date again retries a lock that could not be lengthened
+    # (idempotent). A failure never undoes the date; it is counted and audited per exhibit
+    # (`EvidenceService.extend_locks`). The counts are of the exhibits this caller may see.
     lock_extension = (_extend_exhibit_locks(conn, case_id, body.retention_until,
                                             user.user_id)
                       if body.retention_until is not None else None)
@@ -438,24 +326,19 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
 
 def _extend_exhibit_locks(conn: psycopg.Connection, case_id: UUID,
                           retention_until: date, actor_id: UUID) -> dict:
-    """`EvidenceService.extend_locks`, with the store built here so a
-    deployment without one reports every exhibit as not extended rather
-    than failing a case edit that has already committed. The store is not
-    built at all for a case with no exhibits.
+    """`EvidenceService.extend_locks`, with the store built here so a deployment without one
+    reports every exhibit as not extended rather than failing a committed case edit. No store is
+    built for a case with no exhibits.
 
-    Counted under the caller's own ceiling, the one their register is
-    drawn under, so the answer never numbers an exhibit they cannot see
-    (x-lock-extension, verifier, 2026-09-24). Every live exhibit is still
-    locked: the date governs them all. Also the Evidence pane's
-    `POST /cases/{id}/evidence/locks`, which is why it is shared."""
+    Every live exhibit is locked, since the date governs them all, but the count is drawn under
+    the caller's own ceiling so it never numbers an exhibit they cannot see. Shared with the
+    Evidence pane's `POST /cases/{id}/evidence/locks`."""
     from noctornal_api.evidence import EvidenceError, EvidenceService, EvidenceStorage
     from noctornal_api.http.deps import user_ceiling
 
     clearance, compartments = user_ceiling(conn, actor_id, case_id=case_id)
-    # Every live exhibit's lock follows the case, including exhibits
-    # above the caller's labels, so the lengthening runs on a system
-    # connection (S1, 2026-09-25); the count it reports is still drawn
-    # under the caller's ceiling, as before.
+    # Every live exhibit's lock follows the case, including exhibits above the caller's labels, so
+    # the lengthening runs on a system connection; the count is still drawn under their ceiling.
     with system_connection(SystemPurpose.EVIDENCE_LOCKS, reuse=conn) as sconn:
         live = sconn.execute(
             """SELECT 1 FROM core.evidence
@@ -509,16 +392,9 @@ class AssignUserBody(BaseModel):
     #: citext-unique but a person's address changes and can be reassigned
     #: within an organisation. A grant must not follow the mailbox.
     user_id: UUID | None = None
-    #: OR the colleague's work address, resolved to their id HERE, once, at
-    #: the moment of granting. The assignment row still stores `user_id`,
-    #: so the grant binds to the person and not the mailbox, and invariant
-    #: 9 holds. Added 2026-09-22 (ux16 no-user-id-for-share, ux02
-    #: share-needs-raw-uuid): the only way to share a case was to type an
-    #: `iam.app_user.id` that no screen available to a case owner ever
-    #: showed, and the directory that does show ids needs `user.manage`.
-    #: Exactly one address is resolved per request, so this answers "is
-    #: this person on the system" for one address a caller already knows
-    #: and never lists anybody.
+    #: Or the colleague's work address, resolved to their id here, once, at the moment of granting.
+    #: The assignment row stores `user_id`, so the grant binds to the person and not the mailbox
+    #: (invariant 9). One address per request, so this never lists anybody.
     email: str | None = Field(default=None, min_length=3, max_length=320)
     role_key: str
     #: docs/05 wants case access time-boxed by default. Not forced here —
@@ -532,16 +408,10 @@ def _audit_share_refused(conn: psycopg.Connection, user: CurrentUser,
                          case_id: UUID, email: str, reason: str) -> None:
     """Record a grant by address that was refused, with the address.
 
-    Sharing by address answers, for one address at a time, whether an
-    active account uses it: an unknown address is a 404, a known one that
-    cannot open the case a 400. That cannot be hidden without making the
-    Share dialog useless to the owner who mistypes an address, and a grant
-    that succeeds says as much anyway. What CAN be ensured is that asking
-    leaves a trace: a successful grant is audited by the service, and until
-    2026-09-23 a refused one wrote nothing, so a `case.grant` holder could
-    walk a list of addresses unseen (verifier follow-up to ux02
-    share-needs-raw-uuid). Grants by id are not recorded here: an id is
-    not guessable, and the service's own refusal already covers them.
+    Sharing by address says, one address at a time, whether an active account uses it (404 or
+    400), which cannot be hidden without making the Share dialog useless. So every refusal leaves
+    a trace, and a `case.grant` holder cannot walk a list of addresses unseen. Grants by id are
+    not recorded here: an id is not guessable, and the service's own refusal covers them.
     """
     audit_auth_event(conn, "CASE_SHARE_REFUSED", user.user_id, case_id,
                      {"by": "email", "email": email.strip().lower(),
@@ -555,39 +425,11 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
                      conn: psycopg.Connection = Depends(get_conn)) -> dict:
     """Grant (or change) a user's access to this case.
 
-    `case.grant` is `requires_step_up = true` in the seed, and `require()`
-    reads that off the permission row and enforces it as check five of the
-    gate. There is deliberately no hand-rolled step-up call here: a second
-    implementation of an assurance check is a second place for it to be
-    wrong, and `require_step_up` exists for the opposite case (danger the
-    permission row does NOT capture).
-
-    `assign_user_checked` — not `assign_user` — because an assignee who
-    cannot clear the case's classification or is not read into its
-    compartments is a reachable state that every listing then quietly
-    filters away. The grant would appear to succeed and confer nothing.
-
-    One thing it checks in the service rather than here: a liaison holds
-    one case at a time (`SINGLE_CASE_ROLES`, enforced in `_grant`, so every
-    writer of an assignment meets it).
-
-    Four things it does not check, which are checked here:
-
-    - **the role exists and confers something.** `_grant` inserts straight
-      into `case_assignment`; an unknown `role_key` trips a foreign key and
-      would surface as a 500, and a real role holding no permissions is a
-      grant that does nothing.
-    - **the account is live.** `list_for_user` and the gate both require
-      `is_active`; assigning a deactivated account writes a row that no
-      code path will ever honour.
-    - **`expires_at` is in the future.** A past expiry writes an assignment
-      that is expired the instant it commits.
-    - **the owner is not demoted.** `_grant` is an UPSERT on
-      (case_id, user_id), so re-assigning the owner REPLACES their
-      CASE_OWNER row. `revoke_user` refuses to remove the owner's access;
-      nothing stopped you achieving the same thing by regrading them to
-      READ_ONLY, which would lock the case's owner out of their own case
-      with no way back short of SQL.
+    Step-up comes from the `case.grant` permission row through `require()`, not a second check
+    here. `assign_user_checked` refuses an assignee who cannot clear the case's labels, and the
+    service holds a liaison to one case (`SINGLE_CASE_ROLES`). Checked here: the role exists and
+    confers something, the account is active, `expires_at` is in the future, and the owner is not
+    regraded, which the UPSERT would otherwise do, locking them out of their own case.
     """
     case = CaseService(conn).get(case_id)
     if case is None:
@@ -599,20 +441,9 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
                       "exactly one of them")
 
     if body.expires_at is not None:
-        # An offset is REQUIRED, and the absence of one is a 400 rather
-        # than an assumption.
-        #
-        # `2027-03-14T17:00:00` is valid ISO 8601 and Pydantic parses it
-        # into a naive datetime. Comparing that to the aware `_now()`
-        # raises `TypeError: can't compare offset-naive and offset-aware
-        # datetimes`, which nothing catches — so the most ordinary
-        # possible client mistake was a 500 on an access-control path.
-        #
-        # Defaulting it to UTC would be worse than refusing. This value
-        # decides the instant somebody LOSES access to a case; a grant
-        # meant to end at 17:00 local, silently read as 17:00Z, is up to
-        # thirteen hours of unintended access on either side, and nothing
-        # in the response would say which reading was taken.
+        # An offset is required: Pydantic parses a naive datetime, which cannot be compared with
+        # the aware `_now()`, and assuming UTC could shift the instant somebody loses access to a
+        # case by hours without saying so.
         if body.expires_at.utcoffset() is None:
             raise Problem(
                 400, "Invalid request",
@@ -639,21 +470,15 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
         raise Problem(400, "Invalid request",
                       f"role {body.role_key!r} grants no permissions, so that "
                       "assignment would confer nothing")
-    # docs/05: an external liaison's access is time-boxed, `expires_at`
-    # required. Nothing held it until 2026-10-07
-    # (2026-10-07), so a LIAISON grant with no end date read a case for good.
+    # docs/05: an external liaison's access is time-boxed, so `expires_at` is required.
     if body.role_key in TIME_BOXED_ROLES and body.expires_at is None:
         raise Problem(400, "Invalid request",
                       f"a {role[2] or body.role_key} grant must end: give an "
                       "end time (expires_at). External access is time-boxed.")
 
-    # The address is resolved only AFTER everything about the request
-    # itself has been validated. Resolved first, a request with a bad
-    # role_key answered 404 for an unknown address and 400 for a known one,
-    # writing nothing and auditing nothing: a free account-existence probe
-    # for any case.grant holder (2026-09-23). From here on, a known address
-    # either becomes a grant, which is audited, or is refused for a reason
-    # about that grant.
+    # The address is resolved only after the rest of the request is validated, or a bad role_key
+    # would answer 404 or 400 by account existence with nothing audited. From here on a known
+    # address either becomes an audited grant or is refused for a reason about that grant.
     target = body.user_id
     if target is None:
         # One refusal for "no account" and "deactivated account" alike: the
@@ -700,7 +525,7 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
     ).fetchone()
 
     try:
-        # An assignment is an IAM write (0109, S1): system connection.
+        # An assignment is an IAM write (0109): system connection.
         with system_connection(SystemPurpose.CASE_MEMBERSHIP, reuse=conn) as sconn:
             CaseService(sconn).assign_user_checked(
                 case_id, target, body.role_key,
@@ -723,11 +548,9 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
         if body.email is None:
             raise
         _audit_share_refused(conn, user, case_id, body.email, "labels")
-        # The service's refusal names the assignee's clearance ("assignee
-        # clearance GREEN is below ..."). Reached by UUID that told a case
-        # owner about somebody whose id they already held; reached by a
-        # guessable address it would tell them any colleague's clearance.
-        # Said the way the roster says it, without the level (2026-09-23).
+        # The service's refusal names the assignee's clearance; by a guessable address that would
+        # tell the caller any colleague's clearance, so this says it as the roster does, without
+        # the level.
         raise Problem(
             400, "Invalid request",
             "that colleague could not open this case: their clearance is "
@@ -740,14 +563,11 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
         "display_name": assignee[0],
         "role_key": body.role_key,
         "expires_at": body.expires_at.isoformat() if body.expires_at else None,
-        # An UPSERT that replaced an existing grade must say so — otherwise
-        # demoting a colleague looks identical to adding a new one
-        # (invariant 12).
+        # An UPSERT over an existing grade says so, or demoting a colleague would look like adding
+        # one (invariant 12).
         "replaced_role": existing[0] if existing else None,
-        # The names a person reads, beside the keys. The owner decided
-        # CASE_OWNER is shown as Lead investigator (migration 0062), and
-        # the Share panel printed the key because nothing it could read
-        # carried the name: `/admin/roles` needs user.manage (2026-09-23).
+        # The names a person reads, beside the keys (CASE_OWNER is shown as Lead investigator,
+        # 0062): the Share panel cannot read `/admin/roles`, which needs user.manage.
         "role_name": role[2] or body.role_key,
         "replaced_role_name": ((existing[1] or existing[0])
                                if existing else None),
@@ -763,35 +583,13 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
 def list_case_users(case_id: UUID,
                     user: CurrentUser = Depends(require("case.read")),
                     conn: psycopg.Connection = Depends(get_conn)) -> dict:
-    """Who is assigned to this case, and whether the assignment works.
+    """Who is assigned to this case, and whether each assignment works.
 
-    `effective` is the point of this endpoint. An assignment row is only
-    half of access: the same five-part gate that guards every other
-    endpoint also needs an unexpired assignment, a live account, clearance
-    that dominates the case, and the case's compartments. A row that fails
-    any of those is invisible in its effects and indistinguishable from a
-    working one in the table — which is how somebody ends up asking why a
-    colleague they "added last week" cannot open the case.
-
-    Recomputed here from the same predicates `CaseService.list_for_user`
-    uses, so the two cannot drift into disagreeing about who can read.
-
-    That includes break-glass. `list_for_user` and the gate count a live
-    grant, on this case or global, at its level; this compared
-    `u.tlp_clearance` alone, so an analyst working in the case under an
-    emergency grant was shown to its owner as "cannot open the case",
-    "clearance below the case's classification" (2026-09-23). Such a colleague is now
-    `effective`, and a caller who can
-    manage the roster (`you_can_grant`) is also told when that access
-    lapses, in `emergency_access_until`, because on that instant they
-    drop back to "cannot open" and a clearance change, not a re-share, is
-    what fixes it. Anyone else reading the roster, LIAISON included, gets
-    null there: whether a colleague can open the case answers their
-    question, and who is on emergency access is not a partner's business.
-
-    Email is deliberately not returned. LIAISON holds `case.read`, so this
-    endpoint is reachable by an external partner, and the roster of a case
-    does not need to hand out the staff directory to answer "who is on it".
+    `effective` uses the predicates `CaseService.list_for_user` uses, so the two cannot disagree:
+    an unexpired assignment, a live account, clearance that dominates the case (a live break-glass
+    grant counts) and the case's compartments. Only a caller who may grant (`you_can_grant`) is
+    told when a colleague's emergency access lapses (`emergency_access_until`). Email is withheld
+    because LIAISON holds `case.read`, and a partner must not get the staff directory.
     """
     labels = conn.execute(
         'SELECT classification, compartments FROM core."case" WHERE id = %s',
@@ -824,13 +622,10 @@ def list_case_users(case_id: UUID,
         (labels[0], case_id),
     ).fetchall()
 
-    # Whether the CALLER's own case role carries `case.grant`, so the Share
-    # panel offers Add and Remove only to somebody who could use them. It
-    # showed both to every roster reader, LIAISON and READ_ONLY included,
-    # and each click ended in a 403 (2026-09-23). A hint for the console,
-    # never a gate: the grant and revoke routes still decide, step-up
-    # included. Read before the roster is built because it also decides
-    # who is told when a colleague's emergency access ends (U22).
+    # Whether the caller's own case role carries `case.grant`, so the Share panel offers Add and
+    # Remove only to somebody who could use them. A hint, never a gate: the grant and revoke routes
+    # still decide. Read before the roster, as it also decides who is told when a colleague's
+    # emergency access ends.
     can_grant = bool(conn.execute(
         """SELECT EXISTS (
                SELECT 1 FROM iam.case_assignment a
@@ -845,10 +640,8 @@ def list_case_users(case_id: UUID,
     names = {g[0]: g[1] for g in conn.execute(
         "SELECT id, display_name FROM iam.app_user WHERE id = ANY(%s)",
         (list(granters),)).fetchall()} if granters else {}
-    # The name a person reads for each grade on the roster, looked up like
-    # the granters' names: the owner decided CASE_OWNER is shown as Lead
-    # investigator (0062), every case worker opens this roster, and none
-    # of them can read `/admin/roles` (2026-09-23).
+    # The name a person reads for each grade on the roster (CASE_OWNER is Lead investigator, 0062),
+    # looked up here because case workers cannot read `/admin/roles`.
     role_names = {g[0]: g[1] for g in conn.execute(
         "SELECT key, display_name FROM iam.role WHERE key = ANY(%s)",
         (list({r[2] for r in rows}),)).fetchall()} if rows else {}
@@ -856,12 +649,8 @@ def list_case_users(case_id: UUID,
     users = []
     for r in rows:
         expired = r[5] is not None and r[5] <= now
-        # Each failing check, in words, so the Share panel can say WHY a
-        # colleague on the roster cannot open the case rather than only
-        # that they cannot (ux02 share-needs-raw-uuid, 2026-09-22). The
-        # clearance line does not name the colleague's level: LIAISON can
-        # read this roster, and "below the case" answers the question
-        # without handing a partner the staff's clearances.
+        # Each failing check, in words, so the Share panel can say why a colleague cannot open the
+        # case. The clearance line does not name the level: LIAISON can read this roster.
         reasons = []
         role_name = role_names.get(r[2]) or r[2]
         if not r[9]:
@@ -914,15 +703,8 @@ def revoke_case_user(case_id: UUID, user_id: UUID,
                      conn: psycopg.Connection = Depends(get_conn)) -> dict:
     """Take a colleague off this case.
 
-    `CaseService.revoke_user` has existed since Phase 1 with no route, so a
-    case could be shared from the console and never unshared: the only
-    remedy for a grant made to the wrong person was SQL (ux02
-    share-needs-raw-uuid, 2026-09-22). Same verb as granting, `case.grant`,
-    with the step-up that permission row carries. The service audits
-    `CASE_ACCESS_REVOKED` in the same transaction.
-
-    The owner cannot be removed, for the reason `assign_case_user` refuses
-    to regrade them: it would lock the case's owner out of their own case.
+    Same verb as granting, `case.grant`, with its step-up; the service audits `CASE_ACCESS_REVOKED`
+    in the same transaction. The owner cannot be removed: it would lock them out of their own case.
     """
     case = CaseService(conn).get(case_id)
     if case is None:
@@ -941,11 +723,10 @@ def revoke_case_user(case_id: UUID, user_id: UUID,
         (case_id, user_id)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "that person is not on this case")
-    # Removing an assignment is an IAM write (0109, S1).
+    # Removing an assignment is an IAM write (0109).
     with system_connection(SystemPurpose.CASE_MEMBERSHIP, reuse=conn) as sconn:
         CaseService(sconn).revoke_user(case_id, user_id, revoked_by=user.user_id)
-    # `revoked_role_name` for the same reason as the roster's `role_name`
-    # (2026-09-23).
+    # `revoked_role_name` for the same reason as the roster's `role_name`.
     return {"case_id": str(case_id), "user_id": str(user_id),
             "display_name": row[1], "revoked_role": row[0],
             "revoked_role_name": row[2] or row[0]}
@@ -966,34 +747,9 @@ def transition(case_id: UUID, body: TransitionBody,
                conn: psycopg.Connection = Depends(get_conn)) -> CaseOut:
     """Move the case along its lifecycle (`_TRANSITIONS` in cases.py).
 
-    ## Re-gated from case.update to case.close (2026-07-30)
-
-    This endpoint predates the rest of the file and asked for
-    `case.update`, the "edit case metadata" verb. `case.close` — "Close a
-    case" — was seeded in 0017 for exactly this and had zero call sites.
-    No access changes today (0021 grants both to CASE_OWNER and to nobody
-    else), so this is a correction of meaning, not of reach: an operator
-    tightening the roles later must be able to grant "may correct the case
-    file" without also granting "may close it".
-
-    ## PURGED is not a close
-
-    `ARCHIVED -> PURGED` marks a case for destruction. Reaching it through
-    the close verb would let a permission with no step-up set the flag
-    that authorises destroying a case file, while `case.delete` is a
-    step-up permission with nothing else calling it. So that one
-    transition re-enters the gate under `case.delete`.
-
-    That gets the step-up half enforced — `evaluate()` reads
-    `requires_step_up` off the permission row. It does NOT get dual
-    control: `approvals.OPERATIONS["case.delete"]` registers the operation
-    with no function that spends it, and says so on Administration,
-    Two-person controls ("Not enforced yet"). A single authoriser can still
-    mark a case PURGED. It is a marker of intent (the destruction itself is
-    Phase 6), and the audit row names them, but it is not two signatures.
-    Flagged rather than left implicit. (The seed's `requires_dual_control`
-    column that this docstring once quoted was never read by anything and
-    is retired, F9c 2026-09-24.)
+    Gated on `case.close`. ARCHIVED to PURGED marks the case for destruction, so that one move is
+    checked again under `case.delete`, which needs a fresh step-up. It is still one signature: dual
+    control for `case.delete` is not enforced yet.
     """
     svc = CaseService(conn)
     if body.status == "PURGED":

@@ -1,8 +1,6 @@
-"""collection.py after its HTTP core moved to egress_policy.py and
-pinned_http.py (docs/00 decision 72, 2026-09-24): the old names are the moved
-objects, fetch keeps its signature and messages, the collector's test seam
-still reaches the connect, and a call that names no route is refused once
-a proxy is configured.
+"""collection.py after its HTTP core moved to egress_policy.py and pinned_http.py (docs/00 decision 72):
+the old names are the moved objects, fetch keeps its signature and messages, the collector's test seam
+still reaches the connect, and a call that names no route is refused once a proxy is configured.
 
 Pure: no database, and no network beyond loopback.
 """

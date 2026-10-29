@@ -1,10 +1,9 @@
-"""The XenForo pages, parsed (F3, 2026-09-24).
+"""The XenForo pages, parsed.
 
-Pure, golden-file: saved XenForo 2 pages under tests/fixtures/xenforo, on
-hosts nobody can register, parsed exactly as the bounded child parses
-them. What each post is, who wrote it, when, what it quotes and what its
-signature says; a board's listing; a member's profile; a sign-in page, an
-anti-bot page and a restyled page told apart.
+Pure, golden-file: saved XenForo 2 pages under tests/fixtures/xenforo, on hosts nobody can register, parsed
+exactly as the bounded child parses them. What each post is, who wrote it, when, what it quotes and what
+its signature says; a board's listing; a member's profile; a sign-in page, an anti-bot page and a restyled
+page told apart.
 """
 from __future__ import annotations
 

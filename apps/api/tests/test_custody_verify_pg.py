@@ -1,51 +1,39 @@
-"""The custody chain verifier — and the proof that it can fail.
+"""The custody chain verifier, and the proof that it can fail.
 
-`core.evidence_custody` has been hash-chained since 0024 and nothing in
-the tree ever recomputed it (2026-09-02). The only test touching the
-hashes checked that the WRITER links two adjacent rows — which a forged
-second genesis, an in-place edit with the trigger stood down, or a deleted
-first row all pass. These tests break the chain in each way it can break
-and assert the verifier notices, because a verifier that has only ever
-seen intact data is not known to work, and one that answers "intact"
-unconditionally is worse than none: it manufactures the assurance the
-docstring on 0024 invokes FRE 902(13)-(14) for.
+`core.evidence_custody` is hash-chained since 0024. A test that checked only that the WRITER links two
+adjacent rows would pass a forged second genesis, an in-place edit with the trigger stood down, or a
+deleted first row. These tests break the chain in each way it can break and assert the verifier
+notices, because a verifier that has only ever seen intact data is not known to work, and one that
+answers "intact" unconditionally is worse than none: it manufactures the assurance the docstring on
+0024 invokes FRE 902(13)-(14) for.
 
 ## Two of these tests pin a BLIND SPOT, not a behaviour
 
-Added 2026-09-02. `test_deleted_tail_row_is_a_KNOWN_blind_spot` and
-`test_a_renumbering_is_a_KNOWN_blind_spot` assert that the verifier does
-NOT notice, which is the opposite of what the rest of the file does, and
-they exist because the pair above them -- middle row, first row -- read as
-an exhaustive enumeration over delete positions while silently omitting
-the third. The omitted one is the cheapest attack in the set. Each of the
-two also asserts the docstring that admits the limit, so the code and the
-claim cannot drift apart again: a limit recorded in prose alone is a limit
-that gets quietly dropped in the next edit, and a limit recorded in a test
-alone reads as a bug.
+`test_deleted_tail_row_is_a_KNOWN_blind_spot` and `test_a_renumbering_is_a_KNOWN_blind_spot` assert
+that the verifier does NOT notice, which is the opposite of what the rest of the file does. They exist
+because the middle-row and first-row delete tests read as an exhaustive enumeration over delete
+positions while omitting the third, and the omitted one is the cheapest attack in the set. Each also
+asserts the docstring that admits the limit, so the code and the claim cannot drift apart: a limit
+recorded in prose alone gets quietly dropped, and a limit recorded in a test alone reads as a bug.
 
 ## How the tampering is done, and why it is safe
 
-The ledger carries row-level and statement-level triggers that block
-UPDATE, DELETE and TRUNCATE (0023, 0052), so ordinary SQL cannot corrupt
-it — which is the point of the table and also the obstacle to testing it.
-`ALTER TABLE ... DISABLE TRIGGER USER` inside a transaction that is then
-ROLLED BACK is the idiom `test_audit_verify_pg.py` established for the
-audit chain: DDL in Postgres is transactional, so the disable, the tamper
-and the re-read all vanish together. Nothing persists, the triggers are
-never left off, and no other test can observe a broken chain.
+The ledger carries row-level and statement-level triggers that block UPDATE, DELETE and TRUNCATE (0023,
+0052), so ordinary SQL cannot corrupt it, which is the point of the table and also the obstacle to
+testing it. `ALTER TABLE ... DISABLE TRIGGER USER` inside a transaction that is then ROLLED BACK is the
+idiom `test_audit_verify_pg.py` established for the audit chain: DDL in Postgres is transactional, so
+the disable, the tamper and the re-read all vanish together. Nothing persists, the triggers are never
+left off, and no other test can observe a broken chain.
 
-The connection is deliberately NOT the autocommit one from `db.connect()`
-— with autocommit there is no transaction to roll back and the tamper
-would be permanent, in a table whose whole purpose is that nothing in it
-can be undone.
+The connection is deliberately NOT the autocommit one from `db.connect()`: with autocommit there is no
+transaction to roll back and the tamper would be permanent, in a table whose whole purpose is that
+nothing in it can be undone.
 
 ## The chain is GLOBAL, so the fixtures are too
 
-Custody rows need an evidence row, which needs a case, which needs a user,
-and the custody row's `actor_id` is a foreign key to a user as well
-(0024). All of that is created INSIDE the rolled-back transaction, so the
-seeds leave nothing behind — and, unlike the teardowns in the evidence
-suites, never need to delete a custody row to clean up.
+Custody rows need an evidence row, which needs a case, which needs a user, and the custody row's
+`actor_id` is a foreign key to a user as well (0024). All of that is created INSIDE the rolled-back
+transaction, so the seeds leave nothing behind and never need to delete a custody row to clean up.
 """
 from __future__ import annotations
 
@@ -167,9 +155,8 @@ def test_untouched_chain_verifies(tamperable):
 
 
 def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
-    """2026-10-07, as for the audit chain: the custody verifier handed
-    every row of the ledger back to Python. A scoped clean run now answers
-    one summary row, with the count and span of what it checked."""
+    """As for the audit chain, the custody verifier does not hand every row of the ledger back to
+    Python: a scoped clean run answers one summary row, with the count and span of what it checked."""
     from noctornal_api.custody_verify import verify_custody_chain
 
     evidence_id, uid = _exhibit(tamperable, "rows")
@@ -302,27 +289,20 @@ def test_deleted_first_row_is_NO_GENESIS(tamperable):
 
 
 def test_deleted_tail_row_is_a_KNOWN_blind_spot(tamperable):
-    """Deleting the NEWEST rows is invisible. This pins the limit, not a
-    behaviour anyone wants.
+    """Deleting the NEWEST rows is invisible. This pins the limit, not a behaviour anyone wants.
 
-    The two delete tests above read as an exhaustive enumeration -- middle
-    and first -- and until 2026-09-02 the third position had no test and
-    no mention in `custody_verify.py`'s "What this cannot see", which named
-    only the far more expensive re-chaining attack. A tail delete is the
-    CHEAPEST delete there is: nothing names the newest row as its
-    predecessor, so one DELETE with no rehashing at all leaves every
-    survivor linking to a real predecessor, one genesis and no forks.
+    A tail delete is the CHEAPEST delete there is: nothing names the newest row as its predecessor, so
+    one DELETE with no rehashing at all leaves every survivor linking to a real predecessor, one genesis
+    and no forks. `custody_verify.py`'s "What this cannot see" names it alongside the far more expensive
+    re-chaining attack.
 
-    That matters because the tail is where an export or a destruction is
-    recorded, and because 0024's own docstring (0024:15-17) claims "a
-    deleted or reordered row is detectable on replay". It is not, for this
-    position. Closing the hole needs something the ledger cannot supply
-    about itself -- a persisted high-water mark, or `tail_row_hash`
-    recorded out of band and compared on the next run.
+    That matters because the tail is where an export or a destruction is recorded, and because 0024's
+    own docstring (0024:15-17) claims "a deleted or reordered row is detectable on replay", which is
+    not true for this position. Closing the hole needs something the ledger cannot supply about itself:
+    a persisted high-water mark, or `tail_row_hash` recorded out of band and compared on the next run.
 
-    So this test asserts BOTH halves that have to stay in step: the
-    behaviour, and the module docstring that admits it. A docstring that
-    quietly re-acquired the withdrawn claim would turn this red.
+    So this test asserts BOTH halves that have to stay in step: the behaviour, and the module docstring
+    that admits it. A docstring that re-acquired the withdrawn claim would turn this red.
     """
     from noctornal_api import custody_verify
     from noctornal_api.custody_verify import verify_custody_chain
@@ -349,12 +329,10 @@ def test_deleted_tail_row_is_a_KNOWN_blind_spot(tamperable):
     assert after.breaks == ()
     assert not [f for f in after.forks if f.id > (after.fork_boundary or 0)]
     assert after.genesis_count == 1
-    # `checked`, `last_id` and `tail_row_hash` all move (measured on a
-    # two-row tail delete: 166->164, 861->859, 0c42c7d6->330df2cd), while
-    # `breaks`, `forks`, `first_id` and `genesis_count` do not. None of the
-    # three is DETECTION: each needs a value recorded before the delete, and
-    # this module persists none of them. Only a caller who knew the
-    # previous count can read anything into that.
+    # `checked`, `last_id` and `tail_row_hash` all move, while `breaks`, `forks`, `first_id` and
+    # `genesis_count` do not. None of the three is DETECTION: each needs a value recorded before the
+    # delete, and this module persists none of them. Only a caller who knew the previous count can read
+    # anything into that.
     assert after.checked == seeded.checked - 2
     assert after.last_id == ids[-3]
 
@@ -376,22 +354,19 @@ def test_deleted_tail_row_is_a_KNOWN_blind_spot(tamperable):
 def test_a_renumbering_is_a_KNOWN_blind_spot(tamperable):
     """Swapping two rows' ids changes no hash. Also pinned as a limit.
 
-    `id` is not among the columns `_HASH_EXPR` covers, so a renumbering is
-    invisible to every check -- which is the other half of 0024:15-17's
-    false claim that "a deleted or reordered row is detectable on replay".
-    Recorded here on 2026-09-02 because the module docstring now says so
-    and a claim nobody checks is a claim that rots.
+    `id` is not among the columns `_HASH_EXPR` covers, so a renumbering is invisible to every check,
+    which is the other half of 0024:15-17's false claim that "a deleted or reordered row is detectable
+    on replay". The module docstring says so, and a claim nobody checks is a claim that rots.
 
-    The ids are swapped through a negative parking value, because the
-    primary key is unique and `UPDATE ... SET id = <the other one>` would
-    collide mid-statement.
+    The ids are swapped through a negative parking value, because the primary key is unique and
+    `UPDATE ... SET id = <the other one>` would collide mid-statement.
     """
     from noctornal_api import custody_verify
     from noctornal_api.custody_verify import _HASH_EXPR, verify_custody_chain
 
     assert "c.id" not in _HASH_EXPR, \
         "id is now hashed; a renumbering IS detectable and this test is stale"
-    assert "A pure renumbering." in custody_verify.__doc__, \
+    assert "A pure renumbering is invisible" in custody_verify.__doc__, \
         "the module must NAME this blind spot, not just have it"
 
     _guard_clean_start(verify_custody_chain(tamperable))
@@ -502,17 +477,13 @@ def test_a_second_genesis_is_reported_as_tampering(tamperable):
 def test_a_scoped_run_reports_whole_ledger_findings_from_outside_its_scope(tamperable):
     """A scoped report can come back not-intact naming other exhibits' rows.
 
-    GENESIS and NO_GENESIS are computed over the whole table and appended
-    to every report, scoped or not -- deliberately, because the anchor is a
-    property of the chain and an officer producing one exhibit still needs
-    to hear that the ledger was re-anchored. But it means a scoped
-    `intact` is not purely "a statement about the rows REPORTED", which is
-    what `CustodyReport.intact`'s docstring said until 2026-09-02 while
-    the endpoint's scoped caveat enumerated only LINK, FORK and CONTENT.
-    Two prose halves agreeing with each other and not with the code.
+    GENESIS and NO_GENESIS are computed over the whole table and appended to every report, scoped or
+    not, deliberately: the anchor is a property of the chain, and an officer producing one exhibit still
+    needs to hear that the ledger was re-anchored. So a scoped `intact` is not purely "a statement about
+    the rows REPORTED", and `CustodyReport.intact`'s docstring and the endpoint's scoped caveat must say
+    so rather than enumerate only LINK, FORK and CONTENT.
 
-    Both halves are asserted here: the behaviour, and the docstring that
-    now describes it.
+    Both halves are asserted here: the behaviour, and the docstring that describes it.
     """
     from noctornal_api.custody_verify import CustodyReport, verify_custody_chain
 
@@ -533,8 +504,8 @@ def test_a_scoped_run_reports_whole_ledger_findings_from_outside_its_scope(tampe
     assert all(b.evidence_id != clean_ev for b in scoped.breaks), \
         [(b.kind, b.id, str(b.evidence_id)) for b in scoped.breaks]
 
-    # ...and an EMPTY scope is not spared either, which is why `intact`'s
-    # docstring no longer says an empty result returns True full stop.
+    # ...and an EMPTY scope is not spared either, so `intact`'s docstring does not say an empty result
+    # returns True full stop.
     empty = verify_custody_chain(tamperable, evidence_id=uuid4())
     assert empty.checked == 0 and not empty.intact
 
@@ -544,8 +515,8 @@ def test_a_scoped_run_reports_whole_ledger_findings_from_outside_its_scope(tampe
     # The old text sent the caller to an unscoped run to find a deletion.
     # That run is blind to a tail delete as well, so the redirection may
     # only survive as a retraction, never as advice.
-    assert "the unscoped run is blind to them too" in doc, \
-        "the property must say an unscoped run is not the answer either"
+    assert "blind to a deletion at the END of the ledger" in " ".join(doc.split()), \
+        "the property must say a deletion at the end of the ledger is invisible to it"
     if "run without `evidence_id`" in doc:
         assert "no longer" in doc, \
             "that redirection is withdrawn; it may only appear as a retraction"
@@ -608,17 +579,14 @@ def test_per_exhibit_view_is_exact_while_the_global_run_reports_the_rest(tampera
 def test_an_empty_scope_is_not_reported_as_a_pass(tamperable):
     """`intact` on zero rows means "nothing to say", never "verified".
 
-    A caller that reads `intact` without `checked` for an exhibit that has
-    no custody at all would believe its custody verified. `first_id` /
-    `last_id` being None is the tell.
+    A caller that reads `intact` without `checked` for an exhibit that has no custody at all would
+    believe its custody verified. `first_id` / `last_id` being None is the tell.
 
-    `intact` is True here only because the ledger underneath is ANCHORED:
-    GENESIS and NO_GENESIS are whole-ledger findings injected into every
-    report, so an empty scope over a re-anchored ledger comes back
-    not-intact instead -- see
-    `test_a_scoped_run_reports_whole_ledger_findings_from_outside_its_scope`.
-    The guard below is what keeps that from surfacing here as a confusing
-    failure of the empty-scope rule it is not about (added 2026-09-02).
+    `intact` is True here only because the ledger underneath is ANCHORED: GENESIS and NO_GENESIS are
+    whole-ledger findings injected into every report, so an empty scope over a re-anchored ledger comes
+    back not-intact instead (see
+    `test_a_scoped_run_reports_whole_ledger_findings_from_outside_its_scope`). The guard below keeps
+    that from surfacing here as a confusing failure of the empty-scope rule it is not about.
     """
     from noctornal_api.custody_verify import verify_custody_chain
 
@@ -678,29 +646,21 @@ def _make_user(conn, *, global_roles=()):
 
 
 def _session_headers(conn, email) -> dict:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against. Unbound (no
+    address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
     is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. TOTP codes
+    are single-use, so two sign-ins for one account inside one 30-second step would fail on the code,
+    not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return {"Authorization": f"Bearer {token}"}
@@ -739,11 +699,9 @@ def test_the_endpoint_reports_what_the_service_reports(conn, client):
     assert [(b["kind"], b["id"]) for b in body["breaks"]] == \
         [(b.kind, b.id) for b in report.breaks]
 
-    # An UNSCOPED run carries a caveat too. Until 2026-09-02 it returned
-    # `"caveat": null`, which an officer reads as "nothing qualifies this
-    # answer" -- while the qualification that matters most is true of every
-    # run: the checks are relative, so rows removed from the END of the
-    # ledger leave `intact: true` and no trace at all.
+    # An UNSCOPED run carries a caveat too: `"caveat": null` would read as "nothing qualifies this
+    # answer", while the qualification that matters most is true of every run. The checks are relative,
+    # so rows removed from the END of the ledger leave `intact: true` and no trace at all.
     assert body["caveat"], "an unscoped answer needs a caveat as much as a scoped one"
     assert "END" in body["caveat"] and "tail_row_hash" in body["caveat"], \
         body["caveat"]
@@ -765,9 +723,8 @@ def test_the_endpoint_reports_what_the_service_reports(conn, client):
     assert scoped["tail_row_hash"] == report.tail_row_hash, \
         "the tail is whole-ledger, like the anchor: an exhibit's newest row " \
         "is not the chain's tail"
-    # The scoped caveat used to promise "Run without `evidence_id` for
-    # that" -- an unscoped run does NOT reveal a deletion when the removed
-    # rows were the ledger's own tail, so that sentence was withdrawn.
+    # The scoped caveat must not promise "Run without `evidence_id` for that": an unscoped run does NOT
+    # reveal a deletion when the removed rows were the ledger's own tail.
     assert "Run without `evidence_id`" not in scoped["caveat"], scoped["caveat"]
     assert "breaks[].evidence_id" in scoped["caveat"], \
         "a scoped run can report GENESIS breaks belonging to other " \
@@ -777,25 +734,19 @@ def test_the_endpoint_reports_what_the_service_reports(conn, client):
 def test_the_console_consumes_this_endpoint_and_the_docstring_names_how():
     """The other end of the contract: the analyst console.
 
-    An endpoint with no reachable caller is a feature nobody can run, and
-    this repo has closed audit-chain work before only once the UI landed
-    the same day. `verify_custody`'s docstring now NAMES its console half
-    -- the button, the wiring function, the renderer -- so this test reads
-    the names out of the docstring and checks each one exists in the
-    shipped static assets. A rename on either side turns the docstring
-    into a lie and this red, which is the only thing that keeps a
-    cross-file claim like that honest.
+    An endpoint with no reachable caller is a feature nobody can run. `verify_custody`'s docstring NAMES
+    its console half (the button, the wiring function, the renderer), so this test reads the names out
+    of the docstring and checks each one exists in the shipped static assets. A rename on either side
+    turns the docstring into a lie and this red, which is the only thing that keeps a cross-file claim
+    like that honest.
 
-    `custodyVerdict` must render the four fields `/audit/verify`'s panel
-    has no equivalent for: `scoped` and `caveat`, so a per-exhibit answer
-    is never read as a global one, and `genesis_count` with
+    `custodyVerdict` must render the four fields `/audit/verify`'s panel has no equivalent for: `scoped`
+    and `caveat`, so a per-exhibit answer is never read as a global one, and `genesis_count` with
     `genesis_note`, which is the one removal no relative check can see.
 
-    Pure -- no database, no browser -- following `test_ui_invariants.py`,
-    which reads the same files for the same reason. It sits in this
-    module anyway so the endpoint and its consumer are checked together;
-    the consequence is that it skips with the rest of the file when there
-    is no DATABASE_URL.
+    Pure: no database, no browser, following `test_ui_invariants.py`. It sits in this module so the
+    endpoint and its consumer are checked together; it skips with the rest of the file when there is no
+    DATABASE_URL.
     """
     from pathlib import Path
 

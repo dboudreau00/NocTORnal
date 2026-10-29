@@ -1,66 +1,50 @@
-"""The archive-expansion child process: one bounded walk over one archive
-sample's bytes (roadmap phase 8 "archive expansion", 2026-10-02).
+"""The archive-expansion child process: one bounded walk over one archive sample's bytes.
 
-Run as `python -m noctornal_api.lab_archive_child` by `lab_archive`
-through the same runner static triage uses (`lab_triage.run_child`),
-never imported for its walk by anything that holds a database
-connection, a key or a request. Pure in the sense `lab_static` is: no
-database, no environment reads beyond what the parent hands it, no files.
+Run as `python -m noctornal_api.lab_archive_child` by `lab_archive` through the same runner static triage
+uses (`lab_triage.run_child`), never imported for its walk by anything that holds a database connection,
+a key or a request. Pure in the sense `lab_static` is: no database, no environment reads beyond what the
+parent hands it, no files.
 
-## Why a child, and why nothing touches a disk
+Why a child, and why nothing touches a disk: an archive's container format is parsed by code written for
+well-formed input (a zip bomb, a tar whose size field lies, a name that walks out of its directory). So
+the walk happens in a process that bounds itself before it reads a payload byte (`lab_static.apply_limits`:
+no file writes, a CPU limit, an address space limit where the platform enforces one), under the parent's
+wall clock and output cap, and every member is read into memory through a reader that stops one byte past
+its cap. Nothing here calls `extract`, `extractall` or opens a path: a member's name is used for exactly
+two things, the refusal rules below and the path recorded on the child sample.
 
-An archive is the oldest delivery wrapper there is, and its container
-format is parsed by code that was written for well-formed input: a zip
-bomb, a tar whose size field lies, a name that walks out of its
-directory. So the walk happens in a process that bounds itself BEFORE it
-reads a payload byte (`lab_static.apply_limits`: no file writes, a CPU
-limit, an address space limit where the platform enforces one), under the
-parent's wall clock and output cap, and every member is read INTO MEMORY
-through a reader that stops one byte past its cap. Nothing here ever
-calls `extract`, `extractall` or opens a path: a member's name is used
-for exactly two things, the refusal rules below and the path recorded on
-the child sample.
+What crosses: stdin carries one header line (UTF-8 JSON, at most `HEADER_CAP` bytes) naming the caps and
+the archive-password convention, then the archive. stdout carries one frame: an 8-byte big-endian length,
+the JSON report, then every accepted member's bytes back to back in the report's order (`frame`). The
+parent recomputes every digest and believes nothing but the shape (`lab_archive`): a member whose bytes do
+not hash to what the report says is dropped with the whole answer.
 
-## What crosses, and how
+Every refusal is reported as a code from `REFUSALS`, never a sentence, and a member's name reaches the
+report only once `safe_path` has found it printable; an unprintable one is reported in its escaped form. A
+parser's own message can quote hostile bytes, so an exception is reported by its class alone, as
+`lab_static` reports one.
 
-stdin carries one header line (UTF-8 JSON, at most `HEADER_CAP` bytes)
-naming the caps and the archive-password convention, then the archive.
-stdout carries one frame: an 8-byte big-endian length, the JSON report,
-then every accepted member's bytes back to back in the report's order
-(`frame`). The parent recomputes every digest and believes nothing but
-the shape (`lab_archive`): a member whose bytes do not hash to what the
-report says is dropped with the whole answer.
-
-Every refusal is reported as a CODE from `REFUSALS`, never a sentence,
-and a member's name reaches the report only once `safe_path` has found
-it printable; an unprintable one is reported in its escaped form. A
-parser's own message can quote hostile bytes, so an exception is reported
-by its class alone, as `lab_static` reports one.
-
-## The rules, in the order they are applied to a member
+The rules, in the order they are applied to a member:
 
 1. A directory entry is recorded and holds nothing.
-2. A symbolic link, a hard link or a device file is refused: each is an
-   instruction to a filesystem, and nothing here has one.
-3. The name: NUL or an unprintable character, over `MAX_PATH_CHARS`, an
-   absolute path (a leading slash, a drive letter, a UNC prefix) or a
-   `..` component is refused. The normalised path (forward slashes, no
+2. A symbolic link, a hard link or a device file is refused: each is an instruction to a filesystem, and
+   nothing here has one. A zip entry marked as a link or a device that holds bytes is read as the file
+   an extractor writes from it.
+3. The name: NUL or an unprintable character, over `MAX_PATH_CHARS`, an absolute path (a leading slash, a
+   drive letter, a UNC prefix) or a `..` component is refused. The normalised path (forward slashes, no
    `.` components) is what the child sample records.
-4. A second member with the same normalised path is a duplicate, and one
-   that differs only by case or Unicode normalisation (NFKC, casefolded)
-   collides with the first: both are refused, the first stands.
-5. An encrypted zip member is opened with the archive-password
-   convention (docs/16 C6, `infected`, handed in by the parent) and
-   refused when that does not open it; an encryption or compression
-   method the standard library cannot read is refused by name.
-6. The declared size is checked against the per-member cap before a byte
-   is read, then the bytes are read under the cap anyway (a size field
-   can lie); an empty member is refused (an empty submission is not a
-   sample); a zip member's compression ratio is checked against the cap,
-   and the whole walk's ratio against the archive's own size.
-7. The running total of uncompressed bytes is checked against its cap
-   after every member; past it the whole expansion is refused, because a
-   partial answer to "what is in this archive" is the kind that gets
+4. A second member with the same normalised path is a duplicate, and one that differs only by case or
+   Unicode normalisation (NFKC, casefolded) collides with the first: both are refused, the first stands.
+5. An encrypted zip member is opened with the archive-password convention (docs/16 C6, `infected`, handed
+   in by the parent) and refused when that does not open it; an encryption or compression method the
+   standard library cannot read is refused by name.
+6. The declared size is checked against the per-member cap before a byte is read, then the bytes are read
+   under the cap anyway (a size field can lie); an empty member is refused (an empty submission is not a
+   sample); a zip member's compression ratio is checked against the cap, and the whole walk's ratio
+   against the archive's own size.
+7. The running total of uncompressed bytes, tar header bodies included, is checked against its cap after
+   every member; past it the
+   whole expansion is refused, because a partial answer to "what is in this archive" is the kind that gets
    trusted.
 """
 from __future__ import annotations
@@ -106,11 +90,9 @@ MEMBER_REFUSALS = (
     "corrupt_member", "truncated_member", "size_mismatch",
 )
 REFUSALS = ARCHIVE_REFUSALS + MEMBER_REFUSALS
-#: The per-member refusals behind which there is no content to compare: a
-#: directory, a link, a device and an empty entry hold no bytes, so a
-#: refusal of one leaves nothing unscreened. Every other member refusal
-#: left bytes that no screening saw, which the derived "members were not
-#: compared" gap says (2026-10-03).
+#: The per-member refusals behind which there is no content to compare: a directory, a link, a device and
+#: an empty entry hold no bytes, so a refusal of one leaves nothing unscreened. Every other member refusal
+#: left bytes that no screening saw, which the derived "members were not compared" gap says.
 CONTENT_FREE_REFUSALS = ("directory", "symlink", "hardlink", "device", "empty")
 
 _DRIVE = re.compile(r"^[A-Za-z]:")
@@ -184,10 +166,9 @@ class _Walk:
         self.refused: list[dict] = []
         self.entries = 0
         self.total = 0
-        #: Bytes decompressed to get past members refused over the
-        #: per-member cap in a STREAMING tar (2026-10-03): the reader must still decompress
-        #: them, so they
-        #: count against the total and the ratio like any other byte.
+        #: Bytes decompressed to get past refused members and tar header bodies in a streaming tar: the
+        #: reader must still decompress them, so they count against the total and the ratio like any other
+        #: byte.
         self.skipped = 0
         self.seen_exact: dict[str, int] = {}
         self.seen_folded: dict[str, str] = {}
@@ -252,17 +233,13 @@ class _Walk:
         return data
 
     def skip_over_cap(self, stream, declared: int) -> None:
-        """A tar member over the per-member cap is refused, but a streaming
-        read still has to decompress it to reach the next header, and
-        tarfile's own stream skip (`seek`) is quadratic in the compression
-        ratio: a 171 byte tar.bz2 declaring one 96 MiB member burned the
-        whole wall clock and ended as a generic timeout, and a 48 MiB member
-        at 85 to 1 took 14 seconds where reading it in pieces takes half a
-        second. So: the declared size is held to the archive's own ratio
-        BEFORE a byte is decompressed, and what is decompressed is read in
-        `CHUNK` pieces and counted against the total and the ratio as it
-        goes. The cost of a skip is thereby bounded by the caps, not by what
-        a header claims, and a bomb is a named refusal of the whole archive."""
+        """A tar member over the per-member cap is refused, but a streaming read still has to decompress it
+        to reach the next header, and tarfile's own stream skip (`seek`) is quadratic in the compression
+        ratio: a 171 byte tar.bz2 declaring one 96 MiB member burns the whole wall clock and ends as a
+        generic timeout. So the declared size is held to the archive's own ratio before a byte is
+        decompressed, and what is decompressed is read in `CHUNK` pieces and counted against the total and
+        the ratio as it goes. The cost of a skip is thereby bounded by the caps, not by what a header
+        claims, and a bomb is a named refusal of the whole archive."""
         if (self.total + self.skipped + declared) / self.archive_len > self.max_ratio:
             raise Refused("ratio", ratio=round(
                 (self.total + self.skipped + declared) / self.archive_len, 1),
@@ -278,6 +255,19 @@ class _Walk:
             if held / self.archive_len > self.max_ratio:
                 raise Refused("ratio", ratio=round(held / self.archive_len, 1),
                               cap=self.max_ratio)
+
+    def header_body(self, declared: int) -> None:
+        """A GNU long-name or long-link body, or a pax body, about to be read whole by tarfile before it
+        yields the member it describes. Its decompressed blocks count like a skipped member's, and the
+        declared size is refused before the read, so a tiny header cannot inflate past the caps."""
+        blocks = -(-max(declared, 0) // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+        held = self.total + self.skipped + blocks
+        if held > self.max_total:
+            raise Refused("total_bytes", total=held, cap=self.max_total)
+        if held / self.archive_len > self.max_ratio:
+            raise Refused("ratio", ratio=round(held / self.archive_len, 1),
+                          cap=self.max_ratio)
+        self.skipped += blocks
 
     def keep(self, path: str, data: bytes, *, compressed: int | None) -> None:
         self.total += len(data)
@@ -319,15 +309,12 @@ _CD_FIXED = 46
 
 
 def _count_directory(data: bytes, start: int, cd_size: int, max_members: int) -> int:
-    """How many entries the central directory really holds, counted by
-    walking its records from `start` and refusing at the first one past
-    `max_members`. The claimed count is not believed: zipfile reads records
-    until `cd_size` bytes are used and never looks at the count, so a
-    directory of millions of 46-byte records behind an end record that
-    claims one entry was parsed whole, up to the size of the archive, before
-    the count refusal (docs/17). The walk only counts: a record that is not
-    one ends it, and zipfile, which reads the same bytes from the same place,
-    refuses that as corrupt in its own words."""
+    """How many entries the central directory really holds, counted by walking its records from `start`
+    and refusing at the first one past `max_members`. The claimed count is not believed: zipfile reads
+    records until `cd_size` bytes are used and never looks at the count, so a directory of millions of
+    46-byte records behind an end record that claims one entry would be parsed whole, up to the size of the
+    archive, before the count refusal. The walk only counts: a record that is not one ends it, and
+    zipfile, which reads the same bytes from the same place, refuses that as corrupt in its own words."""
     if start < 0:
         raise Refused("corrupt")
     end = min(start + cd_size, len(data))
@@ -382,24 +369,18 @@ def zip_preflight(data: bytes, max_members: int) -> int:
     return max(total, _count_directory(data, cd_end - cd_size, cd_size, max_members))
 
 
-#: The most a zip entry marked as a symbolic link may hold and still be one:
-#: its bytes are the link's target, a path.
-MAX_LINK_TARGET = 1024
-
-
 def _zip_kind(info: zipfile.ZipInfo) -> str | None:
-    """A refusal code for a zip entry that is not a plain file, read from
-    the Unix mode in the external attributes, else None.
+    """A refusal code for a zip entry that is not a plain file, read from the Unix mode in the external
+    attributes, else None.
 
-    In a zip that mode is a bit beside an entry that carries bytes, which
-    Windows and most extractors write out as an ordinary file. So an entry
-    marked as a device that holds any bytes, or as a link that holds more
-    than a link target, is read as the file it is: refused as content-free,
-    it hid a payload from expansion and screening (2026-10-07)."""
+    In a zip that mode is a bit beside an entry that carries bytes, which Windows and most extractors
+    write out as an ordinary file. So an entry marked as a device or a link that holds any bytes is read
+    as the file it is: refusing it as content-free would hide a payload from expansion and screening,
+    however short the payload."""
     if info.is_dir():
         return "directory"
     mode = (info.external_attr >> 16) & 0xF000
-    if mode == 0xA000 and info.file_size <= MAX_LINK_TARGET:
+    if mode == 0xA000 and info.file_size == 0:
         return "symlink"
     if mode in (0x2000, 0x6000, 0x1000, 0xC000) and info.file_size == 0:
         return "device"
@@ -416,12 +397,10 @@ def walk_zip(data: bytes, walk: _Walk) -> None:
         infos = zf.infolist()
         if len(infos) > walk.max_members:
             raise Refused("member_count", entries=len(infos), cap=walk.max_members)
-        # The bytes open with a local header (`family_of`), so the first
-        # member the central directory names must start there. zipfile reads
-        # the LAST end record and shifts every offset past whatever precedes
-        # it, so a zip appended to another one listed only the second, and
-        # the first one's members went unexpanded and unscreened with nothing
-        # refused (2026-10-07).
+        # The bytes open with a local header (`family_of`), so the first member the central directory
+        # names must start there. zipfile reads the last end record and shifts every offset past whatever
+        # precedes it, so a zip appended to another one would list only the second, and the first one's
+        # members would go unexpanded and unscreened with nothing refused.
         if infos and min(i.header_offset for i in infos) != 0:
             raise Refused("corrupt", error="bytes_before_first_member")
         for info in infos:
@@ -473,12 +452,9 @@ def walk_zip(data: bytes, walk: _Walk) -> None:
                 continue
             except (zipfile.BadZipFile, OSError, ValueError, OverflowError,
                     LookupError, MemoryError, zlib.error) as exc:
-                # ZipCrypto's check is ONE byte, so a wrong password gets
-                # past it once in 256 and then decrypts to garbage that
-                # fails here (zlib.error, a CRC): for an encrypted member
-                # that is the password not opening it, not a corrupt
-                # archive (and an uncaught zlib.error used to refuse the
-                # WHOLE archive as corrupt; 2026-10-03).
+                # ZipCrypto's check is one byte, so a wrong password gets past it once in 256 and then
+                # decrypts to garbage that fails here (zlib.error, a CRC): for an encrypted member that is
+                # the password not opening it, not a corrupt archive.
                 walk.refuse(path, "encrypted_no_password" if encrypted
                             else "corrupt_member", error=type(exc).__name__)
                 continue
@@ -504,11 +480,10 @@ def _tar_kind(member: tarfile.TarInfo) -> str | None:
 
 
 def _tar_stream(data: bytes):
-    """The tar's bytes as a stream, decompressed by the library's own file
-    readers, which read EVERY stream of a multi-stream gzip, bzip2 or xz file
-    as `tar xzf` does. tarfile's own `r|*` decompressor stops at the end of
-    the first stream, so a second stream's members were neither expanded nor
-    refused (2026-10-07)."""
+    """The tar's bytes as a stream, decompressed by the library's own file readers, which read every
+    stream of a multi-stream gzip, bzip2 or xz file as `tar xzf` does. tarfile's own `r|*` decompressor
+    stops at the end of the first stream, so a second stream's members would be neither expanded nor
+    refused."""
     raw = io.BytesIO(data)
     if data[:2] == b"\x1f\x8b":
         return gzip.GzipFile(fileobj=raw, mode="rb")
@@ -558,6 +533,21 @@ def _rest_is_padding(tf: tarfile.TarFile, walk: _Walk) -> bool:
                           cap=walk.max_ratio)
 
 
+def _counted_tarinfo(walk: _Walk) -> type[tarfile.TarInfo]:
+    """A TarInfo whose long-name, long-link and pax header bodies are held to the walk's caps before
+    tarfile reads them, since tarfile consumes them inside `next()` where the member loop cannot."""
+    class _Counted(tarfile.TarInfo):
+        def _proc_gnulong(self, tarfile):
+            walk.header_body(self.size)
+            return super()._proc_gnulong(tarfile)
+
+        def _proc_pax(self, tarfile):
+            walk.header_body(self.size)
+            return super()._proc_pax(tarfile)
+
+    return _Counted
+
+
 def walk_tar(data: bytes, walk: _Walk) -> None:
     """A streaming read (`r|`) over `_tar_stream`: gzip, bzip2 and xz are
     decompressed as the members are read, never into one buffer first, so a
@@ -567,7 +557,8 @@ def walk_tar(data: bytes, walk: _Walk) -> None:
     (`_Walk.skip_over_cap`): the skip is a decompression too. Anything but
     padding after the last member read refuses the whole archive."""
     try:
-        tf = tarfile.open(fileobj=_tar_stream(data), mode="r|")
+        tf = tarfile.open(fileobj=_tar_stream(data), mode="r|",
+                          tarinfo=_counted_tarinfo(walk))
     except tarfile.ReadError:
         raise Refused("not_tar" if data[:2] in (b"\x1f\x8b", b"BZ", b"\xfd7")
                       else "corrupt") from None

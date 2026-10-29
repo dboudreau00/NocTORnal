@@ -1,26 +1,13 @@
-"""Similarity reads: similar wording and similar meaning (F6.3 and F6.4,
-embeddings, 2026-09-24).
+"""Similarity reads: similar wording and similar meaning, from embeddings.
 
-Every route here is a POST beside the untouched GET text-search routes in
-search.py. A pasted passage travels in the BODY, never in a URL, so it
-stays out of proxy and server logs; and `/similar` may embed the item
-now and, for similar meaning, send its text to the model endpoint, a side
-effect no GET may have. Reads they are, so on a closed case they stay
-open (test_closed_case_read_only.py lists them as not content).
-
-Who may read what is exactly what the text search already allows:
-documents need the global collection.read that /collection/documents
-demands and are read at the reader's CASE-LESS labels (a break-glass grant
-on one case never raises deployment-wide documents); exhibits need
-evidence.read on the case and claims case.read, both at the case-scoped
-labels. Every route spends the 'search' meter, and every similar meaning
-send spends 'search.meaning' too.
-
-What an answer says: a band for similar wording ("near duplicate", "much
-of the same wording", "some shared wording"), the position for similar
-meaning, and what the two texts share (selectors, words, phrases). The
-number is in the answer for scripts; the console never prints it (docs/13
-#9). No answer carries a vector.
+Every route is a POST: a pasted passage stays out of URLs and logs, and `/similar` may embed the
+item and send its text to the model endpoint, which no GET may do. They are reads, so a closed
+case keeps them open (test_closed_case_read_only.py). Access is the text search's: documents need
+the global collection.read and are read at the reader's case-less labels, which no break-glass
+grant raises; exhibits need evidence.read and claims case.read, at the case-scoped labels. Every
+route spends the 'search' meter and every similar meaning send 'search.meaning' too. An answer
+gives a band for wording, the position for meaning and what the two texts share; the number is for
+scripts and the console never prints it (docs/13 #9). No answer carries a vector.
 """
 from __future__ import annotations
 
@@ -118,14 +105,12 @@ def _usable(svc: EmbeddingService, role: str, *, free_text: bool):
 
 
 def _explained(role: str, query_text: str, hits: list[dict], *, limit: int) -> list[dict]:
-    """Each hit with what it shares with the query; similar wording hits
-    that fall below the bands are dropped. The hit's text, read for this,
-    never leaves.
+    """Each hit with what it shares with the query; similar wording hits that fall below the bands
+    are dropped. The hit's text, read for this, never leaves.
 
-    The query side is worked out once, and similar wording stops at the
-    first hit under WORDING_FLOOR: hits come nearest first, so none after
-    it can be shown, and explaining them was most of a request's CPU (about
-    13 s for 200 hits at the caps, measured 2026-09-25)."""
+    The query side is worked out once, and similar wording stops at the first hit under
+    WORDING_FLOOR: hits come nearest first, so none after it can be shown, and explaining them
+    would be most of a request's CPU (about 13 s for 200 hits at the caps)."""
     query = E.SharedQuery(query_text)
     out = []
     for hit in hits:
@@ -290,7 +275,7 @@ def search_documents_similar(
 
 
 # ---------------------------------------------------------------------------
-# Case items (F6.4)
+# Case items
 # ---------------------------------------------------------------------------
 
 EXHIBIT_NOTE = ("Exhibits are compared by title and description: this build does not "

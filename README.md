@@ -233,7 +233,7 @@ anything missing. Then it builds `.venv` with the two workspace packages;
 generates a fresh TOTP key, persona key and ingest pepper into `.env.local`
 (mode 600), **never overwriting an existing one**; starts Postgres, Redis,
 MinIO and Mailpit and waits for the database to accept connections; applies
-all 182 Alembic migrations (Alembic head 0182); creates your first account,
+all 183 Alembic migrations (Alembic head 0183); creates your first account,
 printing the password **once** with a QR code to scan and waiting until you
 have saved it; offers the demo case; and starts the API, printing the console
 URL, <http://127.0.0.1:8000/ui/>. Detail and troubleshooting:
@@ -331,7 +331,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **8377 tests** (`def test_`
+With the containers up, expect **no failures** across **8420 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -676,7 +676,7 @@ test named after it.
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
-| **Migrations** | Alembic | 182 revisions (Alembic head 0182), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Migrations** | Alembic | 183 revisions (Alembic head 0183), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
@@ -695,7 +695,7 @@ enforces it.
 
 ### Testing
 
-**8377 tests** (`def test_` functions across two pytest roots, maintained by
+**8420 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -722,7 +722,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   182 Alembic revisions
+│   └── migrations/versions/   183 Alembic revisions
 ├── docs/                      the reasoning, one numbered document per subject
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
@@ -775,8 +775,11 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1.4, release 0.9.4, tag `v0.9.4-beta`: Beta 1.3 with a quiet console
-and a manual you can read, and no migration. Every explanatory paragraph that
+This is Beta 1.5, release 0.9.5, tag `v0.9.5-beta`: Beta 1.4 with the 18 findings
+of a code review of the whole tree closed, each with a test, and one migration,
+0183, which stops the request role from lowering the label of an entity or a tie.
+Beta 1.4 was Beta 1.3 with a quiet console and a manual you can read, and no
+migration. Every explanatory paragraph that
 used to open a pane is off the screen, and what it said is in the manual, now a
 book of five parts and thirteen appendices with a PDF beside it. A warning that
 protects somebody is still on screen, in a sentence. Beta 1.3 was Beta 1.2 with
@@ -808,7 +811,7 @@ reads, selectors, search and the audit log hold at 100,000 entities and
 about 5,000 entities a case, and the ego network and the path search stop at
 5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1.4 has entity merge under the two-person
+Beyond what the tour shows, Beta 1.5 has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery

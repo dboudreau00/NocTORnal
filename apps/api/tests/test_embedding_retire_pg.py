@@ -1,14 +1,11 @@
-"""A retired index stays retired (F6.1 and F6.2, embeddings, 2026-09-25).
+"""A retired index stays retired.
 
-Only a role's very first index registers itself (rebuilds are operator
-acts). When the only similar meaning index was retired, the next pass once
-registered a new ACTIVE one by itself, audited as SYSTEM with the reason
-'first similar meaning index', and sent every eligible text to the
-endpoint again, while the console's retire
-confirmation had promised the index was never used again. Now the pass
-refuses with `retired` and sends nothing at all, not even the canary; the
-status, the readiness rows, the script's exit code and the console say so;
-and an administrator's Rebuild is what starts the next index.
+Only a role's very first index registers itself (rebuilds are operator acts). When the only similar
+meaning index was retired, the pass must not register a new ACTIVE one by itself (audited as SYSTEM with the
+reason 'first similar meaning index') and send every eligible text to the endpoint again: the console's
+retire confirmation promises the index is never used again. The pass refuses with `retired` and sends
+nothing at all, not even the canary; the status, the readiness rows, the script's exit code and the console
+say so; and an administrator's Rebuild is what starts the next index.
 
 Env-gated on DATABASE_URL. Prefix `ert-`.
 """

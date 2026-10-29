@@ -1,51 +1,33 @@
-"""The static-triage child process: one bounded step over one sample's
-bytes (F11 and F12, 2026-09-24).
+"""The static-triage child process: one bounded step over one sample's bytes.
 
-Run as `python -m noctornal_api.lab_static` by `lab_triage`, never
-imported for its steps by anything that holds a database connection,
-a key or a request. Pure in this sense: no database, no
-environment reads beyond what the parent hands it, no files.
+Run as `python -m noctornal_api.lab_static` by `lab_triage`, never imported for its steps by anything
+that holds a database connection, a key or a request. Pure in this sense: no database, no environment
+reads beyond what the parent hands it, no files.
 
-## Why a child at all, and one per step
+Why a child, and one per step: every parser here reads attacker-supplied bytes. pefile is pure Python and
+memory-safe but has had CPU and memory blow-ups on crafted files; yara-x runs precompiled native code and
+parses PE, ELF and .NET with its own modules. So each step runs in a process of its own that bounds itself
+before it reads a payload byte: no file writes, a CPU limit, an address space limit where the platform
+enforces one, a few file descriptors and no core dump. The parent adds a wall-clock limit that kills the
+process group and a cap on what it will read back. One slow or crashing step fails alone; the others
+still report.
 
-Every parser here reads attacker-supplied bytes. pefile is pure Python
-and memory-safe but has had CPU and memory blow-ups on crafted files;
-yara-x runs precompiled native code and parses PE, ELF and .NET with its
-own modules. So each step runs in a process of its own that bounds itself
-BEFORE it reads a payload byte: no file writes, a CPU limit, an address
-space limit where the platform enforces one, a few file descriptors and no
-core dump. The parent adds a wall-clock limit that kills the process group
-and a cap on what it will read back. One slow or crashing step fails
-alone; the others still report.
+What crosses: stdin carries one header line (UTF-8 JSON, at most `HEADER_CAP` bytes), then the sample,
+then the rule blob for the YARA modes. Never a temporary file, an argument, an environment variable or a
+log line. stdout carries one JSON document for every mode but `yara_compile`, which frames its report and
+its blob (`frame_compile`). stderr is drained by the parent into its own log, never into the UI, the audit
+chain or the run row: a parser's message can quote hostile bytes. For the same reason every step reports
+an exception by its class with a fixed sentence, never by its message.
 
-## What crosses, and how
+What the child can still reach: the environment it is started with holds no credential (`child_env` in
+`analysis_runner`), but on Linux a process can read `/proc/<pid>/environ` of any dumpable process running
+as the same user, which includes its parent, the other API workers and a container's PID 1, and it shares
+the container's network. So a parser exploit in a child started beside the application is a compromise of
+the process that started it. The selftest reports both facts (`exposure`) and readiness shows them.
 
-stdin carries one header line (UTF-8 JSON, at most `HEADER_CAP` bytes),
-then the sample, then the rule blob for the YARA modes. Never a temporary
-file, an argument, an environment variable or a log line. stdout carries
-one JSON document for every mode but `yara_compile`, which frames its
-report and its blob (`frame_compile`). stderr is drained by the parent
-into its own log, never into the UI, the audit chain or the run row:
-a parser's message can quote hostile bytes.
-
-Every step reports an exception by its CLASS with a fixed sentence and
-never by its message, for the same reason.
-
-## What the child can still reach
-
-The environment it is started with holds no credential (`child_env` in
-`analysis_runner`), but on Linux a process can read `/proc/<pid>/environ`
-of any dumpable process running as the same user, which includes its
-parent, the other API workers and a container's PID 1, and it shares the
-container's network. So a parser exploit in a child started beside the
-application is a compromise of the process that started it. The selftest
-reports both facts (`exposure`) and readiness shows them.
-
-Since 2026-10-02 (docs/17 F42) production starts this module in the
-isolated analysis worker instead (`analysis_worker`, compose.yml's
-`analysis-worker`): a container with no secrets to read and no network to
-reach, where the same selftest reports the same two facts about a
-container that has neither to give. The child is the same module either
+Production starts this module in the isolated analysis worker instead (`analysis_worker`, compose.yml's
+`analysis-worker`): a container with no secrets to read and no network to reach, where the same selftest
+reports the same two facts about a container that has neither to give. The child is the same module either
 way, started by the same `analysis_runner.run_local`.
 """
 from __future__ import annotations
@@ -169,16 +151,12 @@ def _version(dist: str) -> str | None:
         return None
 
 
-#: The CPU features wasmtime's Cranelift checks when it loads precompiled
-#: code, as Linux names them in /proc/cpuinfo (2026-09-24). x86_64: `pni`
-#: is SSE3, `abm` carries LZCNT and `cx16` is CMPXCHG16B, which Linux
-#: spells differently from Cranelift; the verifier of 2026-09-24 found
-#: `sse3` and `lzcnt` (names Linux never prints),
-#: `cmpxchg16b`, `avx512vbmi` and `avx512_bitalg` missing, so hosts that
-#: differed only there shared a key and each refused the other's build in
-#: turn. aarch64: `atomics` is LSE, `paca` pointer authentication, `fphp`
-#: half precision and `bti` branch target identification. Extra flags only
-#: make a key more specific, which costs a compile, never a refused load.
+#: The CPU features wasmtime's Cranelift checks when it loads precompiled code, as Linux names them in
+#: /proc/cpuinfo. x86_64: `pni` is SSE3, `abm` carries LZCNT and `cx16` is CMPXCHG16B, which Linux spells
+#: differently from Cranelift. Hosts that differ in any feature Cranelift checks must not share a key, or
+#: each refuses the other's build in turn. aarch64: `atomics` is LSE, `paca` pointer authentication, `fphp`
+#: half precision and `bti` branch target identification. Extra flags only make a key more specific, which
+#: costs a compile, never a refused load.
 CPU_FEATURES = {
     "x86_64": ("pni", "ssse3", "cx16", "sse4_1", "sse4_2", "popcnt", "avx",
                "avx2", "fma", "bmi1", "bmi2", "abm", "avx512f", "avx512vl",
@@ -377,7 +355,7 @@ def fuzzy_step(data: bytes, fuzzy_max_bytes: int) -> dict:
 
 # -- YARA ------------------------------------------------------------------
 
-#: What a scan reports per version, bounded (F12 F).
+#: What a scan reports per version, bounded.
 MAX_RULES_REPORTED = 200
 MAX_OFFSETS = 8
 META_TEXT = 512
@@ -395,10 +373,9 @@ def _meta_value(value):
 
 
 def yara_scan_step(data: bytes, rules_blob: bytes, timeout_s: int) -> dict:
-    """Load a compiled build and scan. Returns per matching rule its
-    namespace, identifier, tags, metadata and, per pattern, the hit count
-    and the first offsets. NO MATCHED BYTES: they would carry the
-    sample's content into a finding (F12)."""
+    """Load a compiled build and scan. Returns per matching rule its namespace, identifier, tags, metadata
+    and, per pattern, the hit count and the first offsets. No matched bytes: they would carry the sample's
+    content into a finding."""
     try:
         import yara_x
     except Exception as exc:  # noqa: BLE001
@@ -490,15 +467,12 @@ def _compile_errors(compiler) -> list[dict]:
 
 
 def yara_compile_step(source_json: bytes) -> tuple[dict, bytes]:
-    """Two passes, because yara-x keeps the valid rules of a source whose
-    `add_source` raised (probed 2026-09-24: always-true rules either side
-    of a broken one in a 'failed' file matched an unrelated buffer).
+    """Two passes, because yara-x keeps the valid rules of a source whose `add_source` raised (always-true
+    rules either side of a broken one in a 'failed' file matched an unrelated buffer).
 
-    Pass 1 compiles each file alone in a fresh Compiler; a file with any
-    error is 'failed' and left out. Pass 2 compiles only the files pass 1
-    accepted, one namespace per path, into the Compiler whose build is
-    serialised. A cross-file reference fails pass 1, as an include does
-    (includes are disabled)."""
+    Pass 1 compiles each file alone in a fresh Compiler; a file with any error is 'failed' and left out.
+    Pass 2 compiles only the files pass 1 accepted, one namespace per path, into the Compiler whose build
+    is serialised. A cross-file reference fails pass 1, as an include does (includes are disabled)."""
     import yara_x
     files = json.loads(source_json.decode("utf-8"))["files"]
     report: dict = {"files": [], "rule_count": 0, "warning_count": 0}

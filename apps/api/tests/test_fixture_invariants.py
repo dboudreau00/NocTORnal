@@ -2,18 +2,13 @@
 
 ## Why this file exists
 
-Migration 0059 binds every compartment column to `iam.compartment`. From
-that day a fixture that writes a key straight into a bound column with raw
-SQL is refused by the database unless the key was registered first -- and
-two fixtures did exactly that, in files that DID register the key, just
-later, inside a different helper. On the development database the keys
-had been registered by earlier runs, so the suite was green; on CI's fresh
-database eight tests failed on the release commit of Alpha 5 (2026-09-09).
-A per-file check ("does this file register anything?") would have passed
-both files. The defect was ORDER inside one helper, so the check is per
-function.
+Migration 0059 binds every compartment column to `iam.compartment`. A fixture that writes a key straight
+into a bound column with raw SQL is refused by the database unless the key was registered first. A file
+that registers the key later, inside a different helper, passes on a development database where earlier
+runs registered the keys and fails on a fresh one. A per-file check ("does this file register anything?")
+would pass such a file. The defect is ORDER inside one helper, so the check is per function.
 
-Pure -- no database. Reads the test sources.
+Pure: no database. Reads the test sources.
 """
 from __future__ import annotations
 
@@ -82,14 +77,12 @@ def _writers_without_registration(path: Path) -> list[str]:
 
 
 def test_every_raw_compartment_write_registers_its_key_first():
-    """A helper that writes a compartment column with raw SQL must register
-    the key EARLIER IN THE SAME FUNCTION.
+    """A helper that writes a compartment column with raw SQL must register the key EARLIER IN THE SAME
+    FUNCTION.
 
-    The helper may take the keys as a parameter -- `_user(conn,
-    compartments=("OPX",))` -- and then it must register whatever it was
-    given, because it cannot know whether the caller's other helper ran
-    first. That is the shape both offenders had: `_case` registered, `_user`
-    wrote, and the tests called `_user` first.
+    The helper may take the keys as a parameter, `_user(conn, compartments=("OPX",))`, and then it must
+    register whatever it was given, because it cannot know whether the caller's other helper ran first
+    (`_case` registers, `_user` writes, and a test calls `_user` first).
     """
     offenders: list[str] = []
     for path in sorted(TESTS.glob("test_*.py")):
@@ -128,12 +121,9 @@ _PREFIX_DEFS = (
 
 
 def test_every_email_prefix_belongs_to_one_file():
-    """Teardowns delete by email prefix, and an append-only ledger (an
-    exhibit, a custody row) pins what one file leaves behind. Two files on
-    one prefix therefore break each other in a full run and never alone:
-    the dual-control tests took `dch-` and `dcp-`, both already the
-    deception tests', and every dual-control teardown then failed on the
-    deception exhibit it tried to delete (F9, 2026-09-24)."""
+    """Teardowns delete by email prefix, and an append-only ledger (an exhibit, a custody row) pins what one
+    file leaves behind. Two files on one prefix therefore break each other in a full run and never alone: one
+    teardown fails on the exhibit the other file left."""
     owners: dict[str, set[str]] = {}
     for path in sorted(TESTS.glob("test_*.py")):
         text = path.read_text(encoding="utf-8", errors="replace")

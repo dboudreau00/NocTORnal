@@ -1,38 +1,11 @@
-"""Phase 7 over HTTP: channels, contact blocks, verification, conversations.
+"""Comms over HTTP: channels, contact blocks, verification, conversations.
 
-The services were built and tested before any of this existed, so the
-endpoints are thin. What this file adds is the parts the services cannot
-enforce on their own.
-
-## Three things that live here rather than in the services
-
-**The stoplist is split across two routers on purpose.** A GLOBAL entry is
-reference data about a forum and needs no case; a CASE entry does. Serving
-both from one case-scoped route would let anyone holding the global
-permission write into a case they cannot see, and serving both from one
-global route would do the reverse. So `/comms/stoplist` writes GLOBAL
-entries under a global permission, `/cases/{id}/comms/stoplist` writes
-CASE entries under the case gate, and neither can produce the other's
-scope.
-
-**Cross-case counts are bounded by the caller's own assignments.**
-`shared_service_publishers` and the impersonation query span cases by
-design -- that is what makes them useful -- so both take the caller's
-visible case ids, resolved HERE from `iam.case_assignment`, never from a
-parameter. A caller-supplied case list would be a disclosure oracle: pass
-a guessed id, see whether the count moves.
-
-**Verification is metered.** `comms.verify` exists because these are the
-only routes in the system that fork gpg: every route that forks it (a
-signature check, a key import) is metered under `comms.verify`, and one
-time budget covers every run a call makes (pgp.py, F10a 2026-09-24).
-
-## What is deliberately absent
-
-There is no endpoint that creates a `comms.channel_binding` from a parsed
-contact block. Invariant 3: the parse raises proposals, and proposals are
-applied through the existing review path with a human `reviewed_by`. A
-"promote this parse" button would be that path with the human removed.
+The stoplist is split: `/comms/stoplist` writes GLOBAL entries under a global permission and
+`/cases/{id}/comms/stoplist` writes CASE entries under the case gate, so neither can write the
+other's scope. Cross-case queries take the caller's visible case ids from `iam.case_assignment`,
+never from a parameter, which would be a disclosure oracle. Every route that forks gpg is metered
+under `comms.verify`. No route turns a parsed contact block into a binding (invariant 3): the parse
+raises proposals, which a person applies.
 """
 from __future__ import annotations
 
@@ -96,9 +69,8 @@ def _verifier_version_cached() -> str | None:
     """
     return verifier_version()
 
-# `route_class=BodyCappedRoute` makes the `@body_cap` marker on the PGP
-# routes effective (F10a, 2026-09-24); a route without the marker runs as
-# it always did.
+# `route_class=BodyCappedRoute` makes the `@body_cap` marker on the PGP routes effective; a route
+# without the marker is unaffected.
 router = APIRouter(prefix="/cases/{case_id}/comms", tags=["comms"],
                    route_class=BodyCappedRoute)
 #: Not case-scoped: platform reference data and the GLOBAL stoplist.
@@ -163,12 +135,10 @@ def platforms(
     _: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Every platform, its durable selector type, and what an analyst
-    should understand about seeing little or nothing from it.
+    """Every platform, its durable selector type, and what seeing little or nothing from it means.
 
-    The coverage note is surfaced rather than buried because the failure
-    it prevents is silent: a SimpleX-using actor looks inactive, and an
-    analyst reads inactivity as a finding.
+    The coverage note is surfaced because the failure is silent: an actor on SimpleX looks inactive,
+    and an analyst would take that inactivity as evidence.
     """
     return {"platforms": CommsService(conn).platforms()}
 
@@ -219,16 +189,10 @@ def bind(
 ) -> dict:
     """Record an observed identifier, normalised to its durable part.
 
-    `verification` defaults to CLAIMED because that is what an identifier
-    in a signature block IS. OBSERVED means somebody saw it in use.
-
-    **CONFIRMED cannot be set here.** It was accepted from the request
-    body with only a free-text `verification_note` required, which made
-    every defence in `pgp.py` optional: an analyst who typed "CONFIRMED"
-    reached the grade docs/10 says may carry weight in automatic identity
-    resolution without a signature existing at all. The one route to
-    CONFIRMED is now `/pgp/verify`, where the fingerprint must match the
-    claimed key and the identifier must appear inside the signed bytes.
+    `verification` defaults to CLAIMED, which is what an identifier in a signature block is;
+    OBSERVED means somebody saw it in use. CONFIRMED cannot be set here, as it carries weight in
+    identity resolution (docs/10): the one route to it is `/pgp/verify`, where the fingerprint must
+    match the claimed key and the identifier must appear inside the signed bytes.
     """
     if body.verification == "CONFIRMED":
         raise Problem(
@@ -245,11 +209,8 @@ def bind(
     compartments = frozenset(body.compartments)
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=compartments)
-    # http_ui-008 (2026-10-03): the identity was taken on trust and only the
-    # foreign key checked it, which row security does not filter, so a
-    # binding was attached to another case's node or one above the caller,
-    # and an unknown id was a 500 (201 against 500, an existence oracle for
-    # node ids across the deployment). One 404 for all three.
+    # The foreign key alone would accept another case's node or one above the caller (row security
+    # does not filter it) and 500 on an unknown id, an existence oracle. One 404 for all three.
     if body.identity_node_id is not None:
         gate_element(conn, user, case_id=case_id, kind="node",
                      element_id=body.identity_node_id,
@@ -274,8 +235,7 @@ def correlate(
     case_id: UUID,
     platform_key: str = Query(...),
     observed: str = Query(...),
-    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
-    # when the cap cut the answer short.
+    # Capped like every list; `truncated` says when the cap cut the answer short.
     limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -303,17 +263,15 @@ def correlate(
 def co_declared(
     case_id: UUID,
     reference: str = Query(...),
-    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
-    # when the cap cut the answer short.
+    # Capped like every list; `truncated` says when the cap cut the answer short.
     limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """Every identifier published together in one artefact.
 
-    docs/10: the SET is the finding rather than any member of it. A vendor
-    running Jabber + Tox + Session with a PGP key operates differently
-    from one running a Telegram bot and nothing else.
+    The set tells more than any member of it (docs/10): a vendor on Jabber, Tox and Session with a
+    PGP key operates differently from one running a Telegram bot alone.
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     found = CommsService(
@@ -326,8 +284,7 @@ def co_declared(
 @router.get("/shared-devices", response_model=dict)
 def shared_devices(
     case_id: UUID,
-    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
-    # when the cap cut the answer short.
+    # Capped like every list; `truncated` says when the cap cut the answer short.
     limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -369,13 +326,8 @@ def parse_contact_block(
 ) -> dict:
     """Parse a contact block into structured entries and raise proposals.
 
-    Metered under `capture` for the reason that limit exists: this runs
-    extraction over pasted text and raises a proposal per new value, so a
-    loop floods the triage queue -- an attack on the analyst's attention
-    rather than on the server.
-
-    Nothing here becomes a binding. The entries are a reading, the
-    proposals go to the existing review queue, and a person applies them.
+    Metered under `capture`: a proposal per new value means a loop floods the analyst's triage
+    queue. Nothing here becomes a binding; a person applies the proposals.
     """
     compartments = frozenset(body.compartments)
     check_writable_labels(conn, user, classification=body.classification,
@@ -415,8 +367,7 @@ def contact_block(
             dependencies=[Depends(rate_limit("search"))])
 def impersonation(
     case_id: UUID,
-    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
-    # when the cap cut the answer short.
+    # Capped like every list; `truncated` says when the cap cut the answer short.
     limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -427,11 +378,9 @@ def impersonation(
     other -- because the tool cannot tell them apart and the difference
     decides who the victim is.
     """
-    # CR5: the caller's own ceiling, threaded in. This used to filter on
-    # case_id alone, and a block may be classified above its case.
-    # Deliberately WITHOUT `case_id=` (2026-09-23): the candidates come
-    # from every case the caller can see, so a break-glass grant on this
-    # one must not raise what they read of the others.
+    # The caller's own ceiling, since a block may be classified above its case. Without `case_id=`:
+    # the candidates come from every case the caller can see, so a break-glass grant on this one
+    # must not raise what they read of the others.
     ceiling, comps = user_ceiling(conn, user.user_id)
     candidates = ContactBlockService(conn).impersonation_candidates(
         case_id, visible_case_ids=_visible_cases(conn, user, case_id),
@@ -535,10 +484,9 @@ def add_case_stoplist_entry(
 # ---------------------------------------------------------------------------
 
 def _pgp_problem(exc: Exception) -> Problem:
-    """One mapping for every PGP route (F10-fix, 2026-09-24): an object the
-    caller may not see, in another case or unknown is one 404; a record
-    that refuses is 409; no usable gpg is 503; anything else is 400. A
-    trigger's refusal is its authored first line, as 409."""
+    """One mapping for every PGP route: an object the caller may not see, in another case or
+    unknown is one 404; a record that refuses is 409; no usable gpg is 503; anything else is 400.
+    A trigger's refusal is its authored first line, as 409."""
     if isinstance(exc, PgpNotFound):
         return Problem(404, "Not found", safe_detail(exc))
     if isinstance(exc, PgpConflict):
@@ -559,20 +507,17 @@ def _b64(value: str, what: str) -> bytes:
 
 def _write_ceiling(conn: psycopg.Connection, user: CurrentUser
                    ) -> tuple[str, frozenset[str]]:
-    """The labels a WRITE is judged under: the caller's own, raised only
-    by a global grant, as check_writable_labels judges them. `user_ceiling`
-    with a case id is for reads; a case-scoped grant used for a write here
-    would count no use on the officer's card
-    (2026-09-24), so a write never reads through one."""
+    """The labels a write is judged under: the caller's own, raised only by a global grant, as
+    check_writable_labels judges them. A case-scoped grant used for a write would count no use on
+    the officer's card, so a write never reads through `user_ceiling` with a case id."""
     clearance, held = user_ceiling(conn, user.user_id)
     return clearance.name, held
 
 
 class VerifyBody(BaseModel):
-    """A signature check. With no `form` it is the clearsigned check it
-    always was. DETACHED takes exactly one signature field and exactly one
-    data field (F10a). A registry key (`pgp_key_id`, F10b) or a pasted key
-    (`public_key` with its `claimed_fingerprint`), never both."""
+    """A signature check, clearsigned unless `form` is DETACHED, which takes exactly one signature
+    field and one data field. A registry key (`pgp_key_id`) or a pasted key (`public_key` with its
+    `claimed_fingerprint`), never both."""
     form: Literal["CLEARSIGNED", "DETACHED"] = "CLEARSIGNED"
     signed_message: str | None = Field(None, min_length=1, max_length=1_000_000)
     signature: str | None = Field(None, min_length=1, max_length=90_000)
@@ -628,14 +573,11 @@ def verify(
     user: CurrentUser = Depends(require("comms.bind")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Verify a clearsigned message or a detached signature and record the
-    outcome.
+    """Verify a clearsigned message or a detached signature and record the outcome.
 
-    Every outcome is recorded, including the failures and the one that
-    means nobody looked. On VERIFIED -- and only then -- the named binding
-    becomes CONFIRMED, and only when a cited contact block ties the key to
-    the binding's holder (F10b). The binding, the block and the key are
-    loaded under the caller's labels before gpg is forked (F10-fix).
+    Every outcome is recorded, failures included. Only on VERIFIED does the named binding become
+    CONFIRMED, and only when a cited contact block ties the key to the binding's holder. The
+    binding, the block and the key are loaded under the caller's labels before gpg is forked.
     """
     clearance, held = _write_ceiling(conn, user)
     signature = data = None
@@ -669,11 +611,7 @@ def verifications(
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return {"verifications": PgpService(conn).verifications(
                 case_id, clearance=clearance.name, compartments=compartments),
-            # Cached per process. This called gpg --version on EVERY
-            # request, so a read endpoint any comms.read holder can reach
-            # forked a subprocess per call -- bounded only by the blanket
-            # ceiling, which fails OPEN, while the POST that forks for a
-            # real reason is capped at 60/hour.
+            # Cached per process: a read any comms.read holder can reach must not fork gpg per call.
             "verifier": _verifier_version_cached(),
             "notice": (
                 "A CONFIRMED binding means a signature by the CLAIMED key "
@@ -699,7 +637,7 @@ def unverified(
 
 
 # ---------------------------------------------------------------------------
-# The case key registry (F10b, 2026-09-24)
+# The case key registry
 # ---------------------------------------------------------------------------
 
 class KeyImportBody(BaseModel):
@@ -881,9 +819,8 @@ def attribution_blocks(
 
 
 # ---------------------------------------------------------------------------
-# Web Key Directory lookups (F10c, 2026-09-24): one person asks, another
-# approves and sends, through the integration route wkd only (docs/00
-# decisions 68 and 75)
+# Web Key Directory lookups: one person asks, another approves and sends, through the integration
+# route wkd only (docs/00 decisions 68 and 75)
 # ---------------------------------------------------------------------------
 
 @router.get("/pgp/key-directory", response_model=dict)
@@ -999,12 +936,9 @@ def open_conversation(
 ) -> dict:
     """Start a conversation record.
 
-    `provenance_class` is mandatory and the checks around it are the
-    point. Capturing a conversation a persona is a PARTY to is legally
-    distinct from capturing one it is not (docs/16 L4), so PERSONA_PARTY
-    must name the persona and anything obtained another way must carry a
-    written authority. The software cannot judge whether the authority is
-    good; it refuses to let there be none recorded.
+    `provenance_class` is mandatory: capturing a conversation a persona is party to is legally
+    distinct from capturing one it is not (docs/16 L4), so PERSONA_PARTY must name the persona and
+    anything else must carry a written authority, whose quality the software cannot judge.
     """
     compartments = frozenset(body.compartments)
     check_writable_labels(conn, user, classification=body.classification,
@@ -1021,9 +955,7 @@ def open_conversation(
     except CommsError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(conv_id),
-            # The legal-review item by its register number, which counsel
-            # uses, and not by a design document's path (ux19-copy
-            # developer-speak-in-copy, 2026-09-23).
+            # Named by the register number counsel uses, not a design document's path.
             "notice": ("Legal review item L4 is still open: interception "
                        "law, one-party versus two-party consent, and the "
                        "retention of uninvolved third parties' content in a "
@@ -1036,8 +968,7 @@ def open_conversation(
             dependencies=[Depends(rate_limit("graph.view"))])
 def contact_graph(
     case_id: UUID,
-    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
-    # when the cap cut the answer short.
+    # Capped like every list; `truncated` says when the cap cut the answer short.
     limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -1053,10 +984,9 @@ def contact_graph(
 
 
 def _cap_projection(result: dict, limit: int) -> dict:
-    """Keep the `limit` strongest ties of a co-participation projection
-    (http_ui-015, 2026-10-03), and the vertices they join. Not silent
-    (invariant 12): `truncated`, and the counts in `coverage`, say what the
-    cap cut. The order of what is kept is the projection's own."""
+    """Keep the `limit` strongest ties of a co-participation projection and the vertices they
+    join. Not silent (invariant 12): `truncated` and the counts in `coverage` say what the cap
+    cut. The order of what is kept is the projection's own."""
     edges = result["edges"]
     result["truncated"] = len(edges) > limit
     if not result["truncated"]:
@@ -1086,12 +1016,9 @@ def mark_incidental(
     case_id: UUID, conversation_id: UUID, body: IncidentalBody,
     user: CurrentUser = Depends(require("comms.bind")),
     conn: psycopg.Connection = Depends(get_conn),
-    # The flag on a system connection (S1, 2026-09-25): minimisation at
-    # closure finds third parties by it, so it must land; as the request role
-    # the UPDATE touched no row of a conversation above them and still
-    # answered as done. Since 2026-10-07 a conversation above the flagger is
-    # refused before the write (`_own_conversation`), so what this connection
-    # reaches is a conversation they may read.
+    # The flag on a system connection: minimisation at closure finds third parties by it, so it
+    # must land. A conversation above the flagger is refused before the write
+    # (`_own_conversation`), so this connection reaches only a conversation they may read.
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.MINIMISATION)),
 ) -> dict:
     """Flag a participant as not a subject.
@@ -1103,8 +1030,6 @@ def mark_incidental(
     _own_conversation(conn, user, case_id, conversation_id, "comms.bind")
     if not CommsService(sconn).mark_incidental(conversation_id, body.handle,
                                                incidental=body.incidental):
-        # It answered 200 and the flag for a handle nobody in the
-        # conversation has, and changed nothing (2026-10-07).
         raise Problem(404, "Not found",
                       "no participant of this conversation has that handle")
     return {"conversation_id": str(conversation_id), "handle": body.handle,
@@ -1120,9 +1045,8 @@ def minimise(
     case_id: UUID, conversation_id: UUID, body: MinimiseBody,
     user: CurrentUser = Depends(require("comms.minimise")),
     conn: psycopg.Connection = Depends(get_conn),
-    # Minimisation on a system connection (S1, 2026-09-25): it is a legal
-    # obligation (docs/16 L4), and as the request role it would drop only
-    # the bodies the minimiser may read and report that count as done.
+    # Minimisation on a system connection: it is a legal obligation (docs/16 L4), and as the
+    # request role it would drop only the bodies the minimiser may read and report that as done.
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.MINIMISATION)),
 ) -> dict:
     """Drop message BODIES, keep the metadata graph.
@@ -1146,25 +1070,16 @@ def minimise(
 def _own_conversation(conn: psycopg.Connection, user: CurrentUser,
                       case_id: UUID, conversation_id: UUID,
                       permission_key: str) -> None:
-    """Resolve a caller-supplied conversation id: this case's and within the
-    caller's labels, or one 404 for a conversation that is missing, in
-    another case or above them.
+    """Resolve a caller-supplied conversation id: this case's and within the caller's labels, or
+    one 404 for a conversation that is missing, in another case or above them.
 
-    The case gate authorises the caller against `case_id` from the path;
-    without the same-case check, a conversation id from a DIFFERENT case would
-    be accepted and minimised under an authorisation that never covered it.
-
-    The labels are checked too (verification round three, A3, 2026-10-07).
-    The write runs on a system connection, which sees every conversation, so
-    this is the only place a caller below a conversation is stopped: it
-    answered an AMBER analyst's flag on a RED conversation with a 200 and the
-    flag, and a random id with a 404. A conversation above the caller is now
-    the missing one's 404, its AUTHZ_DENIED row kept (`gate_element`). The
-    system connection still drops every body of a conversation the caller
-    may read, a message above them included (docs/16 L4)."""
-    # The conversation's case and labels as facts (S1, 2026-09-25), so the
-    # gate still answers one above the caller with its AUTHZ_DENIED row and
-    # not a silent unrecorded 404 from row-level security.
+    The case gate covers only `case_id` from the path, and the write runs on a system connection
+    that sees every conversation, so this is the only check that stops a conversation from another
+    case or above the caller; its AUTHZ_DENIED row is kept (`gate_element`). The minimisation
+    still drops every body of a conversation the caller may read, a message above them included
+    (docs/16 L4)."""
+    # The conversation's case and labels as facts, so the gate answers one above the caller with
+    # its AUTHZ_DENIED row, not a silent unrecorded 404 from row-level security.
     gate_element(conn, user, case_id=case_id, kind="conversation",
                  element_id=conversation_id, permission_key=permission_key,
                  missing_detail="no such conversation in this case")
@@ -1186,22 +1101,16 @@ def co_participation(
     provenance_class: list[str] = Query(default_factory=list),
     since: datetime | None = Query(None),
     until: datetime | None = Query(None),
-    # Capped like every list (http_ui-015, 2026-10-03): the strongest
-    # `limit` ties are kept and `truncated` says so.
+    # Capped like every list: the strongest `limit` ties are kept and `truncated` says so.
     limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """The bipartite conversation graph projected to one mode.
 
-    Newman weighting by default, so a large channel cannot manufacture a
-    clique. Every exclusion is reported in `coverage` rather than applied
-    silently: an analyst who cannot tell a sparse network from a filtered
-    one draws confident conclusions from an incomplete picture.
-
-    The edges are marked `is_inferred`. Two people in the same room have
-    not been observed talking to each other, and invariant 4 exists
-    because that distinction has to survive.
+    Newman weighting by default, so a large channel cannot manufacture a clique. Every exclusion is
+    reported in `coverage`, so a filtered network is not read as a sparse one. Edges are marked
+    `is_inferred`: two people in one room were not observed talking to each other (invariant 4).
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     try:
@@ -1221,17 +1130,12 @@ def co_participation(
 
 
 def _disclose_hidden_participants(out: dict, mode: str) -> None:
-    """How many participants resolve to an identity the reader cannot see,
-    said only as the case allows (graph-coparticipation-ignores-withheld-
-    none, 2026-10-03). The count went out under every withheld_disclosure
-    setting, and the filters narrow it to one room, so a case set to NONE
-    still localised hidden identities to a conversation. Now the graph's
-    rule, under `coverage.withheld`: nothing under NONE, whether under
-    PRESENCE, how many under COUNT, which alone keeps the old
-    `participants_excluded_not_visible` key. An oversized room's
-    `projectable_participants` is left out except under COUNT, because it
-    is the room's size less, among others, the hidden members of that one
-    room."""
+    """How many participants resolve to an identity the reader cannot see, said only as the case
+    allows under `coverage.withheld`: nothing under NONE, whether under PRESENCE, how many under
+    COUNT, which alone keeps `participants_excluded_not_visible`. The filters can narrow this to
+    one room, so a bare count would localise hidden identities. An oversized room's
+    `projectable_participants` is left out except under COUNT: it is the room's size less, among
+    others, its hidden members."""
     cov = out.get("coverage") or {}
     hidden = cov.pop("participants_excluded_not_visible", 0)
     if mode == DISCLOSURE_COUNT:

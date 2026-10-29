@@ -1,21 +1,14 @@
-"""The triage queue over HTTP — the endpoints the Feeds pane reads.
+"""The triage queue over HTTP: the endpoints the Feeds pane reads (docs/12: the queue is the product).
 
-`ingest.record` had no listing endpoint at all: records were scored,
-prioritised and compartmented, and the only way to see one was a Python
-shell. docs/12 is explicit that the queue is the product — "volume is the
-enemy, and a queue nobody can prioritise is a queue nobody reads" — so a
-scoring function with no queue behind it was scoring for nobody.
+The tests that matter are the refusals:
 
-The tests that carry this file are the refusals, as usual:
-
-- the queue is bounded by the caller's cases AND labels, not by the global
-  `ingest.read` verb;
-- quarantine (a record attached to no case) is visible only to the ingest
-  operator, because no case assignment can grant something with no case;
-- near-duplicates are FOLDED and COUNTED, never dropped (invariant 12);
+- the queue is bounded by the caller's cases and labels, not by the global `ingest.read` verb;
+- quarantine (a record attached to no case) is visible only to the ingest operator, because no case
+  assignment can grant something with no case;
+- near-duplicates are folded and counted, never dropped (invariant 12);
 - a key listing never contains a secret.
 
-**The email prefix is `iqe-` and must stay unique.**
+The email prefix is `iqe-` and must stay unique.
 
 Env-gated on DATABASE_URL.
 """
@@ -43,16 +36,10 @@ EMAIL_LIKE = "iqe-%@noctornal.test"
 def conn():
     from noctornal_api.db import connect
     c = connect()
-    # The compartment every stealer-log test here forces onto its key and
-    # reads its caller into, registered by THIS file. Since 2026-09-09
-    # (migration 0059) `iam.app_user.compartments` (the raw UPDATE in
-    # `_make_user`) and `ingest.api_key.forced_compartment` (the key
-    # `_ingest` issues) are both bound to `iam.compartment`. Until then
-    # this file passed only because `test_ingest_pg.py` sorts first and
-    # leaves the same row behind; on a database without it, four tests
-    # failed at that UPDATE. ON CONFLICT because that other file registers
-    # the same key, and never deleted because the registry refuses to drop
-    # a key while any row still carries it.
+    # The compartment every stealer-log test here forces onto its key and reads its caller into.
+    # `iam.app_user.compartments` (the raw UPDATE in `_make_user`) and `ingest.api_key.forced_compartment`
+    # are both bound to `iam.compartment`. ON CONFLICT because `test_ingest_pg.py` registers the same key;
+    # never deleted because the registry refuses to drop a key while any row carries it.
     c.execute("INSERT INTO iam.compartment (key, label) VALUES "
               "('STEALER-2026', 'Stealer logs 2026 (test)') "
               "ON CONFLICT (key) DO NOTHING")
@@ -99,10 +86,7 @@ def _make_user(conn, *, clearance="RED", compartments=(), global_roles=()):
     uid = store.create_user(email, "Queue", PASSWORD)
     secret = totp.generate_secret()
     store.enroll_totp(uid, secret)
-    # Since 0059 every compartment column is bound to iam.compartment. This
-    # helper writes whatever it is handed, so it registers it first rather
-    # than trusting the caller to have done so -- two helpers of this shape
-    # were refused on CI's fresh database on 2026-09-09 while passing here.
+    # Every compartment column is bound to iam.compartment, so the helper registers each key first.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -118,29 +102,18 @@ def _make_user(conn, *, clearance="RED", compartments=(), global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted as `scripts/bootstrap.py session` does: the account by email, then
+    `SessionService` against the store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent); only `NOCTORNAL_SESSION_STRICT_BINDING` refuses that, and it is off
+    here. It skips `POST /auth/login`, which answers 204 with the token only in `__Host-session`, and
+    TOTP codes are single-use within a 30-second step.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as the real mint sites pass: step-up gated routes refuse a session without it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -259,15 +232,12 @@ def test_a_compartmented_record_is_not_in_a_blind_callers_queue(conn, client):
 
 
 def test_quarantine_is_its_own_endpoint_with_its_own_verb(conn, client):
-    """A record attached to no case cannot be granted by a case assignment,
-    so the ordinary gate hides it from everybody and nothing is ever
-    attached. It gets `ingest.manage` — the operator verb — rather than a
-    hidden branch inside `/records` that widens what that returns based on
-    a second permission.
+    """A record attached to no case cannot be granted by a case assignment, so the ordinary gate hides it
+    from everybody. It gets `ingest.manage`, the operator verb, rather than a hidden branch in `/records`
+    that widens its result on a second permission.
 
-    Deliberately NOT `ingest.read` for SYS_ADMIN: that would mean the
-    operator reads every case's records, which is the over-broad grant this
-    system exists to avoid.
+    Deliberately not `ingest.read` for SYS_ADMIN: the operator would read every case's records, the
+    over-broad grant this system exists to avoid.
     """
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
@@ -350,27 +320,16 @@ def test_rescoring_a_record_you_cannot_read_is_a_404(conn, client):
 
 
 def test_rescoring_a_QUARANTINED_record_is_refused(conn, client):
-    """Found by the adversarial pass on 2026-07-25, and it was mine.
+    """Re-scoring a quarantined record is refused.
 
-    `_authorise_record` returned early for a record with no case — the
-    comment said "only the ingest operators see it" and the code checked
-    nothing. That was survivable for `/credentials`, whose service layer
-    re-applies the labels and refuses a null case; it was a hole for
-    `/score`, which reaches `score_record`: a method with no label
-    predicate that WRITES `priority`.
+    `_authorise_record` must not return early for a record with no case: `/score` reaches `score_record`,
+    which has no label predicate and writes `priority`. Three problems in one call, all asserted:
 
-    Three separate problems in one call, which is why the test asserts all
-    three:
-
-    1. an existence oracle — 404 for a nonexistent id, 200 for a
-       quarantined one, so the status code confirms the record exists;
-    2. a content oracle — the returned score is
-       `10*watched_selector_hits + 2*(high risk) - 8*(duplicate)`, so the
-       number leaks how many watched selectors the unreadable payload
-       matches;
-    3. an unauthorised WRITE — `priority` is the column `/quarantine`
-       sorts by, so a caller with no compartment could reorder the
-       operator's triage queue.
+    1. an existence oracle: 404 for a nonexistent id, 200 for a quarantined one;
+    2. a content oracle: the score is `10*watched_selector_hits + 2*(high risk) - 8*(duplicate)`, so it
+       leaks how many watched selectors the unreadable payload matches;
+    3. an unauthorised write: `priority` is the column `/quarantine` sorts by, so a caller with no
+       compartment could reorder the operator's triage queue.
     """
     owner, _oe, _os = _make_user(conn, global_roles=("SYS_ADMIN",))
     _ingest(conn, owner, category="STEALER_LOG", compartment="STEALER-2026",

@@ -1,175 +1,97 @@
-"""Phase 8 -- malware sample handling (docs/11, invariant 10).
+"""Malware sample handling (docs/11, invariant 10).
 
-=====================================================================
-COUNSEL MUST REVIEW A DEPLOYMENT OF THIS BEFORE IT IS USED IN ANY
-ABSOLUTE SENSE.
+A deployment of this needs counsel's review before use. A store of attacker-supplied binaries will
+eventually receive material whose possession alone is an offence, and the handling rules differ between
+the two jurisdictions targeted (US and Canada, decision 13). The module refuses to accept anything until
+an operator has declared in the environment that a prohibited-content policy exists and names a designated
+person (`policy_declared()`). That is a statement by the operator, not a check by the software.
 
-Built on an operator directive of 2026-07-25 which supersedes decision
-36's block. That block was never about the code. It was about the fact
-that a store of attacker-supplied binaries WILL eventually receive
-material whose possession alone is an offence; that the handling rules
-differ between the two jurisdictions this platform targets (decision 13:
-US and Canada); and that discovering that after the first ingest is a
-legal problem rather than a technical one.
+## Invariant 10: samples never render, never execute
 
-This module cannot fix that and does not pretend to. What it does is
-refuse to accept anything until an operator has declared, in the
-environment, that a prohibited-content policy exists and names a
-designated person -- see `policy_declared()`. The declaration is a
-statement by the operator, not a verification by the software. A false
-declaration produces a working system and an unlawful deployment.
-=====================================================================
+The binary is only ever an encrypted archive download from a separate origin. The check is configuration,
+never a request header (`origin_split()`):
 
-## Invariant 10, enforced rather than documented
+- `NOCTORNAL_SAMPLE_ORIGIN`: the origin sample bytes are served from.
+- `NOCTORNAL_BASE_URL`: the application origin (`transports.base_url()`).
+- `NOCTORNAL_PUBLIC_ORIGIN`: the origin this process is served at. It defaults to the application origin,
+  so a process that says nothing is the application and refuses.
 
-    Samples never render, never execute. The binary is only ever an
-    encrypted archive download from a SEPARATE ORIGIN.
+`download()` serves bytes only on a process configured as the sample origin, and only when that is a real
+second origin. Elsewhere it refuses and names the origin to fetch from. Serving hostile bytes from the
+case file's origin would let a crafted filename, an SVG preview or a PDF renderer bug run with the
+analyst's session on the case data (docs/11). The Host header is client-supplied, so it is never compared.
+The UI CSP names the sample origin and the sample process answers the console's cross-origin request.
 
-The origin split is usually written down and then forgotten at deploy
-time, so it is a runtime check here, and the check is CONFIGURATION,
-never a request header. Three origins decide it (`origin_split()`):
+What crosses to that origin is a ticket, not a session (0061). The cookie pair is `__Host-` prefixed and
+`SameSite=strict`, so none of it reaches the sample origin. `issue_download_ticket` mints, on the
+application origin under the cookie session (the `x-csrf-token` double-submit applies), a ticket good for
+one sample and one redemption within `DOWNLOAD_TICKET_TTL_SECONDS`. Redemption re-reads the holder's
+account (active, still holding `sample.download`) and live clearance before a byte moves, so a revocation
+inside the window bites. The session behind the mint is not re-derived there. The Bearer path still works.
 
-- `NOCTORNAL_SAMPLE_ORIGIN` -- the origin sample bytes are served from;
-- `NOCTORNAL_BASE_URL` -- the application origin, the one the console is
-  served from and email links point at (`transports.base_url()`);
-- `NOCTORNAL_PUBLIC_ORIGIN` -- the origin THIS process is served at. It
-  defaults to the application origin, so a process that says nothing is
-  the application and refuses.
+When `NOCTORNAL_SAMPLE_ORIGIN` is unset the control is off: every download refuses on every process, and
+no document may claim the invariant holds for such a deployment.
 
-`download()` serves bytes only on a process configured as the sample
-origin, and only when that origin is a real second origin rather than a
-second name for the application's. Everywhere else it refuses and names
-the origin to fetch from. Serving hostile bytes from the same origin as
-the case file means an escape -- a crafted filename, an SVG preview, a
-PDF renderer bug -- runs with the analyst's session on the case data.
-docs/11: "you would have built a drive-by vector into your own
-highest-trust system, seeded with hostile files by design."
+Further rules the code holds:
 
-**Until 2026-09-09 the check compared `NOCTORNAL_SAMPLE_ORIGIN` against
-`request.url`, which Starlette builds from the Host header -- a value the
-client sends.** A caller who set `Host: samples.example` on a request to
-the application origin passed it, and behind a proxy that rewrote Host
-nobody passed it. It was also unsatisfiable from the console: the UI's
-CSP was `connect-src 'self'`, so the Lab pane could only ever fetch the
-application origin, which meant the variable was either equal to the
-application origin (the check a no-op, bytes served from the origin the
-invariant forbids, "invariant 10 holds" in every document) or the Lab
-pane could not download at all. The two halves were internally
-consistent and wrong together. Now the UI CSP names the sample origin,
-the sample process answers the console's cross-origin request, and the
-verdict comes from the three variables above.
+- The object key is the SHA-256, never the filename. Original filenames are attacker-controlled and are
+  themselves a payload vector; the original is kept in a column for the record and never used as a path.
+- Nothing is stored as an executable. Every sample is encrypted at rest under a per-sample key, which
+  also stops the operator's own EDR quarantining the evidence.
+- Quarantine is the landing state. Nothing reaches the RE queue before triage has run.
 
-**What crosses to that origin is a TICKET, not a session** (0061). The
-cookie pair is `__Host-` prefixed and `SameSite=strict`, so none of it
-can reach the sample origin -- that is the point of the split -- and the
-console therefore forced the login-body token there as a Bearer: a
-standing session credential, held in page memory, posted to a second
-origin, on the one path that puts working malware on somebody's disk.
-`issue_download_ticket` replaces it. The ticket is minted on the
-APPLICATION origin under the ordinary cookie session (so the
-`x-csrf-token` double-submit applies), is good for one sample and one
-redemption within `DOWNLOAD_TICKET_TTL_SECONDS`, and carries no standing
-authority: what it buys is the archive the analyst was already
-downloading. Nor does it outlive the authority it was minted under -- the
-redemption re-reads the holder's ACCOUNT (active, still holding
-`sample.download`) and their live clearance before a byte moves, so a
-revocation inside the window bites. The session behind the mint is the
-one thing not re-derived there, and 0061 says exactly that. The Bearer
-path still works; removing it is a later step.
+## A rejected sample is preserved, not destroyed
 
-**When `NOCTORNAL_SAMPLE_ORIGIN` is unset the control is OFF**, and the
-readiness register, the router docstring and `GET /samples/policy` all
-say so in those words: every download refuses, on every process, and no
-document may claim the invariant holds for such a deployment.
+`reject()` moves the ciphertext into a separate object-locked store under a legal hold and keeps the data
+key, unless `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` says `destroy`. Getting a preserved sample out takes
+two people: a Security Officer's time-boxed authorisation naming one case owner, and that case owner,
+through the same encrypted archive and sample origin a download uses. `PreservationStorage` has no method
+that deletes or lifts a hold. See `reject`, `retrieve_preserved` and docs/11.
 
-Three more rules the code holds:
+## The archive password
 
-- **The object key is the SHA-256, never the filename.** Original
-  filenames are attacker-controlled and are themselves a payload vector
-  (`../../etc/cron.d/x`, a right-to-left override, a 4KB name). The
-  original is kept in a column for the record and never used as a path.
-- **Nothing is stored as an executable.** Every sample is encrypted at
-  rest under a per-sample key. Besides containment, this is what stops
-  your own EDR quarantining the evidence -- docs/11 calls that a routine
-  and embarrassing failure in labs that skip it.
-- **Quarantine is the landing state.** Nothing reaches the RE queue
-  before triage has run.
+The convention is a ZIP with the password `infected`. It prevents accidental double-click execution and
+stops mail gateways and EDR silently eating the sample in transit. It provides no confidentiality: the
+password is public and ZipCrypto is broken. Confidentiality comes from access control, transport and
+audit, so `archive()` says so in the archive comment itself.
 
-## A rejected sample is preserved, not destroyed (F2, 2026-09-22)
+## Static triage
 
-The owner's decision after the review of that day. `reject()` moves the
-ciphertext into a separate object-locked store under a legal hold and
-keeps the data key, unless `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` says
-`destroy`. Getting a preserved sample back out takes two people: a
-Security Officer's time-boxed authorisation naming one case owner, and
-that case owner, through the same encrypted archive and the same sample
-origin a download uses. `PreservationStorage` has no method that deletes
-or lifts a hold. See `reject` and `retrieve_preserved`, and docs/11.
+Submission computes the hashes, the file type and the entropy, and queues the rest: imphash and the Rich
+header (pefile), ssdeep and TLSH (in-tree ports in `fuzzyhash`), and YARA with the operator's activated
+rule sets (`yara_rules`). Those run afterwards, in bounded child processes, through `lab_triage`, never
+inside the upload request. What a run could not establish is a gap on the row with a status and a reason,
+because a NULL imphash that reads as "no imports" is worse than an absent one that says why. A run writes
+machine findings (origin `machine`), never the graph: a selector reaches a case only when an analyst
+proposes it.
 
-## What the archive password does and does not do
+## What is not built
 
-The convention is a ZIP with the password `infected`. It DOES prevent
-accidental double-click execution and stop mail gateways and EDR from
-silently eating the sample in transit. It provides NO confidentiality --
-the password is public and ZipCrypto is broken. Confidentiality comes
-from access control, transport and audit. The password must never be
-allowed to create a false sense of protection, so `archive()` says so in
-the archive comment itself.
+- Archive expansion is capped: `lab_archive` expands an archive after its static triage under the depth,
+  count, size and ratio caps docs/11 asks for, and each stored member is a sample of its own.
+- No sandbox of its own (docs/11 says integrate). A request is recorded (RECORD_ONLY) or, where an
+  operator configured a self-hosted CAPEv2, sent by the sandbox worker after sign-off (`sandbox.py`);
+  nothing in a request path sends anything.
+- No perceptual matching. Screening (`screening.py`) compares exact hashes against the lists this
+  deployment imported under a recorded authority: a re-encoded copy does not match, and an archive member
+  is compared only once expansion has stored it as a sample (`derived_gaps` says which were not).
 
-## Static triage (F11 and F12, 2026-09-24)
+## Seams the Lab features share
 
-Submission computes the hashes, the file type and the entropy, and queues
-the rest: imphash and the Rich header (pefile), ssdeep and TLSH (in-tree
-ports in `fuzzyhash`), and YARA with the operator's activated rule sets
-(`yara_rules`). Those run afterwards, in bounded child processes, through
-`lab_triage`, and never inside the upload request. What a run could not
-establish is a gap on the row with a status and a reason, because a NULL
-imphash that reads as "this sample has no imports" is worse than an
-absent one that says why. A run writes machine findings (origin
-`machine`), never the graph: a selector reaches a case only when an
-analyst proposes it.
+Static triage, screening and the sandbox read and record through the same seams, each fixed once (docs/00
+decision 70). A later feature fills a seam by adding lines or owning a named placeholder body; it never
+changes a seam's signature.
 
-## What is NOT built, and is not pretended
-
-- **No uncapped archive expansion.** An archive is expanded after its
-  static triage by `lab_archive` (phase 8, 2026-10-02), under the depth,
-  count, size and ratio caps docs/11 asks for, and each stored member is a
-  sample of its own.
-- **No sandbox of its own.** docs/11 is emphatic that you integrate rather
-  than build one. A request is recorded (RECORD_ONLY) or, where an
-  operator configured a self-hosted CAPEv2, sent by the sandbox worker
-  after its sign-off (`sandbox.py`, F14, 2026-09-24); nothing in a request
-  path sends anything.
-- **No perceptual matching.** Prohibited-content screening (`screening.py`,
-  F13, 2026-09-24) compares exact hashes against the lists this deployment
-  imported under a recorded authority, and says so on every sample: a
-  re-encoded copy does not match, and an archive member is compared only
-  once expansion has stored it as a sample (`derived_gaps` says which
-  entries were not).
-
-## Seams the Lab features share (F11-core, 2026-09-24)
-
-Static triage, prohibited-content screening and the sandbox read and
-record through the same seams, each fixed once (docs/00 decision 70). A
-later feature fills a seam by ADDING lines, or by owning a named
-placeholder body; it never changes a seam's signature or re-extracts it.
-
-- The row shape is `SAMPLE_FIELDS`, by name: a new column is one entry
-  and one `Sample` field with a default.
-- Every Lab read goes through `lab_gate()`; what the Lab shows nobody is
-  one line in `LAB_EXCLUSIONS`, which every reader then applies.
-- `_verified_plaintext` is the one path that decrypts for use, verifies
-  and records a tamper alarm that survives the raise;
-  `_adopt_held_copy` keeps its own comparison (its mismatch means "not
-  this sample's copy", not a tamper).
-- Custody names a person (USER) or nobody (SYSTEM, the product acting on
-  nobody's request); a download, share, detonation request or
-  assignment always names a person.
-- `record_machine_analysis`, `MACHINE_PRODUCERS`, `PROPOSAL_ORIGINS` and
-  `_propose_entry` are how a machine records a finding and how an analyst
-  proposes one of its selectors.
-- `DERIVED_GAP_STEPS` and `derived_gaps` compute the gaps that are not
-  stored, from the sample's screening outcome and file type.
+- The row shape is `SAMPLE_FIELDS`, by name: a new column is one entry and one `Sample` field with a default.
+- Every Lab read goes through `lab_gate()`; what the Lab shows nobody is one line in `LAB_EXCLUSIONS`.
+- `_verified_plaintext` is the one path that decrypts for use, verifies and records a tamper alarm that
+  survives the raise; `_adopt_held_copy` keeps its own comparison (a mismatch means "not this sample's
+  copy", not a tamper).
+- Custody names a person (USER) or nobody (SYSTEM, the product acting on nobody's request); a download,
+  share, detonation request or assignment always names a person.
+- `record_machine_analysis`, `MACHINE_PRODUCERS`, `PROPOSAL_ORIGINS` and `_propose_entry` are how a machine
+  records a finding and how an analyst proposes one of its selectors.
+- `DERIVED_GAP_STEPS` and `derived_gaps` compute the gaps that are not stored.
 """
 from __future__ import annotations
 
@@ -194,8 +116,7 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.types.json import Json
 
-# The states whose content is read-only, from where the rule is written
-# down: samples attached to a case are its content (c7/c21, 2026-09-24).
+# The states whose content is read-only: samples attached to a case are its content.
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 # The one existing spelling of "does this ACTIVE account hold this global
 # permission", used at redemption. See `_still_authorised`.
@@ -220,24 +141,17 @@ IN_ANALYSIS = "IN_ANALYSIS"
 REPORTED = "REPORTED"
 REJECTED = "REJECTED"
 
-#: What the queue can be filtered by, in queue order. SUBMITTED is in the
-#: enum and never landed in (a submission lands in QUARANTINED), so it is
-#: not offered. Until 2026-09-22 the route took no state at all and the
-#: console filtered the working set client-side, so choosing Rejected, In
-#: analysis or Reported always showed "Nothing in the queue."
-#: (ux13-lab:rejected-filter-always-empty).
+#: What the queue can be filtered by, in queue order. SUBMITTED is in the enum but never landed in (a
+#: submission lands in QUARANTINED), so it is not offered.
 QUEUE_STATES = (QUARANTINED, TRIAGED, ASSIGNED, IN_ANALYSIS, REPORTED,
                 REJECTED)
 
 #: What the queue shows when no state is asked for: work still waiting.
 WORKING_SET = (QUARANTINED, TRIAGED, ASSIGNED)
 
-#: F2, decided by the owner on 2026-09-22: what `reject()` does with the
-#: bytes. `preserve` (the default) moves the ciphertext into the
-#: preservation store under a legal hold and keeps the data key; `destroy`
-#: is the behaviour this module had until that day. Anything else refuses,
-#: naming this variable, because a typo that silently picked either one
-#: would be a disposition nobody chose.
+#: What `reject()` does with the bytes. `preserve` (the default) moves the ciphertext into the
+#: preservation store under a legal hold and keeps the data key; `destroy` deletes it. Anything else
+#: refuses, naming this variable, so a typo cannot silently pick a disposition nobody chose.
 DISPOSITION_ENV = "NOCTORNAL_REJECTED_SAMPLE_DISPOSITION"
 PRESERVE = "preserve"
 DESTROY = "destroy"
@@ -261,10 +175,8 @@ TICKET_RETRIEVAL = "preserved_retrieval"
 #: friendlier refusal and not the control.
 MAX_AUTHORISATION_DAYS = 30
 
-#: The entity a selector a lab analysis extracted is proposed as (docs/11:
-#: "Extracted C2 infrastructure links samples to INFRA nodes"). Anything not
-#: named here is proposed as a SELECTOR, the shape the capture extractor
-#: already uses, so the triage card reads it the same way.
+#: The entity a selector extracted by a lab analysis is proposed as (docs/11). Anything not named here is
+#: proposed as a SELECTOR, the shape the capture extractor uses.
 _NODE_FOR_SELECTOR = {
     "DOMAIN": "INFRA", "IPV4": "INFRA", "IPV6": "INFRA", "URL": "INFRA",
     "ONION": "INFRA", "ASN": "INFRA",
@@ -272,25 +184,18 @@ _NODE_FOR_SELECTOR = {
     "TRON_ADDR": "WALLET",
 }
 
-#: How long a preserving rejection waits for the sample's row lock before
-#: giving up. The lock is taken BEFORE anything is copied, so a second
-#: rejection of the same sample waits for the first and then sees
-#: REJECTED, instead of copying too and leaving a held version behind that
-#: no row names and this product can never delete (verifier on F2,
-#: 2026-09-22). A module constant so a test can shorten it.
+#: How long a preserving rejection waits for the sample's row lock. The lock is taken before anything is
+#: copied, so a second rejection waits, then sees REJECTED, rather than leaving a held version no row
+#: names and this product can never delete. A module constant so a test can shorten it.
 REJECT_LOCK_TIMEOUT = "5s"
 
 
 def _row_busy() -> SampleError:
-    """The refusal when a rejection could not get the sample's row lock
-    within `REJECT_LOCK_TIMEOUT`. Read at call time, so a test that
-    shortens the timeout sees its own value named.
+    """The refusal when a rejection could not get the sample's row lock within `REJECT_LOCK_TIMEOUT`.
 
-    Raise it `from None`, never from the LockNotAvailable: the router's
-    `safe_detail` replaces the whole message of an error chained to a
-    psycopg one, so the analyst was shown "the request could not be
-    completed" instead of this (2026-09-23).
-    The lock timeout's own text adds nothing this does not say."""
+    Raise it `from None`, never from the LockNotAvailable: the router's `safe_detail` replaces the whole
+    message of an error chained to a psycopg one.
+    """
     return SampleError(
         f"another change to this sample is still in progress (most likely "
         f"somebody else rejecting it), and this rejection stopped after "
@@ -301,13 +206,10 @@ def _row_busy() -> SampleError:
 def _db_error_in(exc: BaseException) -> psycopg.Error | None:
     """The psycopg error anywhere in `exc`'s chain, as cause or context.
 
-    For a refusal whose authored text has to reach the analyst.
-    `http.errors.safe_detail` throws away the WHOLE message of an error
-    whose cause chain holds a psycopg error, which is right, since a
-    psycopg error's text is raw PQ output. So such a refusal is raised
-    `from None`, names the database error by its class only, and logs it
-    against a ref the message carries (2026-09-23). Bounded and cycle-guarded, like
-    `safe_detail`'s walk.
+    `http.errors.safe_detail` throws away the whole message of an error whose cause chain holds a psycopg
+    error (its text is raw PQ output). A refusal whose authored text must reach the analyst is therefore
+    raised `from None`, names the database error by class only, and logs it against a ref the message
+    carries. Bounded and cycle-guarded, like `safe_detail`'s walk.
     """
     seen: set[int] = set()
     todo: list[BaseException | None] = [exc]
@@ -345,36 +247,20 @@ VIEW_DEDUPE_SECONDS = 300
 #: It is a safety interlock, not a secret.
 ARCHIVE_PASSWORD = b"infected"
 
-#: Declared by NOCTORNAL_MAX_SAMPLE_BYTES, 256 MiB when unset (the same
-#: reader as the evidence cap, `config.declared_cap`). A sample larger
-#: than this is a disk image or a mistake, and either way it does not
-#: belong in a quarantine queue behind an HTTP request. The sample bucket
-#: is deliberately NOT object-locked (docs/11), so unlike the evidence cap
-#: this one is about memory and the queue rather than permanent storage,
-#: and a production boot does not insist on the declaration.
+#: Declared by NOCTORNAL_MAX_SAMPLE_BYTES, 256 MiB when unset (same reader as the evidence cap,
+#: `config.declared_cap`). A larger sample is a disk image or a mistake. The sample bucket is not
+#: object-locked (docs/11), so this cap is about memory and the queue, and a production boot does not
+#: insist on the declaration.
 MAX_SAMPLE_BYTES = declared_cap(SAMPLE_CAP_ENV)
 
-#: How long a download ticket is good for (0061).
-#:
-#: Sixty seconds, and the number is chosen against what the ticket
-#: actually spans: the gap between two requests ONE browser makes back to
-#: back -- mint on the application origin, then redeem on the sample
-#: origin -- with a preflight and a click's worth of latency between them.
-#: It is not a session and must not be sized like one. The generous
-#: reading of that gap is a slow link and a busy laptop, which is seconds;
-#: sixty leaves an order of magnitude of headroom and still means a ticket
-#: copied out of a proxy log or a crash dump is inert by the time anybody
-#: reads it. The other half of the bound is that the ticket is single-use,
-#: so the window is not "how long is it valid" but "how long may it sit
-#: unused before the analyst has to click again".
+#: How long a download ticket is good for (0061). It spans two back-to-back requests of one browser (mint
+#: on the application origin, redeem on the sample origin), not a session. Sixty seconds leaves ample
+#: headroom for a slow link and still makes a ticket copied from a proxy log inert. Tickets are single-use.
 DOWNLOAD_TICKET_TTL_SECONDS = 60
 
-#: The verb both doors into a sample's bytes state, in ONE place because
-#: two of them now read it: `routers/samples.py` gates the download and
-#: the mint on it through `require_global`, and the redemption re-reads it
-#: on the sample origin (`_still_authorised`). Two spellings of the key
-#: would mean a permission renamed in the seed silently ungating one door
-#: while the other kept refusing.
+#: The verb gating a sample's bytes, in one place: `routers/samples.py` gates the download and the mint
+#: on it, and redemption re-reads it on the sample origin (`_still_authorised`). Two spellings could
+#: ungate one door while the other kept refusing.
 DOWNLOAD_PERMISSION = "sample.download"
 
 #: Which permission a ticket's redemption re-reads, by the ticket's
@@ -386,20 +272,13 @@ _PURPOSE_PERMISSION = {
     TICKET_RETRIEVAL: RETRIEVE_PERMISSION,
 }
 
-#: The refusal reason, from `_ticket_refusal`, that names nobody: a
-#: presented string that matched no row at all. It is the one refusal an
-#: unauthenticated caller can produce on demand, and it is therefore the
-#: one that is counted rather than written down. Named rather than
-#: repeated so the producer and the consumer cannot drift.
+#: The refusal reason from `_ticket_refusal` that names nobody: a presented string that matched no row.
+#: An unauthenticated caller can produce it on demand, so it is counted rather than written down.
 _UNKNOWN_TICKET = "unknown_ticket"
 
-#: What EVERY refused redemption says, whatever the reason. One string,
-#: used by every raise on that path, because the whole point is that a
-#: caller cannot tell the four ticket-state refusals from each other or
-#: from the account one: "already redeemed" would tell the holder of a
-#: stolen ticket that it was real and that somebody else got there first.
-#: It enumerates the possibilities instead, so a legitimate analyst is not
-#: sent looking at the wrong one, and the audit records which it was.
+#: What every refused redemption says, whatever the reason, so a caller cannot tell the refusals apart:
+#: "already redeemed" would tell the holder of a stolen ticket that it was real. It lists the
+#: possibilities so a legitimate analyst is not sent to the wrong one, and the audit records which it was.
 _TICKET_REFUSED = (
     "this download ticket is not valid: it has been used, it has expired, "
     "it was not issued for this sample, or the account it was issued to "
@@ -416,17 +295,10 @@ _UNKNOWN_TICKET_LOG_SECONDS = 30.0
 
 
 class _SampledWarning:
-    """At most one log line per window, carrying the count of everything
-    the window swallowed, so an operator reads "412 since the last line"
-    rather than 412 lines.
+    """At most one log line per window, carrying the count of everything the window swallowed.
 
-    A deliberate second, smaller copy of the class in
-    `http/routers/live.py`. A service module must not import a router --
-    the dependency runs the other way and closing that loop for a
-    twelve-line helper would be the wrong trade -- and the shared home for
-    it is a new module, which is a change to make on purpose rather than
-    inside a security fix. `threading.Lock` because the ASGI threadpool
-    runs these handlers on more than one thread.
+    A deliberate smaller copy of the class in `http/routers/live.py`: a service module must not import a
+    router. `threading.Lock` because the ASGI threadpool runs handlers on more than one thread.
     """
 
     def __init__(self) -> None:
@@ -462,26 +334,19 @@ class PolicyNotDeclared(SampleError):
 
 
 class SampleCaseReadOnly(SampleError):
-    """The sample's case is CLOSED, ARCHIVED or PURGED
-    (`cases.CONTENT_READ_ONLY_STATES`), and a sample attached to a case is
-    that case's content, so the Lab records nothing more against it.
+    """The sample's case is CLOSED, ARCHIVED or PURGED (`cases.CONTENT_READ_ONLY_STATES`).
 
-    c7/c21 (2026-09-24). Only `sample.submit` and the propose path refused
-    a read-only case; assign, record an analysis, request a detonation and
-    reject all worked on a closed case's sample, and under the `destroy`
-    disposition one analyst could destroy an ARCHIVED case's sample,
-    bypassing the retention purge's two-person control. The routers refuse
-    first, through `deps.refuse_if_case_read_only`, which audits and titles
-    the 409; this is the service's own check, for a caller that is not a
-    router and for a case closed after the router looked. Its message does
-    not name the case, which a Lab analyst may not be able to open."""
+    A sample attached to a case is that case's content, so the Lab records nothing more against it. The
+    routers refuse first, through `deps.refuse_if_case_read_only`; this is the service's own check for a
+    caller that is not a router and for a case closed after the router looked. Its message does not name
+    the case, which a Lab analyst may not be able to open."""
 
 
 class SampleIntegrityError(SampleError):
-    """The decrypted bytes do not hash to the recorded SHA-256: a tamper or
-    a storage fault. Raised by `_verified_plaintext` after the alarm has
-    been committed on its own, so whatever the caller does next, the
-    custody row and the audit row stay (F11-core D, 2026-09-24)."""
+    """The decrypted bytes do not hash to the recorded SHA-256: a tamper or a storage fault.
+
+    Raised by `_verified_plaintext` after the alarm has been committed on its own, so the custody row and
+    the audit row stay whatever the caller does next."""
 
 
 class AuthorisationRequired(SampleError):
@@ -491,16 +356,10 @@ class AuthorisationRequired(SampleError):
 
 
 class PreservationUnverified(SampleError):
-    """The held PUT returned, so a held version EXISTS, and then the store
-    could not be made to confirm what it holds (the read-back failed, or
-    disagreed). Carries `copy`, the version the PUT reported, so the
-    rejection can name it.
+    """The held PUT returned, so a held version exists, but the store could not confirm what it holds.
 
-    Final review C8, 2026-09-23: only a size or hold MISMATCH was a
-    SampleError, and it was reported as "Nothing has changed"; an S3 or
-    transport error from the read-back was not a SampleError at all, reached
-    the router raw, and answered 500. Either way the held version was named
-    nowhere, and each retry wrote another one."""
+    Carries `copy`, the version the PUT reported, so the rejection can name it; otherwise each retry
+    would write another held version that nothing names."""
 
     def __init__(self, message: str, copy: PreservedObject) -> None:
         super().__init__(message)
@@ -508,10 +367,10 @@ class PreservationUnverified(SampleError):
 
 
 class PreservationUnconfirmed(SampleError):
-    """The held PUT was sent and no answer came back (a timeout, a dropped
-    connection), so a held version may or may not exist at `bucket`/`key`,
-    and if it does, its version id is not known here. Distinct from a
-    refusal, where the store answered and nothing was written (C8)."""
+    """The held PUT was sent and no answer came back (a timeout, a dropped connection).
+
+    A held version may or may not exist at `bucket`/`key`, and if it does its version id is not known
+    here. Distinct from a refusal, where the store answered and nothing was written."""
 
     def __init__(self, message: str, bucket: str, key: str) -> None:
         super().__init__(message)
@@ -520,11 +379,10 @@ class PreservationUnconfirmed(SampleError):
 
 
 class NothingToPreserve(SampleError):
-    """F13 (2026-09-24): the working store says the object is ABSENT
-    and the preservation store holds no copy of it, so there is nothing to
-    preserve. `_adopt_held_copy`'s refusal, raised as its own class so the
-    screening path can tell it apart from a store that did not answer; the
-    human path's behaviour and text do not change."""
+    """The working store says the object is absent and the preservation store holds no copy of it.
+
+    `_adopt_held_copy`'s refusal, a class of its own so the screening path can tell it from a store that
+    did not answer."""
 
 
 class _StoreFailed(Exception):
@@ -537,9 +395,10 @@ class _StoreFailed(Exception):
 
 
 class ProhibitedContentMatch(SampleError):
-    """F13 (2026-09-24): a submission matched a prohibited-content hash
-    list. The router answers 451 with `str(exc)`, which never names the
-    list or its category. Carries what the alert reached."""
+    """A submission matched a prohibited-content hash list.
+
+    The router answers 451 with `str(exc)`, which never names the list or its category. Carries what the
+    alert reached."""
 
     def __init__(self, message: str, *, result_id: UUID,
                  officers_notified: int, alert_outcome: str) -> None:
@@ -585,19 +444,14 @@ def policy_declared() -> tuple[bool, str]:
 
     Two environment variables, both required:
 
-    - `NOCTORNAL_PROHIBITED_CONTENT_POLICY` -- a reference an auditor can
-      follow. A document id, a ticket, a URL. Not a boolean, because
-      "true" is what somebody types to make an error go away and a
-      reference is what somebody has to actually possess.
-    - `NOCTORNAL_DESIGNATED_PERSON` -- who material is escalated to.
-      docs/11 is specific that the response to prohibited material is a
-      documented procedure with a named person, not a product feature.
+    - `NOCTORNAL_PROHIBITED_CONTENT_POLICY`: a reference an auditor can follow (a document id, a ticket,
+      a URL). Not a boolean, because "true" is what somebody types to make an error go away.
+    - `NOCTORNAL_DESIGNATED_PERSON`: who material is escalated to. docs/11 requires a documented
+      procedure with a named person, not a product feature.
 
-    This is a DECLARATION, not a verification. The software cannot check
-    that the referenced policy exists, is correct, or has been read by
-    anyone. What it can do is refuse to make ingesting a one-click
-    accident, and put the operator's own reference in the audit trail so
-    that "nobody knew" is not available afterwards.
+    This is a declaration, not a verification: the software cannot check that the policy exists or has
+    been read. It does stop ingesting being a one-click accident, and puts the operator's own reference
+    in the audit trail.
     """
     reference = os.environ.get("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "").strip()
     person = os.environ.get("NOCTORNAL_DESIGNATED_PERSON", "").strip()
@@ -614,18 +468,11 @@ def policy_declared() -> tuple[bool, str]:
 
 
 def sample_origin() -> str:
-    """The separate origin sample bytes may be served from, as configured.
+    """The separate origin sample bytes may be served from, as configured (trailing slash stripped).
 
-    Empty means "not configured", and `download()` then refuses. That is
-    invariant 10 as a runtime check rather than a deployment note: an
-    origin split that is only ever written down is an origin split that
-    does not survive the first hurried deploy.
-
-    This is the raw setting, trailing slash stripped. Whether it is an
-    origin at all, and how it stands against the application origin and
-    this process's own, is `origin_split()`'s verdict; readers that need a
-    decision call that, and this exists so the register can quote what the
-    operator actually typed.
+    Empty means "not configured", and `download()` then refuses: invariant 10 is a runtime check, not a
+    deployment note. This is the raw setting, so the register can quote what the operator typed; the
+    verdict on it is `origin_split()`'s.
     """
     return os.environ.get("NOCTORNAL_SAMPLE_ORIGIN", "").strip().rstrip("/")
 
@@ -645,32 +492,22 @@ def app_origin() -> str:
 
 
 def public_origin() -> str:
-    """The origin THIS process is served at: `NOCTORNAL_PUBLIC_ORIGIN`,
-    defaulting to the application origin.
+    """The origin this process is served at: `NOCTORNAL_PUBLIC_ORIGIN`, defaulting to the application origin.
 
-    The default is the safe direction. A process that does not say which
-    origin it is serving is taken to be the application, and the
-    application refuses to hand over sample bytes -- so forgetting the
-    variable on the sample process produces a refusal that names what to
-    set, and forgetting it on the application changes nothing.
+    The default is the safe direction: a process that does not say which origin it serves is taken to be
+    the application, which refuses to hand over sample bytes.
     """
     return (os.environ.get("NOCTORNAL_PUBLIC_ORIGIN", "").strip().rstrip("/")
             or app_origin())
 
 
 def normalise_origin(value: str, *, allow_path: bool = False) -> str | None:
-    """`scheme://host[:port]`, lower-cased, default port dropped -- or
-    None when the value is not an http(s) origin.
+    """`scheme://host[:port]`, lower-cased, default port dropped, or None when not an http(s) origin.
 
-    One normaliser, because the split is decided by string EQUALITY and
-    three readers (the download, the UI's CSP and the cross-origin
-    answer) must agree on what "the same origin" means. `allow_path`
-    exists for the application origin: `NOCTORNAL_BASE_URL` may carry a
-    path prefix for a deployment mounted under one, and its ORIGIN is
-    what the split compares. The sample origin may not: a path there
-    would make the console's download URL and the CSP source both
-    path-specific, and "an origin with a path" is exactly the
-    `app.internal/samples` shape docs/11 says is not a separate origin.
+    One normaliser, because the split is decided by string equality and the download, the UI's CSP and
+    the cross-origin answer must agree on "the same origin". `allow_path` is for the application origin:
+    `NOCTORNAL_BASE_URL` may carry a path prefix, and only its origin is compared. The sample origin may
+    not carry a path: `app.internal/samples` is not a separate origin (docs/11).
     """
     parts = urlsplit(value.strip())
     if parts.scheme not in ("http", "https") or not parts.netloc:
@@ -696,26 +533,19 @@ def normalise_origin(value: str, *, allow_path: bool = False) -> str | None:
 
 @dataclass(frozen=True)
 class OriginSplit:
-    """The three origins invariant 10 turns on, normalised, and the
-    verdict they give for THIS process.
+    """The three origins invariant 10 turns on, normalised, and the verdict they give for this process.
 
     `role` is one of:
 
-    - `unconfigured` -- `NOCTORNAL_SAMPLE_ORIGIN` is unset: the control is
-      OFF and every download refuses everywhere;
-    - `invalid` -- it is set but is not an origin;
-    - `same_origin` -- it names the application origin: two names for one
-      origin is not a split, and the download refuses rather than serve
-      hostile bytes from the origin the invariant forbids;
-    - `app` -- this process is the application: it refuses and names the
-      sample origin to fetch from;
-    - `sample` -- this process is the sample origin: it serves.
+    - `unconfigured`: `NOCTORNAL_SAMPLE_ORIGIN` is unset, the control is off and every download refuses;
+    - `invalid`: it is set but is not an origin;
+    - `same_origin`: it names the application origin, which is not a split, so the download refuses;
+    - `app`: this process is the application: it refuses and names the sample origin to fetch from;
+    - `sample`: this process is the sample origin: it serves.
 
-    `refusal` is why `download()` refuses on this process, or None when it
-    serves. `split_problem` is the subset of refusals that are about the
-    DEPLOYMENT rather than about which process this is -- what the
-    register and the policy endpoint report, and what the console shows
-    instead of a download button.
+    `refusal` is why `download()` refuses on this process, or None when it serves. `split_problem` is the
+    subset of refusals about the deployment rather than about which process this is; the register and the
+    policy endpoint report it, and the console shows it instead of a download button.
     """
 
     role: str
@@ -738,10 +568,8 @@ class OriginSplit:
 def origin_split(*, this: str | None = None) -> OriginSplit:
     """Decide the origin split from configuration alone.
 
-    `this` overrides `public_origin()`; the service tests use it to stand
-    a call on one process or the other without an environment. Nothing in
-    the HTTP layer passes it -- the router used to pass the Host header
-    here, which is the defect this function replaced.
+    `this` overrides `public_origin()` so service tests can stand a call on one process or the other.
+    Nothing in the HTTP layer passes it: the Host header is never an input.
     """
     raw_sample = sample_origin()
     raw_app = app_origin()
@@ -785,27 +613,15 @@ def origin_split(*, this: str | None = None) -> OriginSplit:
 
 
 def download_cors_headers(origin_header: str | None) -> dict[str, str]:
-    """The headers that let the console on the APPLICATION origin read a
-    download from THIS process -- when this process is the sample origin
-    and the request's `Origin` is the application's. Empty otherwise.
+    """The headers that let the console on the application origin read a download from this process.
 
-    The allowed origin is the CONFIGURED application origin, never an echo
-    of the header: a page on any other origin gets no
-    `Access-Control-Allow-Origin` and the browser withholds the response.
-    No `Access-Control-Allow-Credentials`, so no cookie ever crosses --
-    which is why the console proves itself there with something that is
-    neither: a one-shot download ticket in the FORM BODY (0061), minted
-    on the application origin under the cookie session. It carried a
-    Bearer until 2026-09-10, and that is the credential this comment used
-    to name. The redemption sends no header of its own at all, because
-    one outside the CORS safelist would make it a preflighted request and
-    `app._preflight` admits `authorization` alone.
+    Non-empty only when this process is the sample origin and the request's `Origin` is the application's.
+    The allowed origin is the configured application origin, never an echo of the header. There is no
+    `Access-Control-Allow-Credentials`, so no cookie crosses: the console proves itself with a one-shot
+    download ticket in the form body (0061). The redemption sends no header of its own, because one outside
+    the CORS safelist would trigger a preflight and `app._preflight` admits `authorization` alone.
 
-    Exists at all because a CSP that names the sample origin is only half
-    of letting the Lab pane download: without this answer the browser
-    performs the request and then refuses to show the page the bytes, and
-    the pane reports "the request did not complete" for a download the
-    server served. The two halves live in one module so they cannot drift.
+    Without this answer the browser performs the request and then refuses to show the page the bytes.
     """
     split = origin_split()
     if not split.serves_here or split.app is None:
@@ -820,22 +636,13 @@ def download_cors_headers(origin_header: str | None) -> dict[str, str]:
     }
 
 
-# ---------------------------------------------------------------------------
-# The one Lab gate (F11-core C, 2026-09-24)
-# ---------------------------------------------------------------------------
-
-#: SQL predicates over a sample alias `{s}` that EVERY Lab read applies as
-#: well as the caller's labels: what the Lab shows nobody, whoever asks.
-#: Prohibited-content screening (F13) is one line here, and that single
-#: line keeps a matched sample out of the queue, the
-#: card, the download and its ticket, the preserved retrieval and its
-#: ticket, similarity, retrohunt and the static-triage claim, while the
-#: Security Officer's content-free list (`exclusions=False`) still shows
-#: it. A flag on each reader was the alternative, and a reader that forgot
-#: the flag would have been the leak.
+#: SQL predicates over a sample alias `{s}` that every Lab read applies as well as the caller's labels:
+#: what the Lab shows nobody, whoever asks. Screening is one line here, which keeps a matched sample out
+#: of the queue, card, download and ticket, preserved retrieval and ticket, similarity, retrohunt and the
+#: static-triage claim, while the Security Officer's content-free list (`exclusions=False`) still shows
+#: it. A flag on each reader would leak wherever a reader forgot it.
 LAB_EXCLUSIONS: tuple[str, ...] = (
-    # F13, 2026-09-24. A sample that matched a prohibited-content hash
-    # list is gone from the Lab for everyone, for good ("no analyst
+    # A sample that matched a prohibited-content hash list is gone from the Lab for everyone ("no analyst
     # viewing", docs/11); only the officer's two readers opt out.
     "{s}.screening_outcome <> 'MATCH'",
 )
@@ -848,19 +655,13 @@ def lab_exclusions_sql(s: str = "s") -> str:
 
 
 def lab_gate(*, s: str = "s", c: str = "c", exclusions: bool = True) -> str:
-    """The Lab's label predicate, composed as `deps.effective_labels`
-    composes a node's: the stricter of the sample's classification and its
-    case's, and the union of their compartments, against the caller's
-    clearance and held compartments. The query LEFT JOINs the case's facts
-    as {c} (`LATERAL iam.case_facts({s}.case_id)`, S1: row-level security
-    hides core."case" from Lab analysts, who hold no assignment) and passes
-    `gate_params(...)`.
+    """The Lab's label predicate, composed as `deps.effective_labels` composes a node's.
 
-    It was written out five times, positionally, before 2026-09-24 (queue,
-    visible, the download's and the retrieval's checks, and the officer's
-    list), and every new Lab feature would have added a sixth or a flag to
-    some of them. Rendered at call time so `LAB_EXCLUSIONS` is read when
-    the query is built."""
+    It is the stricter of the sample's classification and its case's, and the union of their
+    compartments, against the caller's clearance and held compartments. The query LEFT JOINs the case's
+    facts as {c} (`LATERAL iam.case_facts({s}.case_id)`: row-level security hides core."case" from Lab
+    analysts, who hold no assignment) and passes `gate_params(...)`. Rendered at call time so
+    `LAB_EXCLUSIONS` is read when the query is built."""
     gate = (f"greatest({s}.classification, "
             f"coalesce({c}.classification, {s}.classification)) "
             f"<= %(gate_clearance)s::core.tlp "
@@ -908,8 +709,8 @@ _MAGIC: list[tuple[bytes, str]] = [
     (b"Rar!\x1a\x07", "RAR"),
     (b"7z\xbc\xaf\x27\x1c", "7-Zip"),
     (b"\x1f\x8b", "gzip"),
-    (b"BZh", "bzip2"),               # phase 8, 2026-10-02: a tar.bz2
-    (b"\xfd7zXZ\x00", "xz"),         # phase 8, 2026-10-02: a tar.xz
+    (b"BZh", "bzip2"),
+    (b"\xfd7zXZ\x00", "xz"),
     (b"%PDF-", "PDF"),
     (b"\xd0\xcf\x11\xe0", "OLE compound (legacy Office)"),
     (b"#!", "script with shebang"),
@@ -920,10 +721,8 @@ _MAGIC: list[tuple[bytes, str]] = [
 class Triage:
     """What static triage established, and what it could not.
 
-    `gaps` is not decoration. A NULL imphash reads as "this sample has no
-    imports"; a recorded gap reads as "nobody looked". Invariant 12 is
-    about ingest, but the principle is the same -- an absence with no
-    reason is indistinguishable from a finding.
+    A NULL imphash reads as "this sample has no imports"; a recorded gap reads as "nobody looked". An
+    absence with no reason is indistinguishable from a finding.
     """
 
     sha256: bytes
@@ -951,42 +750,36 @@ def file_type_of(data: bytes) -> str:
     for magic, label in _MAGIC:
         if data.startswith(magic):
             return label
-    # A tar's magic sits at offset 257, not at the start (phase 8,
-    # 2026-10-02): a plain tar is typed so the expansion can see it.
+    # A tar's magic sits at offset 257, not at the start; a plain tar is typed so expansion can see it.
     if len(data) > 262 and data[257:262] == b"ustar":
         return "tar"
     return "unknown"
 
 
-#: What a stored or derived gap says about its check (F11-core G,
-#: 2026-09-24). `pending`: static triage will run it; `not_applicable`: it
-#: does not apply to this sample (not a PE, no Rich header); `skipped`: a
-#: limit kept it from running; `failed`: it ran and did not finish;
-#: `unavailable`: this deployment cannot run it.
+#: What a stored or derived gap says about its check. `pending`: static triage will run it;
+#: `not_applicable`: it does not apply to this sample (not a PE, no Rich header); `skipped`: a limit kept
+#: it from running; `failed`: it ran and did not finish; `unavailable`: this deployment cannot run it.
 GAP_STATUSES = ("pending", "not_applicable", "skipped", "failed",
                 "unavailable")
 #: The checks the static-triage runner settles, in the order they are
 #: listed on a new sample.
 STATIC_STEPS = ("imphash", "rich_header_hash", "ssdeep", "tlsh", "yara")
 PENDING_REASON = "static triage has not run yet; it runs after submission"
-#: Gaps computed when a sample is READ rather than stored: a stored copy of
-#: one would go stale the moment the deployment's answer changed. The
-#: steps are prohibited-content screening's (F13).
+#: Gaps computed when a sample is read rather than stored: a stored copy would go stale the moment the
+#: deployment's answer changed. The steps are prohibited-content screening's.
 DERIVED_GAP_STEPS = ("prohibited_content_screening",
-                     # F13. Exact hashes only, and containers only.
+                     # Exact hashes only, and containers only.
                      "prohibited_content_perceptual",
                      "prohibited_content_archive_members")
 
 def _archive_members_gap(gaps: list[dict], triage_gaps,
                          unscreened: int | None | bool) -> list[dict]:
-    """The derived "archive members were not compared" gap of one archive,
-    given its stored gaps and what its finished expansion recorded:
-    `False` when no expansion finished (pending, failed, refused, or one
-    that never ran), None when a finished one does not say, else how many
-    entries were refused with bytes behind them.
+    """The derived "archive members were not compared" gap of one archive.
 
-    Dropped only when the expansion finished and left nothing uncompared;
-    reworded to a count when it left some; kept as it is otherwise (2026-10-03)."""
+    Takes its stored gaps and what its finished expansion recorded: `False` when no expansion finished
+    (pending, failed, refused, or never run), None when a finished one does not say, else how many entries
+    were refused with bytes behind them. Dropped only when the expansion finished and left nothing
+    uncompared; reworded to a count when it left some; kept as it is otherwise."""
     pending = any(isinstance(g, dict) and g.get("step") == "archive_expansion"
                   for g in triage_gaps or [])
     if pending or unscreened is False or unscreened is None:
@@ -1005,49 +798,40 @@ def _archive_members_gap(gaps: list[dict], triage_gaps,
                    f"own")}]
 
 
-#: Who a machine analysis row says produced it, by kind (F11-core F). The
-#: sandbox (F14) is 'SANDBOX'.
+#: Who a machine analysis row says produced it, by kind.
 MACHINE_PRODUCERS: dict[str, str] = {
     "STATIC": "NocTORnal static triage",
     "YARA": "YARA scan",
-    "SANDBOX": "CAPEv2 sandbox",  # F14, 2026-09-24.
-    "ARCHIVE": "NocTORnal archive expansion",  # phase 8, 2026-10-02 (0160).
+    "SANDBOX": "CAPEv2 sandbox",
+    "ARCHIVE": "NocTORnal archive expansion",
 }
-#: Where a proposal made from an analysis says it came from, by the row's
-#: (origin, machine kind). The sandbox (F14) is ('machine', 'SANDBOX').
+#: Where a proposal made from an analysis says it came from, by the row's (origin, machine kind).
 PROPOSAL_ORIGINS: dict[tuple[str, str | None], str] = {
     ("analyst", None): "lab/analysis",
     ("machine", "STATIC"): "lab/static-triage",
-    ("machine", "SANDBOX"): "lab/sandbox",  # F14, 2026-09-24.
+    ("machine", "SANDBOX"): "lab/sandbox",
 }
 #: The two stores a sample's bytes are read from.
 STORE_WORKING = "working"
 STORE_PRESERVATION = "preservation"
-#: The file types that are archives (phase 8, 2026-10-02): expanded, or
-#: refused by name, after static triage. One list, read by `triage` and by
-#: screening's derived gap.
+#: The file types that are archives: expanded, or refused by name, after static triage. Read by `triage`
+#: and by screening's derived gap.
 ARCHIVE_FILE_TYPES = frozenset({"ZIP or OOXML", "RAR", "7-Zip", "gzip",
                                 "bzip2", "xz", "tar"})
 
 
 def triage(data: bytes) -> Triage:
-    """Static only. Nothing here executes, parses a container, or
-    expands an archive.
+    """Static only: nothing here executes, parses a container, or expands an archive.
 
-    The fuzzy hashes and YARA are PENDING: they run afterwards, in bounded
-    child processes (`lab_triage`), never inside the upload request.
-    Archive expansion is deliberately absent: docs/11 asks for it with
-    depth and expansion-ratio caps, and an uncapped expander is a zip
-    bomb waiting for someone to send one. Building the capped version is
-    real work and the honest thing is to record its absence rather than
-    ship the uncapped one. Prohibited-content screening is a derived gap
-    (`derived_gaps`), not a stored one.
+    The fuzzy hashes and YARA are pending: they run afterwards in bounded child processes
+    (`lab_triage`), never inside the upload request. Archive expansion is likewise deferred to
+    `lab_archive`, which applies docs/11's depth and ratio caps; an uncapped expander is a zip bomb.
+    Prohibited-content screening is a derived gap (`derived_gaps`), not a stored one.
     """
     gaps = [{"step": step, "status": "pending", "reason": PENDING_REASON}
             for step in STATIC_STEPS]
-    # Archive expansion (phase 8, 2026-10-02): pending for every archive
-    # kind the Lab types, expanded or refused by name after static triage
-    # (lab_archive; the unsupported kinds are refused there, in words).
+    # Pending for every archive kind the Lab types: expanded, or refused by name, after static triage
+    # (`lab_archive`; unsupported kinds are refused there, in words).
     file_type = file_type_of(data)
     if file_type in ARCHIVE_FILE_TYPES:
         gaps.append({"step": "archive_expansion", "status": "pending",
@@ -1089,28 +873,15 @@ def _zc_crc32(byte: int, crc: int) -> int:
 class _ZipCrypto:
     """The traditional ZIP cipher, for the `infected` convention.
 
-    **This is not confidentiality and is not used as any part of a
-    security control.** ZipCrypto is broken by a known-plaintext attack
-    older than most of the people who will read this, and the password is
-    printed in the archive comment and in a response header. Its two jobs,
-    which are the two docs/11 asks for, are mechanical:
+    This is not confidentiality and is not part of any security control: ZipCrypto falls to a
+    known-plaintext attack, and the password is printed in the archive comment and a response header. It
+    has two mechanical jobs (docs/11): an interlock, so a live binary cannot be double-clicked out of a
+    file manager, and an opaque container, so the lab's own endpoint protection and mail gateway do not
+    quarantine the sample in transit. Confidentiality comes from the access gate and the envelope
+    encryption at rest.
 
-      1. an interlock, so a live binary cannot be double-clicked out of a
-         file manager without an explicit step;
-      2. an opaque container, so the lab's OWN endpoint protection and mail
-         gateway do not quarantine the sample in transit -- the "routine
-         and embarrassing failure" this module's docstring names.
-
-    Confidentiality of a sample comes from the access gate and the
-    envelope encryption at rest, neither of which this touches.
-
-    Written out because Python's `zipfile` **cannot write encrypted
-    entries at all** -- `setpassword()` is decrypt-only. The previous
-    version of `archive()` believed otherwise, produced a plain DEFLATE
-    entry with the encryption bit clear, and shipped an archive comment
-    telling the analyst a password protected it. Round-tripped in the
-    tests through Python's own decryptor, which is the strongest available
-    check that this is the real format and not a plausible-looking one.
+    Written out because Python's `zipfile` cannot write encrypted entries (`setpassword()` is
+    decrypt-only). The tests round-trip it through Python's own decryptor to prove it is the real format.
     """
 
     def __init__(self, password: bytes):
@@ -1140,42 +911,27 @@ class _ZipCrypto:
 
 def archive(data: bytes, sha256_hex: str,
             password: bytes = ARCHIVE_PASSWORD, *, what: str = "sample") -> bytes:
-    """Wrap the sample so it cannot be double-clicked into running.
+    """Wrap the sample in an encrypted ZIP so it cannot be double-clicked into running.
 
-    Named for its hash, not its original filename -- the name is
-    attacker-controlled and the archive is the last place it should
-    reappear. The comment states plainly what the password is worth,
-    because the single commonest mistake with this convention is treating
-    it as confidentiality.
+    Named for its hash, never its original filename: the name is attacker-controlled and the archive is the
+    last place it should reappear. The archive comment states what the password is worth, because the
+    commonest mistake with this convention is treating it as confidentiality.
 
-    `what` names the contents in that comment: "sample" for the Lab, and
-    "exhibit" for attacker markup produced through the sample origin
-    (x-hostile-export, 2026-09-24), which leaves in this same archive so
-    a captured page cannot be opened into a browser by a double-click
-    either. The entry stays `<sha256>.bin` for both: an `.html` entry is
-    exactly the double-click this archive exists to stop.
+    `what` names the contents in that comment: "sample" for the Lab, "exhibit" for attacker markup served
+    through the sample origin, which leaves in this same archive so a captured page cannot be opened into a
+    browser by a double-click. The entry stays `<sha256>.bin` for both: an `.html` entry is exactly the
+    double-click this archive exists to stop.
 
-    **This produced a PLAIN ZIP until 2026-07-26.** The old docstring
-    said "Python's zipfile writes ZipCrypto", which is false in the
-    direction that matters: `zipfile` reads encrypted entries and cannot
-    write them. `ARCHIVE_PASSWORD` was defined, exported in `__all__`, and
-    referenced by nothing. The entry carried flag bits 0x0000 and opened
-    with no prompt in Explorer, 7-Zip, a mail gateway or an EDR agent --
-    while the archive comment and the `X-Sample-Archive-Password` header
-    both told the analyst a password protected it. Invariant 10 says the
-    binary is only ever an *encrypted* archive download; it was not one.
+    The entry must really be encrypted (invariant 10: the binary is only ever an *encrypted* archive
+    download), and `zipfile` can only decrypt, so the ZIP is built by hand (see `_ZipCrypto`). The fields
+    that matter and are easy to get wrong:
 
-    The ZIP is built by hand because there is no stdlib API for this. The
-    fields that matter and are easy to get wrong:
-
-    - flag bit 0 set (encrypted), and **bit 3 NOT set**: with a data
-      descriptor the check byte comes from the mod-time instead of the
-      CRC, and readers disagree about which;
-    - the 12-byte encryption header's LAST byte must equal the high byte
-      of the entry's CRC-32, which is how a reader recognises a wrong
-      password;
-    - the CRC is over the PLAINTEXT, the sizes are of the ENCRYPTED
-      stream, and compression happens before encryption.
+    - flag bit 0 set (encrypted), and bit 3 not set: with a data descriptor the check byte comes from the
+      mod-time instead of the CRC, and readers disagree about which;
+    - the 12-byte encryption header's last byte must equal the high byte of the entry's CRC-32, which is
+      how a reader recognises a wrong password;
+    - the CRC is over the plaintext, the sizes are of the encrypted stream, and compression happens before
+      encryption.
     """
     name = f"{sha256_hex}.bin".encode("ascii")
     crc = zlib.crc32(data) & 0xFFFFFFFF
@@ -1229,27 +985,18 @@ STORE_READ_TIMEOUT_S = 60.0
 def _bounded_http(*, resend_writes: bool = True):
     """The HTTP pool both sample stores use, which gives up in seconds.
 
-    minio-py's own pool waits five minutes on a connect or a read and
-    retries five times, so one stalled call could hold a request for about
-    half an hour. The preserving rejection makes calls to these stores
-    inside a transaction that holds the sample's row lock, and until final
-    review C7 (2026-09-23) the working-copy delete ran while the audit
-    chain's advisory lock was held too, which stalled every audited write
-    in the deployment behind one hung DELETE. The same bound as
+    minio-py's own pool waits five minutes on a connect or a read and retries five times, so one stalled
+    call could hold a request for about half an hour. The preserving rejection calls these stores inside a
+    transaction that holds the sample's row lock, so the bound matters. It matches
     `readiness._object_store_client`, loosened for real transfers.
 
-    Retries: a connection that never opened is retried (nothing was sent).
-    A READ that timed out is NOT: the request went out, and retrying a held
-    PUT whose answer was lost writes a second held version that nothing
-    can delete. A 5xx answer is retried only where a resend is harmless.
-    For the samples store it is (a resent PUT overwrites the same
-    unversioned object, a resent DELETE deletes nothing twice). For the
-    preservation store (`resend_writes=False`) only reads are resent: a 502
-    or 504 can come from a proxy after the store took the held PUT, so a 5xx
-    does not prove nothing was written, and `preserve()` reports the
-    refusal instead (final review verifier on C7, 2026-09-23, which found
-    this docstring claiming it did). Certificate handling is minio-py's
-    own default, restated because passing a pool replaces it.
+    Retries: a connection that never opened is retried (nothing was sent). A read that timed out is not:
+    the request went out, and retrying a held PUT whose answer was lost writes a second held version that
+    nothing can delete. A 5xx answer is retried only where a resend is harmless. For the samples store it
+    is (a resent PUT overwrites the same unversioned object, a resent DELETE deletes nothing twice). For
+    the preservation store (`resend_writes=False`) only reads are resent: a 502 or 504 can come from a
+    proxy after the store took the held PUT, so `preserve()` reports the refusal instead. Certificate
+    handling is minio-py's own default, restated because passing a pool replaces it.
     """
     import certifi
     import urllib3
@@ -1278,14 +1025,11 @@ def _missing(exc: BaseException) -> bool:
 
 
 class SampleStorage:
-    """The sample bucket. docs/11: "Bucket separate from evidence, WORM, no
-    public access, no CDN, own credentials."
+    """The sample bucket. docs/11: "Bucket separate from evidence, WORM, no public access, no CDN, own
+    credentials."
 
-    Its OWN credentials, deliberately. Reusing the evidence keys would mean
-    a compromise of the evidence path reaches the malware store and vice
-    versa, and the whole point of a separate bucket is that the two do not
-    share a blast radius. `SAMPLE_ACCESS_KEY` falls back to the MinIO ones
-    ONLY for a single-node development stack, and says so.
+    Its own credentials, so a compromise of the evidence path does not reach the malware store or vice
+    versa. `SAMPLE_ACCESS_KEY` falls back to the MinIO ones only for a single-node development stack.
     """
 
     def __init__(self) -> None:
@@ -1329,8 +1073,7 @@ class SampleStorage:
 
 @dataclass(frozen=True)
 class PreservedObject:
-    """Where a rejected sample's ciphertext now lives, as the store
-    reported it after the write, not as it was asked for."""
+    """Where a rejected sample's ciphertext now lives, as the store reported it after the write."""
 
     bucket: str
     key: str
@@ -1339,28 +1082,20 @@ class PreservedObject:
 
 
 class PreservationStorage:
-    """The preservation bucket (F2, 2026-09-22): where a rejected sample's
-    ciphertext goes instead of being destroyed.
+    """The preservation bucket: where a rejected sample's ciphertext goes instead of being destroyed.
 
-    Modelled on `SampleStorage`, and separate from it for the same reason
-    that store is separate from evidence: its own bucket
-    (`PRESERVE_BUCKET`, default `noctornal-preserved`) and its own
-    credentials (`PRESERVE_ENDPOINT` / `PRESERVE_ACCESS_KEY` /
-    `PRESERVE_SECRET_KEY`). Those fall back to the `SAMPLE_*` variables and
-    then to `MINIO_*` ONLY so a single-node development stack works with
-    nothing added; a deployment gives this bucket its own account, and
-    infra/production/compose.yml mints one when the variables are set.
+    Separate from `SampleStorage` for the same reason that store is separate from evidence: its own bucket
+    (`PRESERVE_BUCKET`, default `noctornal-preserved`) and credentials (`PRESERVE_ENDPOINT` /
+    `PRESERVE_ACCESS_KEY` / `PRESERVE_SECRET_KEY`). Those fall back to the `SAMPLE_*` variables and then
+    `MINIO_*` only so a single-node development stack works; a deployment gives this bucket its own
+    account, and infra/production/compose.yml mints one when the variables are set.
 
-    The bucket is created WITH object lock and no default retention. The
-    protection is a per-object LEGAL HOLD, placed on the one version this
-    process wrote, which holds until somebody deliberately lifts it and has
-    no expiry for a clock to run out.
+    The bucket is created with object lock and no default retention. The protection is a per-object legal
+    hold on the one version this process wrote, which has no expiry for a clock to run out.
 
-    Two things are deliberately absent. There is no `delete`, and no method
-    that lifts a hold: retrieval reads a held object and leaves the hold
-    exactly where it was, and nothing in this codebase may release one.
-    Lifting a hold is an operator's act under counsel's instruction,
-    outside the product, and it should be.
+    There is deliberately no `delete` and no method that lifts a hold: retrieval reads a held object and
+    leaves the hold where it was. Lifting a hold is an operator's act under counsel's instruction, outside
+    the product.
     """
 
     def __init__(self) -> None:
@@ -1395,23 +1130,17 @@ class PreservationStorage:
     def preserve(self, key: str, data: bytes) -> PreservedObject:
         """Write, hold, and prove both, or raise saying what now exists.
 
-        The hold is set IN the write (`legal_hold=True` on the PUT), so no
-        window exists in which the object is in the bucket unheld. Then the
-        store is asked, about the exact version it returned, what it now
-        holds: the size must be the size written and the hold must read
-        back as ON. A bucket created without object lock refuses the held
-        PUT outright, and that refusal is translated into a sentence that
-        says which bucket and what to do, rather than an S3 error code.
+        The hold is set in the write (`legal_hold=True` on the PUT), so the object is never in the bucket
+        unheld. The store is then asked, about the exact version it returned, what it holds: the size must
+        be the size written and the hold must read back ON. A bucket created without object lock refuses
+        the held PUT, and that is translated into a sentence naming the bucket and what to do.
 
-        Three ways to fail, and the caller must be able to tell them apart
-        (final review C8, 2026-09-23): the store REFUSED the PUT, so nothing
-        was written (`SampleError`); the PUT got no answer, so a held
-        version may exist (`PreservationUnconfirmed`); or the PUT returned
-        and the read-back failed or disagreed, so a held version DOES exist
-        (`PreservationUnverified`, naming it). The read-back messages say
-        "hold", never the two words the console reads as "record the
-        rejection only", because once a held copy exists that is the one
-        way out that strands it.
+        The caller must be able to tell three failures apart: the store refused the PUT, so nothing was
+        written (`SampleError`); the PUT got no answer, so a held version may exist
+        (`PreservationUnconfirmed`); or the PUT returned and the read-back failed or disagreed, so a held
+        version does exist (`PreservationUnverified`, naming it). The read-back messages say "hold", never
+        the two words the console reads as "record the rejection only", because once a held copy exists
+        that is the one way out that strands it.
         """
         from minio.error import S3Error
 
@@ -1463,14 +1192,11 @@ class PreservationStorage:
     def latest_held(self, key: str) -> PreservedObject | None:
         """The newest version at `key`, if the store holds one under a hold.
 
-        For a rejection whose working copy is already gone because an
-        earlier attempt deleted it and then failed to record (2026-09-23): the retry adopts
-        the held copy instead of steering
-        the analyst to a record-only rejection that would leave it named by
-        no row. A plain HEAD and a hold read, which the preservation
-        account's policy already allows; listing versions it may not do.
-        The caller still proves the bytes are this sample's before
-        recording anything."""
+        For a rejection whose working copy is already gone because an earlier attempt deleted it and then
+        failed to record: the retry adopts the held copy instead of steering the analyst to a record-only
+        rejection that would leave it named by no row. A plain HEAD and a hold read, which the
+        preservation account's policy allows; it may not list versions. The caller still proves the bytes
+        are this sample's before recording anything."""
         from minio.error import S3Error
 
         try:
@@ -1523,8 +1249,7 @@ class Sample:
     assigned_to: UUID | None
     classification: str
     compartments: frozenset[str]
-    #: F2 (0063): where a rejected sample's ciphertext went, if it was
-    #: preserved rather than destroyed or left in place.
+    #: Where a rejected sample's ciphertext went, if it was preserved (0063).
     preserved_bucket: str | None = None
     preserved_key: str | None = None
     preserved_at: datetime | None = None
@@ -1534,20 +1259,18 @@ class Sample:
     #: True once the data key has been zeroed (a destroy). Read as a
     #: boolean in SQL so the sealed key itself never enters this object.
     key_destroyed: bool = False
-    #: F11 (2026-09-24): written by static triage, None until it has run
-    #: (the row's `triage_gaps` says why each is absent). `tlsh` is the
-    #: canonical form without the T1 prefix (ontology `tlsh_norm`).
+    #: Written by static triage, None until it has run (the row's `triage_gaps` says why each is absent).
+    #: `tlsh` is the canonical form without the T1 prefix (ontology `tlsh_norm`).
     imphash: str | None = None
     rich_header_hash: str | None = None
     ssdeep: str | None = None
     tlsh: str | None = None
-    #: F13 (2026-09-24). NOT_SCREENED, NO_MATCH or MATCH, and when;
-    #: and when a matched sample's bytes were found in neither store.
+    #: NOT_SCREENED, NO_MATCH or MATCH, and when; and when a matched sample's bytes were found in neither
+    #: store.
     screening_outcome: str = "NOT_SCREENED"
     screened_at: datetime | None = None
     screening_bytes_absent_at: datetime | None = None
-    #: Archive expansion (phase 8, 2026-10-02; migration 0158): the archive
-    #: sample this one was cut from, and its path inside it. Both or neither.
+    #: The archive sample this one was cut from, and its path inside it (migration 0158). Both or neither.
     parent_sample_id: UUID | None = None
     archive_path: str | None = None
 
@@ -1555,12 +1278,10 @@ class Sample:
     def bytes_disposition(self) -> str:
         """Where the bytes are, in one word the console can show.
 
-        `in_sample_store` for a live sample; for a rejected one,
-        `preserved`, `destroyed`, or `kept` (the rejection was recorded
-        without disposing of anything, which is what a hold or a missing
-        object leaves). A screening match whose bytes have not yet moved is
-        `awaiting_preservation`, and one whose bytes were found in neither
-        store `not_found` (F13)."""
+        `in_sample_store` for a live sample; for a rejected one, `preserved`, `destroyed`, or `kept` (the
+        rejection was recorded without disposing of anything, which is what a hold or a missing object
+        leaves). A screening match whose bytes have not yet moved is `awaiting_preservation`, and one whose
+        bytes were found in neither store `not_found`."""
         if self.preserved_key:
             return "preserved"
         if self.state != REJECTED:
@@ -1581,17 +1302,12 @@ class Redemption(NamedTuple):
 
 @dataclass(frozen=True)
 class DownloadTicket:
-    """What a mint hands back. `raw` exists in this object and in the
-    response that carries it, and nowhere else: the row holds
-    `hash_token(raw)`, and no audit detail, log line or URL ever repeats
-    it (0061).
+    """What a mint hands back.
 
-    `expires_at` comes back from the INSERT rather than being computed
-    here, because the expiry is set by the DATABASE clock and compared
-    against the database clock at redemption. A Python `datetime.now()`
-    would introduce a second clock into a sixty-second window, which is
-    how a control ends up refusing valid tickets on one host and
-    accepting expired ones on another.
+    `raw` exists in this object and in the response that carries it, and nowhere else: the row holds
+    `hash_token(raw)`, and no audit detail, log line or URL repeats it (0061). `expires_at` comes back
+    from the INSERT because the expiry is set by the database clock and compared against it at
+    redemption; a Python clock would add a second clock to a sixty-second window.
     """
 
     id: UUID
@@ -1616,9 +1332,8 @@ class SampleService:
                  preservation=None):
         self._c = conn
         self._storage = storage
-        #: The preservation store (F2). Injected like `storage`, and None
-        #: unless the caller is about to preserve or retrieve: building
-        #: one needs credentials that a queue read has no use for.
+        #: The preservation store. Injected like `storage`, and None unless the caller is about to
+        #: preserve or retrieve: building one needs credentials a queue read has no use for.
         self._preservation = preservation
 
     # -- ingest ------------------------------------------------------------
@@ -1636,24 +1351,15 @@ class SampleService:
                ) -> Sample:
         """Land a sample in QUARANTINE, run static triage, encrypt at rest.
 
-        `parent_sample_id` and `archive_path` (phase 8, 2026-10-02) make
-        the submission a MEMBER of an archive sample: the expansion
-        (`lab_archive`) brings a member in through this very path, so it
-        gets the upload's envelope, screening, custody, triage queue and
-        rules, plus the two columns and a SYSTEM custody row saying it was
+        `parent_sample_id` and `archive_path` make the submission a member of an archive sample:
+        `lab_archive` brings a member in through this path, so it gets the upload's envelope, screening,
+        custody, triage queue and rules, plus the two columns and a SYSTEM custody row saying it was
         expanded rather than submitted by the person named.
 
-        Refuses outright unless a prohibited-content policy has been
-        declared. That refusal is the whole reason this phase was blocked,
-        and it stays enforced rather than becoming a comment.
+        Refuses outright unless a prohibited-content policy has been declared.
 
-        `visible_to_*` are the SUBMITTER's labels, and they are used for
-        exactly one thing: deciding how much the duplicate refusal is
-        allowed to say. They default to None, which means "say nothing" —
-        the conservative direction, so a caller that omits them leaks
-        nothing rather than everything. That is the opposite of how
-        `queue()` and `download()` treated their clearance argument before
-        F19, and deliberately so.
+        `visible_to_*` are the submitter's labels, used only to decide how much the duplicate refusal may
+        say. They default to None, meaning "say nothing", so a caller that omits them leaks nothing.
         """
         declared, detail = policy_declared()
         if not declared:
@@ -1664,37 +1370,22 @@ class SampleService:
             raise SampleError(
                 f"sample exceeds {MAX_SAMPLE_BYTES} bytes; a submission that "
                 f"large is a disk image or a mistake")
-        # Validated HERE, before anything is written anywhere. The router
-        # takes `classification` as an unconstrained `Form(...)` string and
-        # it lands in a `core.tlp` column, so a typo used to surface as a
-        # psycopg DataError from inside the INSERT -- which, under the old
-        # ordering, was AFTER the bytes had already gone to the object
-        # store. A label the system cannot parse is a bad request, not a
-        # database error.
+        # Validated here, before anything is written. The router takes `classification` as a free `Form`
+        # string that lands in a `core.tlp` column; a label the system cannot parse is a bad request,
+        # not a database error after the bytes have gone to the object store.
         try:
             tlp_from_name(classification)
         except AccessResolutionError as exc:
             raise SampleError(str(exc)) from exc
 
-        # THE CASE'S FLOOR, APPLIED (F19, 2026-07-26).
-        #
-        # `lab.sample` is the one labelled table with no `enforce_tlp_floor`
-        # trigger -- core.node, core.edge and core.evidence all have one --
-        # and the router's `classification` is a `Form(...)` defaulting to
-        # AMBER. So an analyst attaching the dropper from a RED,
-        # compartmented case and touching nothing else produced a row at
-        # AMBER with no compartments, and every read that consulted the
-        # sample's own labels handed it to anybody with AMBER clearance.
-        #
-        # RAISED rather than refused. Refusing would mean an analyst who
-        # left a form field alone gets an error instead of a safe default,
-        # and the safe direction here is unambiguous. Migration 0043
-        # attaches the floor trigger as the backstop for anything that does
-        # not come through this method.
+        # Apply the case's floor. `lab.sample` is the one labelled table with no `enforce_tlp_floor`
+        # trigger, and the router's `classification` defaults to AMBER, so an analyst attaching a sample
+        # from a RED, compartmented case would otherwise get an AMBER row with no compartments. The floor
+        # is raised rather than refused: an analyst who leaves a form field alone gets the safe default
+        # instead of an error. Migration 0043 attaches the floor trigger as the backstop.
         if case_id is not None:
-            # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
-            # hold no case assignment, so under row-level security core."case" is
-            # hidden from them, and its labels and read-only state must still compose.
+            # Read through iam.case_facts: Lab analysts hold no case assignment, so row-level security
+            # hides core."case" from them, and its labels and read-only state must still compose.
             case = self._c.execute(
                 "SELECT classification, compartments FROM iam.case_facts(%s)",
                 (case_id,)).fetchone()
@@ -1707,10 +1398,8 @@ class SampleService:
         result = triage(data)
         digest_hex = result.sha256.hex()
 
-        # F13, 2026-09-24. Screened once the hashes exist and BEFORE
-        # the duplicate check and any write, so every attempt to bring
-        # listed material in is an event, and before any static triage (it
-        # is queued with the row, below). A hash lookup reads no bytes.
+        # Screened once the hashes exist and before the duplicate check and any write, so every attempt
+        # to bring listed material in is an event. A hash lookup reads no bytes.
         from noctornal_api import screening
         verdict = screening.screen_digests(
             self._c, sha256=result.sha256, sha1=result.sha1, md5=result.md5)
@@ -1741,26 +1430,15 @@ class SampleService:
                 "not see is refused without saying so, because the refusal "
                 "would otherwise answer a question the access gate does not.")
         if existing is not None:
-            # Deduplication on content, exactly like evidence. Two analysts
-            # finding the same binary is a finding about the actors, not a
-            # reason for two copies of live malware.
+            # Deduplicate on content, as evidence does: two analysts finding the same binary is a finding
+            # about the actors, not a reason for two copies of live malware.
             #
-            # But the refusal is an EXISTENCE ORACLE, and it was answering
-            # for everybody (F19). The submitter obviously knows the hash —
-            # they hold the file. What the message discloses is that THIS
-            # DEPLOYMENT already holds it, which in a compartmented case is
-            # the fact that somebody else is working the same intrusion.
-            # Uploading a hash you suspect and reading the error is a cheap
-            # probe.
-            #
-            # So the useful message goes only to a caller who could have
-            # seen the existing row anyway, and everybody else gets a
-            # refusal that says no more than "not accepted". That narrows
-            # the answer; it does not close it (lab-6, 2026-10-03): refused
-            # (409) against accepted (201) is still one bit across a
-            # compartment or label boundary for a caller who holds the file.
-            # It is inherent in content dedupe and is a stated residual in
-            # docs/17, not something this wording solves.
+            # The refusal is an existence oracle: it discloses that this deployment already holds the
+            # hash, which in a compartmented case means somebody else is working the same intrusion. So
+            # the useful message goes only to a caller who could have seen the existing row, and everyone
+            # else gets "not accepted". That narrows the answer without closing it: refused (409) against
+            # accepted (201) is still one bit for a caller who holds the file. It is inherent in content
+            # dedupe and a stated residual in docs/17.
             if _may_see(existing[1], existing[2], visible_to_clearance,
                         visible_to_compartments):
                 raise SampleError(
@@ -1782,25 +1460,11 @@ class SampleService:
         storage_key = f"samples/{digest_hex[:2]}/{digest_hex}"
         bucket = os.environ.get("SAMPLE_BUCKET", "noctornal-samples")
 
-        # ROW FIRST, THEN BYTES. The order matters more here than anywhere
-        # else in the system (F19, 2026-07-26).
-        #
-        # The old order put the ciphertext in the bucket and then inserted.
-        # Any failure in between -- a constraint violation, a bad label, a
-        # dropped connection -- left a copy of LIVE MALWARE in an
-        # object-locked bucket with no row naming it, no submitter attached
-        # to it and no state machine covering it. Object lock means it
-        # cannot then be deleted, by anyone, including root. That is the
-        # single worst durable outcome this module can produce.
-        #
-        # Reversed, the failure modes swap for strictly better ones: a
-        # storage failure rolls the row back and nothing is retained
-        # anywhere, and every validation error now fires before a single
-        # byte leaves the process. The residual window -- put succeeds, then
-        # COMMIT fails -- is far narrower than "put succeeds, then INSERT
-        # rejects the row", and it is the one an operator can actually
-        # detect, because a bucket object whose digest matches no row is a
-        # query rather than an archaeology exercise.
+        # Row first, then bytes. If the ciphertext went into the object-locked bucket before the INSERT,
+        # any failure in between would leave live malware that no row names and that nobody, root
+        # included, can delete. Reversed, a storage failure rolls the row back and retains nothing, and
+        # every validation error fires before a byte leaves the process. The residual window (put
+        # succeeds, COMMIT fails) is narrow and detectable: a bucket object whose digest matches no row.
         screened = verdict.outcome == screening.NO_MATCH
         with self._c.transaction():
             row = self._c.execute(
@@ -1840,9 +1504,8 @@ class SampleService:
             if self._storage is not None:
                 self._storage.put(storage_key, ciphertext)
             if parent_sample_id is not None:
-                # Cut from an archive by the product, on nobody's request:
-                # a SYSTEM row, which 0078 allows for VIEWED_META, naming
-                # the archive and the path (phase 8, 2026-10-02).
+                # Cut from an archive by the product, on nobody's request: a SYSTEM row, which 0078
+                # allows for VIEWED_META, naming the archive and the path.
                 self._access(sample.id, None, "VIEWED_META",
                              {"event": "expanded",
                               "parent_sample_id": str(parent_sample_id),
@@ -1851,99 +1514,57 @@ class SampleService:
             else:
                 self._access(sample.id, submitted_by, "VIEWED_META",
                              {"event": "submitted", "policy_reference": detail})
-            # Queued in the same transaction as the row (F11, 2026-09-24):
-            # a sample that exists always has its triage coming, and one
-            # rolled back leaves no run behind. The run itself happens
-            # later, outside this request (`lab_triage`).
+            # Queued in the same transaction as the row: a sample that exists always has its triage
+            # coming, and a rolled-back one leaves no run behind. The run itself happens later, outside
+            # this request (`lab_triage`).
             from noctornal_api.lab_triage import enqueue
             enqueue(self._c, sample.id, trigger="SUBMIT")
         return sample
 
     def reject(self, sample_id: UUID, *, actor_id: UUID, reason: str,
                purge_bytes: bool = True) -> Sample:
-        """The REJECTED path docs/11 requires: record THAT something was
-        rejected and why, and take the material out of the working store.
+        """The REJECTED path docs/11 requires: record that something was rejected and why, and take the
+        material out of the working store.
 
-        ## What happens to the bytes (F2, owner decision, 2026-09-22)
-
-        `purge_bytes=True` means "dispose of the bytes the way this
-        deployment has decided", read from
+        `purge_bytes=True` means "dispose of the bytes the way this deployment has decided", read from
         `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`:
 
-        - `preserve`, the default. The CIPHERTEXT is copied into the
-          preservation store at `preserved/<sha256[:2]>/<sha256>`, under a
-          legal hold set in the same PUT, and the store is asked what it
-          now holds (size, and that the hold reads back ON) before
-          anything else moves. Only then is the row marked REJECTED with
-          where the copy went, then the working copy is deleted from the
-          samples bucket, and the audit row is appended LAST (C7, below).
-          The data key is KEPT: ciphertext with no key is a file nobody
-          can ever read, which would satisfy a preservation order in form
-          and defeat it in substance (0063 makes that a CHECK). What moves
-          is exactly what was stored; the only decryption on this path is
-          the in-memory proof a retry makes before adopting a held copy
-          (the proof below), the same check a retrieval makes.
-        - `destroy`, the behaviour until that day: the object is deleted
-          and the data key zeroed.
+        - `preserve`, the default. The ciphertext is copied into the preservation store at
+          `preserved/<sha256[:2]>/<sha256>` under a legal hold set in the same PUT, and the store is asked
+          what it now holds (size, and that the hold reads back ON) before anything else moves. Only then
+          is the row marked REJECTED with where the copy went, the working copy deleted, and the audit
+          row appended last. The data key is kept: ciphertext with no key satisfies a preservation order
+          in form and defeats it in substance (0063 makes that a CHECK). The only decryption on this
+          path is the in-memory proof a retry makes before adopting a held copy, the same check a
+          retrieval makes.
+        - `destroy`: the object is deleted and the data key zeroed.
 
-        `purge_bytes=False` keeps its old meaning: record the rejection and
-        the reason, dispose of nothing, leave the bytes where they are.
+        `purge_bytes=False` records the rejection and the reason and disposes of nothing.
 
-        Until 2026-09-22 a rejection DESTROYED by default, on the first
-        click, from a card that did not name the sample
-        (ux13-lab:reject-one-click-destroy). The console now asks for a
-        confirmation that names the sample and states which of these will
-        happen, and the default no longer loses anything.
+        Failure leaves nothing half done. If the copy fails, nothing changes and the refusal says why.
+        Once a held copy exists (the held PUT returned, or was sent and never answered) nothing in this
+        product can delete it, so every failure from then on names it, says truthfully whether the working
+        copy was already deleted, and is written to the audit log in its own statement
+        (`SAMPLE_PRESERVATION_INCOMPLETE`), so the record does not live only in one analyst's error box.
+        A retry whose working copy is gone records the held copy at this sample's key if the kept data key
+        opens it to this sample's SHA-256; otherwise a record-only rejection would leave that copy linked
+        to no row.
 
-        ## Failure leaves nothing half done
+        The audit append takes the chain's global advisory lock and holds it to COMMIT, so nothing slow,
+        such as the working-copy delete, may run after it: a stalled object store would stall every
+        audited write in the deployment, logins included.
 
-        If the copy fails, nothing changes: the sample is still where it
-        was, in the state it was in, and the refusal says why. Once a held
-        copy exists (the held PUT returned, or was sent and never answered)
-        nothing in this product can delete it, so every failure from then
-        on names it, says truthfully whether the working copy was already
-        deleted, and is written to the audit log in its own statement
-        (`SAMPLE_PRESERVATION_INCOMPLETE`) so the record does not live only
-        in one analyst's error box (final review C8, 2026-09-23).
+        The sample's row is locked before anything is copied, so two rejections cannot both copy: the
+        second waits (up to `REJECT_LOCK_TIMEOUT`), reads REJECTED and refuses. The record-only and destroy
+        paths take the same lock; without it a record-only rejection would overwrite the reason and append
+        a second, contradictory REJECTED custody row.
 
-        A retry whose working copy is gone does not steer to a record-only
-        rejection: if the preservation store holds a held copy at this
-        sample's key and the kept data key opens it to this sample's
-        SHA-256, the retry records THAT copy (2026-09-23).
-        Until then a failure between the working-copy delete and COMMIT
-        told the analyst the working copy was still in place, the retry
-        answered "nothing to preserve", and the record-only rejection it
-        suggested left the held copy linked to no row, for good.
-
-        The audit append takes the chain's global advisory lock and holds
-        it to COMMIT, so nothing slow may run after it: the working-copy
-        delete, a network call, used to (final review C7, 2026-09-23), and
-        a stalled object store then stalled every audited write in the
-        deployment, logins included.
-
-        The sample's row is locked before anything is copied, so two
-        rejections of one sample cannot both copy: the second waits for
-        the first (up to `REJECT_LOCK_TIMEOUT`), reads REJECTED and
-        refuses having copied nothing. The record-only and destroy paths
-        take the same lock (2026-09-23): without it a
-        record-only rejection that started during a preserving one waited
-        on the row, then overwrote its reason and appended a second,
-        contradictory REJECTED custody row.
-
-        ## Legal hold still beats DESTROY, and does not block PRESERVE
-
-        docs/08 states it without qualification: **"legal_hold overrides
-        all deletion, everywhere."** A prohibited-content policy may
-        require destruction and a preservation order requires retention,
-        and in some jurisdictions each is an offence against the other.
-        Software cannot pick, so destruction under a hold (the sample's or
-        its case's) is REFUSED and the conflict goes to a person.
-
-        Preservation is not a deletion of the material. It moves the same
-        ciphertext, key intact, into a store where it sits under a legal
-        hold of its own; a sample under a hold is, if anything, better
-        preserved afterwards. So it proceeds, and the custody row records
-        that a hold was in force when it did.
+        Legal hold beats DESTROY and does not block PRESERVE. docs/08: "legal_hold overrides all
+        deletion, everywhere." A prohibited-content policy may require destruction and a preservation
+        order requires retention, and in some jurisdictions each is an offence against the other. Software
+        cannot pick, so destruction under a hold (the sample's or its case's) is refused and the conflict
+        goes to a person. Preservation moves the same ciphertext, key intact, into a store under a legal
+        hold of its own, so it proceeds, and the custody row records that a hold was in force.
         """
         if not reason or not reason.strip():
             raise SampleError("a rejection has to say why; that record is the "
@@ -1973,15 +1594,10 @@ class SampleService:
         if held:
             raise SampleError(_HOLD_REFUSES_DESTROY)
 
-        # Refusing rather than proceeding, for the same reason
-        # `retention._purge_evidence` and `ingest._with_raw` do: the
-        # row about to be written says `bytes_purged: true` in an
-        # APPEND-ONLY ledger. Writing that without a store is not a
-        # missing side effect, it is a false record of a destruction
-        # -- and the one an auditor asking "was this destroyed" will
-        # be shown. The state machine is still testable with a fake;
-        # what is refused is claiming a destruction with nothing at
-        # all behind it.
+        # Refuse rather than proceed, as `retention._purge_evidence` and `ingest._with_raw` do: the row
+        # about to be written says `bytes_purged: true` in an append-only ledger, and writing that
+        # without a store is a false record of a destruction. The state machine stays testable with a
+        # fake; what is refused is claiming a destruction with nothing behind it.
         if self._storage is None:
             raise SampleError(
                 "the sample store is not configured, so the bytes "
@@ -2005,14 +1621,11 @@ class SampleService:
         return bool(row[0] or row[1]), row[2]
 
     def _refuse_if_case_read_only(self, sample_id: UUID) -> None:
-        """Raise `SampleCaseReadOnly` when the sample's case is in
-        `CONTENT_READ_ONLY_STATES`. A sample with no case has nothing to be
-        read-only for.
+        """Raise `SampleCaseReadOnly` when the sample's case is in `CONTENT_READ_ONLY_STATES`.
 
-        Every Lab write on an existing sample calls this first (c7/c21,
-        2026-09-24): the same rule `deps.refuse_if_case_read_only` applies
-        at the router, read from the same set, so the two cannot disagree
-        about which states are shut."""
+        A sample with no case has nothing to be read-only for. Every Lab write on an existing sample calls
+        this first: the same rule `deps.refuse_if_case_read_only` applies at the router, read from the same
+        set, so the two cannot disagree about which states are shut."""
         row = self._c.execute(
             """SELECT c.status FROM lab.sample s
                  JOIN LATERAL iam.case_facts(s.case_id) c ON true
@@ -2024,16 +1637,15 @@ class SampleService:
                 "case has to be reopened first")
 
     def read_only_cases(self, case_ids) -> frozenset[str]:
-        """The ids, of those given, whose case is read-only for content, in
-        one query: what `case_read_only` on a queue row or a card is read
-        from, so the Lab offers no work the server would refuse (c21,
-        2026-09-24)."""
+        """The ids, of those given, whose case is read-only for content, in one query.
+
+        What `case_read_only` on a queue row or a card is read from, so the Lab offers no work the server
+        would refuse."""
         wanted = sorted({str(i) for i in case_ids if i})
         if not wanted:
             return frozenset()
-        # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
-        # hold no case assignment, so under row-level security core."case" is
-        # hidden from them, and its labels and read-only state must still compose.
+        # Read through iam.case_facts: Lab analysts hold no case assignment, so row-level security hides
+        # core."case" from them, and its labels and read-only state must still compose.
         rows = self._c.execute(
             "SELECT c.id FROM unnest(%s::uuid[]) AS x(id) "
             "CROSS JOIN LATERAL iam.case_facts(x.id) c "
@@ -2042,24 +1654,19 @@ class SampleService:
         return frozenset(str(r[0]) for r in rows)
 
     def _lock_unrejected(self, sample_id: UUID, *, nothing: str) -> None:
-        """Inside the caller's transaction: lock the sample's row, and
-        refuse if it is already REJECTED or its case is read-only.
+        """Inside the caller's transaction: lock the sample's row, and refuse if it is already REJECTED or
+        its case is read-only.
 
-        Every rejection path takes this lock before it changes anything
-        (2026-09-23). The preserving path took it alone,
-        so a record-only rejection that started while a preserving one was
-        copying passed the unlocked pre-check in `reject`, waited on its
-        UPDATE, and then, READ COMMITTED re-reading a row that still
-        matched `WHERE id = %s`, overwrote the reason and appended a second
-        REJECTED custody row saying the bytes were kept where they had in
-        fact been moved. Now the second rejection waits here, reads
-        REJECTED, and changes nothing.
+        Every rejection path takes this lock before it changes anything. Without it a record-only rejection
+        that started while a preserving one was copying would pass the unlocked pre-check in `reject`, wait
+        on its UPDATE, and then (READ COMMITTED re-reading a row that still matches `WHERE id = %s`)
+        overwrite the reason and append a second REJECTED custody row saying the bytes were kept where
+        they had been moved. Now the second rejection waits here, reads REJECTED, and changes nothing.
 
-        NO KEY UPDATE rather than UPDATE so that inserts elsewhere that only
-        reference this row (a custody row written by somebody opening it,
-        whose foreign key takes KEY SHARE) are not held up. The short wait
-        is for THIS lock only; the audit append a caller may make later
-        waits on the chain's advisory lock at the default timeout.
+        NO KEY UPDATE rather than UPDATE so that inserts elsewhere that only reference this row (a custody
+        row written by somebody opening it, whose foreign key takes KEY SHARE) are not held up. The short
+        wait is for this lock only; a later audit append waits on the chain's advisory lock at the default
+        timeout.
         """
         self._c.execute("SELECT set_config('lock_timeout', %s, true)",
                         (REJECT_LOCK_TIMEOUT,))
@@ -2073,9 +1680,8 @@ class SampleService:
             raise SampleError(
                 "already rejected (somebody else finished rejecting it while "
                 f"this rejection was waiting). {nothing}")
-        # Again under the lock, where every path re-reads what it depends
-        # on: a rejection that waited here while the case was closed must
-        # not dispose of a closed case's sample (c7, 2026-09-24). Like the
+        # Checked again under the lock, where every path re-reads what it depends on: a rejection that
+        # waited here while the case was closed must not dispose of a closed case's sample. Like the
         # hold, the case row itself is read, not locked.
         self._refuse_if_case_read_only(sample_id)
 
@@ -2083,18 +1689,14 @@ class SampleService:
                            reason: str) -> Sample:
         """The `destroy` disposition: the object deleted, the key zeroed.
 
-        Under the row lock, with the hold read again under it, so neither a
-        concurrent rejection nor a hold placed since `reject` looked can be
-        destroyed through. There is no audit append here, so the
-        delete holding the row lock holds up only this sample.
+        Under the row lock, with the hold read again under it, so neither a concurrent rejection nor a hold
+        placed since `reject` looked can be destroyed through. There is no audit append here, so the delete
+        holding the row lock holds up only this sample.
 
-        The sample's CASE row is held FOR SHARE for the whole of it (2026-10-07). The row
-        lock covers the sample and a case
-        hold writes the case, so the reread alone could not see a hold
-        committed during the store's delete: the sample was left REJECTED,
-        its bytes gone and the case held. `set_case_legal_hold` takes the case
-        row FOR UPDATE, so a hold entered meanwhile waits for this rejection
-        and one written earlier is read below."""
+        The sample's case row is held FOR SHARE throughout. The row lock covers the sample and a case hold
+        writes the case, so the reread alone could not see a hold committed during the store's delete.
+        `set_case_legal_hold` takes the case row FOR UPDATE, so a hold entered meanwhile waits for this
+        rejection and one written earlier is read below."""
         try:
             with self._case_row_shared(sample_id), self._c.transaction():
                 self._lock_unrejected(sample_id, nothing="Nothing was "
@@ -2109,12 +1711,9 @@ class SampleService:
                               data_key_ciphertext = %s
                         WHERE id = %s AND state <> 'REJECTED'
                     RETURNING """ + _RETURNING,
-                    # The data key is destroyed WITH the bytes, so that even
-                    # if the object survives a bucket-lifecycle race nothing
-                    # can decrypt it. Only with them, though: destroying the
-                    # key while keeping the ciphertext preserves a file
-                    # nobody can ever read, which satisfies a preservation
-                    # order in form and defeats it in substance.
+                    # The data key is destroyed with the bytes, so nothing can decrypt the object even if
+                    # it survives a bucket-lifecycle race. Only with them: destroying the key while keeping
+                    # the ciphertext satisfies a preservation order in form and defeats it in substance.
                     (reason, b"", sample_id)).fetchone()
                 if row is None:
                     raise SampleError("already rejected")
@@ -2201,8 +1800,8 @@ class SampleService:
         # moment any failure must NAME the copy, because nothing in this
         # product can delete it.
         copy: PreservedObject | None = None
-        # Set when the held PUT was sent and never answered: a held copy
-        # may exist and its version is not known (C8).
+        # Set when the held PUT was sent and never answered: a held copy may exist and its version is
+        # not known.
         unconfirmed: PreservationUnconfirmed | None = None
         # Whether the working copy is gone: deleted by this attempt, or
         # already missing when a retry adopted the held copy.
@@ -2213,13 +1812,9 @@ class SampleService:
         adopted = False
         try:
             with self._c.transaction():
-                # The row is locked BEFORE anything is copied (verifier on
-                # F2, 2026-09-22). Two rejections of one sample used to
-                # both copy into the preservation bucket; the loser's
-                # guarded UPDATE then matched nothing and it raised a bare
-                # "already rejected", leaving a held version that no row
-                # named. Now the second waits here, reads REJECTED and
-                # copies nothing.
+                # The row is locked before anything is copied. Otherwise two rejections of one sample both
+                # copy into the preservation bucket, and the loser leaves a held version no row names.
+                # Now the second waits here, reads REJECTED and copies nothing.
                 self._lock_unrejected(current.id, nothing="Nothing was "
                                       "copied.")
                 try:
@@ -2275,14 +1870,10 @@ class SampleService:
                 # The custody ledger takes no chain lock, so it goes before
                 # the delete with the row it describes.
                 self._access(current.id, actor_id, "REJECTED", detail)
-                # Inside the transaction, so a working copy that will not
-                # delete leaves the row unclaimed. BEFORE the audit append,
-                # never after it (final review C7, 2026-09-23): the append
-                # takes the audit chain's global advisory lock and holds it
-                # to COMMIT, and this is a network call. Behind it, a
-                # stalled store stalled every audited write in the
-                # deployment, logins included, for as long as minio-py
-                # kept retrying.
+                # Inside the transaction, so a working copy that will not delete leaves the row unclaimed.
+                # Before the audit append, never after: the append holds the audit chain's global advisory
+                # lock to COMMIT, and this is a network call, so a stalled store would stall every audited
+                # write in the deployment, logins included.
                 if not adopted:
                     deleting = True
                     self._storage.delete(storage_key)
@@ -2303,37 +1894,29 @@ class SampleService:
                 unconfirmed=unconfirmed, working_gone=working_gone,
                 delete_unconfirmed=deleting and not working_gone,
                 cause=exc)
-            # Unchained when the cause is a database error, which after the
-            # delete it most likely is: the audit append and COMMIT are all
-            # that follow it. Chained, `safe_detail` threw the whole message
-            # away and the analyst read "the request could not be completed
-            # (ref ...)" instead of where the only copy of the sample now is
-            # (2026-09-23). The database error
-            # is logged against the ref the message carries.
+            # Unchained when the cause is a database error, which after the delete it most likely is.
+            # Chained, `safe_detail` would discard the message and the analyst would not learn where the
+            # only copy of the sample now is. The database error is logged against the ref the message
+            # carries.
             raise refusal from (None if _db_error_in(exc) else exc)
         return _record(row)
 
     def _adopt_held_copy(self, current: Sample, preserved_key: str,
                          storage_key: str, exc: BaseException
                          ) -> PreservedObject:
-        """A retry whose working copy is gone: the held copy an earlier
-        attempt left, proven to be this sample's, or a refusal that says
-        which of four things is true.
+        """A retry whose working copy is gone: the held copy an earlier attempt left, proven to be this
+        sample's, or a refusal that says which of four things is true.
 
-        2026-09-23. An attempt that deleted the working
-        copy and then failed before COMMIT used to leave the next attempt
-        here with nothing to read, answering "nothing to preserve" and
-        pointing at a record-only rejection, which recorded the sample as
-        kept in place, named no held copy, and could never be undone (a
-        second rejection is refused, and retrieval needs `preserved_key`).
+        An attempt that deleted the working copy and then failed before COMMIT would otherwise leave the
+        next attempt with nothing to read, answering "nothing to preserve" and pointing at a record-only
+        rejection that names no held copy and cannot be undone (a second rejection is refused, and
+        retrieval needs `preserved_key`).
 
-        Adopted only when the working store says the object is ABSENT (a
-        store that did not answer proves nothing), when the newest version
-        at the content-addressed key is under a hold, and when the kept data
-        key opens it to this sample's SHA-256: the same proof a retrieval
-        makes before it serves a byte, so a stray or foreign object at the
-        key is never recorded as this sample. The plaintext exists only in
-        this process's memory, for the length of the hash.
+        Adopted only when the working store says the object is absent (a store that did not answer proves
+        nothing), when the newest version at the content-addressed key is under a hold, and when the kept
+        data key opens it to this sample's SHA-256: the same proof a retrieval makes before it serves a
+        byte, so a stray or foreign object at the key is never recorded as this sample. The plaintext
+        exists only in this process's memory, for the length of the hash.
         """
         kind = type(exc).__name__
         if not _missing(exc):
@@ -2353,11 +1936,9 @@ class SampleService:
                 f"rejection without the bytes now could leave such a copy "
                 f"named by no row.") from lookup
         if found is None:
-            # KeyError from a test double, S3Error NoSuchKey from MinIO,
-            # and no held copy either: a row whose object is not in the
-            # store (the demo seed writes none) has nothing to preserve,
-            # and saying "preserved" for it would be the false record
-            # `destroy` refuses to write too. Its own class (F13), same text.
+            # KeyError from a test double, S3Error NoSuchKey from MinIO, and no held copy either: a row
+            # whose object is not in the store (the demo seed writes none) has nothing to preserve, and
+            # saying "preserved" would be the false record `destroy` refuses to write too.
             raise NothingToPreserve(
                 f"the sample store has no readable object at {storage_key} "
                 f"({kind}) and the preservation store holds no copy of it, "
@@ -2376,11 +1957,8 @@ class SampleService:
             key_row = self._c.execute(
                 "SELECT data_key_ciphertext, data_key_id "
                 "FROM lab.sample_data_key(%s)", (current.id,)).fetchone()
-            # Both refused as a SampleError naming what was found, so a key
-            # ring or a store that fails here answers the router's 409 and
-            # not a bare 500 (2026-09-23: a
-            # missing working object had always been a 409 before adoption
-            # added these two calls).
+            # Both refused as a SampleError naming what was found, so a key ring or a store that fails
+            # here answers the router's 409 and not a bare 500.
             try:
                 data_key = bytes.fromhex(envelope.decrypt(
                     bytes(key_row[0]), key_id=key_row[1]))
@@ -2423,24 +2001,18 @@ class SampleService:
                                  working_gone: bool,
                                  delete_unconfirmed: bool,
                                  cause: BaseException) -> SampleError:
-        """The refusal for a preserving rejection that failed once a held
-        copy existed (or may have), and a record of it that outlives the
-        rolled-back transaction.
+        """The refusal for a preserving rejection that failed once a held copy existed (or may have), and
+        a record of it that outlives the rolled-back transaction.
 
-        2026-09-23. The message names the copy,
-        says truthfully whether the working copy is gone, and says what a
-        retry will do. It never says "legal hold" or `purge_bytes`: the
-        console reads either as "offer the record-only rejection", which
-        is the one way out that strands a held copy. The audit row is its
-        own statement on the autocommit connection, after the rollback;
-        when the connection itself is what failed, the message says the
-        row could not be written rather than implying it was.
+        The message names the copy, says truthfully whether the working copy is gone, and says what a
+        retry will do. It never says "legal hold" or `purge_bytes`: the console reads either as "offer the
+        record-only rejection", the one way out that strands a held copy. The audit row is its own
+        statement on the autocommit connection, after the rollback; when the connection itself is what
+        failed, the message says the row could not be written rather than implying it was.
 
-        A database error is named by its class only, never its text (raw PQ
-        output, which the HTTP layer must not return), and logged in full
-        against a ref the message and the audit row both carry. The caller
-        raises the result unchained in that case, so the message survives
-        `safe_detail` (2026-09-23).
+        A database error is named by its class only, never its text (raw PQ output, which the HTTP layer
+        must not return), and logged in full against a ref the message and the audit row both carry. The
+        caller raises the result unchained in that case, so the message survives `safe_detail`.
         """
         db = _db_error_in(cause)
         ref = None
@@ -2503,14 +2075,12 @@ class SampleService:
             f"the rejection could not be completed ({failure}). {said} "
             f"{state} {logged}")
 
-    # -- prohibited-content screening (F13, 2026-09-24) --------------------
+    # -- prohibited-content screening --------------------------------------
     #
-    # A match only ever REDUCES access: the sample leaves the Lab, is marked
-    # REJECTED and MATCH for good, and its bytes are preserved. So the lock
-    # here refuses nothing but absence, not a REJECTED row and not a closed
-    # case (c7 keeps new CONTENT out of a closed case, and this is not
-    # content). `_lock_unrejected` ends in the read-only refusal, so reusing
-    # it could never preserve a closed case's match.
+    # A match only ever reduces access: the sample leaves the Lab, is marked REJECTED and MATCH for good,
+    # and its bytes are preserved. So the lock here refuses nothing but absence, not a REJECTED row and
+    # not a closed case (a match is not new content). `_lock_unrejected` ends in the read-only refusal,
+    # so reusing it could never preserve a closed case's match.
 
     def _screening_sentence(self, alert_outcome: str) -> str:
         """What the submitter is told. Never the list, never its category."""
@@ -2589,10 +2159,10 @@ class SampleService:
         return outcome, reach.notified, told
 
     def _refuse_waiting_detonations(self, sample_id: UUID) -> dict:
-        """A match refuses every detonation still waiting and names every
-        one already sent, in a SAVEPOINT whose failure never undoes the
-        isolation (F13 and F14: AWAITING_SIGNOFF to REFUSED is an edge
-        0103's guard allows)."""
+        """A match refuses every detonation still waiting and names every one already sent.
+
+        Runs in a SAVEPOINT whose failure never undoes the isolation (AWAITING_SIGNOFF to REFUSED is an
+        edge 0103's guard allows)."""
         out: dict = {}
         try:
             with self._c.transaction():
@@ -2656,21 +2226,17 @@ class SampleService:
     def reject_by_screening(self, sample_id: UUID, *, verdict, trigger: str,
                             actor_id: UUID | None, cascade: bool = True,
                             extra: dict | None = None) -> dict:
-        """Isolate a HELD sample that matched: one transaction, no bytes
-        moved (the worker's `preserve_screened` moves them).
+        """Isolate a held sample that matched: one transaction, no bytes moved (the worker's
+        `preserve_screened` moves them).
 
-        REJECTED and MATCH, a human rejection's own reason kept; custody
-        REJECTED as SYSTEM with the person who started it in the detail;
-        waiting detonations refused and sent ones named; live preservation
-        authorisations void by derivation; the alerts; the result; the
-        audit row last. A sample already matched gets a result saying so
-        and the (coalesced) officer alert, and nothing else changes.
+        REJECTED and MATCH, a human rejection's own reason kept; custody REJECTED as SYSTEM with the person
+        who started it in the detail; waiting detonations refused and sent ones named; live preservation
+        authorisations void by derivation; the alerts; the result; the audit row last. A sample already
+        matched gets a result saying so and the (coalesced) officer alert, and nothing else changes.
 
-        Archive expansion (phase 8, 2026-10-02): with `cascade`, a match
-        on a member of an archive tree isolates the archive and every
-        other member afterwards (`lab_archive.isolate_tree`), each
-        through this method with the cascade off and `extra` naming the
-        sample the match was found on."""
+        With `cascade`, a match on a member of an archive tree isolates the archive and every other member
+        afterwards (`lab_archive.isolate_tree`), each through this method with the cascade off and `extra`
+        naming the sample the match was found on."""
         result_id = uuid4()
         try:
             with self._c.transaction():
@@ -2721,14 +2287,10 @@ class SampleService:
         except psycopg.errors.LockNotAvailable:
             raise _row_busy() from None
         if cascade:
-            # On EVERY call, including one that found the sample already
-            # isolated (2026-10-03): the cascade is
-            # idempotent, and a first call that committed this row and then
-            # met a busy sibling must be finishable by the next call. The
-            # earlier "only the first time" skip left the archive and the
-            # other members visible for good once a sibling was locked for
-            # five seconds. `lab_archive.complete_isolations` (the
-            # screening pass) is the backstop when nobody calls again.
+            # On every call, including one that found the sample already isolated: the cascade is
+            # idempotent, and a first call that committed this row and then met a busy sibling must be
+            # finishable by the next call. `lab_archive.complete_isolations` (the screening pass) is the
+            # backstop when nobody calls again.
             from noctornal_api.lab_archive import isolate_tree
             isolate_tree(self, sample_id, verdict=verdict, trigger=trigger,
                          actor_id=actor_id)
@@ -2745,15 +2307,12 @@ class SampleService:
                             archive_path: str | None = None) -> None:
         """A submission that matched. Always raises ProhibitedContentMatch.
 
-        An existing row with this sha256 is isolated as a held sample (or,
-        already matched, recorded again and the officer alerted). Otherwise
-        a REJECTED and MATCH row is written, so every result names a sample
-        and every read of one is gated on that row's labels. Under
-        `preserve` the ciphertext goes to the working store exactly as a
-        submission's does (row first) and the byte move follows the commit,
-        or the next worker pass; under `destroy` nothing is stored anywhere
-        (no data key is ever sealed); a case hold forces preserve. No static
-        triage is queued."""
+        An existing row with this sha256 is isolated as a held sample (or, already matched, recorded again
+        and the officer alerted). Otherwise a REJECTED and MATCH row is written, so every result names a
+        sample and every read of one is gated on that row's labels. Under `preserve` the ciphertext goes to
+        the working store exactly as a submission's does (row first) and the byte move follows the commit,
+        or the next worker pass; under `destroy` nothing is stored anywhere (no data key is ever sealed); a
+        case hold forces preserve. No static triage is queued."""
         from noctornal_api import screening
         existing = self._c.execute(
             "SELECT id FROM lab.sample WHERE sha256 = %s",
@@ -2879,25 +2438,20 @@ class SampleService:
                                      alert_outcome=alert)
 
     def preserve_screened(self, sample_id: UUID) -> str:
-        """Move a matched sample's bytes into the preservation store: the
-        worker's half of an isolation, and a preserving submission's.
+        """Move a matched sample's bytes into the preservation store: the worker's half of an isolation,
+        and a preserving submission's.
 
-        The same order and the same failure record a preserving rejection
-        uses (row lock, the held copy or the adoption of an earlier one,
-        the UPDATE, custody, the working delete, the audit row last,
-        `_preservation_incomplete` once a held copy may exist), under the
-        screening lock, which returns without work when the row is no
-        longer waiting. Returns "preserved", "pending" (it will be tried
+        The same order and failure record as a preserving rejection (row lock, the held copy or the
+        adoption of an earlier one, the UPDATE, custody, the working delete, the audit row last,
+        `_preservation_incomplete` once a held copy may exist), under the screening lock, which returns
+        without work when the row is no longer waiting. Returns "preserved", "pending" (it will be tried
         again), "bytes_not_found" (recorded, below) or "not_pending".
 
-        A working store that says the object is ABSENT while the
-        preservation store holds no copy is never trusted on one look: a
-        changed bucket variable, or a database restored ahead of its object
-        store, looks exactly like that. The first look is a custody row; a
-        second, at least `screening.ABSENCE_RECHECK` later, sets
-        `screening_bytes_absent_at` and the row stops waiting. The data key
-        is never touched: the worker destroys nothing, and
-        a review by the officer is what closes the question."""
+        A working store that says the object is absent while the preservation store holds no copy is never
+        trusted on one look: a changed bucket variable, or a database restored ahead of its object store,
+        looks the same. The first look is a custody row; a second, at least `screening.ABSENCE_RECHECK`
+        later, sets `screening_bytes_absent_at` and the row stops waiting. The data key is never touched:
+        the worker destroys nothing, and a review by the officer closes the question."""
         from noctornal_api import screening
         if self._storage is None or self._preservation is None:
             return "pending"
@@ -3018,7 +2572,7 @@ class SampleService:
 
     def assign(self, sample_id: UUID, *, analyst_id: UUID,
                actor_id: UUID) -> Sample:
-        self._refuse_if_screening_match(sample_id)  # F13
+        self._refuse_if_screening_match(sample_id)
         self._refuse_if_case_read_only(sample_id)
         row = self._c.execute(
             """UPDATE lab.sample
@@ -3043,28 +2597,22 @@ class SampleService:
                         tool: str | None = None,
                         tool_version: str | None = None,
                         derived_from_version_id: UUID | None = None) -> UUID:
-        """Findings are machine-readable by construction.
+        """Record an analyst's finding. Findings are machine-readable by construction.
 
-        `derived_from_version_id` names the YARA rule set version an
-        analyst's assessment was taken from ("Use as family assessment",
-        F12 G): stored on the row so it is read through that set's labels
-        as well as the sample's, and never labelled below the finding it
-        came from. The set's key never goes into free text. The custody
-        row names the analysis by id and, for such a row, not its kind
-        (2026-09-24).
+        `derived_from_version_id` names the YARA rule set version an analyst's assessment was taken from
+        ("Use as family assessment"): stored on the row so it is read through that set's labels as well as
+        the sample's, and never labelled below the finding it came from. The set's key never goes into
+        free text. The custody row names the analysis by id and, for such a row, not its kind.
 
-        `family_assessment` without a `confidence` is refused by a CHECK
-        constraint, because a family attribution is an ASSESSMENT and one
-        without a confidence is a fact wearing an assessment's clothes.
-        Reaching the graph is a separate, deliberate step: it becomes a
-        `core.assertion` like everything else (invariant 1), never a column
-        stamped on an actor.
+        `family_assessment` without a `confidence` is refused by a CHECK constraint: a family attribution
+        is an assessment, and one without a confidence is a fact wearing an assessment's clothes. Reaching
+        the graph is a separate, deliberate step: it becomes a `core.assertion` like everything else
+        (invariant 1), never a column stamped on an actor.
 
-        Refused for a sample whose case is read-only: an attribution dated
-        after `closed_at` on a closed case's sample is the post-closure
-        material the rule exists to keep out (c7, 2026-09-24).
+        Refused for a sample whose case is read-only: an attribution dated after `closed_at` is
+        post-closure material the rule exists to keep out.
         """
-        self._refuse_if_screening_match(sample_id)  # F13
+        self._refuse_if_screening_match(sample_id)
         self._refuse_if_case_read_only(sample_id)
         if kind not in {"STATIC", "YARA", "MANUAL_RE", "SANDBOX", "VENDOR"}:
             raise SampleError(f"unknown analysis kind {kind!r}")
@@ -3101,14 +2649,12 @@ class SampleService:
                                 run_id: UUID | None = None,
                                 yara_ruleset_version_id: UUID | None = None
                                 ) -> UUID:
-        """A finding the product made, not a person (F11-core F).
+        """A finding the product made, not a person.
 
-        Runs inside the CALLER's transaction. Refuses a rejected sample
-        and one whose case is read-only (c7), like an analyst's record.
-        It never moves the sample's state (triage's move to TRIAGED is the
-        runner's own, conditional statement), never writes custody (the
-        caller wrote SCANNED for the bytes it read), and never writes
-        `core.*` or `collect.*`: a machine proposes nothing on its own."""
+        Runs inside the caller's transaction. Refuses a rejected sample and one whose case is read-only,
+        like an analyst's record. It never moves the sample's state (triage's move to TRIAGED is the
+        runner's own, conditional statement), never writes custody (the caller wrote SCANNED for the bytes
+        it read), and never writes `core.*` or `collect.*`: a machine proposes nothing on its own."""
         if kind not in MACHINE_PRODUCERS:
             raise SampleError(f"unknown machine analysis kind {kind!r}")
         row = self._c.execute(
@@ -3135,8 +2681,6 @@ class SampleService:
              yara_ruleset_version_id)).fetchone()
         return out[0]
 
-    # -- the one verified-plaintext path (F11-core D, 2026-09-24) -----------
-
     #: The refusal each store's tamper alarm raises, word for word what the
     #: download and the retrieval said before they shared this path.
     _INTEGRITY_REFUSAL = {
@@ -3155,11 +2699,11 @@ class SampleService:
     def _integrity_alarm(self, sample_id: UUID, *, actor_id: UUID | None,
                          recorded: bytes, computed: bytes, store: str,
                          extra: dict | None = None) -> None:
-        """Record a failed integrity check: a custody VIEWED_META row and a
-        SAMPLE_INTEGRITY_ALARM audit row, in their OWN transaction so they
-        survive the raise that follows. An audit row rolled back with the
-        failure it records is not an audit row (F19). SYSTEM when nobody
-        asked for the read (scheduled triage)."""
+        """Record a failed integrity check: a custody VIEWED_META row and a SAMPLE_INTEGRITY_ALARM audit row.
+
+        Written in their own transaction so they survive the raise that follows: an audit row rolled back
+        with the failure it records is not an audit row. SYSTEM when nobody asked for the read (scheduled
+        triage)."""
         detail = {"event": "integrity_check_failed",
                   "recorded_sha256": bytes(recorded).hex(),
                   "computed_sha256": bytes(computed).hex(),
@@ -3175,27 +2719,20 @@ class SampleService:
                             store: str = STORE_WORKING,
                             max_bytes: int | None = None,
                             extra: dict | None = None) -> bytes:
-        """The sample's plaintext, decrypted and verified against its
-        recorded SHA-256, or a refusal.
+        """The sample's plaintext, decrypted and verified against its recorded SHA-256, or a refusal.
 
-        The one path that decrypts a sample for USE: the download, the
-        preserved retrieval, the static-triage runner and the
-        sandbox dispatch. It makes NO label or state decision: every caller
-        gates first (the download through `_downloadable`, the retrieval
-        through `_retrievable`, the runner through its claim). A mismatch
-        writes the alarm on its own (`_integrity_alarm`) and raises
+        The one path that decrypts a sample for use: the download, the preserved retrieval, the
+        static-triage runner and the sandbox dispatch. It makes no label or state decision: every caller
+        gates first (the download through `_downloadable`, the retrieval through `_retrievable`, the runner
+        through its claim). A mismatch writes the alarm on its own (`_integrity_alarm`) and raises
         `SampleIntegrityError` with the store's sentence.
 
-        Refuses to run inside an open transaction, because there the
-        alarm's `transaction()` is a SAVEPOINT that rolls back with the
-        raise: the alarm would vanish without a trace, silently, which is
-        worse than any error. Refuses a
-        destroyed data key and, when `max_bytes` is given, a sample larger
-        than that, before anything is fetched.
+        Refuses to run inside an open transaction, because there the alarm's `transaction()` is a SAVEPOINT
+        that rolls back with the raise and the alarm would vanish silently. Refuses a destroyed data key
+        and, when `max_bytes` is given, a larger sample, before anything is fetched.
 
-        `_adopt_held_copy` is the one decryption that does not come here:
-        its mismatch means "this held object is not this sample's copy",
-        which it refuses by name, not a tamper of a known copy.
+        `_adopt_held_copy` is the one decryption that does not come here: its mismatch means "this held
+        object is not this sample's copy", which it refuses by name, not a tamper of a known copy.
         """
         if self._c.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
             raise RuntimeError("the integrity alarm must commit on its own; "
@@ -3266,54 +2803,29 @@ class SampleService:
                  ) -> tuple[bytes, str]:
         """The encrypted archive, and only from the separate origin.
 
-        Which origin this process is serving comes from CONFIGURATION --
-        `origin_split()`, read here so a second caller cannot skip it.
-        `request_origin` is kept under its old name for the service tests,
-        which stand a call on one process or the other by passing the
-        origin that process would be configured as; it is NOT where a
-        request arrived, and nothing in the HTTP layer passes it. Until
-        2026-09-09 the router passed `request.url`'s origin here, and that
-        is the Host header: a client-supplied value the check then granted
-        on. Serving hostile bytes from the app origin means an escape runs
-        with the analyst's session on the case file -- a drive-by vector
-        built into the highest-trust system in the estate, seeded with
-        hostile files by design (docs/11).
+        Which origin this process is serving comes from configuration (`origin_split()`), read here so a
+        second caller cannot skip it. `request_origin` exists for the service tests, which stand a call on
+        one process or the other by passing the origin that process would be configured as; it is not
+        where a request arrived, and nothing in the HTTP layer passes it (the Host header is
+        client-supplied). Serving hostile bytes from the app origin means an escape runs with the analyst's
+        session on the case file (docs/11).
 
-        **The caller's clearance is REQUIRED, and it was missing entirely.**
-        This method used to select `storage_key, data_key_ciphertext,
-        data_key_id, sha256, state` and nothing else: no classification, no
-        compartments, no case. The router gated it on
-        `require_global("sample.download")` plus step-up, and
-        `require_global` knows nothing about a case OR an element.
+        The caller's clearance is required. The router gates on `require_global("sample.download")` plus
+        step-up, which knows nothing about a case or an element, so without a label check `queue()` and
+        `detail()` would hide an over-classified sample that this path then handed over.
 
-        The inconsistency was inside one file. `queue()` filters on
-        `classification <= caller AND compartments <@ caller`, and
-        `detail()` 404s an over-classified sample -- so the same caller was
-        told the sample did not exist and handed its bytes one request
-        later. On the one path in the entire system that puts working
-        malware on somebody's disk.
+        The case's labels are composed in as well: a sample can be classified above its case, and a sample
+        submitted with the router's AMBER default sits below a RED case with nothing to catch it
+        (`lab.sample` has no `enforce_tlp_floor` trigger, unlike node, edge and evidence).
 
-        The case's labels are composed in as well: a sample can be
-        classified ABOVE its case (queue's docstring says so), and a sample
-        submitted with the router's `AMBER` default sits BELOW a RED case
-        with nothing to catch it -- `lab.sample` has no `enforce_tlp_floor`
-        trigger, unlike node, edge and evidence. Both directions are
-        handled here because neither is handled anywhere else.
-
-        `ticket_id` names the one-shot ticket that authorised this copy,
-        when one did (0061). It is recorded in the custody row and
-        nowhere else: "who took a copy of a live binary" is the question
-        `lab.sample_access` exists to answer, and HOW they proved they
-        could is part of that answer. The clearance handed in is always
-        the live one -- for a ticket that means the ticket-holder's
-        ceiling read at redemption, not the one that was true when the
-        ticket was minted a minute ago.
+        `ticket_id` names the one-shot ticket that authorised this copy, when one did (0061). It is
+        recorded in the custody row and nowhere else: how an analyst proved they could take a copy of a
+        live binary is part of what `lab.sample_access` answers. The clearance handed in is always the live
+        one: for a ticket, the holder's ceiling read at redemption, not the one at mint.
         """
-        # Ahead of the origin split, and it has to stay ahead of it: a
-        # caller who forgot the argument must be told THAT, not handed a
-        # deployment refusal about origins that sends them to the
-        # environment. `_downloadable` asks again -- the guard belongs to
-        # the decision, and the mint reaches the decision by another door.
+        # Ahead of the origin split, and it has to stay ahead of it: a caller who forgot the argument
+        # must be told that, not handed a deployment refusal about origins. `_downloadable` asks again:
+        # the guard belongs to the decision, and the mint reaches the decision by another door.
         _require_clearance(clearance)
         split = origin_split(this=request_origin)
         if not split.serves_here:
@@ -3322,18 +2834,14 @@ class SampleService:
 
         self._downloadable(sample_id, clearance=clearance,
                            compartments=compartments)
-        # Re-verified on EVERY read, failing closed, and the failure
-        # RECORDED rather than merely raised (F19): `_verified_plaintext`
-        # is the one place that decrypts, checks and writes the alarm in
-        # its own transaction (F11-core D, 2026-09-24).
+        # Re-verified on every read, failing closed, and the failure recorded rather than merely raised:
+        # `_verified_plaintext` decrypts, checks and writes the alarm in its own transaction.
         data = self._verified_plaintext(sample_id, actor_id=actor_id,
                                         store=STORE_WORKING)
         digest = hashlib.sha256(data).hexdigest()
 
-        # `via` is derived rather than passed: a ticket id present means
-        # the authority was a ticket, and two parameters that can disagree
-        # about one fact is how a custody row comes to say something that
-        # is not so.
+        # `via` is derived rather than passed: a ticket id means the authority was a ticket, and two
+        # parameters that can disagree about one fact let a custody row say something untrue.
         custody = {"origin": configured}
         if ticket_id is not None:
             custody["via"] = "ticket"
@@ -3344,31 +2852,24 @@ class SampleService:
 
     def _downloadable(self, sample_id: UUID, *, clearance: str | None,
                       compartments: frozenset[str] = frozenset()) -> tuple:
-        """The decision that stands between a caller and a live binary, in
-        ONE place because two endpoints now make it.
+        """The decision that stands between a caller and a live binary, in one place because two endpoints
+        make it.
 
-        Returns `(storage_key, whether a data key is held, data_key_id,
-        sha256, state)` for a sample this caller may take a copy of, and raises
-        otherwise. `issue_download_ticket` calls it and throws the row
-        away: what it needs is the refusal, so that a ticket can never be
-        minted for a sample its holder could not have downloaded directly.
-        Restating the predicate there would have been the same defect this
-        method's own history is made of -- `download()` had no label check
-        at all while `detail()` twenty lines away 404'd the same sample.
+        Returns `(storage_key, whether a data key is held, data_key_id, sha256, state)` for a sample this
+        caller may take a copy of, and raises otherwise. `issue_download_ticket` calls it and discards the
+        row: it needs the refusal, so a ticket is never minted for a sample its holder could not have
+        downloaded directly.
 
-        Five parts, and each one has been wrong here at some point:
+        Five parts:
 
         1. the caller's clearance is stated rather than assumed;
-        2. the sample exists, and is readable at that clearance -- with
-           its CASE's labels composed in, stricter classification and
-           union of compartments, exactly as `deps.effective_labels` does
-           for a node. Applied IN the query, so a caller who may not read
-           it gets "no such sample", the same answer a nonexistent id
-           gets: a status code must not be an existence oracle;
+        2. the sample exists and is readable at that clearance, with its case's labels composed in
+           (stricter classification, union of compartments, as `deps.effective_labels` does for a node).
+           Applied in the query, so a caller who may not read it gets "no such sample", the same answer a
+           nonexistent id gets: a status code must not be an existence oracle;
         3. its compartments are ones the caller is read into;
         4. it was not REJECTED, whose bytes are destroyed by definition;
-        5. it still has a data key, without which there is nothing to
-           decrypt.
+        5. it still has a data key, without which there is nothing to decrypt.
         """
         _require_clearance(clearance)
         row = self._c.execute(
@@ -3382,8 +2883,8 @@ class SampleService:
         if row is None:
             raise SampleError("no such sample")
         if row[6] == "PURGED":
-            # lab-4 (2026-10-03): a purged case's material is not handed out,
-            # whether or not its retention sweep has reached this sample yet.
+            # A purged case's material is not handed out, whether or not its retention sweep has reached
+            # this sample yet.
             raise SampleError(
                 "this sample's case has been purged, so its material is not "
                 "released through the download")
@@ -3412,10 +2913,11 @@ class SampleService:
         return row
 
     def _listed_now_clear(self, sample_id: UUID) -> bool:
-        """lab-2 (2026-10-03): a list imported since the sample was last
-        screened binds before a ticket is minted or a byte is read, not
-        when a later pass reaches the sample. A caller refuses with `no
-        such sample`, the answer a matched (excluded) sample already gets."""
+        """Whether the sample is clear of any hash list imported since it was last screened.
+
+        A newly imported list binds before a ticket is minted or a byte is read, not when a later pass
+        reaches the sample. A caller refuses with `no such sample`, the answer a matched (excluded) sample
+        already gets."""
         from noctornal_api import screening
         return screening.bytes_may_move(self._c, sample_id)
 
@@ -3428,35 +2930,25 @@ class SampleService:
                               ip_hash: bytes | None = None,
                               request_origin: str | None = None
                               ) -> DownloadTicket:
-        """Mint a one-shot, sixty-second authority to download ONE sample.
+        """Mint a one-shot, sixty-second authority to download one sample.
 
-        Minted on the APPLICATION origin, under the caller's ordinary
-        session, and redeemed on the sample origin -- which is the whole
-        point. A `__Host-` cookie cannot travel to the sample origin, so
-        until now the console forced the login-body token there as a
-        Bearer: a standing session credential, held in page memory,
-        presented to a second origin. The ticket confers authority over
-        this sample and nothing else, once, and expires whether it is used
-        or not.
+        Minted on the application origin under the caller's ordinary session, and redeemed on the sample
+        origin. A `__Host-` cookie cannot travel there, and a standing session credential must not. The
+        ticket confers authority over this sample and nothing else, once, and expires whether used or not.
 
         Refuses on two configuration grounds before it looks at anything:
 
-        - `split_problem` -- the control is off, or the configured value
-          is not an origin, or it is a second name for the application's.
-          A ticket whose `download_url` points at an origin that refuses
-          every download is a worse answer than a refusal here, because
-          the failure would surface as the console's "did not complete";
-        - this process IS the sample origin. The sample origin exists so
-          that no analyst session runs there; minting on it would put the
-          session it is minted under exactly where the split says none may
-          be. `app.py`'s `_allowed_on_sample_origin` already 404s this
-          path on that process -- the ticket path is not the download path
-          and is not in its allow-list -- and this is the check that does
-          not depend on a regular expression in another file agreeing.
+        - `split_problem`: the control is off, the configured value is not an origin, or it is a second
+          name for the application's. A ticket whose `download_url` points at an origin that refuses every
+          download is worse than a refusal here, because it would surface as the console's "did not
+          complete";
+        - this process is the sample origin. No analyst session runs there, and minting on it would put
+          the session exactly where the split says none may be. `app.py`'s `_allowed_on_sample_origin`
+          already 404s this path on that process; this check does not depend on a regular expression in
+          another file agreeing.
 
-        Then the SAME decision `download()` makes, through
-        `_downloadable`, so the mint cannot authorise what the download
-        would refuse.
+        Then the same decision `download()` makes, through `_downloadable`, so the mint cannot authorise
+        what the download would refuse.
         """
         split = _mint_split(request_origin)
         self._downloadable(sample_id, clearance=clearance,
@@ -3477,16 +2969,11 @@ class SampleService:
         hash, the database-clock expiry and the issue audit cannot drift
         between a download and a retrieval."""
         raw = new_download_ticket()
-        # The expiry is set BY THE DATABASE and compared against the
-        # database clock at redemption. Computing it here would put a
-        # second clock inside a sixty-second window -- the API host's --
-        # and two clocks a few seconds apart mean a ticket that is expired
-        # on arrival or one that outlives its own audit row.
-        # The TTL crosses as a `timedelta`, which psycopg adapts to
-        # `interval` -- so the addition is `timestamptz + interval` with
-        # nothing for the planner to guess at. `make_interval(secs => %s)`
-        # would have left an integer parameter to be resolved against an
-        # overloaded function's `double precision` argument.
+        # The expiry is set by the database and compared against the database clock at redemption: a
+        # second clock (the API host's) inside a sixty-second window gives tickets expired on arrival or
+        # outliving their audit row. The TTL crosses as a `timedelta`, which psycopg adapts to `interval`,
+        # so the addition is `timestamptz + interval`; `make_interval(secs => %s)` would leave an integer
+        # parameter to resolve against an overloaded function.
         row = self._c.execute(
             """INSERT INTO lab.download_ticket
                    (token_hash, sample_id, user_id, session_id, expires_at,
@@ -3516,52 +3003,34 @@ class SampleService:
     def redeem_download_ticket(self, presented: str, *, sample_id: UUID,
                                ip_hash: bytes | None = None
                                ) -> Redemption:
-        """Spend a ticket. Returns `(user_id, ticket_id, purpose)`; raises
-        on anything else. The purpose (0063) says whether the bytes come
-        from the working store or, for a preserved sample, the
-        preservation store; it is read from the row, never from the
-        request.
+        """Spend a ticket. Returns `(user_id, ticket_id, purpose)`; raises on anything else.
 
-        ONE statement decides it. The predicate and the write are the same
-        `UPDATE ... RETURNING`, so two simultaneous presentations of the
-        same ticket cannot both find `redeemed_at IS NULL` -- the row lock
-        the UPDATE takes serialises them and exactly one gets a row back.
-        A `SELECT` then an `UPDATE` would have been the readable version
-        and would have handed the archive to both halves of a race, which
-        is precisely what "one-shot" must not mean.
+        The purpose (0063) says whether the bytes come from the working store or, for a preserved sample,
+        the preservation store; it is read from the row, never from the request.
 
-        `sample_id` is part of the predicate, not a check afterwards: a
-        ticket presented on the path of a DIFFERENT sample matches no row
-        at all, so it is refused and -- deliberately -- not spent. Burning
-        it would let anyone who could reach this endpoint invalidate a
-        ticket they cannot use by guessing the wrong sample.
+        One statement decides it. The predicate and the write are the same `UPDATE ... RETURNING`, so two
+        simultaneous presentations of one ticket cannot both find `redeemed_at IS NULL`: the row lock
+        serialises them and exactly one gets a row back.
 
-        Expiry is `expires_at > now()`, the database's clock on both
-        sides of the hand-off, and the row is not deleted: an exhausted
-        ticket is evidence for as long as the retention pass leaves it.
+        `sample_id` is part of the predicate, not a check afterwards: a ticket presented on the path of a
+        different sample matches no row, so it is refused and not spent. Burning it would let anyone
+        who reaches this endpoint invalidate a ticket they cannot use.
 
-        ## The ACCOUNT is re-read here; the session is not
+        Expiry is `expires_at > now()`, the database's clock on both sides of the hand-off, and the row is
+        not deleted: an exhausted ticket is evidence for as long as the retention pass leaves it.
 
-        A live ticket is not an authority on its own, and treating it as
-        one meant that inside the sixty-second window an account which had
-        just been DEACTIVATED, or had `sample.download` revoked, still
-        received the archive. Sixty seconds is short and that is still the
-        wrong answer on the one path that puts working malware on a disk,
-        so `_still_authorised` re-asks the question the mint asked --
-        active account, verb held through a global role -- on this
-        process, before the bytes move. The other half of the mint's
-        decision, the sample's labels against the holder's LIVE ceiling,
-        has always been re-read: `routers/samples.download` calls
-        `user_ceiling` and `_downloadable` runs again.
+        ## The account is re-read here; the session is not
 
-        What is deliberately NOT re-derived is the SESSION -- whether it
-        still exists, has been revoked, has expired, or would satisfy
-        step-up freshness now. That is the residual 0061 states, and it is
-        a different question from this one: the session is a credential
-        this origin cannot resolve without a third copy of a check
-        `http/deps.py` keeps in exactly two places, whereas the account is
-        one row and one join away from the ticket the caller just
-        presented.
+        A live ticket is not an authority on its own: an account deactivated, or stripped of
+        `sample.download`, inside the sixty-second window must not receive the archive. `_still_authorised`
+        re-asks the mint's question (active account, verb held through a global role) on this process
+        before the bytes move. The sample's labels against the holder's live ceiling are also re-read:
+        `routers/samples.download` calls `user_ceiling` and `_downloadable` runs again.
+
+        The session is deliberately not re-derived (whether it still exists, was revoked, or would satisfy
+        step-up now). That is the residual 0061 states: this origin cannot resolve a session without a
+        third copy of a check `http/deps.py` keeps in exactly two places, whereas the account is one row
+        and one join away from the ticket.
         """
         digest = hash_token(presented or "")
         # That statement, as the definer (0180): the request role reads no
@@ -3571,33 +3040,20 @@ class SampleService:
                  FROM lab.spend_sample_ticket(%s, %s)""",
             (digest, sample_id)).fetchone()
         if row is None:
-            # WHY it failed goes in the audit and never in the answer. The
-            # caller learns only that the ticket is not usable: "already
-            # redeemed" tells a holder of a stolen ticket that it was real
-            # and that someone else got there first, which is exactly the
-            # oracle `deps.current_user` refuses to be about sessions.
+            # Why it failed goes in the audit and never in the answer. "Already redeemed" would tell the
+            # holder of a stolen ticket that it was real and that someone else got there first, the oracle
+            # `deps.current_user` refuses to be about sessions.
             reason, holder = self._ticket_refusal(digest, sample_id)
             if reason == _UNKNOWN_TICKET:
-                # ...and one of the five reasons is not audited at all.
-                #
-                # An unknown ticket names nobody and evidences nothing: a
-                # string that matched no row. It is also the ONE refusal a
-                # caller with no credential of any kind can produce on
-                # demand, by posting `ticket=x` at this origin -- so
-                # writing a row for it made `audit.event`, which is
-                # append-only by design, hash-chained and serialised by an
-                # advisory lock, appendable by anyone who could reach the
-                # sample process, with nothing able to remove what they
-                # wrote. That is the shape `RateLimiter.should_audit`
-                # already refuses on its own denials, for the same reason.
-                #
-                # The honest record of "somebody sent a string" is a
-                # counted log line, the way `routers/live.py` records a
-                # pre-accept refusal, and the `sample.download` limit
-                # bounds how many strings one source may send. The other
-                # four reasons each name a REAL minted ticket and a real
-                # user; those still write a row, because those are events
-                # a security officer must be able to find years later.
+                # One of the five reasons is not audited at all. An unknown ticket names nobody and
+                # evidences nothing, and it is the one refusal a caller with no credential can produce on
+                # demand (`ticket=x` posted at this origin). Writing a row would make `audit.event`
+                # (append-only, hash-chained, serialised by an advisory lock) appendable by anyone who can
+                # reach the sample process, with nothing able to remove it; `RateLimiter.should_audit`
+                # refuses its own denials for the same reason. The record is a counted log line, as
+                # `routers/live.py` does for a pre-accept refusal, and the `sample.download` limit bounds
+                # how many strings a source may send. The other four reasons name a real ticket and user
+                # and still write a row, which a security officer must be able to find years later.
                 counted = _unknown_tickets.note()
                 if counted is not None:
                     log.warning(
@@ -3611,36 +3067,26 @@ class SampleService:
                             sample_id=sample_id, outcome="DENIED",
                             ip_hash=ip_hash, detail={"reason": reason})
             raise SampleError(_TICKET_REFUSED)
-        # The ticket is spent, so the connection can be bound to its holder
-        # and the rows below keep the holder as their actor: the database
-        # attributes a request-role row only to the user its connection is
-        # bound to (0150, evidence-ledger-actor-time-forgeable, 2026-10-03).
-        # A holder whose account is no longer active binds to nobody, and
+        # The ticket is spent, so the connection can be bound to its holder and the rows below keep the
+        # holder as their actor: the database attributes a request-role row only to the user its
+        # connection is bound to (0150). A holder whose account is no longer active binds to nobody, and
         # that row is demoted to an unverified claim in its detail.
         from noctornal_api.db import bind_ticket
         bind_ticket(self._c, presented)
         if not hmac.compare_digest(bytes(row[3]), digest):
-            # Cannot fire against the predicate above, and that is the
-            # point of writing it: the equality that granted this row was
-            # the database's, inside an index, and this is the comparison
-            # THIS process makes on the bytes it got back before it serves
-            # a live binary. The day somebody loosens that WHERE clause --
-            # a prefix lookup, a join, a LIKE -- a partial match stops
-            # here instead of becoming a download.
+            # Cannot fire against the predicate above, by design: the equality that granted this row was
+            # the database's, and this is the comparison this process makes on the bytes it got back
+            # before serving a live binary. If the WHERE clause is ever loosened (a prefix lookup, a
+            # join, a LIKE), a partial match stops here instead of becoming a download.
             self._audit("SAMPLE_DOWNLOAD_TICKET_REFUSED", actor_id=row[1],
                         sample_id=sample_id, outcome="DENIED", ip_hash=ip_hash,
                         detail={"reason": "hash_mismatch_after_lookup"})
             raise SampleError(_TICKET_REFUSED)
-        # The ticket is already SPENT at this point, and the account check
-        # below can still refuse. That ordering is deliberate in both
-        # directions. Spending first is what makes the one-shot property a
-        # single statement, which is the only way two simultaneous
-        # presentations cannot both succeed; and a ticket presented by a
-        # holder who has just lost their authority is a ticket that should
-        # not survive to be presented again if the deactivation is
-        # reversed. Nothing is lost by burning it: unlike a wrong-sample
-        # guess, this presentation could only be made by somebody actually
-        # holding the string.
+        # The ticket is already spent here, and the account check below can still refuse. Spending first
+        # keeps one-shot a single statement, the only way two simultaneous presentations cannot both
+        # succeed, and a ticket presented by a holder who just lost their authority should not survive
+        # to be presented again if the deactivation is reversed. Unlike a wrong-sample guess, only
+        # somebody actually holding the string can make this presentation.
         holder = row[1]
         # The permission re-read belongs to the ticket's PURPOSE (0063): a
         # retrieval ticket was minted under `sample.preserved.retrieve`,
@@ -3668,25 +3114,17 @@ class SampleService:
 
     def _still_authorised(self, user_id: UUID,
                           permission: str = DOWNLOAD_PERMISSION) -> bool:
-        """Is the ticket's holder still an ACTIVE account holding
-        `sample.download` through a global role?
+        """Is the ticket's holder still an active account holding the permission through a global role?
 
-        `IamAdminService.holds_global_permission` is that question already
-        written down -- its own docstring calls it "the same question
-        `deps.require_global` asks, WITHOUT the step-up freshness clause".
-        Reused rather than restated: a second copy of the join would be the
-        defect this whole path is made of, where `download()` had no label
-        check while `detail()` twenty lines away had one.
+        Reuses `IamAdminService.holds_global_permission`, which is "the same question
+        `deps.require_global` asks, without the step-up freshness clause"; a second copy of the join is how
+        a path ends up with a check its sibling lacks.
 
-        Its docstring also says it must not authorise a WRITE, because a
-        write is what step-up exists to re-challenge. This is not a write
-        and the step-up it omits was not skipped: `require_global` and
-        `require_step_up` both ran at the mint, less than
-        `DOWNLOAD_TICKET_TTL_SECONDS` ago, and sixty seconds is a tighter
-        assurance bound than the fifteen minutes `STEP_UP_FRESHNESS`
-        would have allowed. What could not be re-asked here is whether the
-        SESSION that satisfied it is still live, and that -- not the
-        account -- is the residual 0061 states.
+        That method must not authorise a write, because step-up exists to re-challenge writes. This is not
+        a write and the step-up it omits was not skipped: `require_global` and `require_step_up` ran at the
+        mint, less than `DOWNLOAD_TICKET_TTL_SECONDS` ago, a tighter bound than `STEP_UP_FRESHNESS`. What
+        cannot be re-asked here is whether the session that satisfied it is still live: the residual 0061
+        states.
         """
         return IamAdminService(self._c).holds_global_permission(
             user_id, permission)
@@ -3695,12 +3133,9 @@ class SampleService:
                            permission: str = DOWNLOAD_PERMISSION) -> str:
         """Which half of `_still_authorised` said no, for the audit only.
 
-        A second read on the refusal path alone, for `_ticket_refusal`'s
-        reason: "the account was disabled and a download was attempted
-        thirty seconds later" and "this analyst's download permission was
-        revoked" are two different things to go and ask somebody about,
-        and a single reason string would send a security officer to the
-        wrong one.
+        A second read on the refusal path alone, for `_ticket_refusal`'s reason: a disabled account and a
+        revoked permission are different things to ask somebody about, and one reason string would send a
+        security officer to the wrong one.
         """
         row = self._c.execute(
             "SELECT is_active FROM iam.app_user WHERE id = %s",
@@ -3715,12 +3150,9 @@ class SampleService:
                         sample_id: UUID) -> tuple[str, UUID | None]:
         """Why a redemption matched nothing, for the audit row only.
 
-        A second read, on the refusal path alone, because "a ticket was
-        refused" is not a useful thing for a security officer to find:
-        replay, a stale tab and a ticket aimed at the wrong sample are
-        three different events and only one of them is an attack. The
-        holder comes back too, so the audit row names a user when there is
-        one to name.
+        A second read on the refusal path alone: replay, a stale tab and a ticket aimed at the wrong sample
+        are three different events and only one is an attack. The holder comes back too, so the audit row
+        names a user when there is one to name.
         """
         row = self._c.execute(
             """SELECT user_id, sample_id, redeemed_at, expired
@@ -3741,7 +3173,7 @@ class SampleService:
         # nothing: another request redeemed it between the two statements.
         return "redeemed_concurrently", row[0]
 
-    # -- preserved samples: two people to get one back out (F2, 0063) -----
+    # -- preserved samples: two people to get one back out (0063) ---------
 
     def resolve_account(self, value: str) -> UUID:
         """An account named by id or by email, for the authorisation form.
@@ -3771,19 +3203,16 @@ class SampleService:
             self, sample_id: UUID, *, granted_to: UUID, granted_by: UUID,
             scope_note: str, legal_basis: str,
             duration: timedelta = timedelta(days=7)) -> UUID:
-        """Authorise ONE named person to retrieve ONE preserved sample.
+        """Authorise one named person to retrieve one preserved sample.
 
-        Modelled on `IngestService.grant_pii_authorisation`: time-boxed,
-        justified, two humans. The person granting and the person granted
-        cannot be one person (a CHECK in 0063 as well as this refusal),
-        the scope has a length floor because a blanket authorisation is
-        not one, the legal basis is mandatory, and the window is capped at
-        thirty days.
+        Modelled on `IngestService.grant_pii_authorisation`: time-boxed, justified, two humans. The
+        granting and the granted person cannot be one person (a CHECK in 0063 as well as this refusal),
+        the scope has a length floor because a blanket authorisation is not one, the legal basis is
+        mandatory, and the window is capped at thirty days.
 
-        The grantee must hold `sample.preserved.retrieve` now. An
-        authorisation for somebody whose role cannot use it authorises
-        nothing, and a Security Officer told so at the time can pick the
-        right person instead of finding out from a refusal later.
+        The grantee must hold `sample.preserved.retrieve` now. An authorisation for somebody whose role
+        cannot use it authorises nothing, and telling the Security Officer at the time lets them pick the
+        right person.
         """
         if granted_to == granted_by:
             raise SampleError(
@@ -3804,7 +3233,7 @@ class SampleService:
         if sample is None:
             raise SampleError("no such sample")
         if sample.screening_outcome == "MATCH":
-            # F13. Such material leaves only outside the product.
+            # Such material leaves only outside the product.
             raise SampleError(
                 "this sample matched a prohibited-content list. Material "
                 "preserved because of such a match is released only outside "
@@ -3854,15 +3283,14 @@ class SampleService:
                     detail={"authorisation_id": str(authorisation_id)})
 
     def preservation_authorisations(self, sample_id: UUID) -> list[dict]:
-        """Every authorisation ever granted on this sample, newest first,
-        with names rather than uuids: the point of the record is that a
-        NAMED person allowed a NAMED person, and a reviewer who has to look
-        the ids up separately will not."""
-        # F13. An authorisation on a matched sample is VOID by
-        # derivation: 0063's CHECK makes every revocation name a person, and
-        # a screening pass has none, so it is reported dead rather than
-        # revoked, and every door refuses it (the grant, the mint, the
-        # redemption through retrieve_preserved, and the retrieval).
+        """Every authorisation ever granted on this sample, newest first, with names rather than uuids.
+
+        The point of the record is that a named person allowed a named person, and a reviewer who has to
+        look the ids up separately will not."""
+        # An authorisation on a matched sample is void by derivation: 0063's CHECK makes every revocation
+        # name a person and a screening pass has none, so it is reported dead rather than revoked, and
+        # every door refuses it (the grant, the mint, the redemption through retrieve_preserved, and the
+        # retrieval).
         rows = self._c.execute(
             """SELECT a.id, a.granted_to, gt.display_name, gt.email,
                       gb.display_name, gb.email, a.scope_note, a.legal_basis,
@@ -3892,33 +3320,25 @@ class SampleService:
     def preserved_for_authorisation(self, *, clearance: str | None,
                                     compartments: frozenset[str] = frozenset(),
                                     limit: int = 100) -> list[dict]:
-        """The Security Officer's list: every preserved sample the officer's
-        labels reach, with its authorisations, and NOTHING of its content.
+        """The Security Officer's list: every preserved sample the officer's labels reach, with its
+        authorisations, and nothing of its content.
 
-        2026-09-23. The officer's half of the two-person
-        retrieval lived only in the Lab's sample card, which needs
-        `sample.read`, and SECURITY_OFFICER holds no `sample.read` (nor may
-        it: Security Officers read no case content). So the one role that
-        may authorise a retrieval could not reach the form, and the case
-        owner was told to ask for something nobody could give.
+        The officer's half of the two-person retrieval cannot live only in the Lab's sample card, which
+        needs `sample.read`; SECURITY_OFFICER holds none (Security Officers read no case content).
 
-        What is returned is what an authorisation is ABOUT and nothing
-        more: which sample (hash, size, labels), where it is held and since
-        when, whether a legal hold covers it, the case's code (the label
-        the break-glass review queue already shows the same officer), and
-        who has been authorised. No filename, source note, rejection
-        reason, analysis or custody: those are the case's content, and the
-        officer decides on the request and its legal basis, not on the
-        material. The label composition is `queue()`'s, and it is the same
-        gate the authorise route applies, so a sample listed here is one
-        the officer can act on.
+        Returned is what an authorisation is about and no more: which sample (hash, size, labels), where it
+        is held and since when, whether a legal hold covers it, the case's code (the label the break-glass
+        review queue already shows the same officer), and who has been authorised. No filename, source
+        note, rejection reason, analysis or custody: those are the case's content, and the officer decides
+        on the request and its legal basis, not the material. The label composition is `queue()`'s and the
+        same gate the authorise route applies, so a sample listed here is one the officer can act on.
         """
         if clearance is None:
             raise SampleError(
                 "the preserved-sample list needs the caller's clearance; a "
                 "default would list every compartment to whoever forgot it")
-        # The officer's list opts out of LAB_EXCLUSIONS: what the Lab hides
-        # from analysts is still material the officer governs (F11-core C).
+        # The officer's list opts out of LAB_EXCLUSIONS: what the Lab hides from analysts is still
+        # material the officer governs.
         rows = self._c.execute(
             f"""SELECT s.id, s.sha256, s.byte_size, s.preserved_bucket,
                        s.preserved_key, s.preserved_at,
@@ -3938,8 +3358,8 @@ class SampleService:
                  "preserved_key": r[4], "preserved_at": r[5].isoformat(),
                  "legal_hold": bool(r[6]), "case_code": r[7],
                  "classification": r[8],
-                 # F13. A matched sample's authorisations are void and
-                 # the console offers no Authorise or Revoke for it.
+                 # A matched sample's authorisations are void and the console offers no Authorise or
+                 # Revoke for it.
                  "screening_match": bool(r[9]),
                  "authorisations": self.preservation_authorisations(r[0])}
                 for r in rows]
@@ -3970,14 +3390,10 @@ class SampleService:
                           ip_hash: bytes | None = None) -> None:
         """Audit a refused retrieval, then raise.
 
-        Every refusal is written, not only the missing authorisation: a
-        preserved sample is material somebody decided to hold under a
-        legal hold, and "who tried to get it out, and why were they
-        stopped" is a question a Security Officer must be able to answer
-        years later. The caller here is always an authenticated account,
-        so unlike an unknown download ticket this cannot be used to append
-        to the audit chain anonymously. Autocommit, so the row survives
-        the raise.
+        Every refusal is written, not only the missing authorisation: "who tried to get a held sample out,
+        and why were they stopped" is a question a Security Officer must be able to answer years later.
+        The caller is always an authenticated account, so unlike an unknown download ticket this cannot be
+        used to append to the audit chain anonymously. Autocommit, so the row survives the raise.
         """
         self._audit("SAMPLE_PRESERVED_RETRIEVAL_REFUSED", actor_id=actor_id,
                     sample_id=sample_id, outcome="DENIED",
@@ -4004,8 +3420,7 @@ class SampleService:
             {"id": sample_id,
              **gate_params(clearance, compartments)}).fetchone()
         if row is None or not self._listed_now_clear(sample_id):
-            # lab-2 (2026-10-03): a list imported since the last pass binds
-            # here too, answered as the sample the gate hides.
+            # A list imported since the last pass binds here too, answered as the sample the gate hides.
             self._refuse_retrieval(sample_id, actor_id, "not_visible",
                                    "no such sample", stage=stage,
                                    session_id=session_id, ip_hash=ip_hash)
@@ -4041,22 +3456,18 @@ class SampleService:
                                ip_hash: bytes | None = None,
                                request_origin: str | None = None
                                ) -> DownloadTicket:
-        """The retrieval's half of the 0061 hand-off: a one-shot,
-        sixty-second ticket, minted on the APPLICATION origin, spent at
-        the sample origin's download path.
+        """The retrieval's half of the 0061 hand-off: a one-shot, sixty-second ticket, minted on the
+        application origin and spent at the sample origin's download path.
 
-        A retrieval is sample bytes, so invariant 10 applies to it exactly
-        as to a download: they come from the separate origin or not at
-        all, and the sample process serves the download path and nothing
-        else. Reusing that path, and the ticket that crosses to it, is what
-        keeps a second door from being opened on the one process the split
-        exists to keep narrow. The ticket carries `purpose =
-        'preserved_retrieval'`, so it cannot be spent as a download.
+        A retrieval is sample bytes, so invariant 10 applies exactly as to a download: they come from the
+        separate origin or not at all, and the sample process serves the download path and nothing else.
+        Reusing that path and its ticket avoids opening a second door on the one process the split exists
+        to keep narrow. The ticket carries `purpose = 'preserved_retrieval'`, so it cannot be spent as a
+        download.
 
-        Refuses (and audits the refusal) unless the caller holds a LIVE
-        authorisation for this sample. The redemption checks it again,
-        because an authorisation revoked inside the sixty seconds must
-        bite before a byte moves.
+        Refuses (and audits the refusal) unless the caller holds a live authorisation for this sample. The
+        redemption checks it again, because an authorisation revoked inside the sixty seconds must bite
+        before a byte moves.
         """
         split = _mint_split(request_origin)
         self._retrievable(sample_id, actor_id=actor_id, clearance=clearance,
@@ -4078,21 +3489,17 @@ class SampleService:
                            compartments: frozenset[str] = frozenset(),
                            ticket_id: UUID | None = None
                            ) -> tuple[bytes, str]:
-        """A preserved sample, in the SAME encrypted archive a download
-        produces, under a live authorisation somebody else granted.
+        """A preserved sample, in the same encrypted archive a download produces, under a live
+        authorisation somebody else granted.
 
-        Never plaintext: the held ciphertext is opened with the kept data
-        key, re-verified against the recorded SHA-256 (a mismatch is the
-        same recorded tamper alarm a download raises), and wrapped by
-        `archive()`, whose password is an interlock and not
-        confidentiality. The legal hold is not touched: nothing in
-        `PreservationStorage` can lift one, and this reads the held
-        version in place.
+        Never plaintext: the held ciphertext is opened with the kept data key, re-verified against the
+        recorded SHA-256 (a mismatch raises the same recorded tamper alarm a download does), and wrapped by
+        `archive()`, whose password is an interlock and not confidentiality. The legal hold is not touched:
+        nothing in `PreservationStorage` can lift one, and this reads the held version in place.
 
-        Written down on both outcomes. Every refusal is an audit row
-        (`SAMPLE_PRESERVED_RETRIEVAL_REFUSED`, with the reason); a success
-        is a custody row naming the authorisation and the store, an audit
-        row, and one more on the authorisation's retrieval count.
+        Written down on both outcomes. Every refusal is an audit row (`SAMPLE_PRESERVED_RETRIEVAL_REFUSED`,
+        with the reason); a success is a custody row naming the authorisation and the store, an audit row,
+        and one more on the authorisation's retrieval count.
         """
         _require_clearance(clearance)
         split = origin_split(this=request_origin)
@@ -4110,8 +3517,8 @@ class SampleService:
             raise SampleError("this sample has no data key; it cannot be read")
 
         _sha256, _key_held, _key_id, bucket, key, version = row
-        # The download's tamper discipline, through the one path that
-        # decrypts, verifies and records the alarm on its own (F11-core D).
+        # The download's tamper discipline, through the one path that decrypts, verifies and records the
+        # alarm on its own.
         data = self._verified_plaintext(sample_id, actor_id=actor_id,
                                         store=STORE_PRESERVATION)
         digest = hashlib.sha256(data).hexdigest()
@@ -4141,13 +3548,9 @@ class SampleService:
     def record_view(self, sample_id: UUID, *, actor_id: UUID) -> bool:
         """Write that somebody opened this sample's record.
 
-        The console's ledger promised "every look is a row" and opening a
-        sample wrote nothing, so an analyst relying on it to show who had
-        seen a sample was misled (ux13-lab:custody-ledger-hides-who-and-
-        what, 2026-09-22). Once per person per `VIEW_DEDUPE_SECONDS`: the
-        console reopens the record after each action it takes, and those
-        reopenings are not separate looks. Returns whether a row was
-        written."""
+        The console's ledger promises "every look is a row". Once per person per `VIEW_DEDUPE_SECONDS`: the
+        console reopens the record after each action it takes, and those reopenings are not separate looks.
+        Returns whether a row was written."""
         recent = self._c.execute(
             """SELECT 1 FROM lab.sample_access
                 WHERE sample_id = %s AND actor_id = %s
@@ -4164,9 +3567,7 @@ class SampleService:
     def people(self, ids) -> dict[str, dict]:
         """`{uuid: {"name", "email"}}` for the accounts a record names.
 
-        Submitter and assignee were returned as bare uuids and the console
-        read neither (ux13-lab:provenance-never-shown). Names, because
-        provenance nobody can read is not provenance."""
+        Names, because provenance nobody can read is not provenance."""
         wanted = sorted({str(i) for i in ids if i})
         if not wanted:
             return {}
@@ -4176,22 +3577,17 @@ class SampleService:
         return {str(r[0]): {"name": r[1], "email": r[2]} for r in rows}
 
     def case_labels(self, case_ids) -> dict[str, tuple[str, frozenset[str]]]:
-        """`{case id: (classification, compartments)}` for the cases a page
-        of samples belongs to, in one query.
+        """`{case id: (classification, compartments)}` for the cases a page of samples belongs to, in one
+        query.
 
-        ux13-lab:label-chip-understates-handling (2026-09-23). `queue()` and
-        `visible()` gate on the sample's labels COMPOSED with its case's,
-        and the row chip showed the sample's own alone. A malware analyst,
-        who holds no case access and so sees no other marking, read a
-        sample from a compartmented case as plain AMBER. The router now
-        returns the composed labels, and this is where the case half comes
-        from."""
+        `queue()` and `visible()` gate on the sample's labels composed with its case's, so the row chip
+        must show the composed labels: a malware analyst holds no case access and sees no other marking,
+        and would otherwise read a sample from a compartmented case as plain AMBER."""
         wanted = sorted({str(i) for i in case_ids if i})
         if not wanted:
             return {}
-        # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
-        # hold no case assignment, so under row-level security core."case" is
-        # hidden from them, and its labels and read-only state must still compose.
+        # Read through iam.case_facts: Lab analysts hold no case assignment, so row-level security hides
+        # core."case" from them, and its labels and read-only state must still compose.
         rows = self._c.execute(
             "SELECT c.id, c.classification, c.compartments "
             "FROM unnest(%s::uuid[]) AS x(id) "
@@ -4213,15 +3609,11 @@ class SampleService:
            WHERE s.id = %(sample)s)"""
 
     def eligible_assignees(self, sample_id: UUID) -> list[dict]:
-        """Who a sample can be assigned to: an ACTIVE account holding
-        `sample.analyse` whose own clearance and compartments reach the
-        sample at its composed labels.
+        """Who a sample can be assigned to: an active account holding `sample.analyse` whose own clearance
+        and compartments reach the sample at its composed labels.
 
-        ux13-lab:no-assign-or-record-analysis (2026-09-23). The console had
-        no way to assign at all, and the API took any uuid, so the one way
-        to do it was to type an internal id, and a valid but wrong one
-        assigned the sample to somebody who could not even open it. The
-        console offers this list, and `assign` refuses anybody not on it.
+        The console offers this list and `assign` refuses anybody not on it, so a valid but wrong uuid
+        cannot assign the sample to somebody who could not open it.
         """
         rows = self._c.execute(
             self._EFFECTIVE + """
@@ -4241,21 +3633,13 @@ class SampleService:
                                only: UUID | None = None) -> list[dict]:
         """Who may sign off a non-private detonation of this sample.
 
-        docs/11: "require case owner sign-off for anything non-private". So
-        a lead investigator (a CASE_OWNER assignment, unexpired) on the
-        sample's own case; for a sample with no case, an account holding
-        the CASE_OWNER role. Active, cleared to see the sample, and never
-        the person asking: a sign-off by the requester is one person, and
-        two-person controls stay two people.
+        docs/11: "require case owner sign-off for anything non-private". So a lead investigator (an
+        unexpired CASE_OWNER assignment) on the sample's own case; for a sample with no case, an account
+        holding the CASE_OWNER role. Active, cleared to see the sample, and never the person asking: a
+        sign-off by the requester is one person, and two-person controls stay two people.
 
-        ux13-lab:detonation-authoriser-uuid (2026-09-23). The form asked for
-        another person's internal uuid, which no analyst has, and any valid
-        uuid was accepted, so a mistype named the wrong human on the record
-        whose whole point is that a named human agreed.
-
-        `only` (F14, 2026-09-24) narrows the list to one person, so
-        "is this person eligible NOW" is the same SQL as the list: the
-        sandbox sign-off, its listing and the worker's re-check all ask it.
+        `only` narrows the list to one person, so "is this person eligible now" is the same SQL as the
+        list: the sandbox sign-off, its listing and the worker's re-check all ask it.
         """
         rows = self._c.execute(
             self._EFFECTIVE + """
@@ -4283,23 +3667,19 @@ class SampleService:
                            target: str, exposure_level: str,
                            authorised_by: UUID | None = None,
                            note: str | None = None) -> UUID:
-        """Record a detonation request. **Nothing is submitted anywhere.**
+        """Record a detonation request. Nothing is submitted anywhere.
 
-        docs/11: do not build a sandbox, integrate with one. What is built
-        is the authorisation record, because detonation is an overt act --
-        operators watch public sandboxes for their own samples and treat a
-        submission as a signal they have been noticed, which can end an
-        operation that took months.
+        docs/11: do not build a sandbox, integrate with one. What is built is the authorisation record,
+        because detonation is an overt act: operators watch public sandboxes for their own samples and treat
+        a submission as a signal they have been noticed, which can end an operation that took months.
 
-        The authoriser of a non-private detonation must be somebody else,
-        and somebody `detonation_authorisers` lists: a lead investigator on
-        the sample's case who can see it (ux13-lab:detonation-authoriser-
-        uuid, 2026-09-23). The CHECK constraint only asks that a name be
-        there; this is what makes it the right name.
+        The authoriser of a non-private detonation must be somebody else, and somebody
+        `detonation_authorisers` lists: a lead investigator on the sample's case who can see it. The CHECK
+        constraint only asks that a name be there; this makes it the right name.
 
-        Refused for a sample whose case is read-only (c7, 2026-09-24).
+        Refused for a sample whose case is read-only.
         """
-        self._refuse_if_screening_match(sample_id)  # F13
+        self._refuse_if_screening_match(sample_id)
         self._refuse_if_case_read_only(sample_id)
         if exposure_level not in {"NONE", "VENDOR", "PUBLIC"}:
             raise SampleError(f"unknown exposure level {exposure_level!r}")
@@ -4320,11 +3700,9 @@ class SampleService:
                     "the authoriser must be an active lead investigator on "
                     "this sample's case (for a sample with no case, a lead "
                     "investigator) who is cleared to see the sample")
-        # lab-3 (2026-10-03): PENDING whatever the exposure. A VENDOR or
-        # PUBLIC row used to be written AUTHORISED naming a lead
-        # investigator who never acted and was never told; a record-only
-        # row cannot change afterwards (0103's guard), so it records the
-        # requester's word that they agreed, and the named person is told.
+        # Always PENDING, whatever the exposure. A record-only row cannot change afterwards (0103's guard),
+        # so writing a VENDOR or PUBLIC row as AUTHORISED would record a lead investigator's agreement they
+        # never gave. The named person is told instead.
         row = self._c.execute(
             """INSERT INTO lab.detonation
                    (sample_id, target, exposure_level, authorised_by,
@@ -4356,32 +3734,18 @@ class SampleService:
               compartments: frozenset[str] = frozenset(),
               case_id: UUID | None = None,
               limit: int = 100) -> list[Sample]:
-        """The RE queue, filtered by the caller's own labels COMPOSED with
-        each sample's case.
+        """The RE queue, filtered by the caller's own labels composed with each sample's case.
 
-        Both halves are needed and the file used to have neither reliably.
-        A sample can be classified ABOVE its case, so the case gate alone is
-        not enough; and it can sit BELOW its case, because the router's
-        `classification` defaults to AMBER and `lab.sample` has no
-        `enforce_tlp_floor` trigger — so the sample's own labels alone are
-        not enough either. `submit()` now raises the row to the case's floor
-        and this composes at read time as well, because a case whose
-        classification is raised after the fact must take its samples with
-        it.
+        Both halves are needed. A sample can be classified above its case, so the case gate alone is not
+        enough; and it can sit below its case, because the router's `classification` defaults to AMBER and
+        `lab.sample` has no `enforce_tlp_floor` trigger, so the sample's own labels alone are not enough
+        either. `submit()` raises the row to the case's floor and this composes at read time as well, so a
+        case whose classification is raised later takes its samples with it.
 
-        `clearance` is REQUIRED. It used to default to `"RED"`, which meant
-        a caller who forgot the argument was silently handed everything —
-        the same fail-open shape that left `download()` with no gate at all,
-        sitting in the same file.
+        `clearance` is required: a default would silently hand everything to a caller who forgot it.
 
-        `states` is honoured, and `case_id` narrows to one case (2026-09-22).
-        The route used to take neither, so the console filtered the working
-        set client-side: Rejected, In analysis and Reported were always
-        empty, and a Lab opened inside one case listed every case's
-        samples (ux13-lab:rejected-filter-always-empty,
-        ux13-lab:lab-not-case-scoped). Narrowing by case discloses nothing
-        the unfiltered queue does not: the label predicate below is the
-        gate either way.
+        `states` filters the queue and `case_id` narrows it to one case. Narrowing by case discloses
+        nothing the unfiltered queue does not: the label predicate below is the gate either way.
         """
         unknown = [s for s in states if s not in QUEUE_STATES + (SUBMITTED,)]
         if unknown:
@@ -4409,11 +3773,9 @@ class SampleService:
                 compartments: frozenset[str] = frozenset()) -> Sample | None:
         """One sample, or None if the caller may not know it exists.
 
-        The composition is written once here and once in `download()`
-        rather than in the router, so a second caller cannot skip it —
-        which is what happened to `download()`. Returning None rather than
-        raising keeps the router's answer identical to "no such sample": a
-        status code must not be an existence oracle for a compartmented
+        The composition is written once here and once in `download()` rather than in the router, so a
+        second caller cannot skip it. Returning None rather than raising keeps the router's answer
+        identical to "no such sample": a status code must not be an existence oracle for a compartmented
         case.
         """
         row = self._c.execute(
@@ -4426,20 +3788,13 @@ class SampleService:
 
     def analyses(self, sample_id: UUID, *, clearance: str | None = None,
                  compartments: frozenset[str] = frozenset()) -> list[dict]:
-        """Every recorded analysis the reader may see, with WHO recorded it
-        by name and the tool's version, or, for a machine row, what
-        produced it.
+        """Every recorded analysis the reader may see, with who recorded it by name and the tool's
+        version, or, for a machine row, what produced it.
 
-        ux13-lab:no-assign-or-record-analysis (2026-09-23): the console
-        showed neither the analyst nor the version, and this read never
-        returned the version it was asked for.
-
-        A row derived from a YARA rule set (a machine YARA row, or an
-        analyst's assessment taken from one) is returned only when the
-        ceiling given reaches the set's classification and compartments
-        (F12 G). With no ceiling such rows are hidden, so the new label
-        dimension fails closed and every existing caller keeps working.
-        Hidden rows are neither returned nor counted."""
+        A row derived from a YARA rule set (a machine YARA row, or an analyst's assessment taken from one)
+        is returned only when the ceiling given reaches the set's classification and compartments. With no
+        ceiling such rows are hidden, so the label dimension fails closed. Hidden rows are neither returned
+        nor counted."""
         rows = self._c.execute(
             """SELECT a.id, a.kind, a.analyst_id, a.tool, a.findings,
                       a.extracted_selectors, a.yara_hits, a.family_assessment,
@@ -4498,53 +3853,37 @@ class SampleService:
                                    compartments: frozenset[str] = frozenset(),
                                    found: dict | None = None,
                                    origin: str | None = None) -> dict:
-        """Put ONE selector a lab analysis extracted into the sample's case
-        triage queue, as a proposal. Never into the graph.
+        """Put one selector a lab analysis extracted into the sample's case triage queue, as a proposal.
+        Never into the graph.
 
-        docs/11: "Findings flow back as assertions" and "the RE's
-        structured output is where most graph value comes from". Until
-        2026-09-23 the extracted C2 domains, addresses and wallets were
-        stored and shown nowhere, so the one thing that ties a sample to
-        actors never reached the case (ux13-lab:no-assign-or-record-
-        analysis). This is the "propose as assertion" path: machines and
+        docs/11: "Findings flow back as assertions". This is the "propose as assertion" path: machines and
         the lab propose, the case's analysts dispose.
 
-        The row is resolved under the CALLER's ceiling, so a finding the
-        caller cannot see is "no such analysis" however its id was learned,
-        and its origin picks the proposal's (`PROPOSAL_ORIGINS`): an
-        analyst's row proposes as `lab/analysis`, a static-triage row as
-        `lab/static-triage`, which an analyst clicks for; the machine never
-        proposes on its own. `found` and `origin` are how `_propose_entry`
-        (the seam a machine finding calls with a row it resolved itself)
-        comes in.
+        The row is resolved under the caller's ceiling, so a finding the caller cannot see is "no such
+        analysis" however its id was learned. Its origin picks the proposal's (`PROPOSAL_ORIGINS`): an
+        analyst's row proposes as `lab/analysis`, a static-triage row as `lab/static-triage`, which an
+        analyst clicks for; the machine never proposes on its own. `found` and `origin` are how
+        `_propose_entry` (the seam a machine finding calls with a row it resolved itself) comes in.
 
-        It is refused for a sample with no case, for a case that is closed
-        or archived (read-only for content), and for a sample, or a rule
-        set the row derives from, carrying a compartment its case does
-        not, because an accepted proposal is written with the case's
-        compartments and would shed that restriction. The classification
-        is the strictest of the sample's, the case's and the rule set's:
-        an accepted element is never labelled below the material it came
-        from.
+        Refused for a sample with no case, for a case that is closed or archived (read-only for content),
+        and for a sample, or a rule set the row derives from, carrying a compartment its case does not,
+        because an accepted proposal is written with the case's compartments and would shed that
+        restriction. The classification is the strictest of the sample's, the case's and the rule set's:
+        an accepted element is never labelled below the material it came from.
 
-        The answer is the SAME whether a proposal was queued, one was
-        already there in any state, or the case already holds the entity:
-        `{"sent": True, "label": ...}` and nothing else. A malware analyst
-        holds no case access, can record an analysis with any selector
-        value they like, and then propose it; an answer that said "already
-        an entity" with its node id, or "already proposed (rejected)", or
-        named the case's code, let a role barred from case content probe
-        the case graph one value at a time (2026-09-23 verifier, on
-        ux13-lab:no-assign-or-record-analysis). What actually happened is
-        written to the audit trail, SYSTEM when no person asked, where a
-        reviewer can read it, and the case's own analysts see the queue.
+        The answer is the same whether a proposal was queued, one was already there in any state, or the
+        case already holds the entity: `{"sent": True, "label": ...}` and nothing else. A malware analyst
+        holds no case access, can record an analysis with any selector value, and then propose it; a
+        distinguishing answer (a node id, "already proposed (rejected)", the case's code) would let a role
+        barred from case content probe the case graph one value at a time. What actually happened is written
+        to the audit trail, SYSTEM when no person asked, and the case's own analysts see the queue.
         """
         from noctornal_ontology.definition import SELECTOR_TYPES
         from noctornal_ontology.normalisers import normalise, redact_url_credentials
 
         from noctornal_api.proposals import KIND_NODE, ProposalStore
 
-        self._refuse_if_screening_match(sample.id)  # F13
+        self._refuse_if_screening_match(sample.id)
         if found is None:
             found = self.analysis(sample.id, analysis_id, clearance=clearance,
                                   compartments=compartments)
@@ -4559,17 +3898,16 @@ class SampleService:
             raise SampleError(
                 "this sample is not attached to a case, so there is no triage "
                 "queue to propose into")
-        # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
-        # hold no case assignment, so under row-level security core."case" is
-        # hidden from them, and its labels and read-only state must still compose.
+        # Read through iam.case_facts: Lab analysts hold no case assignment, so row-level security hides
+        # core."case" from them, and its labels and read-only state must still compose.
         case = self._c.execute(
             "SELECT status, classification, compartments "
             "FROM iam.case_facts(%s)", (sample.case_id,)).fetchone()
         if case is None:
             raise SampleError("no such case")
         status, case_tlp, case_comps = case
-        # The shared set, not a literal copy of it (c7, 2026-09-24): a copy
-        # is how a state gets added in one place and missed in another.
+        # The shared set, not a literal copy of it: a copy is how a state gets added in one place and
+        # missed in another.
         if status in CONTENT_READ_ONLY_STATES:
             # Not named by its code: the Lab shows a case the caller cannot
             # open as "a case you cannot open", and this refusal must not
@@ -4622,11 +3960,9 @@ class SampleService:
         audit = {"analysis_id": str(analysis_id), "index": index,
                  "selector_type": kind, "origin": origin}
         sent = {"sent": True, "label": norm}
-        # Already proposed on this case (in any state), or already an
-        # entity: the extraction path's rule, for the same reason. A second
-        # click must not stack up a duplicate for somebody to reject. Both
-        # answer exactly as a new proposal does (see the docstring); only
-        # the audit trail says which it was.
+        # Already proposed on this case (in any state), or already an entity: the extraction path's rule.
+        # A second click must not stack up a duplicate for somebody to reject. Both answer exactly as a new
+        # proposal does (see the docstring); only the audit trail says which it was.
         queued = self._c.execute(
             """SELECT id, state FROM collect.proposal
                 WHERE case_id = %s AND kind = %s
@@ -4659,11 +3995,9 @@ class SampleService:
             case_id=sample.case_id, kind=KIND_NODE, origin=origin,
             payload={"node_type": node_type, "label": norm,
                      "classification": classification,
-                     # Accept copies attrs onto the entity, so the value as
-                     # the analysis recorded it is kept without a URL's
-                     # password or token: the label (`norm`) was clean, the
-                     # raw value was not (graph-url-selector-keeps-
-                     # credentials, 2026-10-03, verify round).
+                     # Accept copies attrs onto the entity, so the value as the analysis recorded it is
+                     # kept without a URL's password or token: the label (`norm`) was clean, the raw
+                     # value was not.
                      "attrs": {"selector_type": kind,
                                "raw_value": redact_url_credentials(raw),
                                "sample_id": str(sample.id),
@@ -4680,7 +4014,6 @@ class SampleService:
         """Why the case's analysts are being shown this value, in words."""
         when = found["created_at"][:10]
         if found.get("origin") == "machine" and found.get("kind") == "SANDBOX":
-            # F14, 2026-09-24.
             findings = found.get("findings") or {}
             return (f"Observed by the sandbox {findings.get('sandbox') or 'CAPEv2'} "
                     f"(CAPE task {findings.get('task_id')}) "
@@ -4708,34 +4041,27 @@ class SampleService:
 
     def _propose_entry(self, sample: Sample, found: dict | None, index: int,
                        *, actor_id: UUID | None, origin: str) -> dict:
-        """The seam a machine finding proposes through (F11-core H): a row
-        the caller resolved itself, and the origin its proposal carries.
-        The sandbox (F14) calls this with actor None for its
-        configured auto-propose; the refusals, labels and uniform answer
-        are `propose_extracted_selector`'s, which holds the body so there
-        is one."""
+        """The seam a machine finding proposes through: a row the caller resolved itself, and the origin
+        its proposal carries.
+
+        The sandbox calls this with actor None for its configured auto-propose. The refusals, labels and
+        uniform answer are `propose_extracted_selector`'s, which holds the body so there is one."""
         return self.propose_extracted_selector(
             sample, UUID(found["id"]) if found else None, index,
             actor_id=actor_id, found=found, origin=origin)
 
     def detonations(self, sample_id: UUID) -> list[dict]:
-        """Every detonation REQUEST against this sample.
+        """Every detonation request against this sample.
 
-        Requests, not results: nothing in this build submits to a sandbox.
-        The record exists because detonation is an overt act — operators
-        watch public sandboxes for their own samples and treat a
-        submission as a signal they have been noticed, which can end an
-        operation that took months. So the authorisation is captured
-        before anything could be sent, and it stays captured whether or
-        not an integration ever appears.
+        Requests, not results: this module submits nothing itself (the sandbox worker sends SUBMIT rows).
+        The authorisation is captured before anything could be sent, because detonation is an overt act:
+        operators watch public sandboxes for their own samples and treat a submission as a signal they
+        have been noticed.
 
-        `authorised_by` is joined to an email rather than left as a uuid:
-        the whole point of the column is that a NAMED human agreed, and a
-        name a reviewer has to look up separately is one they will not.
+        `authorised_by` is joined to an email rather than left as a uuid: the point of the column is that a
+        named human agreed, and a name a reviewer has to look up separately is one they will not.
         """
-        # F14 (2026-09-24): SUBMIT rows are sent by the sandbox
-        # worker, so `submitted` is derived from the row rather than the
-        # literal False every row carried while nothing could be sent.
+        # SUBMIT rows are sent by the sandbox worker, so `submitted` is derived from the row.
         rows = self._c.execute(
             """SELECT d.id, d.target, d.exposure_level, d.status,
                       d.requested_at, d.submitted_at, d.external_ref,
@@ -4783,27 +4109,19 @@ class SampleService:
 
     def custody(self, sample_id: UUID, *, clearance: str | None = None,
                 compartments: frozenset[str] = frozenset()) -> list[dict]:
-        """The ledger, with WHO in it.
+        """The custody ledger, with who is in it.
 
-        `actor_id`, `archive_format` and `detail` were always returned and
-        the console dropped all three, so the chain of custody for
-        attacker-supplied binaries named nobody, and a submission and a
-        failed integrity check both read "VIEWED_META"
-        (ux13-lab:custody-ledger-hides-who-and-what, 2026-09-22). The
-        actor's name and email come back now, and for an assignment the
-        assignee's too; `detail.event` is what tells the console which
-        VIEWED_META row it is looking at.
+        `actor_id`, `archive_format` and `detail` are returned so the ledger names its actors; `detail.event`
+        tells the console which VIEWED_META row it is looking at. The actor's name and email come back, and
+        for an assignment the assignee's too.
 
-        `actor_kind` says whether a person or the product acted: a SYSTEM
-        row has no actor (None, never the string 'None'), and the console
-        says "NocTORnal (automated)" for it (F11-core E).
+        `actor_kind` says whether a person or the product acted: a SYSTEM row has no actor (None, never the
+        string 'None'), and the console says "NocTORnal (automated)" for it.
 
-        An ANALYSED row whose analysis the reader cannot see (one derived
-        from a rule set above their labels, F12) keeps its person and time
-        and loses its kind and analysis id, so the ledger stays complete
-        without saying that a hidden rule set produced a finding here
-        (2026-09-24). The residual: the reader can
-        count an analysis they cannot open.
+        An ANALYSED row whose analysis the reader cannot see (one derived from a rule set above their
+        labels) keeps its person and time and loses its kind and analysis id, so the ledger stays complete
+        without saying that a hidden rule set produced a finding here. The residual: the reader can count
+        an analysis they cannot open.
         """
         rows = self._c.execute(
             """SELECT a.actor_id, a.action, a.occurred_at, a.archive_format,
@@ -4838,25 +4156,18 @@ class SampleService:
         return out
 
     def derived_gaps(self, samples: list[Sample]) -> dict[str, list[dict]]:
-        """The gaps computed when a page of samples is READ (F11-core G).
-        The router drops any stored entry whose step is in
-        `DERIVED_GAP_STEPS` (legacy rows) and appends these.
+        """The gaps computed when a page of samples is read. The router drops any stored entry whose step
+        is in `DERIVED_GAP_STEPS` (legacy rows) and appends these.
 
-        F13 (2026-09-24): from the sample's screening outcome and file
-        type, never stored, because a later import changes them. Not
-        screened says nothing was compared; screened says exact hashes
-        only; a container says its members were not compared.
+        Computed from the sample's screening outcome and file type and never stored, because a later list
+        import changes them. Not screened says nothing was compared; screened says exact hashes only; a
+        container says its members were not compared.
 
-        Phase 8 (2026-10-02), corrected 2026-10-03:
-        once an archive is expanded its members are samples, each screened
-        on its own, so "members were not compared" stops being true FOR
-        THOSE MEMBERS. It stays true for an entry that was refused with
-        bytes behind it (a traversal name, an encrypted member, one over a
-        cap) and for a whole archive that was refused, failed, is pending
-        or was never expanded (a sample from before the expansion existed).
-        So the gap is dropped only on the record of a finished expansion
-        that left nothing uncompared, and otherwise says how many entries
-        were not."""
+        Once an archive is expanded its members are samples, each screened on its own, so "members were not
+        compared" stops being true for those members. It stays true for an entry that was refused with bytes
+        behind it (a traversal name, an encrypted member, one over a cap) and for a whole archive that was
+        refused, failed, is pending or was never expanded. So the gap is dropped only on the record of a
+        finished expansion that left nothing uncompared, and otherwise says how many entries were not."""
         from noctornal_api.screening import screening_gaps
         archives = [s.id for s in samples if s.file_type in ARCHIVE_FILE_TYPES]
         finished = self._finished_expansions(archives) if archives else {}
@@ -4870,9 +4181,8 @@ class SampleService:
         return out
 
     def _finished_expansions(self, ids: list[UUID]) -> dict[str, int | None]:
-        """Per archive whose expansion ran to its end (a finding with
-        neither a refusal nor a failure), how many entries were refused
-        with bytes behind them: None when the finding does not say."""
+        """Per archive whose expansion ran to its end (a finding with neither a refusal nor a failure), how
+        many entries were refused with bytes behind them: None when the finding does not say."""
         rows = self._c.execute(
             """SELECT DISTINCT ON (sample_id) sample_id::text,
                       findings #>> '{counts,unscreened}'
@@ -4912,15 +4222,13 @@ class SampleService:
                ip_hash: bytes | None = None) -> None:
         """The hash-chained audit log, for the ticket events.
 
-        Distinct from `_access`: `lab.sample_access` is the CUSTODY
-        ledger and its `action` set is closed by a CHECK constraint to
-        the seven things that can happen to a sample, of which minting a
-        ticket is not one. A ticket is an authorisation; the custody row
-        is written when bytes are served, and names the ticket that
-        authorised them.
+        Distinct from `_access`: `lab.sample_access` is the custody ledger and a CHECK constraint closes its
+        `action` set to the seven things that can happen to a sample, of which minting a ticket is not one.
+        A ticket is an authorisation; the custody row is written when bytes are served, and names the ticket
+        that authorised them.
 
-        `actor_kind` follows `deps.audit_auth_event`: a refusal with no
-        identifiable holder is SYSTEM, not a USER row with a null actor.
+        `actor_kind` follows `deps.audit_auth_event`: a refusal with no identifiable holder is SYSTEM, not
+        a USER row with a null actor.
         """
         self._c.execute(
             """INSERT INTO audit.event
@@ -4934,28 +4242,16 @@ class SampleService:
 def _xor_stream(data: bytes, key: bytes) -> bytes:
     """Encrypt the sample at rest under its per-sample key.
 
-    A keystream XOR, and the honest note about it: this is CONTAINMENT, not
-    confidentiality. Its jobs are that the bytes on disk are not
-    recognisable as malware -- so your own EDR does not quarantine the
-    evidence, which docs/11 calls a routine and embarrassing failure -- and
-    that nothing in the pipeline is a runnable file. Confidentiality comes
-    from the bucket's own access control, the origin split and the audit
-    trail.
+    A keystream XOR: this is containment, not confidentiality. The bytes on disk are not recognisable as
+    malware, so the operator's own EDR does not quarantine the evidence (docs/11), and nothing in the
+    pipeline is a runnable file. Confidentiality comes from the bucket's access control, the origin split
+    and the audit trail. A production deployment should replace this with AES-256-GCM streamed through the
+    object store, which also gives integrity. Tampering is detected meanwhile because the bytes are
+    re-verified against their recorded sha256 on every read (see `download`).
 
-    A production deployment should replace this with AES-256-GCM streamed
-    through the object store, which also gives integrity. It is not that
-    here because the sample bytes are re-verified against their recorded
-    sha256 on every read (see `download`), so tampering is detected on the
-    path that matters, and a half-streamed AES implementation would be a
-    worse thing to ship than a clearly-labelled simple one.
-
-    The keystream is SHA-256(key || 8-byte big-endian counter), produced
-    and XORed a megabyte at a time into one preallocated buffer (F11-core
-    I, 2026-09-24). It used to build the whole keystream and XOR through a
-    generator: about 15 MiB/s and three times the sample in memory, which
-    the static-triage runner would have paid on every sample it read. Same
-    bytes out, held equal to the old implementation by test. Returns the
-    buffer itself (a bytearray) so the peak is the sample plus one chunk.
+    The keystream is SHA-256(key || 8-byte big-endian counter), produced and XORed a megabyte at a time
+    into one preallocated buffer, so the peak is the sample plus one chunk. Returns the buffer itself (a
+    bytearray).
     """
     n = len(data)
     out = bytearray(n)
@@ -4980,12 +4276,9 @@ def _xor_stream(data: bytes, key: bytes) -> bytes:
 _XOR_CHUNK = 1 << 20
 
 
-#: The row shape, by NAME: (column, `Sample` field) pairs in select order
-#: (F11-core B, 2026-09-24). `_record` used to unpack by index, so adding a
-#: column meant renumbering every field after it (moving `key_destroyed`
-#: from r[22] to r[24], for one). A new column is now one entry here and
-#: one `Sample` field with a default; the queries below are derived from
-#: this tuple.
+#: The row shape, by name: (column, `Sample` field) pairs in select order. A new column is one entry here
+#: and one `Sample` field with a default; the queries below are derived from this tuple, so no field
+#: needs renumbering.
 SAMPLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("id", "id"), ("case_id", "case_id"), ("sha256", "sha256"),
     ("sha1", "sha1"), ("md5", "md5"),
@@ -4999,16 +4292,14 @@ SAMPLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("preserved_bucket", "preserved_bucket"),
     ("preserved_key", "preserved_key"), ("preserved_at", "preserved_at"),
     ("legal_hold", "legal_hold"),
-    # F11 (2026-09-24): what static triage computed. The columns are 0031's;
-    # nothing wrote them until the static-triage runner.
+    # What static triage computed. The columns are 0031's.
     ("imphash", "imphash"), ("rich_header_hash", "rich_header_hash"),
     ("ssdeep", "ssdeep"), ("tlsh", "tlsh"),
-    # F13, 2026-09-24 (migration 0102). screening_list_seq is read by
-    # screening.py's SQL alone and is not on Sample.
+    # Migration 0102. screening_list_seq is read by screening.py's SQL alone and is not on Sample.
     ("screening_outcome", "screening_outcome"),
     ("screened_at", "screened_at"),
     ("screening_bytes_absent_at", "screening_bytes_absent_at"),
-    # Archive expansion (phase 8, 2026-10-02; migration 0158).
+    # Archive expansion (migration 0158).
     ("parent_sample_id", "parent_sample_id"),
     ("archive_path", "archive_path"),
 )
@@ -5021,11 +4312,10 @@ _COLUMNS = ", ".join(c for c, _f in SAMPLE_FIELDS)
 #: the two cannot fall out of step: the same discipline
 #: `notifications._N_COLUMNS` uses for the same reason.
 _SAMPLE_COLUMNS = ", ".join("s." + c for c, _f in SAMPLE_FIELDS)
-#: Whether the data key has been destroyed, read as a BOOLEAN (0063). The
-#: console needs to say "destroyed" or "kept" for a rejected sample, and
-#: selecting the sealed key itself to decide that would carry key material
-#: through every queue read for the sake of one word. A generated column
-#: since 0180, which the request role may read and the key it may not.
+#: Whether the data key has been destroyed, read as a boolean (0063). The console says "destroyed" or
+#: "kept" for a rejected sample, and selecting the sealed key to decide that would carry key material
+#: through every queue read. A generated column since 0180, which the request role may read and the key
+#: it may not.
 _RETURNING = _COLUMNS + ", data_key_destroyed"
 _SELECT = _SAMPLE_COLUMNS + ", s.data_key_destroyed"
 
@@ -5065,16 +4355,15 @@ def _require_clearance(clearance: str | None) -> None:
 
 
 def _mint_split(request_origin: str | None) -> OriginSplit:
-    """The two configuration refusals every ticket mint makes before it
-    looks at anything, hoisted out of `issue_download_ticket` (0063) so the
-    retrieval mint states the same ones rather than a copy of them.
+    """The two configuration refusals every ticket mint makes before it looks at anything.
 
-    - `split_problem`: the control is off, the value is not an origin, or
-      it is a second name for the application's. A ticket whose
-      `download_url` points at an origin that refuses every download is a
-      worse answer than a refusal here;
-    - this process IS the sample origin, which serves sample bytes and
-      nothing else, and on which no analyst session may run.
+    Shared by `issue_download_ticket` and the retrieval mint (0063) so they state the same ones.
+
+    - `split_problem`: the control is off, the value is not an origin, or it is a second name for the
+      application's. A ticket whose `download_url` points at an origin that refuses every download is
+      worse than a refusal here;
+    - this process is the sample origin, which serves sample bytes and nothing else, and on which no
+      analyst session may run.
     """
     split = origin_split(this=request_origin)
     if split.split_problem is not None:

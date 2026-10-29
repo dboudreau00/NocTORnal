@@ -1,90 +1,35 @@
-"""Phase 7 -- contact blocks, docs/10's "highest-value extraction target".
+"""Contact blocks, docs/10's "highest-value extraction target".
 
-Actors publish their contact details together, in one artefact:
+Actors publish their contact details together in one artefact, and a block routinely includes
+third-party identifiers: the forum's escrow agent, a guarantor, a partner shop. Attributing the
+escrow's Jabber to the vendor is a serious and easy error, and everything here is in service of not
+making it.
 
-    ────────────────────────────────
-    Jabber: vendor@thesecure.biz (OTR only)
-    TOX: 76A1…F3B2
-    Session: 05a3…9c1f
-    PGP: 4A2B 1C9D 8E7F …
-    Escrow: @forum_escrow  ← NOT the vendor's
-    ────────────────────────────────
+Parsing is label-driven rather than a regex over the whole post, because the difference between the
+vendor's Jabber and the escrow's is in the LABEL next to it, not in the string. A line with a
+recognised label is resolved by it. A line without one is resolved only when its shape is
+UNAMBIGUOUS: a 76-hex Tox ID is, a bare 40-hex string is not (SHA-1 looks identical), and
+`vendor@host.tld` is not (a JID and an email address share a shape). Everything else is kept as
+`UNPARSED` with the reason, never dropped (invariant 12). An ambiguous line resolving to nothing is
+the correct outcome: the analyst can label it in one click, while nobody knows to look for a
+confident wrong attribution.
 
-docs/10 explains why that is worth so much, and then immediately explains
-why extracting it naively is dangerous:
+Four defences against the escrow error, in order of strength: the label (`Escrow:`, `Guarantor:`,
+`Admin:` and variants); an in-line marker such as "NOT mine", so the whole line is read; the
+stoplist (`comms.service_selector`), GLOBAL by default because a forum's escrow agent is a property
+of the forum; and shared-service detection (docs/10), counted over DISTINCT PUBLISHERS and only
+across cases the caller can already see, as `selectors.pivots` does.
 
-    Co-declaration is strong identity evidence. When an actor publishes
-    several selectors together in one artefact, *they* are asserting those
-    identifiers belong to the same operator.
-
-    But parse the block structure, not just the selectors. Naive
-    extraction across the whole post produces false links, because contact
-    blocks routinely include third-party identifiers -- the forum's escrow
-    agent, a guarantor, a partner shop. Attributing the escrow's Jabber to
-    the vendor is a serious, and easy, error.
-
-The last sentence is the design brief for this module. Everything below is
-in service of not making that error.
-
-## The guessing rules, and why they refuse so much
-
-The obvious implementation regexes every selector-shaped string out of the
-post. It scores well on recall and produces exactly the landfill docs/09
-warns about, because in a contact block the difference between the
-vendor's Jabber and the escrow's Jabber is not in the string -- it is in
-the LABEL NEXT TO IT. So:
-
-- A line with a recognised label is resolved by its label.
-- A line WITHOUT one is resolved only when its shape is UNAMBIGUOUS. A
-  76-hex Tox ID is; a bare 40-hex string is not (SHA-1 looks identical);
-  `vendor@host.tld` is not, because a JID and an email address are the
-  same shape and calling one the other misfiles the strongest selector in
-  the block.
-- Everything else is kept as `UNPARSED` with the reason. It is NOT
-  dropped -- invariant 12, and more practically: a silent drop is how you
-  discover six months later that every block from one forum parsed to
-  nothing.
-
-An ambiguous line resolving to nothing is the correct outcome, not a
-coverage gap. The analyst can label it in one click; no interface undoes a
-confident wrong attribution, because nobody knows to look.
-
-## Four defences against the escrow error, in order of strength
-
-1. **The label.** `Escrow:`, `Guarantor:`, `Admin:` and their variants
-   mark the value as somebody else's. Cheapest and most reliable.
-2. **The in-line marker.** Vendors annotate: "← NOT mine", "(not the
-   vendor's)". Read the whole line, not just the value.
-3. **The stoplist** (`comms.service_selector`). A forum's escrow agent is
-   a property of the forum, so the list is GLOBAL by default -- a per-case
-   list would mean every case rediscovers it by getting the attribution
-   wrong first.
-4. **Shared-service detection.** docs/10: "Flag when a selector appears in
-   many unrelated vendors' blocks -- that is a shared service, not a
-   shared identity." Counted over DISTINCT PUBLISHERS, and only across
-   cases the caller can already see (the same restriction
-   `selectors.pivots` applies, for the same undecided cross-case
-   disclosure policy).
-
-## Nothing here writes the graph
-
-`ContactBlockService.parse_and_store` writes `comms.contact_block`, its
-entries, and `collect.proposal` rows. It writes NO `comms.channel_binding`
-and no `core.node`/`core.edge` -- invariant 3. A parsed contact block is a
-machine's reading of a forum post, and a machine's reading of a forum post
-is a suggestion.
-
-The proposals it raises are CLAIMED, always. docs/10:
-
-    Only CONFIRMED should carry weight in automatic identity resolution.
-    CLAIMED is a lead.
-
-Confirmation is `pgp.py`'s job and needs cryptography, not parsing.
+Nothing here writes the graph. `ContactBlockService.parse_and_store` writes `comms.contact_block`,
+its entries and `collect.proposal` rows, and no `comms.channel_binding`, `core.node` or `core.edge`
+(invariant 3). The proposals are CLAIMED, always: only CONFIRMED carries weight in automatic
+identity resolution (docs/10), and confirmation is `pgp.py`'s job.
 """
 from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
@@ -96,19 +41,11 @@ from noctornal_api.comms import normalise
 from noctornal_ontology import SELECTOR_TYPES
 from noctornal_ontology import normalise as _canonical
 
-#: Stamped on every block. A re-parse under a new version is a deliberate
-#: act, and knowing which parser produced a reading is the difference
-#: between fixing a rule and arguing about a result.
-#:
-#: cb-2 (F37, 2026-10-02): a fingerprint printed the way gpg prints it keeps
-#: all of its hex groups. cb-1 cut the value at the first run of two spaces,
-#: so a line copied from gpg kept 20 of its 40 hex characters. That changes
-#: `block_fingerprint` for a block that carries such a line, so the version
-#: moved with it: two blocks of one text parsed under different versions
-#: carry different fingerprints and are not compared as copies of each other.
-#: Nothing re-reads a stored block (`parse_and_store` returns the first parse
-#: of a text it has already stored in the case), so a block parsed under cb-1
-#: keeps its reading until somebody parses the text again somewhere new.
+#: Stamped on every block. A re-parse under a new version is a deliberate act, and knowing which
+#: parser produced a reading is the difference between fixing a rule and arguing about a result. A
+#: change that alters `block_fingerprint` moves the version, so two blocks of one text parsed under
+#: different versions are not compared as copies. Nothing re-reads a stored block: `parse_and_store`
+#: returns the first parse of a text it has already stored in the case.
 PARSER_VERSION = "cb-2"
 
 ROLE_SELF = "SELF"
@@ -155,29 +92,24 @@ _LABEL_ALIASES: dict[str, tuple[str | None, str | None]] = {
     "web": (None, "URL"), "website": (None, "URL"),
 }
 
-#: Aliases that are GENERIC venue words rather than platform nouns. They
-#: resolve only as a WHOLE label, never as one word inside a longer one.
-#:
-#: Without this split, "Shop Session: 05a3…" resolved to an onion address,
-#: because the word scan hit "shop" before "session". The generic word is
-#: the qualifier and the platform noun is the thing being qualified, so
-#: the noun has to win -- and left-to-right order does not encode that.
-#: "Public key: <40 hex>" consequently falls through to the shape rules
-#: and is refused as ambiguous with SHA-1, which is the honest answer.
+#: Aliases that are GENERIC venue words rather than platform nouns. They resolve only as a WHOLE
+#: label, never as one word inside a longer one: the generic word is the qualifier and the platform
+#: noun is what it qualifies, so the noun has to win ("Shop Session: ..." is a Session ID, not an
+#: onion address), and left-to-right order does not encode that. "Public key: <40 hex>" falls
+#: through to the shape rules and is refused as ambiguous with SHA-1, which is the honest answer.
 _GENERIC_LABELS = frozenset({
     "shop", "site", "web", "website", "url", "mirror",
     "key", "fingerprint", "fpr", "mail", "pm", "mm", "dis", "tele", "ref",
 })
 
-#: Labels naming somebody ELSE. docs/10 lists the three that matter: the
-#: forum's escrow agent, a guarantor, a partner shop.
+#: Labels naming somebody ELSE. docs/10 lists the three that matter: the forum's escrow agent, a
+#: guarantor, a partner shop.
 #:
-#: "backup" is deliberately ABSENT -- "Backup Jabber:" is the vendor's own
-#: and flagging it would lose a real selector. "support" is deliberately
-#: PRESENT even though a vendor may run their own: the cost is asymmetric.
-#: A wrongly-flagged SELF entry is still stored, visible and one click from
-#: correction; a wrongly-accepted THIRD_PARTY entry is a false attribution
-#: that reads as a finding.
+#: "backup" is deliberately ABSENT: "Backup Jabber:" is the vendor's own and flagging it would lose
+#: a real selector. "support" is deliberately PRESENT even though a vendor may run their own,
+#: because the cost is asymmetric: a wrongly flagged SELF entry is still stored, visible and one
+#: click from correction, while a wrongly accepted THIRD_PARTY entry is a false attribution that
+#: reads as a finding.
 _THIRD_PARTY_LABEL_WORDS = frozenset({
     "escrow", "escrows", "garant", "garantor", "guarantor", "guarant",
     "garantiya", "garantia",
@@ -189,12 +121,9 @@ _THIRD_PARTY_LABEL_WORDS = frozenset({
     "referral", "referrals", "ref", "vouch", "vouches", "vouched",
     "middleman", "mm", "deposit", "dispute", "disputes",
     "owner", "cashier", "treasurer", "operator", "manager",
-    # --- Cyrillic ------------------------------------------------------
-    # Russian-language forums are the primary venue in this domain, and
-    # `Гарант:` is THE standard guarantor label on them. Omitting these
-    # meant defence 1 was silently absent on exactly the forums that
-    # matter most: the transliterated `Garant:` was caught and the native
-    # `Гарант:` was attributed to the vendor.
+    # Cyrillic. Russian-language forums are the primary venue, and the native guarantor label is the
+    # standard one there: without these entries the transliterated `Garant:` would be caught and the
+    # native one attributed to the vendor.
     "гарант", "гаранта", "гаранту", "гарантия", "гарантии",
     "эскроу", "экскроу",
     "арбитр", "арбитраж", "арбитра",
@@ -226,17 +155,14 @@ _THIRD_PARTY_MARKERS = (
 #: one impersonating the other."
 _HEX = re.compile(r"^[0-9a-fA-F]+$")
 _WS = re.compile(r"\s+")
-#: A label is short and wordy. The length cap is what stops a sentence
-#: containing a colon from being read as a label.
+#: A label is short and wordy. The length cap is what stops a sentence containing a colon from being
+#: read as a label.
 #:
-#: `\w` with re.UNICODE (the default for str patterns), NOT [A-Za-z]. The
-#: ASCII-only form meant a Cyrillic label did not match at all, so the
-#: line fell through to shape resolution -- where `_resolve_by_shape`
-#: strips every non-hex character and a 76-hex Tox ID resolves cleanly out
-#: of `Гарант: <tox id>`. The guarantor's key was then attributed to the
-#: vendor, at a score high enough to raise a proposal. Excluding digits
-#: from the FIRST character still keeps "76A1F3B2..." from reading as a
-#: label.
+#: `\w` with re.UNICODE (the default for str patterns), NOT [A-Za-z]: an ASCII-only form would not
+#: match a Cyrillic label, so the line would fall through to shape resolution, where
+#: `_resolve_by_shape` strips every non-hex character and a 76-hex Tox ID resolves cleanly out of a
+#: guarantor's line and is attributed to the vendor. Excluding digits from the FIRST character keeps
+#: "76A1F3B2..." from reading as a label.
 _LINE = re.compile(
     r"^\s*(?P<label>[^\W\d_][\w /_.+\-]{0,28}?)\s*[:=]\s*(?P<value>\S.*?)\s*$")
 #: Box drawing, rules and bullets that fence a block.
@@ -245,13 +171,11 @@ _TRIM_DECORATION = re.compile(r"^[\s\-=_*~#|>•·★☆▪▫\[\(]+|[\s\-=_*~#|
 #: A PGP fingerprint as humans print it: ten groups of four hex.
 _PGP_SPACED = re.compile(
     r"^(?:[0-9a-fA-F]{4}[ \t]+){7,15}[0-9a-fA-F]{4}$")
-#: What gpg prints for a fingerprint, at the start of a value: ten groups of
-#: four hex digits for a v4 key and sixteen for a v5 one, with ANY run of
-#: whitespace between groups. gpg puts two spaces in the middle
-#: ("1234 5678 9ABC DEF0 1234  5678 9ABC DEF0 1234 5678"), which is what the
-#: comment cut below mistook for the start of a comment (F37, 2026-10-02).
-#: The last group may not run on into more hex, so a group of five is not
-#: taken for a group of four.
+#: What gpg prints for a fingerprint, at the start of a value: ten groups of four hex digits for a
+#: v4 key and sixteen for a v5 one, with ANY run of whitespace between groups. gpg puts two spaces
+#: in the middle ("1234 5678 9ABC DEF0 1234  5678 9ABC DEF0 1234 5678"), which the comment cut below
+#: would mistake for the start of a comment. The last group may not run on into more hex, so a group
+#: of five is not taken for a group of four.
 _GPG_FPR = re.compile(
     r"(?:[0-9A-Fa-f]{4}[^\S\r\n]+){15}[0-9A-Fa-f]{4}(?![0-9A-Fa-f])"
     r"|(?:[0-9A-Fa-f]{4}[^\S\r\n]+){9}[0-9A-Fa-f]{4}(?![0-9A-Fa-f])")
@@ -313,42 +237,54 @@ class ParsedEntry:
         }
 
 
+#: Single letters that look like a Latin letter, and Latin letters that look like a Cyrillic one. NFKC
+#: does not fold across scripts, so "Еscrow" with a Cyrillic Е or "гаpант" with a Latin p would miss
+#: the word list while reading as the word. Lowercase only: the text is casefolded first.
+_TO_LATIN = str.maketrans("авекмнорстухіјѕԁһӏԛԝαβεηικμνορτυχζ",
+                          "abekmhopctyxijsdhlqwabehikmnoptyxz")
+_TO_CYRILLIC = str.maketrans("abcehkmoptxy", "авсенкмортху")
+
+
+def _readings(text: str) -> tuple[str, ...]:
+    """The text as written, lowercased, and as it reads: NFKC-casefolded (fullwidth and other
+    compatibility letters), then with lookalike letters folded to each script. The original stays
+    in the set so a word in the list matches as written."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return (text.lower(), folded, folded.translate(_TO_LATIN), folded.translate(_TO_CYRILLIC))
+
+
 def _looks_third_party(label: str | None, whole_line: str) -> str | None:
     """Return the reason this line names somebody else, or None."""
     if label:
-        # Split on non-WORD characters, not on non-[a-z]. The ASCII split
-        # reduced any Cyrillic label to {""}, so the whole word list was
-        # unreachable for it -- see `_LINE`.
-        words = {w for w in re.split(r"[\W_]+", label.lower()) if w}
-        hit = words & _THIRD_PARTY_LABEL_WORDS
-        if hit or label.lower().strip() in _THIRD_PARTY_LABEL_WORDS:
-            named = sorted(hit) or [label.lower().strip()]
+        # Split on non-WORD characters, not on non-[a-z]: an ASCII split reduces a Cyrillic label to
+        # nothing, and the word list would never be reached for it.
+        readings = _readings(label)
+        words = {w for r in readings for w in re.split(r"[\W_]+", r) if w}
+        whole = {r.strip() for r in readings}
+        hit = (words | whole) & _THIRD_PARTY_LABEL_WORDS
+        if hit:
             return (f"the label {label!r} names a third-party role "
-                    f"({', '.join(named)}). Attributing the "
+                    f"({', '.join(sorted(hit))}). Attributing the "
                     f"escrow's identifier to the vendor is a serious and "
                     f"easy error")
-    low = whole_line.lower()
-    for marker in _THIRD_PARTY_MARKERS:
-        if marker in low:
-            return (f"the line says {marker!r}, which disclaims the "
-                    f"identifier rather than publishing it")
+    for low in _readings(whole_line):
+        for marker in _THIRD_PARTY_MARKERS:
+            if marker in low:
+                return (f"the line says {marker!r}, which disclaims the "
+                        f"identifier rather than publishing it")
     return None
 
 
 def _resolve_by_label(label: str | None) -> tuple[str | None, str | None, str] | None:
     """Resolve a label to a kind, or None if it names nothing recognised.
 
-    Exact match first, then word-by-word left to right, because real
-    labels are qualified: "Backup Jabber", "Main TOX", "Shop Session".
-    Refusing those would throw away a LABELLED selector -- the strongest
-    evidence in the block -- over a modifier, and then fall through to the
-    shape rules which correctly refuse `local@domain` as ambiguous. The
-    net effect was a vendor's second Jabber silently vanishing.
+    Exact match first, then word-by-word left to right, because real labels are qualified: "Backup
+    Jabber", "Main TOX", "Shop Session". Refusing those would throw away a LABELLED selector, the
+    strongest evidence in the block, and the shape rules would then refuse `local@domain` as
+    ambiguous.
 
-    Left to right, so the qualifier loses to the noun: "Escrow Jabber"
-    resolves to XMPP here, and separately to THIRD_PARTY in
-    `_looks_third_party`. Both readings are right and they do not
-    interfere -- one says what it is, the other says whose it is.
+    Left to right, so the qualifier loses to the noun: "Escrow Jabber" resolves to XMPP here, and
+    separately to THIRD_PARTY in `_looks_third_party`. One says what it is, the other whose it is.
     """
     if not label:
         return None
@@ -365,20 +301,16 @@ def _resolve_by_label(label: str | None) -> tuple[str | None, str | None, str] |
 
 
 def _fingerprint_head(value: str, by_label) -> tuple[str, str]:
-    """(the whole hex groups of a fingerprint at the start of `value`, the
-    rest), or ("", value) when the line is not a PGP fingerprint line
-    (F37, 2026-10-02).
+    """(the whole hex groups of a fingerprint at the start of `value`, the rest), or ("", value)
+    when the line is not a PGP fingerprint line.
 
-    Narrow on purpose. It applies only where the line is a PGP_FPR line: its
-    label says so, or it has no recognised label and so is read by shape
-    (the shape rule resolves ten or sixteen groups of four to PGP_FPR). A
-    line a label resolves to anything else is left to the old cut, so no
-    other selector kind changes. It takes exactly ten or sixteen groups and
-    stops at the last: what follows is cut as it always was, so a comment
-    after the fingerprint ("  (main key)", "  # work") still is one. The text
-    is returned as written, double space and all: `observed_value` is what
-    the block said, and the normaliser that makes the durable value removes
-    every space.
+    Narrow on purpose: it applies only where the line is a PGP_FPR line (its label says so, or it
+    has no recognised label and the shape rule resolves ten or sixteen groups of four to PGP_FPR). A
+    line a label resolves to anything else is left to the plain cut, so no other selector kind
+    changes. It takes exactly ten or sixteen groups and stops at the last: what follows is cut as
+    usual, so a trailing comment ("  (main key)", "  # work") is still one. The text is returned as
+    written, double space and all: `observed_value` is what the block said, and the normaliser that
+    makes the durable value removes every space.
     """
     if by_label is not None and by_label[1] != "PGP_FPR":
         return "", value
@@ -447,14 +379,12 @@ def _durable_for(platform_key: str | None, selector_type: str | None,
             canonical = _canonical(selector_type, value)
         except Exception as exc:            # a normaliser rejecting its input
             return None, f"could not normalise as {selector_type}: {exc}"
-        # An EMPTY canonical form is not a value, and treating it as one
-        # is how unrelated observations collide. It also skipped the
-        # "no durable form" scoring penalty, because '' is not None -- so
-        # a bare `https://x.onion` (where `_LINE` reads "https" as the
-        # label, leaving `//x.onion`, which `onion_norm` reduces to '')
-        # scored 0.600 as a confidently resolved STRONG selector while
-        # being silently excluded from proposals, the block fingerprint
-        # and shared-service counting.
+        # An EMPTY canonical form is not a value, and treating it as one is how unrelated
+        # observations collide. '' is not None, so it would also skip the "no durable form" scoring
+        # penalty: a bare `https://x.onion` (where `_LINE` reads "https" as the label, leaving
+        # `//x.onion`, which `onion_norm` reduces to '') would score as a confidently resolved
+        # STRONG selector while being excluded from proposals, the block fingerprint and
+        # shared-service counting.
         if not canonical or not canonical.strip():
             return None, (
                 f"nothing durable survives normalisation as {selector_type}; "
@@ -463,23 +393,26 @@ def _durable_for(platform_key: str | None, selector_type: str | None,
     return None, ""
 
 
-#: Unicode categories whose members occupy no visual space: Cf (format —
-#: ZWSP, ZWNJ, the bidi controls, BOM) and Cc (C0/C1 controls). Removed
-#: from every line before parsing (CR4).
+#: Unicode categories whose members occupy no visual space: Cf (format: ZWSP, ZWNJ, the bidi
+#: controls, BOM) and Cc (C0/C1 controls). Removed from every line before parsing.
 #:
-#: Category-based rather than an explicit character list, deliberately.
-#: The bidi defence in the UI (`visibleText`) enumerates specific code
-#: points because it has to SHOW what it found; a parser only has to
-#: refuse to be fooled, and an enumeration is a list somebody has to
-#: remember to extend when Unicode adds a character.
+#: Category-based rather than an explicit character list: the bidi defence in the UI (`visibleText`)
+#: enumerates code points because it has to SHOW what it found, while a parser only has to refuse to
+#: be fooled, and an enumeration must be extended whenever Unicode adds a character. Whitespace is
+#: not in scope: `\s` already matches it and `_LINE` handles it.
 #:
-#: Whitespace is NOT in scope: `\s` already matches it and `_LINE` handles
-#: it. This is only about characters that render as nothing at all.
+#: The default-ignorable code points outside Cf also render as nothing: the combining grapheme
+#: joiner, the variation selectors, the Hangul fillers and the reserved ranges. Between two letters
+#: of a label they split the word or stop `_LINE` matching, so they are removed as well.
+_IGNORABLE = re.compile(
+    "[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2065\u3164"
+    "\ufe00-\ufe0f\uffa0\ufff0-\ufff8\U000e0000-\U000e0fff]")
+
+
 def _strip_invisible(line: str) -> str:
-    import unicodedata
-    return "".join(ch for ch in line
-                   if unicodedata.category(ch) not in ("Cf", "Cc")
-                   or ch in "\t")
+    return _IGNORABLE.sub("", "".join(
+        ch for ch in line
+        if unicodedata.category(ch) not in ("Cf", "Cc") or ch in "\t"))
 
 
 def parse(text: str) -> list[ParsedEntry]:
@@ -501,30 +434,15 @@ def parse(text: str) -> list[ParsedEntry]:
     total = len(candidates)
 
     for index, (line_no, raw) in enumerate(candidates):
-        # CR4 (2026-07-26). Invisible formatting characters are stripped
-        # BEFORE anything reads the line.
-        #
-        # `_LINE`'s label group is `[^\W\d_][\w /_.+-]{0,28}?`, and a
-        # Unicode category-Cf character (U+200B ZWSP, U+200E LRM, U+FEFF)
-        # matches neither `\w` nor `\s`. So `Гарант<ZWSP>: <76-hex Tox ID>`
-        # failed `_LINE` entirely, `label` came out None, and the line fell
-        # through to `_resolve_by_shape` — which strips every non-hex
-        # character, recovers a clean 76-hex Tox ID, and files it as
-        # ROLE_SELF. `_looks_third_party(None, ...)` then skipped its
-        # label word-set branch, because that branch is gated on `if
-        # label:`.
-        #
-        # Net effect: one invisible byte moved the GUARANTOR's key onto the
-        # VENDOR's node, at a score high enough to raise a proposal. That
-        # is the exact attribution docs/10 calls "serious and defamatory",
-        # and the ASCII/Cyrillic version of this hole was already found and
-        # closed once — the invisible-character variant reopened it.
-        #
-        # Stripped rather than rejected: a block is attacker-authored text
-        # and refusing the whole artefact over one character would lose the
-        # other fifteen lines of genuine evidence. The `visibleText`
-        # treatment in the UI still shows the analyst what was really
-        # there.
+        # Invisible formatting characters are stripped BEFORE anything reads the line. A Cf
+        # character (U+200B ZWSP, U+200E LRM, U+FEFF) matches neither `\w` nor `\s`, so a guarantor
+        # label followed by a ZWSP would fail `_LINE`, come out with `label` None and fall through
+        # to `_resolve_by_shape`, which strips every non-hex character, recovers a clean 76-hex Tox
+        # ID and files it as ROLE_SELF: one invisible byte would move the GUARANTOR's key onto the
+        # VENDOR's node, the attribution error docs/10 warns about. Stripped rather than rejected: a
+        # block is attacker-authored text, and refusing the artefact over one character would lose
+        # the other genuine lines. The `visibleText` treatment in the UI still shows the analyst
+        # what was really there.
         line = _TRIM_DECORATION.sub("", _strip_invisible(raw)).strip()
         if not line:
             continue
@@ -532,23 +450,18 @@ def parse(text: str) -> list[ParsedEntry]:
         label = match.group("label").strip() if match else None
         value = (match.group("value") if match else line).strip()
 
-        # `https://x.onion` is not a line labelled "https". The colon in a
-        # URI scheme made `_LINE` split it that way, leaving `//x.onion`
-        # as the value -- which `onion_norm` reduces to the empty string,
-        # so the vendor's own shop address was lost precisely when they
-        # pasted it bare, which is the common case.
+        # `https://x.onion` is not a line labelled "https": the colon in a URI scheme would make
+        # `_LINE` split it that way, leaving `//x.onion`, which `onion_norm` reduces to the empty
+        # string. A bare pasted shop address is the common case.
         if match and value.startswith("//"):
             label, value = None, line
 
         by_label = _resolve_by_label(label)
 
-        # Trailing prose in parentheses or after an arrow is a comment, not
-        # part of the identifier: "vendor@host (OTR only)" must not
-        # normalise to a value containing "(OTR only)".
-        #
-        # Except inside a PGP fingerprint, whose gpg display has two spaces
-        # in the middle (F37, 2026-10-02): its whole hex groups are kept,
-        # and only what follows them is cut.
+        # Trailing prose in parentheses or after an arrow is a comment, not part of the identifier:
+        # "vendor@host (OTR only)" must not normalise to a value containing "(OTR only)". Except
+        # inside a PGP fingerprint, whose gpg display has two spaces in the middle: its whole hex
+        # groups are kept, and only what follows them is cut.
         head, tail = _fingerprint_head(value, by_label)
         value_core = (head + _COMMENT_CUT.split(tail)[0]).strip()
         value_core = value_core.rstrip(",;")
@@ -675,14 +588,11 @@ def block_fingerprint(entries: list[ParsedEntry], raw_text: str) -> str:
 
 
 class ContactBlockService:
-    """The database half: the stoplist, shared-service counting, and
-    persistence.
+    """The database half: the stoplist, shared-service counting, and persistence.
 
-    Writes `comms.contact_block`, `comms.contact_block_entry` and
-    `collect.proposal`. Writes NO `comms.channel_binding`, no `core.node`
-    and no `core.edge` -- invariant 3, and enforced the way `ProposalStore`
-    enforces it: this class holds no GraphWriteService, so the path is
-    absent rather than merely unused.
+    Writes `comms.contact_block`, `comms.contact_block_entry` and `collect.proposal`, and no
+    `comms.channel_binding`, `core.node` or `core.edge` (invariant 3). Like `ProposalStore` it holds
+    no GraphWriteService, so the path is absent rather than merely unused.
     """
 
     def __init__(self, conn: psycopg.Connection):
@@ -743,19 +653,14 @@ class ContactBlockService:
                               case_id: UUID | None = None) -> None:
         """Take an entry off the list without deleting it.
 
-        Parses already cite this row. Deleting it would leave them citing
-        nothing, and a stoplist decision that turns out to be wrong is
-        exactly the one somebody will want to reconstruct.
+        Parses already cite this row, and a stoplist decision that turns out to be wrong is the one
+        somebody will want to reconstruct.
 
-        `scope` is REQUIRED and the UPDATE is predicated on it. Retiring by
-        id alone meant the globally-gated route -- which has no case gate
-        at all -- could retire a CASE-scoped entry: a holder of a global
-        REVIEWER role with no assignment to that case, who gets a 404
-        reading its stoplist, could still take entries off it. That is not
-        cosmetic. `_stoplist_hit` filters `retired_at IS NULL`, so every
-        later parse in that case silently stops flagging that escrow, and
-        the escrow's identifier starts being attributed to vendors --
-        docs/10's "serious, and easy, error", reintroduced quietly.
+        `scope` is REQUIRED and the UPDATE is predicated on it. Retiring by id alone would let the
+        globally-gated route, which has no case gate, retire a CASE-scoped entry: a holder of a
+        global REVIEWER role with no assignment to the case could take entries off its stoplist.
+        `_stoplist_hit` filters `retired_at IS NULL`, so every later parse in that case would
+        silently stop flagging that escrow and start attributing its identifier to vendors.
         """
         if not (reason or "").strip():
             raise ContactBlockError(
@@ -804,21 +709,13 @@ class ContactBlockService:
                       entry: ParsedEntry) -> tuple[UUID, str, str, str] | None:
         """(id, role, service_name, basis) if this value is a known service.
 
-        Two chances, and the second one matters more than it looks.
-
-        The obvious implementation matches only on `durable_value`, and
-        then the stoplist silently stops working for every line whose KIND
-        the parser could not resolve -- which is most of the dangerous
-        ones. `Contact: escrow@forum.biz` has no third-party label, and
-        `local@domain` is refused as ambiguous (a JID and an email are the
-        same shape), so it has no durable value, so it never reaches the
-        list. The escrow's Jabber gets attributed to the vendor: the exact
-        error docs/10 calls "serious, and easy".
-
-        Defence 1 (the label) and defence 3 (the list) are supposed to be
-        INDEPENDENT. So the fallback compares the case-folded observed text
-        directly. It is a weaker match and the row records that it was, but
-        a weaker match that fires beats a stronger one that cannot.
+        Two chances. Matching only on `durable_value` would stop the stoplist working for every line
+        whose KIND the parser could not resolve, which is most of the dangerous ones: `Contact:
+        escrow@forum.biz` has no third-party label, and `local@domain` is refused as ambiguous (a
+        JID and an email share a shape), so it has no durable value and never reaches the list.
+        Defence 1 (the label) and defence 3 (the list) are meant to be INDEPENDENT, so the fallback
+        compares the case-folded observed text directly. It is a weaker match and the row records
+        that it was, but a weaker match that fires beats a stronger one that cannot.
         """
         row = None
         if entry.durable_value:
@@ -866,32 +763,21 @@ class ContactBlockService:
                                    this_publisher: str | None) -> tuple[int, int]:
         """(distinct publishers, blocks) advertising this identifier.
 
-        docs/10: "Flag when a selector appears in many unrelated vendors'
-        blocks -- that is a shared service, not a shared identity."
+        docs/10: a selector in many unrelated vendors' blocks is a shared service, not a shared
+        identity. Counted over DISTINCT PUBLISHERS: one vendor reposting their block in eight
+        threads is one publisher, and counting blocks would demote their own strongest selector.
 
-        Counted over DISTINCT PUBLISHERS. One vendor who reposts their
-        block in eight threads is one publisher; counting blocks would
-        report them as a shared service and demote their own strongest
-        selector.
-
-        Restricted to `case_ids` -- the cases the CALLER can already see.
-        This is the same restriction `selectors.pivots` applies, for the
-        same reason: cross-case disclosure policy is undecided (open
-        question 5), and a count is a disclosure. "This Jabber appears in
-        four other cases" tells you those cases exist.
+        Restricted to `case_ids`, the cases the CALLER can already see, as `selectors.pivots` is:
+        cross-case disclosure policy is undecided (open question 5), and a count is a disclosure
+        ("this Jabber appears in four other cases" says those cases exist).
         """
         if not entry.durable_value or not case_ids:
             return 0, 0
-        # The publisher of the block being parsed is EXCLUDED from the
-        # query and added back once by the caller.
-        #
-        # Excluding only `exclude_block` was not enough: a publisher who
-        # advertised the same identifier in an earlier block was already
-        # inside the count, and the caller's `+ 1` then added them a
-        # second time. Three blocks by two publishers reported "3 distinct
-        # publishers", so a vendor reposting their own contact block
-        # eventually demoted their own strongest selector to THIRD_PARTY
-        # -- the exact outcome the docstring says this prevents.
+        # The publisher of the block being parsed is EXCLUDED from the query and added back once by
+        # the caller. Excluding only `exclude_block` is not enough: a publisher who advertised the
+        # same identifier in an earlier block would already be in the count, and the caller's `+ 1`
+        # would add them twice, so a vendor reposting their own block would eventually demote their
+        # own selector to THIRD_PARTY.
         row = self._c.execute(
             """SELECT count(DISTINCT coalesce(
                           b.publisher_identity_node_id::text,
@@ -939,21 +825,14 @@ class ContactBlockService:
             raise ContactBlockError(
                 "a contact block needs a source: where it was published is "
                 "what makes it attributable at all")
-        # Every caller-supplied id must belong to THIS case.
-        #
-        # `evidence.py` fixed this exact class once already and left the
-        # reason: these columns have no same-case constraint, so an
-        # unchecked id attaches a claim to something in a case the caller
-        # has no rights over, audited only under this one. Here the chain
-        # ran further than that: `_maybe_propose` puts the node id into a
-        # proposal payload, an accepted ATTRIBUTE proposal calls
-        # `add_assertion` on it, and `core.assertion` has no constraint
-        # tying its node's case to its own -- so an attacker-authored
-        # attribute claim surfaced in ANOTHER case's provenance.
-        #
-        # It also removes an oracle: an unknown id raised a
-        # ForeignKeyViolation, which is not a ContactBlockError and so
-        # became a 500 where a valid one gives 201.
+        # Every caller-supplied id must belong to THIS case. These columns have no same-case
+        # constraint, so an unchecked id attaches a claim to something in a case the caller has no
+        # rights over, audited only under this one. Here the chain runs further: `_maybe_propose`
+        # puts the node id into a proposal payload, an accepted ATTRIBUTE proposal calls
+        # `add_assertion` on it, and `core.assertion` has no constraint tying its node's case to its
+        # own, so an attacker-authored attribute claim would surface in ANOTHER case's provenance.
+        # It also removes an oracle: an unknown id would raise a ForeignKeyViolation, a 500 where a
+        # valid one gives 201.
         self._require_same_case(case_id, "core.node", "publisher identity",
                                 publisher_identity_node_id)
         self._require_citable_document(case_id, document_id, classification,
@@ -990,9 +869,8 @@ class ContactBlockService:
                     (case_id, digest)).fetchone()
                 earlier = self.get(existing[0]) if existing else None
                 if earlier is None:
-                    # Parsed already in this case at labels the caller does
-                    # not hold (S1, 2026-09-25): row security hides that
-                    # block, and it is not handed back through this door.
+                    # Parsed already in this case at labels the caller does not hold: row security
+                    # hides that block, and it is not handed back through this door.
                     raise ContactBlockError(
                         "this block has already been parsed in this case, at "
                         "a label you do not hold")
@@ -1035,19 +913,12 @@ class ContactBlockService:
                      else None,
                      entry_proposal))
 
-            # Fingerprinted AFTER the stoplist and shared-service passes,
-            # not before.
-            #
-            # `block_fingerprint` excludes THIRD_PARTY entries so that two
-            # unrelated vendors both quoting the forum's escrow do not look
-            # like one copying the other -- its docstring says exactly
-            # that. Computing it from the raw parse defeated its own
-            # purpose: an entry only becomes THIRD_PARTY when the stoplist
-            # or the shared-service count says so, and both run afterwards.
-            # The result was that any two vendors quoting the same
-            # stoplisted escrow shared a fingerprint and were reported as
-            # impersonating each other -- defences 3 and 4 turned into a
-            # false accusation.
+            # Fingerprinted AFTER the stoplist and shared-service passes. `block_fingerprint`
+            # excludes THIRD_PARTY entries so two unrelated vendors both quoting the forum's escrow
+            # do not look like one copying the other, and an entry only becomes THIRD_PARTY when the
+            # stoplist or the shared-service count says so, both of which run first. Computed from
+            # the raw parse, any two vendors quoting the same stoplisted escrow would share a
+            # fingerprint and be reported as impersonating each other.
             fingerprint = block_fingerprint(entries, raw_text)
             self._c.execute(
                 "UPDATE comms.contact_block SET block_fingerprint = %s "
@@ -1095,20 +966,16 @@ class ContactBlockService:
                                   document_id: UUID | None,
                                   classification: str,
                                   compartments: frozenset[str]) -> None:
-        """Refuse a document this block may not cite (L1, 2026-09-24).
+        """Refuse a document this block may not cite.
 
-        This leg used `_require_same_case`, whose SQL selects a `case_id`
-        that `collect.document` does not have, so any block naming a
-        document answered 500 (UndefinedColumn). A document hangs off a
-        source, not a case, so "the same case" means one this case already
-        cites: a proposal, a claim or a contact block of the case names
-        it. That keeps the same-case intent (citing another case's
-        material is a disclosure) and leaves no probe: a holder of
-        comms.bind can name only documents the case already cites, which
-        Triage shows them. The document is held to the block's labels as
-        every document read holds it: unpurged, its own label and its
-        source's within the block's classification, and its compartments
-        within the case's and the block's."""
+        A document hangs off a source, not a case (`collect.document` has no `case_id`, so
+        `_require_same_case` does not apply), so "the same case" means one this case already cites:
+        a proposal, a claim or a contact block of the case names it. That keeps the same-case
+        intent, since citing another case's material is a disclosure, and leaves no probe: a holder
+        of comms.bind can name only documents the case already cites, which Triage shows them. The
+        document is held to the block's labels as every document read holds it: unpurged, its own
+        label and its source's within the block's classification, and its compartments within the
+        case's and the block's."""
         if document_id is None:
             return
         row = self._c.execute(
@@ -1187,13 +1054,10 @@ class ContactBlockService:
                        document_id: UUID | None) -> UUID | None:
         """Raise a proposal, or explain in the row why it did not.
 
-        Nothing is proposed without a publisher identity to attribute it
-        TO. An identifier with no claimant is an observation about a forum
-        post, not a claim about a person, and manufacturing an identity to
-        hang it on is exactly the landfill docs/09 warns about.
-
-        The proposal is always a CLAIM. docs/10: "Only CONFIRMED should
-        carry weight in automatic identity resolution. CLAIMED is a lead."
+        Nothing is proposed without a publisher identity to attribute it TO: an identifier with no
+        claimant is an observation about a forum post, not a claim about a person, and manufacturing
+        an identity to hang it on is the landfill docs/09 warns about. The proposal is always a
+        CLAIM (docs/10): only CONFIRMED carries weight in automatic identity resolution.
         """
         if entry.role != ROLE_SELF or not entry.durable_value:
             return None
@@ -1235,12 +1099,10 @@ class ContactBlockService:
             compartments: frozenset[str] = frozenset()) -> dict | None:
         """The block and its parsed entries.
 
-        `clearance` is optional ONLY so `parse_and_store` can read back
-        what it just wrote on behalf of the caller who wrote it. Every
-        other caller must pass it: this returns `raw_text` -- the whole
-        forum post -- and a contact block can be classified above its
-        case, so the case gate alone let an AMBER-cleared reader retrieve
-        a RED block in full.
+        `clearance` is optional ONLY so `parse_and_store` can read back what it just wrote on behalf
+        of the caller who wrote it. Every other caller must pass it: this returns `raw_text`, the
+        whole forum post, and a contact block can be classified above its case, so the case gate
+        alone would let an AMBER-cleared reader retrieve a RED block in full.
         """
         row = self._c.execute(
             """SELECT id, case_id, publisher_identity_node_id, publisher_handle,
@@ -1255,9 +1117,8 @@ class ContactBlockService:
             (block_id, clearance, clearance, list(compartments))).fetchone()
         if row is None:
             return None
-        # The entry id is returned (comms F10b, 2026-09-24): a vendor key's
-        # fingerprint is confirmed against ONE line of a block, and the
-        # console names that line by its id.
+        # The entry id is returned: a vendor key's fingerprint is confirmed against ONE line of a
+        # block, and the console names that line by its id.
         entries = self._c.execute(
             """SELECT line_no, label, platform_key, selector_type,
                       observed_value, durable_value, role, role_reason, score,
@@ -1303,27 +1164,17 @@ class ContactBlockService:
                                  ) -> list[dict]:
         """Blocks with the same selector set under DIFFERENT publishers.
 
-        docs/10: "Scammers copy legitimate vendors' contact blocks
-        wholesale. The same block under two handles means EITHER one
-        operator OR one impersonating the other."
+        docs/10: "Scammers copy legitimate vendors' contact blocks wholesale. The same block under
+        two handles means EITHER one operator OR one impersonating the other." Both readings are
+        reported, in that order, because the tool cannot tell them apart and picking one would guess
+        on the analyst's behalf which of two people is the fraud.
 
-        Both readings are reported, in that order, because the tool cannot
-        tell them apart and an interface that picked one would be guessing
-        on the analyst's behalf about which of two people is the fraud.
-
-        ## CR5 (2026-07-26) — this filtered on case_id and nothing else
-
-        The sibling `get()` composes the block's own labels with its case's
-        and gates on both, and its docstring says why: **a block can be
-        classified above its case.** This method skipped that entirely, and
-        it aggregates `publisher_handle` and `source_ref` — so a RED block
-        sharing a fingerprint inside an AMBER case handed its publisher and
-        its source to any AMBER analyst holding `comms.read`.
-
-        `clearance` is REQUIRED rather than defaulted, for the reason
-        `SampleService.queue` learned the same lesson (F19): a caller who
-        forgets an optional clearance argument becomes maximally
-        privileged in silence.
+        The block's own labels are composed with its case's and gated on both, as in `get()`: a
+        block can be classified above its case, and this method aggregates `publisher_handle` and
+        `source_ref`, so a RED block sharing a fingerprint inside an AMBER case would otherwise hand
+        its publisher and source to any AMBER analyst holding `comms.read`. `clearance` is REQUIRED
+        rather than defaulted: a caller who forgets an optional clearance argument becomes maximally
+        privileged in silence (as with `SampleService.queue`).
         """
         if clearance is None:
             raise ValueError(

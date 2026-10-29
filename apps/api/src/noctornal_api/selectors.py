@@ -1,41 +1,31 @@
-"""Selector storage — the entity-resolution join key.
+"""Selector storage: the entity-resolution join key.
 
-A selector is an atomic observable (a jabber, a PGP fingerprint, a BTC
-address). This store is the bridge between the ontology package's
-normalisers (the ONE source of truth for canonical form) and core.selector:
-every write runs the raw value through noctornal_ontology.normalise, so the
-norm_value the database matches on can never drift from the ontology
-definition. Two observations of the same real-world identifier therefore
-collide on (case_id, selector_type, norm_value, classification,
-compartments) and are counted, not duplicated. Since 0134 the labels are
-part of the key: a row carries its owner's labels (the floor when it has no
-owner), and a reader sees only the rows within their own ceiling, so a value
-held above a caller is indistinguishable from one held nowhere
-(`record_for_reader`, `find_for_reader`).
+A selector is an atomic observable (a jabber, a PGP fingerprint, a BTC address). This store is the bridge
+between the ontology package's normalisers (the one source of truth for canonical form) and core.selector:
+every write runs the raw value through noctornal_ontology.normalise, so the norm_value the database matches
+on can never drift from the ontology definition. Two observations of the same real-world identifier
+therefore collide on (case_id, selector_type, norm_value, classification, compartments) and are counted,
+not duplicated. The labels are part of the key (0134): a row carries its owner's labels (the floor when it
+has no owner), and a reader sees only the rows within their own ceiling, so a value held above a caller is
+indistinguishable from one held nowhere (`record_for_reader`, `find_for_reader`).
 
-Scope (Phase 1, docs/09 "Selector storage, normalisers per type,
-exact-match lookup"):
+Scope (docs/09 "Selector storage, normalisers per type, exact-match lookup"):
 - record: normalise + upsert with observation counting.
 - find: normalise + exact within-case lookup (the join key).
-- link_to_node: attribute a selector to its owning node. Because a
-  selector is unique per case, attributing a STRONG selector that already
-  belongs to a different node is exactly a merge lead — it raises
-  SelectorOwnerConflict so the human sees it, rather than silently
-  repointing (docs/01: strong selectors are the merge evidence; the merge
-  itself, reversible + step-up + dual-control, is Phase 6). force=True
+- link_to_node: attribute a selector to its owning node. Because a selector is unique per case, attributing
+  a strong selector that already belongs to a different node is a merge lead: it raises
+  SelectorOwnerConflict so the human sees it, rather than silently repointing (docs/01: strong selectors
+  are the merge evidence; the merge itself, reversible + step-up + dual-control, is Phase 6). force=True
   repoints deliberately.
-- pivots: cross-case matches, but ONLY over case ids the caller already
-  has access to (passed in), so the undecided cross-case-disclosure policy
-  (open question 5) cannot leak through this primitive. Cross-case is also
-  where "same observable, different owners" is genuinely expressible — the
-  per-case unique constraint makes it impossible within one case.
+- pivots: cross-case matches, but only over case ids the caller already has access to (passed in), so the
+  undecided cross-case-disclosure policy (open question 5) cannot leak through this primitive. Cross-case
+  is also where "same observable, different owners" is expressible; the per-case unique constraint makes it
+  impossible within one case.
 
-core.selector.node_id is observation bookkeeping — "this observable was
-attributed to this node" — NOT an asserted graph edge. To make ownership a
-graph fact that carries provenance and renders in the sociogram, create a
-CONTROLS edge via GraphWriteService (which requires an assertion). Keeping
-the two distinct is why core.selector is not covered by the invariant-1
-triggers: it is the observable index, not a graph element.
+core.selector.node_id is observation bookkeeping ("this observable was attributed to this node"), not an
+asserted graph edge. To make ownership a graph fact that carries provenance and renders in the sociogram,
+create a CONTROLS edge via GraphWriteService (which requires an assertion). Keeping the two distinct is why
+core.selector is not covered by the invariant-1 triggers: it is the observable index, not a graph element.
 """
 from __future__ import annotations
 
@@ -56,14 +46,12 @@ _VALID_TYPES = frozenset(s.key for s in SELECTOR_TYPES)
 #: Types normalised as URLs, whose raw value can carry a password or token.
 _URL_NORMALISED = {s.key: s.normaliser == "url_norm" for s in SELECTOR_TYPES}
 
-#: Entity types whose label IS a selector value, so the index follows the
-#: label (graph-selector-index-drift, 2026-10-03). The same set as
+#: Entity types whose label is a selector value, so the index follows the label. The same set as
 #: `routers.graph.SELECTOR_NODE_TYPES`, which the create form checks.
 LABEL_IS_SELECTOR = frozenset({"SELECTOR", "COMMS_ACCOUNT", "WALLET"})
 
 
-#: Why a link with a credential is not taken as a selector label
-#: (graph-url-selector-keeps-credentials, 2026-10-03).
+#: Why a link with a credential is not taken as a selector label.
 CREDENTIAL_REFUSAL = ("This link carries a password, token or key, which the "
                       "graph does not record. Enter it without them.")
 
@@ -83,9 +71,8 @@ def carries_credential(selector_type: str | None, value: object) -> bool:
 
 
 def label_is_selector(node_type: str | None, attrs: dict | None) -> bool:
-    """Whether an entity's label IS a selector value: its type says so, or
-    it was accepted from a proposal that named the selector type (a
-    capture's SELECTOR, a sample's INFRA or WALLET)."""
+    """Whether an entity's label is a selector value: its type says so, or it was accepted from a proposal
+    that named the selector type (a capture's SELECTOR, a sample's INFRA or WALLET)."""
     return (node_type in LABEL_IS_SELECTOR
             or bool((attrs or {}).get("selector_type")))
 
@@ -107,11 +94,10 @@ _COLUMNS = ("id, case_id, selector_type, raw_value, norm_value, node_id, "
 _COLUMNS_S = ("s.id, s.case_id, s.selector_type, s.raw_value, s.norm_value, "
               "s.node_id, s.first_seen, s.last_seen, s.observation_cnt")
 
-#: The rows of one value in one case that a caller may read (0134): the
-#: row's own labels within their ceiling and, when it has an owner, the owner
-#: within it too, so a row written below its owner by a writer that skipped
-#: the labels trigger is still never shown. Parameters: case, type, norm,
-#: clr (clearance name), held (compartments).
+#: The rows of one value in one case that a caller may read (0134): the row's own labels within their
+#: ceiling and, when it has an owner, the owner within it too, so a row written below its owner by a writer
+#: that skipped the labels trigger is still never shown. Parameters: case, type, norm, clr (clearance
+#: name), held (compartments).
 _READABLE = """s.classification <= %(clr)s::core.tlp
                    AND s.compartments <@ %(held)s::text[]
                    AND (s.node_id IS NULL OR EXISTS (
@@ -186,15 +172,10 @@ class SelectorStore:
             raise SelectorError(f"unknown selector type: {selector_type!r}")
         norm = normalise(selector_type, raw_value)
         if not norm.strip():
-            # An empty canonical form is not a value, and storing it as one
-            # is how unrelated observations collide: '' is a value to
-            # UNIQUE (case_id, selector_type, norm_value), so every
-            # observation that normalised to nothing shared ONE row -- and
-            # on a strong type that row is a merge lead between strangers.
-            # Refused with the ontology's own reason (a bare positive
-            # Telegram id, refused since 2026-09-11, is the case that made
-            # this explicit; `comms._durable_or_none` closed the same hole
-            # on its side earlier).
+            # An empty canonical form is not a value, and storing it as one makes unrelated observations
+            # collide: '' is a value to UNIQUE (case_id, selector_type, norm_value), so every observation
+            # that normalised to nothing would share one row, and on a strong type that row is a merge
+            # lead between strangers. Refused with the ontology's own reason.
             raise SelectorError(refusal(selector_type, raw_value))
         return norm
 
@@ -208,31 +189,24 @@ class SelectorStore:
         observed_at: datetime | None = None,
         count: bool = True,
     ) -> SelectorRow:
-        """Upsert an observation. A repeat of the same normalised value in
-        the same case bumps observation_cnt and last_seen rather than
-        inserting a duplicate; a node link fills an empty owner but never
-        overwrites an existing one (re-attribution is a deliberate, audited
-        act, not a silent side effect of re-observation).
+        """Upsert an observation.
 
-        The row is the observation AT its owner's labels (the floor when it
-        has none): 0134's trigger sets them, so "the same value" here means
-        the same value at the same labels. A request's caller records through
-        `record_for_reader`, which never meets a row above them.
+        A repeat of the same normalised value in the same case bumps observation_cnt and last_seen rather
+        than inserting a duplicate; a node link fills an empty owner but never overwrites an existing one
+        (re-attribution is a deliberate, audited act, not a silent side effect of re-observation).
 
-        Two exceptions, both graph-selector-index-drift (2026-10-03). An
-        owner that has been RETIRED is not an owner: the entity "should
-        never have been in the case file", so a live entity recording the
-        same value takes the row over (the retired one kept it before, and
-        re-creating an entity after retiring a mistyped one recorded
-        nothing against it). The check is a positive EXISTS on a retired
-        row, so under row security an owner the caller cannot see is never
-        taken over. And `count=False` re-points an index entry without
-        counting an observation, for a label that changed rather than was
-        seen again (`follow_label`)."""
+        The row is the observation at its owner's labels (the floor when it has none): 0134's trigger sets
+        them, so "the same value" means the same value at the same labels. A request's caller records
+        through `record_for_reader`, which never meets a row above them.
+
+        Two exceptions. An owner that has been retired is not an owner (the entity "should never have been
+        in the case file"), so a live entity recording the same value takes the row over. The check is a
+        positive EXISTS on a retired row, so under row security an owner the caller cannot see is never
+        taken over. And `count=False` re-points an index entry without counting an observation, for a label
+        that changed rather than was seen again (`follow_label`)."""
         norm = self._norm(selector_type, raw_value)
-        # A URL's userinfo or token is a secret, never an identifier: the
-        # index keeps the value as written, so it keeps it without them
-        # (graph-url-selector-keeps-credentials, 2026-10-03).
+        # A URL's userinfo or token is a secret, never an identifier: the index keeps the value as
+        # written, so it keeps it without them.
         if _URL_NORMALISED.get(selector_type):
             raw_value = redact_url_credentials(raw_value)
         # A node_id must belong to THIS case: an unchecked value either
@@ -281,39 +255,28 @@ class SelectorStore:
         node_id: UUID | None = None,
         observed_at: datetime | None = None,
     ) -> tuple[SelectorRow, str]:
-        """`record`, for a request whose caller has `clearance` and
-        `compartments`: (the row the sighting was counted on, the canonical
-        value). Always a row, and always one the caller may read.
+        """`record`, for a request whose caller has `clearance` and `compartments`: (the row the sighting
+        was counted on, the canonical value). Always a row, and always one the caller may read.
 
-        graph-selector-record-oracle, http_ui-002 and rls-2 (2026-10-03,
-        both rounds). `record`'s ON CONFLICT DO UPDATE met the one row for a
-        value whoever owned it, bumped it and handed back its owner, so
-        POST /selectors told an AMBER analyst which RED entity held an
-        email. The first fix answered such a value as a first sighting and
-        stored nothing, which left the oracle one request away (a repeat
-        post, a read, a second entity, the id as a merge's basis all told a
-        held value from an unheld one). Since 0134 a row is keyed by its
-        labels as well, so a value held above the caller is not among the
-        rows they can read and what they record is simply their own row:
+        `record`'s ON CONFLICT DO UPDATE meets the one row for a value whoever owns it, bumps it and hands
+        back its owner, so POST /selectors would tell an AMBER analyst which RED entity held an email. A
+        row is keyed by its labels as well (0134), so a value held above the caller is not among the rows
+        they can read and what they record is simply their own row:
 
-        - named (`node_id`): the sighting is stored at the labels of that
-          entity, which the caller must be able to read. Another observation
-          of the value at those labels is the row that is counted; its owner
-          stays (re-attribution is deliberate, never a side effect).
-        - bare: the strictest row the caller can read is counted, and when
-          there is none the sighting is stored at the floor (CLEAR, no
-          compartments), which every reader of the case can read. Nothing a
-          caller records is ever narrowed by an entity attributed later:
-          that entity gets a row of its own at its own labels.
+        - named (`node_id`): the sighting is stored at the labels of that entity, which the caller must be
+          able to read. Another observation of the value at those labels is the row that is counted; its
+          owner stays (re-attribution is deliberate, never a side effect).
+        - bare: the strictest row the caller can read is counted, and when there is none the sighting is
+          stored at the floor (CLEAR, no compartments), which every reader of the case can read. Nothing a
+          caller records is ever narrowed by an entity attributed later: that entity gets a row of its own
+          at its own labels.
 
         A row above the caller is never read, counted or written.
 
-        A link that carries a password, token or key is refused
-        (`CREDENTIAL_REFUSAL`), as `POST /nodes` refuses it for an entity's
-        label: this is the route a person types a value into, and the row
-        stored its raw value as written and answered with it
-        (verification round three, A6, 2026-10-07). `record` redacts, for
-        the machine paths that read a value out of a capture."""
+        A link that carries a password, token or key is refused (`CREDENTIAL_REFUSAL`), as `POST /nodes`
+        refuses it for an entity's label: this is the route a person types a value into, and the row would
+        store its raw value as written and answer with it. `record` redacts, for the machine paths that
+        read a value out of a capture."""
         norm = self._norm(selector_type, raw_value)
         if carries_credential(selector_type, raw_value):
             raise SelectorError(CREDENTIAL_REFUSAL)
@@ -369,10 +332,9 @@ class SelectorStore:
     ) -> SelectorRow | None:
         """The strictest row of this value the caller may read, or None.
 
-        A row above the caller, or owned by an entity above them, is not
-        among them (graph-selector-record-oracle, 2026-10-03): the answer is
-        what it would be if the value were held nowhere, because the rows
-        the caller records are their own (`record_for_reader`)."""
+        A row above the caller, or owned by an entity above them, is not among them: the answer is what it
+        would be if the value were held nowhere, because the rows the caller records are their own
+        (`record_for_reader`)."""
         norm = self._norm(selector_type, raw_value)
         row = self._c.execute(
             f"""SELECT {_COLUMNS_S} FROM core.selector s
@@ -431,38 +393,27 @@ class SelectorStore:
         clearance: str | None = None,
         compartments: frozenset[str] | list[str] = (),
     ) -> UUID | None:
-        """Keep the index on the label of an entity whose label IS its
-        selector, when the label changes, and return another live entity
-        that already holds the new value (a merge lead), or None.
+        """Keep the index on the label of an entity whose label is its selector, when the label changes,
+        and return another live entity that already holds the new value (a merge lead), or None.
 
-        graph-selector-index-drift (2026-10-03). Only `create_node` wrote
-        the index, so a corrected label left it on the old value, which
-        then pointed at an entity that no longer carried it, while the new
-        value was unindexed: selector search missed the live entity and a
-        strong duplicate was never surfaced.
+        Without this a corrected label would leave the index on the old value, pointing at an entity that
+        no longer carries it, while the new value was unindexed: selector search would miss the live entity
+        and a strong duplicate would never be surfaced.
 
-        The selector types followed are those of the entity's own rows
-        whose value is its OLD label, plus `declared_type` (a Triage
-        entity's `attrs.selector_type`, whose value was never indexed
-        before this date). Rows the entity holds for any other value (a
-        selector recorded against it by hand) are not touched. For each
-        type, the old value's row is released and the new value recorded
-        against the entity without counting an observation.
+        The selector types followed are those of the entity's own rows whose value is its old label, plus
+        `declared_type` (a Triage entity's `attrs.selector_type`). Rows the entity holds for any other value
+        (a selector recorded against it by hand) are not touched. For each type, the old value's row is
+        released and the new value recorded against the entity without counting an observation.
 
-        `strict` refuses a new label that is not a selector of that type,
-        with the ontology's own reason, as `create_node` does. A
-        retraction that restores an older label passes False: the label
-        was accepted under the rules of its day, and a withdrawn source
-        must never be kept live because a rule has since tightened, so
-        the index then simply holds nothing for it.
+        `strict` refuses a new label that is not a selector of that type, with the ontology's own reason,
+        as `create_node` does. A retraction that restores an older label passes False: the label was
+        accepted under the rules of its day, and a withdrawn source must never be kept live because a rule
+        has since tightened, so the index then simply holds nothing for it.
 
-        `clearance` and `compartments` are the caller's (verification round
-        three, A1, 2026-10-07): the types of an entity that owns no row of
-        its own are read only from rows the caller may read, so a value
-        held above them is refused no differently from one held nowhere.
-        Without them that lookup is not made (fail closed: an unknown
-        caller learns nothing from it), and the entity is followed as it
-        was."""
+        `clearance` and `compartments` are the caller's: the types of an entity that owns no row of its
+        own are read only from rows the caller may read, so a value held above them is refused no
+        differently from one held nowhere. Without them that lookup is not made (fail closed: an unknown
+        caller learns nothing from it), and the entity is followed as it was."""
         types: list[str] = []
         for sel_type, norm in self._c.execute(
                 """SELECT selector_type, norm_value FROM core.selector
@@ -501,25 +452,20 @@ class SelectorStore:
         self, case_id: UUID, label: str, clearance: str,
         compartments: frozenset[str] | list[str],
     ) -> list[str]:
-        """The selector types of an entity that owns no index row for its
-        own label: a DUPLICATE, created while another entity held the value
-        (the index keeps its first owner and reports the second as a lead).
+        """The selector types of an entity that owns no index row for its own label: a duplicate, created
+        while another entity held the value (the index keeps its first owner and reports the second as a
+        lead).
 
-        The duplicate is the same kind of entity as the first, so the types
-        are those of the rows the case's index holds for this label's
-        canonical form, whoever owns them (or nobody). Without them its
-        label corrections were neither validated nor followed, while the
-        owner's were (graph-selector-index-drift, 2026-10-03, verify
-        round).
+        The duplicate is the same kind of entity as the first, so the types are those of the rows the
+        case's index holds for this label's canonical form, whoever owns them (or nobody). Otherwise its
+        label corrections would be neither validated nor followed, while the owner's were.
 
-        Only rows the caller may read are asked (`_READABLE`). The table is
-        policied by case alone (0134), so row security does not hide a row
-        held above the caller, and without this a correction to junk was
-        refused, naming the type, where the value was held above them and
-        accepted where it was held by nobody (verification round three, A1,
-        2026-10-07). A row they cannot read is not found, and the entity is
-        then followed as it was. Where the holder IS readable the labels of
-        its row are the duplicate's own, so nothing legitimate is missed."""
+        Only rows the caller may read are asked (`_READABLE`). The table is policied by case alone (0134),
+        so row security does not hide a row held above the caller, and without this a correction to junk
+        would be refused, naming the type, where the value was held above them and accepted where it was
+        held by nobody. A row they cannot read is not found, and the entity is then followed as it was.
+        Where the holder is readable the labels of its row are the duplicate's own, so nothing legitimate
+        is missed."""
         pairs = [(t, n) for t in sorted(_VALID_TYPES)
                  if (n := _norm_or_empty(t, label)).strip()]
         if not pairs:
@@ -537,19 +483,16 @@ class SelectorStore:
 
     def release_node(self, *, case_id: UUID, node_id: UUID,
                      label: str | None = None) -> int:
-        """Let go of every index row a retired entity held, returning how
-        many (graph-selector-index-drift, 2026-10-03). A retired entity
-        "should never have been in the case file", so a selector recorded
-        against it belongs to nobody until a live entity records it.
+        """Let go of every index row a retired entity held, returning how many.
 
-        With `label` (the retired entity's), a row goes to the oldest live
-        entity of the case that holds the same value, a duplicate created
-        while the retired one owned it: it was never indexed, and left
-        alone it stayed unindexed with the row ownerless (verify round,
-        2026-10-03). The duplicate is found by the fold the create form's
-        duplicate check uses (case and runs of whitespace), then confirmed
-        by the canonical form under the row's own type; one this reader
-        cannot see under row security is not handed the row."""
+        A retired entity "should never have been in the case file", so a selector recorded against it
+        belongs to nobody until a live entity records it.
+
+        With `label` (the retired entity's), a row goes to the oldest live entity of the case that holds
+        the same value, a duplicate created while the retired one owned it: it was never indexed, and left
+        alone it would stay unindexed with the row ownerless. The duplicate is found by the fold the create
+        form's duplicate check uses (case and runs of whitespace), then confirmed by the canonical form
+        under the row's own type; one this reader cannot see under row security is not handed the row."""
         released = self._c.execute(
             "UPDATE core.selector SET node_id = NULL "
             "WHERE case_id = %s AND node_id = %s "
@@ -578,8 +521,8 @@ class SelectorStore:
     def find(
         self, *, case_id: UUID, selector_type: str, raw_value: str
     ) -> SelectorRow | None:
-        """Exact-match lookup within a case: normalise the query the same
-        way it was stored, then match on the unique key."""
+        """Exact-match lookup within a case: normalise the query as it was stored, then match on the unique
+        key."""
         norm = self._norm(selector_type, raw_value)
         row = self._c.execute(
             """SELECT id, case_id, selector_type, raw_value, norm_value,

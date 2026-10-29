@@ -1,21 +1,16 @@
-"""infra/production/compose.yml's own Redis start script, rendered to run
-outside compose (the limiter's Redis ACL, review of 2026-10-02).
+"""infra/production/compose.yml's own Redis start script, rendered to run outside compose.
 
-Two readers. test_redis_limiter_acl.py and test_production_secrets_script.py
-run it under `sh` with a stand-in for redis-server, to hold what its start
-check refuses and that the installer step writes what it accepts. CI's
-"Start the ACL Redis" step runs it in redis:7-alpine, so the real-Redis leg
-of test_redis_limiter_acl.py runs instead of skipping, which the "No tests
-were skipped" gate would fail:
+Two readers. test_redis_limiter_acl.py and test_production_secrets_script.py run it under `sh` with
+a stand-in for redis-server, to hold what its start check refuses and that the installer step writes
+what it accepts. CI's "Start the ACL Redis" step runs it in redis:7-alpine, so the real-Redis leg of
+test_redis_limiter_acl.py runs instead of skipping, which the "No tests were skipped" gate would fail:
 
     python apps/api/tests/acl_redis_support.py --tenant > start.sh
 
-The script is the compose file's, but for compose's `$$` escape written
-back as `$`. With --tenant it has one line more, before the server starts:
-a second user, `acl_tenant`, with every key, channel and command, whose
-password is ACL_TENANT_PASSWORD at run time. It stands for another tenant
-of a shared Redis, which the compose file's ACL never has, so the tests can
-show the limiter cannot reach that tenant's keys, and can read ACL LOG.
+The script is the compose file's, with compose's `$$` escape written back as `$`. With --tenant it
+has one line more before the server starts: a second user, `acl_tenant`, with every key, channel and
+command, whose password is ACL_TENANT_PASSWORD at run time. It stands for another tenant of a shared
+Redis, so the tests can show the limiter cannot reach that tenant's keys, and can read ACL LOG.
 """
 from __future__ import annotations
 

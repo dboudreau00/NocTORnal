@@ -1,61 +1,39 @@
-"""Similarity spaces, the embedding pass, the MEANING gate and the
-similarity reads (F6.1 to F6.4, 2026-09-24).
+"""Similarity spaces, the embedding pass, the MEANING gate and the similarity reads.
 
-## What is embedded, and what never is
+What is embedded: collected documents, exhibits (title, description and extracted text, never the bytes) and
+live claims (rationale, reference and claimed values). Never entities, ingest records and victim credentials,
+comms messages, deception captures or samples; and nothing that is victim data, in ANY space, even the local
+one: a document whose category is in ingest.HIGH_RISK_CATEGORIES, a claim citing one, or any item carrying a
+compartment some ingest key forces (the stealer-log compartment). An embedding is a free-text index, and
+decision 52 makes free-text search over victim data impossible. Those items get an EXCLUDED row, so they are
+neither pending for ever nor indexed. The forced set is re-read on every pass: the vectors of items it now
+covers are replaced by EXCLUDED rows, and EXCLUDED rows it no longer covers are released.
 
-Collected documents, exhibits (title, description and extracted text,
-never the bytes) and live claims (rationale, reference and claimed
-values). Never: entities, ingest records and victim credentials, comms
-messages, deception captures, samples; and nothing that is victim data,
-in ANY space, even the local one: a document whose category is in
-ingest.HIGH_RISK_CATEGORIES, a claim citing one, or any item carrying a
-compartment some ingest key forces (the stealer-log compartment). An
-embedding is a free-text index, and decision 52 makes free-text search
-over victim data impossible. Those items get an EXCLUDED row, so they
-are neither pending for ever nor indexed. The forced set is re-read on
-every pass and the vectors of items it now covers are replaced by
-EXCLUDED rows, and EXCLUDED rows it no longer covers are released: an
-exclusion judged only at embed time kept vectors of material a key began
-forcing later.
+The pass holds no row lock across the embedder, the audit or the send. Every audit.event insert takes the audit
+chain's advisory lock until it commits, and the retention purge audits before it updates documents, so a batch
+that held FOR SHARE on documents while it wrote EMBED_BATCH_SENT elsewhere and waited on the model could stall
+every audited action in the product with no cycle the deadlock detector sees. So a batch is two short
+transactions around the work:
 
-## The pass holds no row lock across the embedder, the audit or the send
-
-A batch is two short transactions around the work, because every
-audit.event insert takes the audit chain's advisory lock until it
-commits, and the retention purge audits before it updates documents, so
-a batch that held FOR SHARE on documents while it
-wrote EMBED_BATCH_SENT elsewhere and waited on the model could stall
-every audited action in the product with no cycle the deadlock detector
-sees. So:
-
-- T1 reads the items (documents FOR SHARE SKIP LOCKED, so a row a writer
-  is changing is counted busy and never waited on), judges them, writes
-  EXCLUDED, EMPTY and WITHHELD rows, and commits. Withheld items are never
-  held while anything is sent.
-- For MEANING, EMBED_BATCH_SENT is committed in its own short transaction
-  with a lock timeout BEFORE the request; if it cannot be written nothing
-  is sent and the batch is FAILED audit_unavailable.
+- T1 reads the items (documents FOR SHARE SKIP LOCKED, so a row a writer is changing is counted busy and never
+  waited on), judges them, writes EXCLUDED, EMPTY and WITHHELD rows, and commits. Withheld items are never held
+  while anything is sent.
+- For MEANING, EMBED_BATCH_SENT is committed in its own short transaction with a lock timeout BEFORE the
+  request; if it cannot be written nothing is sent and the batch is FAILED audit_unavailable.
 - The embedder runs, and the request is sent, outside any transaction.
-- T2 locks the same rows FOR SHARE (no skip, under a lock timeout),
-  re-reads them, and writes a vector only for an item whose text, labels,
-  category and case state are what T1 judged. A changed item is left in
-  the queue; its trigger already queued it again. The audit row still
-  names what left the host.
+- T2 locks the same rows FOR SHARE (no skip, under a lock timeout), re-reads them, and writes a vector only for
+  an item whose text, labels, category and case state are what T1 judged. A changed item is left in the queue;
+  its trigger already queued it again. The audit row still names what left the host.
 
-The same rule holds on every path: registration, the canary, recheck, the
-admin pass, on-demand embedding and a free-text query never write an audit
-row inside a transaction that then waits on the network or on row locks.
+The same rule holds on every path: registration, the canary, recheck, the admin pass, on-demand embedding and a
+free-text query never write an audit row inside a transaction that then waits on the network or on row locks.
 
-## Reads
-
-Every similarity read of documents runs per TLP level over that level's
-partial HNSW index (migration 0092), plus an exact branch over the
-compartmented rows the reader holds, then joins back to the live document
-and source with the three label predicates. Rows above the reader are in
-other indexes, so they can neither be returned nor crowd out what the
-reader may see. Case items are an exact scan inside one case. No response
-ever carries a vector: a vector can be partly inverted to its text, so it
-is handled as its text, at its text's labels.
+Every similarity read of documents runs per TLP level over that level's partial HNSW index (migration 0092),
+plus an exact branch over the compartmented rows the reader holds, then joins back to the live document and
+source with the three label predicates. Rows above the reader are in other indexes, so they can neither be
+returned nor crowd out what the reader may see. Case items are an exact scan inside one case. No response ever
+carries a vector: a vector can be partly inverted to its text, so it is handled as its text, at its text's
+labels.
 """
 from __future__ import annotations
 
@@ -98,9 +76,8 @@ FAILED_STALE = "1 hour"
 #: The text read for an item; the built-in embedder keeps 20,000
 #: characters after normalising and MEANING at most 32,000.
 READ_CHARS = 60_000
-#: A stored MEANING canary result older than this is probed again when the
-#: readiness register renders (a send on every render was a network call
-#: triggered by opening a page).
+#: A stored MEANING canary result older than this is probed again when the readiness register renders (a send on
+#: every render would be a network call triggered by opening a page).
 CANARY_FRESH_SECONDS = 3600
 CANARY_TOLERANCE = 0.999
 
@@ -309,10 +286,6 @@ def _strictest(*labels: str | None) -> str:
 def levels_at_or_below(clearance: str) -> tuple[str, ...]:
     return LEVELS[:_TLP_ORDER[clearance] + 1]
 
-
-# ---------------------------------------------------------------------------
-# The gate (F6.2), pure
-# ---------------------------------------------------------------------------
 
 def meaning_gate(item: Item, *, destination: Destination,
                  settings: E.MeaningSettings) -> str | None:
@@ -619,30 +592,23 @@ class EmbeddingService:
                        embedder=None, canary: Sequence[float] | None = None,
                        dims_native: int = E.EMBED_DIM,
                        registered_endpoint: str | None = None) -> Space | None:
-        """Register a space in the lowest free slot, or None when no slot is
-        free or another registration won the race.
+        """Register a space in the lowest free slot, or None when no slot is free or another registration won the
+        race.
 
-        The lock on the queue is a barrier, held for milliseconds: it waits
-        for every writer whose queueing trigger has already run (a document,
-        an exhibit or a claim inserted and not yet committed), so that each
-        of them is either committed, and so visible to the bulk queueing
-        that follows, or runs its own queueing trigger after the space
-        exists. Without it an item inserted in that instant would never be
-        queued for this space.
+        The lock on the queue is a barrier, held for milliseconds: it waits for every writer whose queueing
+        trigger has already run (a document, an exhibit or a claim inserted and not yet committed), so that each
+        of them is either committed, and so visible to the bulk queueing that follows, or runs its own queueing
+        trigger after the space exists. Without it an item inserted in that instant would never be queued for
+        this space.
 
-        It is the QUEUE that is locked and not the three item tables
-        (until 2026-10-03 it was the tables). LOCK TABLE in SHARE mode needs
-        UPDATE, DELETE or TRUNCATE on the table, and 0135 took UPDATE and
-        DELETE on `core.assertion` from the runtime roles (invariant 5), so
-        the system role this runs as was refused and every registration
-        failed. Every item writer's trigger inserts into the queue through
-        `core.embedding_enqueue`, which takes the queue's ROW EXCLUSIVE lock
-        before it reads which spaces exist (even when it queues nothing), so
-        a SHARE lock on the queue waits for exactly those writers and holds
-        every later one at its queueing statement until the space is
-        committed; that statement then reads the new space. The role keeps
-        INSERT and DELETE on the queue for the pass's own work, so no
-        privilege is added."""
+        It is the QUEUE that is locked and not the three item tables: LOCK TABLE in SHARE mode needs UPDATE,
+        DELETE or TRUNCATE on the table, and 0135 took UPDATE and DELETE on `core.assertion` from the runtime
+        roles (invariant 5), so the system role this runs as would be refused. Every item writer's trigger
+        inserts into the queue through `core.embedding_enqueue`, which takes the queue's ROW EXCLUSIVE lock before
+        it reads which spaces exist (even when it queues nothing), so a SHARE lock on the queue waits for exactly
+        those writers and holds every later one at its queueing statement until the space is committed; that
+        statement then reads the new space. The role keeps INSERT and DELETE on the queue for the pass's own
+        work, so no privilege is added."""
         import unicodedata
 
         if embedder is None:
@@ -695,18 +661,14 @@ class EmbeddingService:
                             "WHERE id = %s", (space.id,))
 
     def ensure_spaces(self, *, actor_id: UUID | None = None) -> list[dict]:
-        """Per configured role: the FIRST space is registered ACTIVE at once
-        (a partial index with its coverage stated beats none); a WORDING
-        space whose model is not BUILTIN_CURRENT gets a BUILDING rebuild in
-        a free slot (nothing leaves the host); a space whose bulk queueing
-        did not finish is queued again. MEANING's first space is registered
-        by the pass, which has to send the canary to learn its dimension.
+        """Per configured role: the FIRST space is registered ACTIVE at once (a partial index with its coverage
+        stated beats none); a WORDING space whose model is not BUILTIN_CURRENT gets a BUILDING rebuild in a free
+        slot (nothing leaves the host); a space whose bulk queueing did not finish is queued again. MEANING's
+        first space is registered by the pass, which has to send the canary to learn its dimension.
 
-        Only the first: once an administrator has retired a role's last
-        index, nothing registers a new one by itself (decision 9, rebuilds
-        are operator acts). The console's retire confirmation promises the
-        index is never used again, and for similar meaning a new index
-        re-sends every eligible text (2026-09-25)."""
+        Only the first: once an administrator has retired a role's last index, nothing registers a new one by
+        itself (decision 9, rebuilds are operator acts). The console's retire confirmation promises the index is
+        never used again, and for similar meaning a new index re-sends every eligible text."""
         notes: list[dict] = []
         for space in self.spaces():
             if space.state != "RETIRED" and space.enqueued_at is None:
@@ -1239,11 +1201,9 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
             result.refused = "configuration"
             return None
         if not targets and self.ever_registered(E.ROLE_MEANING):
-            # Every index of this role was retired by an administrator. A
-            # new one re-sends every eligible text, which only an operator
-            # starts (decision 9); registering one here re-sent them all
-            # under 'first similar meaning index' (2026-09-25). Nothing is
-            # sent, not even the canary.
+            # Every index of this role was retired by an administrator. A new one re-sends every eligible text,
+            # which only an operator starts (decision 9); registering one here would re-send them all under
+            # 'first similar meaning index'. Nothing is sent, not even the canary.
             result.refused = "retired"
             return None
         settings = cfg.meaning_settings
@@ -1422,14 +1382,11 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
                 except E.EndpointError as exc:
                     failure = exc
                 except Exception:
-                    # EMBED_BATCH_SENT is already committed. Anything that
-                    # escaped here used to end the pass with no FAILED row
-                    # and no backoff, so the next pass sent and audited the
-                    # same newest-first batch again and never reached the
-                    # rest of the queue (2026-09-25). parse_response now
-                    # turns a hostile answer into EndpointError; this is
-                    # the backstop for anything
-                    # else, and the batch backs off like any failure.
+                    # EMBED_BATCH_SENT is already committed. Anything that escaped here would end the pass with
+                    # no FAILED row and no backoff, so the next pass would send and audit the same newest-first
+                    # batch again and never reach the rest of the queue. parse_response turns a hostile answer
+                    # into EndpointError; this is the backstop for anything else, and the batch backs off like
+                    # any failure.
                     log.warning("a similar meaning batch failed on this host",
                                 exc_info=True)
                     failure = E.EndpointError("embed_error", "the embedding failed "
@@ -1523,8 +1480,6 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
                             "message_authority": settings.message_authority,
                             "local_host": settings.local_host,
                             "model": settings.model})
-
-    # --- on demand (F6.3, F6.4) -------------------------------------------------------------
 
     def embed_now(self, kind: str, item_id: UUID, role: str, *, actor_id: UUID,
                   before_send: Callable[[], None] | None = None) -> tuple[str, str | None]:
@@ -1659,8 +1614,6 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
                               f"AND slot = %s", (item_id, slot)).fetchone()
         return (row[0], row[1]) if row else None
 
-    # --- document reads (F6.3) ------------------------------------------------------------
-
     def document_candidates(self, *, slot: int, query: str, clearance: str,
                             held: frozenset[str], k: int, limit: int,
                             exclude: Sequence[UUID] = ()) -> list[dict]:
@@ -1682,14 +1635,11 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
         return [_document_hit(r) for r in rows]
 
     def _iterative_scan(self) -> None:
-        """Let each partition's HNSW scan go on past entries it cannot
-        return. A relabel deletes and re-inserts vectors by design, and until
-        vacuum repairs the graph those dead entries count against ef_search,
-        so a scan could end with fewer rows than the partition holds (seen
-        on the test estate, 2026-09-24). Each partial index holds one label
-        only, so scanning further never reaches a row above the reader.
-        pgvector before 0.8 has no such setting; it is tried once per
-        process under a savepoint and then left alone."""
+        """Let each partition's HNSW scan go on past entries it cannot return. A relabel deletes and re-inserts
+        vectors by design, and until vacuum repairs the graph those dead entries count against ef_search, so a
+        scan could end with fewer rows than the partition holds. Each partial index holds one label only, so
+        scanning further never reaches a row above the reader. pgvector before 0.8 has no such setting; it is
+        tried once per process under a savepoint and then left alone."""
         global _ITERATIVE
         if _ITERATIVE is False:
             return
@@ -1787,8 +1737,6 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
                  "next_attempt_at": r[4].isoformat() if r[4] else None,
                  "embedded_at": r[5].isoformat() if r[5] else None} for r in rows]
 
-    # --- case items (F6.4) ---------------------------------------------------------------------
-
     def evidence_similar(self, *, case_id: UUID, slot: int, query: str, clearance: str,
                          held: frozenset[str], limit: int,
                          exclude: Sequence[UUID] = ()) -> list[dict]:
@@ -1850,25 +1798,19 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
                           held: frozenset[str], reader: ClaimReader,
                           ids: Sequence[UUID] | None = None
                           ) -> dict[UUID, tuple[str | None, str | None]]:
-        """(status, reason) of each live claim this reader sees, as this
-        reader may be told it.
+        """(status, reason) of each live claim this reader sees, as this reader may be told it.
 
-        A claim's row is judged on the labels of what it cites as well as its
-        own (a claim's words can repeat its source), and read.py withholds
-        cited material above the reader: a claim shows its cited ids and no
-        title. The stored reason can therefore describe material the reader
-        may not read ("its label is TLP:AMBER_STRICT or TLP:RED", "it cites
-        material that has been purged", victim data). So when a claim is
-        WITHHELD or EXCLUDED and some material it cites is not readable by
-        this reader (read.py's rule: documents and sources under the global
-        collection.read at the case-less labels, exhibits under evidence.read
-        at the case's), the claim is judged again on what the reader can
-        read, and that judgement is what the reader is told; when nothing
-        the reader can read explains it, the reason is 'not_compared' and
-        the status NOT_COMPARED (2026-09-25).
+        A claim's row is judged on the labels of what it cites as well as its own (a claim's words can repeat its
+        source), and read.py withholds cited material above the reader: a claim shows its cited ids and no title.
+        The stored reason can therefore describe material the reader may not read ("its label is TLP:AMBER_STRICT
+        or TLP:RED", "it cites material that has been purged", victim data). So when a claim is WITHHELD or
+        EXCLUDED and some material it cites is not readable by this reader (read.py's rule: documents and sources
+        under the global collection.read at the case-less labels, exhibits under evidence.read at the case's),
+        the claim is judged again on what the reader can read, and that judgement is what the reader is told; when
+        nothing the reader can read explains it, the reason is 'not_compared' and the status NOT_COMPARED.
 
-        What remains is the one fact every similarity answer carries anyway:
-        that the claim is not in the index."""
+        What remains is the one fact every similarity answer carries anyway: that the claim is not in the
+        index."""
         from noctornal_api.curation import LIVE_CLAIMS_SQL
         rows = self._c.execute(
             "WITH live AS (" + LIVE_CLAIMS_SQL + ") " + _CLAIM_READER_FACTS, {
@@ -1950,8 +1892,6 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
         coverage = _coverage(rows)
         _COVERAGE_CACHE[key] = (self._clock(), coverage)
         return dict(coverage)
-
-    # --- status (F6.3) -------------------------------------------------------------------------
 
     def status(self) -> dict:
         """What any signed-in account may know: whether each mode can be

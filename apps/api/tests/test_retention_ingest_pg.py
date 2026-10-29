@@ -1,14 +1,12 @@
-"""The ingest retention clock, which until 2026-07-25 nothing read.
+"""The ingest retention clock.
 
-docs/17 F17(a). `ingest.record.retain_until` has carried a clock since
-migration 0033 and `ingest.dead_letter.retain_until` since 0040.
-`RetentionService.due()` queried `core.evidence` and `collect.document`
-and nothing else, so both clocks ticked and nothing ever expired.
+docs/17 F17(a). `ingest.record.retain_until` has carried a clock since migration 0033 and
+`ingest.dead_letter.retain_until` since 0040. `RetentionService.due()` must query them as well as
+`core.evidence` and `collect.document`, or both clocks tick and nothing ever expires.
 
-That is worse than it sounds. The 90-day dead-letter default was chosen
-*because* unassessed third-party victim data deserves the shortest rule —
-and a clock nobody reads delivers the longest possible rule instead. The
-labels and the gating shipped; the expiry did not.
+That is worse than it sounds. The 90-day dead-letter default is chosen *because* unassessed third-party
+victim data deserves the shortest rule, and a clock nobody reads delivers the longest possible rule
+instead.
 
 Env-gated on DATABASE_URL.
 """
@@ -54,15 +52,14 @@ def conn():
         c.execute(f"DELETE FROM ingest.batch WHERE api_key_id IN {ksub}")
         c.execute(f"DELETE FROM ingest.api_key WHERE owner_user_id IN {sub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
-        # A case that was PURGED cannot be deleted, and that is correct
-        # rather than inconvenient: `core.purge_tombstone` has a foreign key
-        # to the case and an append-only trigger, so the record of a
-        # destruction outlives everything it refers to. Deleting the case
-        # would make "we destroyed 40 records from that feed on this date"
-        # unanswerable, which is the one question a tombstone exists for.
+        # A case that was PURGED cannot be deleted, and that is correct rather than inconvenient:
+        # `core.purge_tombstone` has a foreign key to the case and an append-only trigger, so the record of
+        # a destruction outlives everything it refers to. Deleting the case would make "we destroyed 40
+        # records from that feed on this date" unanswerable, which is the one question a tombstone exists
+        # for.
         #
-        # So teardown removes only the cases nothing was destroyed in, and
-        # leaves the rest. Any future test that purges will hit this too.
+        # So teardown removes only the cases nothing was destroyed in, and leaves the rest. Any future test
+        # that purges will hit this too.
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub} '
                   f'AND id NOT IN (SELECT case_id FROM core.purge_tombstone '
                   f'                WHERE case_id IS NOT NULL)')
@@ -80,10 +77,8 @@ def _user(conn):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"rti-{uuid4().hex[:8]}@noctornal.test", "Rti", "x" * 20)
-    # Registered here, in this file, so the suite does not depend on
-    # test_ingest_pg having run first and left the row behind (0059
-    # binds the column; on a fresh database in isolation this UPDATE was
-    # refused until 2026-09-09).
+    # Registered here, in this file, so the suite does not depend on test_ingest_pg having run first and
+    # left the row behind (0059 binds the column, so on a fresh database this UPDATE is refused without it).
     conn.execute(
         "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
         "ON CONFLICT (key) DO NOTHING",
@@ -120,7 +115,7 @@ def _expired_record(conn, svc, owner, case_id=None):
 
 
 def test_an_expired_ingest_record_is_actually_due(conn):
-    """The whole finding. It carried a clock and nothing read it."""
+    """It carries a clock and `due()` must read it."""
     owner = _user(conn)
     svc = IngestService(conn, InMemoryRawStorage())
     case_id = _case(conn, owner)
@@ -184,11 +179,10 @@ def test_a_case_legal_hold_reaches_ingest_records(conn):
 
 
 def test_an_expired_dead_letter_can_be_purged_even_if_it_predates_0040(conn):
-    """Migration 0040's `CHECK (redacted) NOT VALID` is re-evaluated on
-    every UPDATE, so a pre-redactor row would otherwise be the ONE thing a
-    purge cannot destroy — the unredacted victim credentials becoming the
-    only permanent rows in the table. The purge sets `redacted = true` in
-    the same statement that replaces the fragment."""
+    """Migration 0040's `CHECK (redacted) NOT VALID` is re-evaluated on every UPDATE, so a pre-redactor row
+    would otherwise be the ONE thing a purge cannot destroy: the unredacted victim credentials becoming the
+    only permanent rows in the table. The purge sets `redacted = true` in the same statement that replaces
+    the fragment."""
     owner = _user(conn)
     svc = IngestService(conn, InMemoryRawStorage())
     key = svc.authenticate(svc.issue_key(
@@ -202,11 +196,9 @@ def test_an_expired_dead_letter_can_be_purged_even_if_it_predates_0040(conn):
     conn.execute(
         "UPDATE ingest.dead_letter SET retain_until = %s WHERE id = %s",
         (datetime.now(timezone.utc) - timedelta(days=1), dead_id))
-    # Putting the row back into the pre-redactor state needs the constraint
-    # off, because `NOT VALID` does not exempt UPDATES — which is the whole
-    # finding this test exists for. Dropping and restoring it around the
-    # setup is the only way to construct a grandfathered row at all, and
-    # the fact that it is the only way is the point.
+    # Putting the row back into the pre-redactor state needs the constraint off, because `NOT VALID` does
+    # not exempt UPDATES. Dropping and restoring it around the setup is the only way to construct a
+    # grandfathered row at all, and the fact that it is the only way is the point.
     conn.execute("ALTER TABLE ingest.dead_letter "
                  "DROP CONSTRAINT dead_letter_new_rows_are_redacted")
     try:

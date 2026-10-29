@@ -1,66 +1,39 @@
-"""The egress connection ledger: what left this deployment, through which
-route, to where, and how it ended (the egress proxy S2, 2026-09-24;
-docs/00 decision 68: every connection is logged append-only).
+"""The egress connection ledger: what left this deployment, through which route, to where, and how it ended
+(docs/00 decision 68: every connection is logged append-only).
 
-## An event ledger, written by the proxy alone
+`collect.egress_connection` (migration 0086) takes one row per EVENT, written by the proxy alone:
 
-`collect.egress_connection` (migration 0086) takes one row per EVENT:
+- OPEN, committed BEFORE the proxy dials, so a connection that happened always has its row: when the INSERT
+  fails the proxy refuses the client with ledger_unavailable and dials nothing;
+- REFUSED, once the route is known (the credentials held), with the egress_policy code as the reason;
+- CLOSE at teardown, with the bytes each way, the duration and one of CLOSE_REASONS. A proxy killed mid-tunnel
+  leaves an OPEN with no CLOSE, and the reader says so rather than inventing one;
+- PREAUTH: refusals before the credentials held (a bad token, a malformed head, the handshake caps) are COUNTED
+  per peer address and written at most once a minute per peer, so a flood from a compromised container costs
+  one row a minute and never holds the chain lock against OPEN rows. Nothing the client presented is stored;
+- REWRAP: `python -m noctornal_api.egress_proxy rewrap --apply` re-sealed that many exits under the active key.
 
-- OPEN, committed BEFORE the proxy dials, so a connection that happened
-  always has its row: when the INSERT fails the proxy refuses the client
-  with ledger_unavailable and dials nothing;
-- REFUSED, once the route is known (the credentials held), with the
-  egress_policy code as the reason;
-- CLOSE at teardown, with the bytes each way, the duration and one of
-  CLOSE_REASONS. A proxy killed mid-tunnel leaves an OPEN with no CLOSE,
-  and the reader says so rather than inventing one;
-- PREAUTH: refusals before the credentials held (a bad token, a malformed
-  head, the handshake caps) are COUNTED per peer address and written at
-  most once a minute per peer, so a flood from a compromised container
-  costs one row a minute and never holds the chain lock against OPEN
-  rows. Nothing the client presented is stored;
-- REWRAP: `python -m noctornal_api.egress_proxy rewrap --apply` re-sealed
-  that many exits under the active key.
+Development without a proxy writes NO row (docs/20 section 10, reading 3), and the readiness probe route is
+never written (it dials and resolves nothing).
 
-Development without a proxy writes NO row (docs/20 section 10, reading
-3), and the readiness probe route is never written (it dials and resolves
-nothing).
+Append-only and hash-chained: a BEFORE UPDATE OR DELETE row trigger and a BEFORE TRUNCATE statement trigger
+refuse every change, and the chain trigger takes the advisory lock and THEN draws `seq` from its sequence, so
+seq order is chain order and concurrent writers cannot fork it. `verify` recomputes the chain with the
+trigger's own expression, which is duplicated here from the migration and held equal by a test.
 
-## Append-only and hash-chained from the first row
+Labels are decided when a row is READ. A persona row names a forum host, which is exactly what a RED source's
+label protects, so the reader shows it only within the caller's clearance, taking the GREATER of the stored
+label and its source's CURRENT label (a source raised from AMBER to RED raises every earlier row), and, once
+collect.source carries compartments, only to a caller holding all of the source's CURRENT compartments. An ACT
+or STOP row whose destination matched no source (an address inside the profile's networks) is labelled by the
+persona's currently bound sources. A row whose source has since been deleted is shown on its stored label only
+when it was not compartmented. Integration rows are GREEN: their destinations are an administrator's exact
+allowlist entries, configuration an egress.log.read holder already sees.
 
-A BEFORE UPDATE OR DELETE row trigger and a BEFORE TRUNCATE statement
-trigger refuse every change, and the chain trigger takes the advisory lock
-and THEN draws `seq` from its sequence, so seq order is chain order and
-concurrent writers cannot fork it. audit.event drew its seq before the
-lock until 0149 (2026-10-03), which forked its chain under concurrent
-writers; it now draws inside the lock the way this ledger always has.
-`verify` recomputes the chain with the trigger's own expression, which is
-duplicated here from the migration and held equal by a test.
-
-## Labels are decided when a row is READ
-
-A persona row names a forum host, which is exactly what a RED source's
-label protects. So the reader shows a persona row only within the
-caller's clearance, taking the GREATER of the stored label and its
-source's CURRENT label (a source raised from AMBER to RED raises every
-earlier row), and, once collect.source carries compartments, only to a
-caller holding all of the source's CURRENT compartments. An ACT or STOP
-row whose destination matched no source (an address inside the profile's
-networks) is labelled by the persona's currently bound sources. A row
-whose source has since been deleted is shown on its stored label only when
-it was not compartmented. Integration rows are GREEN: their destinations
-are an administrator's exact allowlist entries, configuration an
-egress.log.read holder already sees.
-
-## Who can write it
-
-The proxy connects as `noctornal_egress`, which holds exactly
-EGRESS_GRANTS (the migration's grant block, the proxy's start check and
-test_egress_role_privileges_pg.py all hold that list), and the
-application role keeps SELECT only, so the API cannot forge a proxy row.
-The schema owner can rewrite anything, the chain included; the chain is
-evidence against any writer less than the owner, and `verify` is how it
-is read.
+The proxy connects as `noctornal_egress`, which holds exactly EGRESS_GRANTS (the migration's grant block, the
+proxy's start check and test_egress_role_privileges_pg.py all hold that list), and the application role keeps
+SELECT only, so the API cannot forge a proxy row. The schema owner can rewrite anything, the chain included; the
+chain is evidence against any writer less than the owner, and `verify` is how it is read.
 """
 from __future__ import annotations
 
@@ -76,15 +49,11 @@ import psycopg
 #: The proxy's database role, created at initdb by db/init/20-egress-role.sh.
 EGRESS_ROLE = "noctornal_egress"
 
-#: Every privilege the proxy's role holds, as (kind, object, privilege,
-#: columns or None). ONE list: migration 0086 grants a copy of it (a
-#: migration does not import the app, and a test holds the two equal), the
-#: proxy refuses to start unless has_column_privilege / has_table_privilege
-#: confirm every entry, and test_egress_role_privileges_pg.py asserts the
-#: role holds exactly this. The collection columns are the collection
-#: foundation's; a column a later migration adds (for example
-#: collect.source.compartments) is appended here, with its grant in a
-#: guarded migration block.
+#: Every privilege the proxy's role holds, as (kind, object, privilege, columns or None). ONE list: migration
+#: 0086 grants a copy of it (a migration does not import the app, and a test holds the two equal), the proxy
+#: refuses to start unless has_column_privilege / has_table_privilege confirm every entry, and
+#: test_egress_role_privileges_pg.py asserts the role holds exactly this. A column a later migration adds (for
+#: example collect.source.compartments) is appended here, with its grant in a guarded migration block.
 EGRESS_GRANTS: tuple[tuple[str, str, str, tuple[str, ...] | None], ...] = (
     ("schema", "collect", "USAGE", None),
     ("table", "collect.egress_profile", "SELECT", None),
@@ -116,11 +85,9 @@ EGRESS_GRANTS: tuple[tuple[str, str, str, tuple[str, ...] | None], ...] = (
     ("sequence", "collect.egress_connection_seq", "USAGE", None),
 )
 
-#: How a CLOSE row says a tunnel ended. authority_revoked also covers an
-#: authority that a later widening voided; route_withdrawn covers a route
-#: switched off, retired or narrowed, and a source raised above the
-#: profile's ceiling; persona_withdrawn covers a persona burnt, locked,
-#: held by its platform or unbound (2026-09-24).
+#: How a CLOSE row says a tunnel ended. authority_revoked also covers an authority that a later widening
+#: voided; route_withdrawn covers a route switched off, retired or narrowed, and a source raised above the
+#: profile's ceiling; persona_withdrawn covers a persona burnt, locked, held by its platform or unbound.
 CLOSE_REASONS = ("client_closed", "upstream_closed", "idle_timeout",
                  "session_limit", "proxy_shutdown", "error", "authority_revoked",
                  "run_finished", "route_withdrawn", "persona_withdrawn")
@@ -308,10 +275,6 @@ def stops_in_last_hour(conn: psycopg.Connection, persona_id: UUID) -> int:
         (persona_id,)).fetchone()[0]
 
 
-# ---------------------------------------------------------------------------
-# Verifier
-# ---------------------------------------------------------------------------
-
 def verify(conn: psycopg.Connection) -> dict:
     """Recompute the chain positionally with the trigger's expression.
     {rows, first_break_seq, checked_at}: first_break_seq is None when every
@@ -368,10 +331,9 @@ def listing(conn: psycopg.Connection, *, clearance: str,
             compartments: Iterable[str] = (), route_id: str | None = None,
             event: str | None = None, since: datetime | None = None,
             limit: int = 200) -> dict:
-    """The rows the caller may see, newest first, each OPEN paired with its
-    CLOSE, with how many rows of the WHOLE log were withheld (never narrowed
-    by the route, event or window asked about: egress-ledger-withheld-oracle,
-    2026-10-03). `clearance` is a TLP name (deps.user_ceiling, no case)."""
+    """The rows the caller may see, newest first, each OPEN paired with its CLOSE, with how many rows of the
+    WHOLE log were withheld (never narrowed by the route, event or window asked about). `clearance` is a TLP
+    name (deps.user_ceiling, no case)."""
     if event is not None and event not in ("OPEN", "REFUSED", "PREAUTH", "REWRAP"):
         raise ValueError("event is OPEN, REFUSED, PREAUTH or REWRAP")
     held = sorted(set(compartments))
@@ -393,12 +355,10 @@ def listing(conn: psycopg.Connection, *, clearance: str,
     if since is not None:
         where.append("c.occurred_at >= %(since)s")
         named["since"] = since
-    # The effective label: the greater of the stored label and, for a
-    # persona row, its source's current label, or for an ACT or STOP row
-    # that matched no source, the persona's bound sources' labels now. A
-    # row's source is the one it names, else its run's: a RUN row the proxy
-    # refused before it matched a source still belongs to that run's
-    # source, and is labelled and compartmented by it (2026-09-25).
+    # The effective label: the greater of the stored label and, for a persona row, its source's current label, or
+    # for an ACT or STOP row that matched no source, the persona's bound sources' labels now. A row's source is
+    # the one it names, else its run's: a RUN row the proxy refused before it matched a source still belongs to
+    # that run's source, and is labelled and compartmented by it.
     subject = "coalesce(c.source_id, r.source_id)"
     if has_comp and bound:
         comp_ok = f"""(
@@ -437,14 +397,11 @@ def listing(conn: psycopg.Connection, *, clearance: str,
     """
     base = cte(where)
     visible = "(f.effective <= %(clearance)s::core.tlp AND f.compartments_ok)"
-    # egress-ledger-withheld-oracle (2026-10-03): the count of rows the
-    # caller's clearance hides is taken over the WHOLE log, never under the
-    # route, event or window the caller asked about. Under those filters it
-    # was an exact reading of one hidden profile's activity in one window
-    # (a profile's id is in the overview even when its details are not), so
-    # a reader below its label could map the timing and volume of RED
-    # collection by moving `since`. A route that is hidden from the caller
-    # now answers as one that does not exist: no rows, the same count.
+    # The count of rows the caller's clearance hides is taken over the WHOLE log, never under the route, event or
+    # window the caller asked about: under those filters it would read one hidden profile's activity exactly (a
+    # profile's id is in the overview even when its details are not), so a reader below its label could map the
+    # timing and volume of RED collection by moving `since`. A route hidden from the caller answers as one that
+    # does not exist: no rows, the same count.
     withheld = conn.execute(
         cte(["c.event <> 'CLOSE'"])
         + f"SELECT count(*) FROM filtered f WHERE NOT {visible}", named).fetchone()[0]
@@ -485,9 +442,7 @@ def listing(conn: psycopg.Connection, *, clearance: str,
         }
         if r[5] == "persona" and r[9] is None and r[10] is None and r[11] is None \
                 and r[14] is not None:
-            # A persona row with no run, source or persona has nothing to be
-            # labelled by today; the proxy no longer writes a host on one,
-            # and an older row keeps its host to itself.
+            # A persona row with no run, source or persona has nothing to be labelled by, so its host is withheld.
             item["dest_host"] = None
             item["destination_withheld"] = True
         if r[2] == "OPEN":

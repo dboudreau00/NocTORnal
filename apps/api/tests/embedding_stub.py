@@ -1,11 +1,9 @@
-"""A stub model server speaking the OpenAI embeddings protocol, on
-loopback, for the embeddings suites (F6.2, 2026-09-24). Importable, no
-tests. Nothing here contacts a real model service.
+"""A stub model server speaking the OpenAI embeddings protocol, on loopback, for the embeddings
+suites. Importable, no tests. Nothing here contacts a real model service.
 
-Vectors are the built-in embedder's first `dims` components, so similar
-texts get similar vectors and the MEANING tests read like the real thing;
-`drift` reverses them, which is what a different model behind the same
-endpoint looks like to the canary.
+Vectors are the built-in embedder's first `dims` components, so similar texts get similar vectors and
+the MEANING tests read like the real thing; `drift` reverses them, which is what a different model
+behind the same endpoint looks like to the canary.
 """
 from __future__ import annotations
 
@@ -116,8 +114,7 @@ class StubModel:
         elif mode == "notjson":
             self._send(handler, 200, b"<html>not json</html>")
             return
-        # Hostile answers (2026-09-25): each once escaped the
-        # parser as a Python error, or would have.
+        # Hostile answers: each must be refused as a parse failure, not escape as a Python error.
         elif mode == "bigint" and data:
             data[0]["embedding"][0] = 10 ** 400        # OverflowError as a float
         elif mode == "huge" and data:
@@ -179,9 +176,8 @@ def meaning_env(stub: StubModel, **overrides) -> dict:
 
 
 class NoRoutes:
-    """A connection with no egress route rows (2026-09-25). The route
-    provider asks for an administrator's row before it falls back, in
-    development, to the declared rules alone; these tests hold no database."""
+    """A connection with no egress route rows. The route provider asks for an administrator's row
+    before it falls back, in development, to the declared rules alone; these tests hold no database."""
 
     def execute(self, *_args, **_kwargs):
         return self

@@ -1,17 +1,13 @@
-"""Retiring an entity that carries a tie the caller cannot see, under each
-`withheld_disclosure` setting (docs/17, "retiring an entity with a hidden tie";
-owner decision, 2026-10-08).
+"""Retiring an entity that carries a tie the caller cannot see, under each `withheld_disclosure` setting
+(docs/17, "retiring an entity with a hidden tie").
 
-The refusal used to be one sentence under every setting, so a case set to NONE
-(migration 0030: say nothing about what is withheld) still told the caller that
-a tie above them touches the entity. Under NONE it now reads as the refusal of
-an act that was not done and names nothing; under PRESENCE and COUNT it is
-today's sentence. Nothing is retired over a hidden tie under any of them, and
-the second guard that answers in the same words (a live merge into the entity
-whose merged side the caller cannot see) follows the setting too, so the two
-cannot be told apart.
+Under NONE (migration 0030: say nothing about what is withheld) the refusal reads as the refusal of an act
+that was not done and names nothing; under PRESENCE and COUNT it says a tie above the caller touches the
+entity. Nothing is retired over a hidden tie under any setting. The second guard that answers in the same
+words (a live merge into the entity whose merged side the caller cannot see) follows the setting too, so
+the two cannot be told apart.
 
-Through the real route as the request role (`review_g42_support`).
+Through the real route as the request role (`graph_visibility_support`).
 """
 from __future__ import annotations
 
@@ -19,7 +15,7 @@ from uuid import uuid4
 
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED

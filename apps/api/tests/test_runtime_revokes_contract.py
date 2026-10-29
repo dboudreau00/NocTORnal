@@ -1,13 +1,11 @@
 """The system role is never granted what a migration took from the request role.
 
-S1, 2026-09-25. Migration 0108 grants `noctornal_worker` 0060's shape
-and then `RUNTIME_REVOKES`, a frozen list of every privilege a migration
-between 0060 and 0108 revoked from `noctornal_app` (insert-only records,
-append-only ledgers, the egress ledger that only the proxy writes). BYPASSRLS
-lifts row filtering, not a missing GRANT, so this list is what keeps the
-system role exactly as closed as the request role on those tables. A
-migration in that range with a REVOKE from the runtime role fails here
-until the list repeats it.
+Migration 0108 grants `noctornal_worker` 0060's shape and then `RUNTIME_REVOKES`, a frozen list of every
+privilege a migration between 0060 and 0108 revoked from `noctornal_app` (insert-only records,
+append-only ledgers, the egress ledger that only the proxy writes). BYPASSRLS lifts row filtering, not a
+missing GRANT, so this list is what keeps the system role exactly as closed as the request role on those
+tables. A migration in that range with a REVOKE from the runtime role fails here until the list repeats
+it.
 
 Static: parses the migrations' text, no database.
 """

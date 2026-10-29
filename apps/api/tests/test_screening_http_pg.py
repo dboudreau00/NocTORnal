@@ -1,14 +1,12 @@
-"""Prohibited-content screening over HTTP (F13, 2026-09-24).
+"""Prohibited-content screening over HTTP.
 
-Every screening route needs its permission and a fresh second factor; no
-response carries a list entry that no held sample produced; the label-free
-list carries only a hash prefix; the record is a 404 for an officer whose
-ceiling does not reach the sample and is audited when opened, and never
-carries the filename, source note, rejection reason, analyses or custody;
-a matched submission answers 451 with the contact sentence and never names
-the list or its category; the list upload is capped; the routes sit ahead
-of /{sample_id} and the sample origin answers none of them; /admin/access
-reports the two verbs; the policy block carries counts only.
+Every screening route needs its permission and a fresh second factor; no response carries a list entry
+that no held sample produced; the label-free list carries only a hash prefix; the record is a 404 for an
+officer whose ceiling does not reach the sample and is audited when opened, and never carries the
+filename, source note, rejection reason, analyses or custody; a matched submission answers 451 with the
+contact sentence and never names the list or its category; the list upload is capped; the routes sit
+ahead of /{sample_id} and the sample origin answers none of them; /admin/access reports the two verbs;
+the policy block carries counts only.
 
 Email prefix `scrh-`. Env-gated on DATABASE_URL.
 """
@@ -310,9 +308,8 @@ def test_a_sample_row_says_how_it_was_screened(conn, http, store):
 
 
 def test_the_import_runs_off_the_event_loop(conn, http, store, monkeypatch):
-    """The parse, the COPY and the in-request pass are synchronous work in
-    an async route (async for the upload): they run in the thread pool, so
-    an import never holds the event loop (2026-09-24)."""
+    """The parse, the COPY and the in-request pass are synchronous work in an async route (async for the
+    upload): they run in the thread pool, so an import never holds the event loop."""
     import asyncio
 
     from noctornal_api import screening

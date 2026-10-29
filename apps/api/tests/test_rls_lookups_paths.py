@@ -1,15 +1,13 @@
-"""The lookup ledger's readers, converted for row-level security (F51,
-2026-10-02).
+"""The lookup ledger's readers, converted for row-level security.
 
-Static: no database. Each conversion is pinned by the code that carries
-it, so a later edit cannot quietly undo one:
+Static: no database. Each conversion is pinned by the code that carries it, so a later edit cannot quietly
+undo one:
 
-- the two label joins over the answer read `iam.lookup_result_facts`, never
-  a join to a row the reader may not see (decision 146's anti-join trap);
-- every reader that must see every row names `SystemPurpose.LOOKUPS`: the
-  interactive send and the sign-off from the gates on, the provider test,
-  the quota counts, the cache, the value check, a batch's cancel, and a
-  provider's withdrawal and usage;
+- the two label joins over the answer read `iam.lookup_result_facts`, never a join to a row the reader may
+  not see (decision 146's anti-join trap);
+- every reader that must see every row names `SystemPurpose.LOOKUPS`: the interactive send and the
+  sign-off from the gates on, the provider test, the quota counts, the cache, the value check, a batch's
+  cancel, and a provider's withdrawal and usage;
 - the four tables are under policy in the registry, with their templates.
 """
 from __future__ import annotations

@@ -1,9 +1,8 @@
-"""Administration, Providers: the outbound lookup provider registry
-(F15.2, 2026-09-24).
+"""Administration, Providers: the outbound lookup provider registry.
 
-Every route runs require_global("integration.manage"), which is step-up
-and held by SYS_ADMIN. No answer carries key material or a URL with a
-query string; the key is written by PUT and never read back by any route.
+Every route runs require_global("integration.manage"), which is step-up and held by SYS_ADMIN. No
+answer carries key material or a URL with a query string; the key is written by PUT and never read
+back by any route.
 """
 from __future__ import annotations
 
@@ -22,10 +21,9 @@ from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 _MANAGE = require_global("integration.manage")
-#: Every write lands on a system connection (0179, Beta 1.1): the provider
-#: registry is read-only to the request role, so a statement injected into
-#: a request cannot add a provider, lower its exposure or replace its key
-#: past this gate, its step-up and the registry's audit rows.
+#: Every write lands on a system connection: the provider registry is read-only to the request
+#: role (migration 0179), so a statement injected into a request cannot add a provider, lower its
+#: exposure or replace its key past this gate, its step-up and the registry's audit rows.
 _CONFIG = system_conn(SystemPurpose.CONFIGURATION)
 
 
@@ -47,8 +45,7 @@ class ProviderCreate(BaseModel):
     classification_ceiling: str | None = None
     result_floor: str | None = None
     use_private_ca: bool = False
-    #: A NONE instance's private network (2026-09-25), which its declared
-    #: rule carries (docs/20 section 9).
+    #: A NONE instance's private network, which its declared rule carries (docs/20 section 9).
     private_cidr: str | None = Field(default=None, max_length=50)
     cache_ttl_hours: int = Field(default=168, ge=0, le=2160)
     quota_per_minute: int | None = Field(default=None, gt=0)
@@ -310,8 +307,6 @@ def withdraw_change(
         raise _problem(exc) from exc
     return _one(conn, provider_id, user.user_id)
 
-
-# --- F15.3: the provider test and its usage -----------------------------------
 
 @router.post("/{provider_id}/test", response_model=dict,
              dependencies=[Depends(rate_limit("integration.test"))])

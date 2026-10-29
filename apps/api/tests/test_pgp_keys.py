@@ -1,11 +1,9 @@
-"""Reading vendor keys with gpg for the case key registry (F10b, comms,
-2026-09-24). Pure: no database. Not gated on gpg, for the reason
-test_pgp.py gives.
+"""Reading vendor keys with gpg for the case key registry. Pure: no database. Not gated on gpg, for the
+reason test_pgp.py gives.
 
-Every key is attacker material: the walker refuses secret packets and
-anything that is not public key framing before gpg runs, gpg runs with no
-agent under one budget, the colon listing is split on b"\\n" only, and a
-user ID is decoded for display and never decided on.
+Every key is attacker material: the walker refuses secret packets and anything that is not public key
+framing before gpg runs, gpg runs with no agent under one budget, the colon listing is split on b"\\n" only,
+and a user ID is decoded for display and never decided on.
 """
 from __future__ import annotations
 

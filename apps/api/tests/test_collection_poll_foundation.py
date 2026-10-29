@@ -1,8 +1,7 @@
-"""The cron entry under the collection foundation (2026-09-24): it polls
-as the system, counts blocked, rate-limited, held and too-long sources,
-exits 1 when a person is needed, and reserves a long
-poll's budget without changing how RSS passes are clocked. Run for real
-against stand-ins, as test_collection_poll_script.py does. No database.
+"""The cron entry under the collection foundation: it polls as the system, counts blocked,
+rate-limited, held and too-long sources, exits 1 when a person is needed, and reserves a long poll's
+budget without changing how RSS passes are clocked. Run for real against stand-ins, as
+test_collection_poll_script.py does. No database.
 """
 from __future__ import annotations
 
@@ -127,9 +126,8 @@ def test_rss_passes_are_clocked_as_before(monkeypatch, capsys):
 
 
 def test_the_pass_reads_the_schedule_once_for_due_and_held(monkeypatch, capsys):
-    """2026-09-25: due then held was two readings, and the
-    first moves a source resting outside its persona's hours, so the
-    second under-counted `held`. A service offering due_and_held is asked
+    """Reading due then held is two readings, and the first moves a source resting outside its
+    persona's hours, so the second would under-count `held`. A service offering due_and_held is asked
     once, and neither of the two single readings is."""
     module = _load()
     asked = []

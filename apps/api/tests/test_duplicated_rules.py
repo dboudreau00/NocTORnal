@@ -1,18 +1,13 @@
-"""docs/17, "Tests and code structure", duplicated rules (Beta 1.1).
+"""docs/17, "Tests and code structure", duplicated rules.
 
-Three rules each had many spellings, and a rule with many spellings is
-changed in some of them:
+A rule with many spellings gets changed in some of them, so each of these has one:
 
-- "is this production": ten modules read `NOCTORNAL_ENV` themselves, several
-  by the literal name. There is one reader now, `config.is_production`;
-- the TLP order: fourteen tuples listed the five levels beside
-  `security.access.Tlp`. The order is `access.TLP_NAMES` now, derived from the
-  enum, so a level added to the enum is added everywhere;
-- the refusal the compartment routes map an administration error to is the
-  administration router's own.
+- "is this production": `config.is_production` is the one reader of `NOCTORNAL_ENV`;
+- the TLP order: `access.TLP_NAMES`, derived from the `security.access.Tlp` enum, so a level added to the
+  enum is added everywhere;
+- the refusal the compartment routes map an administration error to is the administration router's own.
 
-Pure: the scans read the source and the helpers run against dictionaries, so
-none of this needs a database.
+Pure: the scans read the source and the helpers run against dictionaries, so none of this needs a database.
 """
 from __future__ import annotations
 

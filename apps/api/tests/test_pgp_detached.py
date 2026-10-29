@@ -1,15 +1,11 @@
-"""Detached signatures, signing subkeys, the packet walker, the agent and
-the version floor (F10a, comms, 2026-09-24).
+"""Detached signatures, signing subkeys, the packet walker, the agent and the version floor.
 
-Not gated on gpg, as test_pgp.py is not: gpg is on the CI image, and the
-only cryptographic-evidence path in the system going untested should break
-the build rather than disappear from it.
+Not gated on gpg, as test_pgp.py is not: the only cryptographic-evidence path in the system going untested
+should break the build rather than disappear from it.
 
-The fixtures were generated once on the development host with a throwaway
-key (a certify-only primary and a signing subkey) whose secret was then
-discarded, as the older fixtures were. The shapes that must never reach
-gpg (secret packets, a signature followed by a literal packet, partial
-lengths) are built here from bytes, never stored as keys.
+The fixtures were generated once with a throwaway key (a certify-only primary and a signing subkey) whose
+secret was then discarded. The shapes that must never reach gpg (secret packets, a signature followed by a
+literal packet, partial lengths) are built here from bytes, never stored as keys.
 """
 from __future__ import annotations
 

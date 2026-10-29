@@ -1,5 +1,4 @@
-"""Triage, the inbox and dual control in the console, held to what the
-2026-09-22 review found in them (the ux08-triage findings).
+"""Triage, the inbox and dual control in the console.
 
 Pure: the shipped static assets, with the real functions run under Node
 against stubs (skipped where Node is absent), beside test_ui_invariants.
@@ -109,11 +108,9 @@ def _run(sources: list[str], body: str, tmp_path: Path):
 
 @needs_node
 def test_the_triage_keys_act_on_the_page_or_a_card_and_nowhere_else(tmp_path):
-    """A plain A pressed while the Dual control Load button had the focus
-    accepted the highlighted proposal: the only guard was INPUT, TEXTAREA
-    and SELECT. Since ux18-a11y:triage-letter-keys-global the letters act
-    only inside the list as well, so this holds them to a card or the list
-    itself, never a button in it, a field, a chord or an open sheet."""
+    """A plain A pressed while the Dual control Load button has the focus must not accept the
+    highlighted proposal. The letters act only inside the list, so this holds them to a card or the
+    list itself, never a button in it, a field, a chord or an open sheet."""
     got = _run([_fn("triageKeyTarget"), _fn("onTriageKey")], """
 const calls = [];
 const state = { tab: 'triage', triage: [{id: 1}, {id: 2}], triageIndex: 0 };
@@ -164,8 +161,7 @@ def test_the_keyboard_sheet_says_what_a_does_and_lists_d():
     text = _visible(_html())
     flat = " ".join(text.split())
     assert "Nothing here writes to the graph without a confirmation step" not in text
-    # A asks first since ux18-a11y:triage-letter-keys-global, and the Undo
-    # this pass added still follows it; both are said where the keys are.
+    # A asks first, and the Undo still follows it; both are said where the keys are.
     assert "Accept, after a confirmation" in flat
     assert "offers an Undo when your role can retire it" in flat
     sheet = text[text.index('<h3 class="h-xs">Triage</h3>'):]
@@ -181,8 +177,8 @@ def test_the_keyboard_sheet_says_what_a_does_and_lists_d():
 
 @needs_node
 def test_an_accept_says_what_it_wrote_and_offers_an_undo(tmp_path):
-    """The card left the queue with no word: an analyst whose Ctrl+A had
-    been taken as A never learned a proposal had left review."""
+    """The card leaving the queue says what happened: an analyst whose Ctrl+A was taken as A must still
+    learn that a proposal has left review."""
     got = _run([_fn("triageRefName"), _fn("triageTitle"), _fn("triageChosenLevel"),
                 _fn("showTriageOutcome"), _fn("triageCanUndo"), _fn("caseCan"),
                 _const("TRIAGE_UNDO_PERMISSION"), _const("TRIAGE_UNDO_WORDS")], """
@@ -253,9 +249,7 @@ def test_an_attribute_card_shows_its_value_with_a_copy_button():
     assert "copyable(el('code', 'mono', visibleText(value)), value" in render
 
 
-# ---------------------------------------------------------------------------
-# accept-downgrades-classification, gap-capture-classification
-# ---------------------------------------------------------------------------
+# A card offers no label below its capture
 
 @needs_node
 def test_a_card_offers_no_label_below_its_capture(tmp_path):
@@ -298,10 +292,9 @@ console.log(JSON.stringify([
 # ---------------------------------------------------------------------------
 
 def test_the_ring_comes_from_the_queue_and_never_from_edge_review():
-    """The Triage half of the ring is the queue's own count. A tie's review
-    is the other half since gap-tie-review (2026-09-23) made the column
-    real and clearable: it is counted into its own map, never into the
-    Triage count, and each half has a row naming where it is cleared."""
+    """The Triage half of the ring is the queue's own count. A tie's review is the other half: it is
+    counted into its own map, never into the Triage count, and each half has a row naming where it is
+    cleared."""
     index = re.sub(r"/\*.*?\*/", "", _fn("indexProjection"), flags=re.S)
     assert "nodeProposed" not in index, (
         "the Triage count is derived from edge.review again")
@@ -372,9 +365,8 @@ function viewOf(card) {
 
 @needs_node
 def test_a_click_or_a_selection_inside_an_opened_capture_keeps_it_open(tmp_path):
-    """The verifier of the first fix: the source view sits inside the card,
-    whose click handler rebuilt the whole list, so a click or a drag-select
-    in the opened capture closed it and dropped the selection."""
+    """The source view sits inside the card, whose click handler rebuilds the whole list, so a click or
+    a drag-select in the opened capture must not close it and drop the selection."""
     got = _run([_fn("splitLead"), _fn("moreDetails"),
                 _fn("renderTriage"), _fn("pickTriageCard"),
                 _fn("triageSourceLine"), _fn("fillTriageSource"),
@@ -484,7 +476,7 @@ console.log(JSON.stringify(rows.map((n) => {
     assert got[1][:2] == ["Open Triage", "triage"]
     assert got[2][:2] == ["Open the exhibit", "evidence"]
     assert got[3][:2] == ["Open the merge", "graph"]
-    # The rail's caption, Records, not the old Lifecycle (2026-09-24).
+    # The rail's caption is Records.
     assert got[4][:2] == ["Open Records", "governance"]
     assert got[5][:2] == ["Open Break-glass", "governance"]
     assert got[6] == ["Open Oversight", None, "Open Oversight"]
@@ -519,9 +511,8 @@ function focusExhibit() {} async function focusMerge() {}
 
 @needs_node
 def test_oversight_from_the_case_less_inbox_leaves_the_inbox(tmp_path):
-    """The verifier of the first fix: a security officer's BREAK_GLASS
-    alert belongs to no case, so its Open goes to Oversight; showAdmin
-    never put the case-less Inbox away, and both views stood on screen."""
+    """A security officer's BREAK_GLASS alert belongs to no case, so its Open goes to Oversight;
+    showAdmin must put the case-less Inbox away so both views are not on screen."""
     got = _run([_fn("notificationRoute"), _fn("openNotificationTarget")], """
 const log = [];
 const state = { caseId: null, caseRec: null };
@@ -691,9 +682,8 @@ const btn = el('button', 'btn', 'Acknowledge');
 
 
 def test_mark_all_read_asks_first_and_names_the_urgent_ones():
-    """The confirmation is ux17-failure's counted one (inboxReadAllText,
-    test_ui_failure_states), which names the urgent ones and says reading
-    does not acknowledge; the outcome is said as this pass said it."""
+    """The confirmation is the counted one (inboxReadAllText, test_ui_failure_states), which names the
+    urgent ones and says reading does not acknowledge."""
     init = _fn("initInbox")
     assert "window.confirm(inboxReadAllText())" in init
     assert "api('/notifications/read-all', { method: 'POST' })" in init

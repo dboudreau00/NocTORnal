@@ -1,20 +1,15 @@
 """The sociogram painter, held to the encoding docs/06 says never bends.
 
-A 42-agent review on 2026-09-22 found the canvas restyle wanting in ways
-no test had noticed, because none looked: the E2 "hollow = unevidenced"
-mark read a field the simulation node never carried and so never drew on
-any case; node opacity depended on radius; a 0.45 literal borrowed the
-confidence channel for provenance; parallel ties could not be clicked;
-Fit could not frame the flagship case; labels were all or nothing by zoom
-and printed over each other; the keyboard could select what it could not
-show. Each check below is named for the defect it would have caught.
+Each check below is named for the defect it would catch: the E2 "hollow = unevidenced" mark must read a
+field the simulation node carries; node opacity must not depend on radius; provenance must not borrow the
+confidence channel with a literal; parallel ties must be clickable; Fit must frame the flagship case;
+labels must thin with zoom and not print over each other; the keyboard must not select what it cannot
+show.
 
-These are pure: they read the shipped static assets, like
-test_ui_invariants and test_theme_contract. The canvas has no DOM to query,
-so the checks read the painter's source. Where a number matters (ring
-gaps, the width ramp) it is parsed and measured rather than matched. The
-view tests at the end go one step further and RUN the view functions
-lifted from app.js under node, against a stub canvas: no database, no
+These are pure: they read the shipped static assets, like test_ui_invariants and test_theme_contract. The
+canvas has no DOM to query, so the checks read the painter's source. Where a number matters (ring gaps,
+the width ramp) it is parsed and measured rather than matched. The view tests at the end go one step
+further and RUN the view functions lifted from app.js under node, against a stub canvas: no database, no
 browser, no network.
 """
 from __future__ import annotations
@@ -84,8 +79,7 @@ def test_a_hollow_node_is_void_inside_with_no_body_and_no_core():
 
 
 def test_an_unevidenced_tie_gets_a_shape_not_a_fade_and_not_a_dash():
-    """Opacity is confidence and dashed is inferred; E2 on a tie may borrow
-    neither (ux07 unevidenced-fade-hijacks-confidence-opacity)."""
+    """Opacity is confidence and dashed is inferred; E2 on a tie may borrow neither."""
     draw = _fn("draw")
     start = draw.index("if (lit && edgeUnevidenced(e)) {")
     bead = draw[start:draw.index("\n    }\n", start)]
@@ -98,8 +92,7 @@ def test_an_unevidenced_tie_gets_a_shape_not_a_fade_and_not_a_dash():
 
 
 def test_the_legend_explains_both_e2_marks():
-    """The meaning lived only in a checkbox's hover title (ux03
-    unevidenced-hollow-never-drawn)."""
+    """The meaning of both E2 marks is in the legend, not only in a checkbox's hover title."""
     html = INDEX.read_text(encoding="utf-8")
     legend = html[html.index('<div class="legend"'):html.index('id="proj-readout"')]
     assert 'class="glyph-node hollow"' in legend
@@ -122,9 +115,8 @@ def test_one_node_treatment_at_every_radius():
 
 
 def test_a_node_with_no_qualifying_tie_is_drawn_at_the_lowest_step():
-    """confAlpha(undefined) is 1, so an entity with no tie in the projection
-    drew at full, HIGH-looking opacity, and 'HIGH only' made every entity
-    look surer (ux03 minconf-isolates-full-opacity)."""
+    """confAlpha(undefined) is 1, so an entity with no tie in the projection would draw at full,
+    HIGH-looking opacity, and 'HIGH only' would make every entity look surer."""
     step = _fn("nodeStep")
     assert "'LOW'" in step
     draw = _fn("draw")
@@ -132,7 +124,7 @@ def test_a_node_with_no_qualifying_tie_is_drawn_at_the_lowest_step():
     assert "state.nodeConf.get(n.id)" not in draw, (
         "the painter reads nodeConf directly and skips the fallback")
     assert "none / 1.00" not in _js(), "the inspector still quotes full opacity"
-    # And when the floor emptied the picture, the canvas says it was the floor.
+    # When the floor emptied the picture, the canvas says it was the floor.
     assert "'no tie in this projection is ' + graded" in _fn("drawLabels")
 
 
@@ -154,11 +146,8 @@ def test_edge_width_spans_the_observed_weight_range():
 # ---------------------------------------------------------------------------
 
 def test_state_rings_stand_clear_of_the_type_ring():
-    """The type ring sat ON r and the dashed --alert proposal ring 1px
-    outside it, so on a group node pending review merged into the type
-    colour (cr02 hue-ring-overloads-state-ring). The type ring is inset
-    now (outer edge = r); the first state ring clears it by 3px and no two
-    state rings overlap."""
+    """The type ring is inset (outer edge = r); the first state ring clears it by 3px and no two state
+    rings overlap, so on a group node a pending-review ring does not merge into the type colour."""
     js = _js()
     block = js[js.index("const STATE_RINGS = {"):]
     block = block[:block.index("};")]
@@ -171,8 +160,7 @@ def test_state_rings_stand_clear_of_the_type_ring():
     for (_, o1, w1), (k2, o2, w2) in zip(rings, rings[1:], strict=False):
         assert o2 - w2 / 2 >= o1 + w1 / 2, f"the {k2} ring overlaps the one inside it"
     draw = _fn("draw")
-    # Traced in the type's own outline since 2026-09-23 (a victim is a
-    # square, context a diamond), and still inset.
+    # Traced in the type's own outline (a victim is a square, context a diamond), and still inset.
     assert "nodeOutline(shape, n.sx, n.sy, r - ringW / 2)" in draw, (
         "the type ring is not inset")
     for key in ("proposal", "selected", "pinned", "anchor", "ego"):
@@ -213,8 +201,8 @@ def test_the_grid_is_one_filled_path():
 
 
 def test_a_throwing_draw_cannot_strand_the_layout_loop():
-    """frame() used to call draw() before reassigning g.raf, so a throw left
-    a stale id and every `if (!g.raf)` restart guard skipped for good."""
+    """frame() reassigns g.raf before calling draw(): a throw must not leave a stale id that makes every
+    `if (!g.raf)` restart guard skip for good."""
     frame = _fn("frame")
     assert frame.index("g.raf = 0;") < frame.index("draw();")
 
@@ -224,9 +212,8 @@ def test_a_throwing_draw_cannot_strand_the_layout_loop():
 # ---------------------------------------------------------------------------
 
 def test_parallel_ties_bow_apart_and_the_nearest_is_hit():
-    """Two ties on one pair were one straight line: the last drawn was the
-    one seen, the first listed the one clicked, so a red dispute opened as
-    a green vouch (ux05 parallel-ties-unreachable)."""
+    """Two ties on one pair must not be one straight line (the last drawn seen, the first listed
+    clicked, so a red dispute opens as a green vouch): they bow apart and the nearest is hit."""
     assert "l.bend = " in _fn("setRendered")
     assert "quadraticCurveTo" in _fn("traceLink")
     hit = _fn("edgeAt")
@@ -239,9 +226,8 @@ def test_parallel_ties_bow_apart_and_the_nearest_is_hit():
 # ---------------------------------------------------------------------------
 
 def test_fit_has_no_fixed_floor_and_keeps_fitting_until_the_layout_is_done():
-    """fitView clamped to 0.12 and fired on the FIRST worker message, before
-    ForceAtlas2 expanded the graph (ux03 fit-cannot-fit-flagship, ux04
-    fit-cannot-frame-flagship, ux18 laptop-canvas-fit)."""
+    """fitView has no fixed 0.12 floor and does not fire on the FIRST worker message, before ForceAtlas2
+    has expanded the graph."""
     frame_all = _fn("frameAll")
     assert "0.12" not in frame_all
     assert "clamp(fit, FIT_MIN, FIT_MAX)" in frame_all
@@ -264,8 +250,8 @@ def test_unconnected_entities_are_shelved_not_flung():
 
 
 def test_labels_are_eleven_px_and_placed_rather_than_thresholded():
-    """All names above 0.7x and none below, drawn inside the node loop at
-    10px, overprinting each other (ux04 labels-all-or-nothing-and-colliding)."""
+    """Names are 11px and placed to avoid each other, not all-or-nothing by a 0.7x zoom threshold drawn
+    inside the node loop, where they overprint."""
     js = _js()
     assert "PAINT.labelFont = '11px '" in js
     draw = _fn("draw")
@@ -276,8 +262,7 @@ def test_labels_are_eleven_px_and_placed_rather_than_thresholded():
 
 
 def test_the_keyboard_can_pan_and_the_view_follows_the_selection():
-    """selectNode never moved the view and the canvas had no pan keys
-    (ux18 no-keyboard-pan-or-reveal)."""
+    """The canvas has pan keys, and selectNode moves the view to the selection."""
     keys = _fn("onCanvasKey")
     assert "e.shiftKey && PAN_KEYS[e.key]" in keys
     assert "followSelection(g)" in _fn("draw")
@@ -285,10 +270,6 @@ def test_the_keyboard_can_pan_and_the_view_follows_the_selection():
     aria = INDEX.read_text(encoding="utf-8")
     assert "Shift with an arrow key pans" in aria
 
-
-# ---------------------------------------------------------------------------
-# Found by the verifier of the first fix pass (2026-09-22 fix round)
-# ---------------------------------------------------------------------------
 
 def _case_switch_reset() -> str:
     """The canvas's own onCaseSwitch registration."""
@@ -349,9 +330,8 @@ def test_the_view_stays_fitted_until_the_analyst_takes_it():
 
 
 def test_every_tie_is_reachable_from_the_keyboard():
-    """Arrows reached entities only, so the second tie on a pair (and every
-    tie, for a keyboard-only analyst) could not be opened (ux05
-    parallel-ties-unreachable)."""
+    """Arrows reach entities, so the second tie on a pair (and every tie, for a keyboard-only analyst)
+    needs its own keys to be opened."""
     keys = _fn("onCanvasKey")
     assert "e.key === ']' || e.key === '['" in keys and "stepTie(" in keys
     ties = _fn("tiesOf")
@@ -387,19 +367,16 @@ def test_docs_06_describes_the_canvas_that_ships():
     assert "(--void, edge to edge)" not in docs
     for phrase in ("Node shape", "State rings", "Edge bead", "type ring"):
         assert phrase in docs, f"docs/06 does not describe the {phrase}"
-    # The fix round's behaviour, written down where the canvas is reviewed.
+    # The behaviour is written down where the canvas is reviewed.
     flat = " ".join(docs.split())
     assert "view stays the fit" in flat, "docs/06 does not describe the sticky fit"
     assert "`[`/`]`" in flat, "docs/06 does not document stepping through ties"
 
 
 # ---------------------------------------------------------------------------
-# Found by the verifier of the fix round (2026-09-22 review, second pass)
-#
-# These run the painter's own view functions, lifted out of app.js, under
-# node against a stub canvas, because the defect was a NUMBER (a reveal
-# margin wider than Fit's padding) that a source grep would not have seen.
-# Skipped only where node is absent; the CI runner image ships it.
+# These run the painter's own view functions, lifted out of app.js, under node against a stub canvas,
+# because the defect to catch is a NUMBER (a reveal margin wider than Fit's padding) that a source grep
+# would not see. Skipped only where node is absent; the CI runner image ships it.
 # ---------------------------------------------------------------------------
 
 def _node() -> str | None:
@@ -653,13 +630,10 @@ def test_a_selection_made_on_another_tab_is_revealed_on_return():
 
 
 def test_fit_keeps_every_entity_clear_of_the_canvas_chrome():
-    """c12 (2026-09-24): Fit's padding kept node centres 45px from the top
-    of a 1366x768 canvas whose head row reaches 35px down, so a top-row
-    hub and the name above it sat under the Pin button, and a bottom-row
-    entity under the names pill. Fit's top and bottom margins now clear
-    the measured chrome bands by the largest node radius, and are never
-    narrower than fitPad, so selecting a fitted entity still never moves
-    the view."""
+    """Fit's top and bottom margins clear the measured chrome bands by the largest node radius, and are
+    never narrower than fitPad, so selecting a fitted entity never moves the view. With padding alone, a
+    top-row hub and the name above it sit under the Pin button on a 1366x768 canvas whose head row reaches
+    35px down, and a bottom-row entity under the names pill."""
     fit = _top_fn("fitMargins")
     assert "chromeBoxes()" in fit and "NODE_R_MAX" in fit
     assert "Math.max(pad," in fit, "a chrome margin may fall below fitPad, under inView's cap"

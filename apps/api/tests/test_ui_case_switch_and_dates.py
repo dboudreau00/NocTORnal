@@ -1,27 +1,21 @@
 """The console's case switching, failed reads, report pane and dates.
 
-The review of 2026-09-22 found each of these wrong in a way no existing
-check could see, because every one of them rendered SOMETHING:
+Each of these goes wrong in a way no check of the rendered output can see, because every one of them
+renders SOMETHING:
 
-- ux02-cases / ux17-failure / ux12-feeds / ux15-report: after "All cases >
-  Open", the previous case's report, watch hits, entities, exhibits and ACH
-  matrix stayed on screen under the new case's code and TLP chip.
-- ux17-failure:failure-renders-as-empty-claim: a failed read drew the
-  pane's EMPTY state, so the triage queue said "Nothing awaiting review."
-  and the destruction register "Nothing has been destroyed." at the moment
-  the console knew nothing.
-- ux15-report: the preview printed "undefined -> undefined" for every
-  relationship, and Download handed over a file with no egress check.
-- ux05-inspector / ux19-copy: a day stored as midnight UTC read back as the
-  previous evening west of Greenwich, and panes mixed local time with
-  unlabelled UTC.
-- ux02-cases:case-status-invisible-in-workspace: nothing in a CLOSED case
-  said it was closed.
+- After "All cases > Open", the previous case's report, watch hits, entities, exhibits and ACH matrix
+  must not stay on screen under the new case's code and TLP chip.
+- A failed read must not draw the pane's EMPTY state ("Nothing awaiting review.", "Nothing has been
+  destroyed.") when the console knows nothing.
+- The report preview must not print "undefined -> undefined" for a relationship, and Download must pass
+  an egress check.
+- A day stored as midnight UTC must not read back as the previous evening west of Greenwich, and panes
+  must not mix local time with unlabelled UTC.
+- A CLOSED case says it is closed.
 
-Pure: these read the shipped static assets (and, for the date helpers, run
-them under node when it is installed, in a zone west of UTC). They live in
-their own file so they do not collide with the other review groups' edits
-to test_ui_invariants.py.
+Pure: these read the shipped static assets (and, for the date helpers, run them under node when it is
+installed, in a zone west of UTC). They live in their own file so they do not collide with edits to
+test_ui_invariants.py.
 """
 from __future__ import annotations
 
@@ -77,8 +71,8 @@ def _resets() -> list[str]:
 #: must clear. A registration that forgets one of these leaves the previous
 #: case's rows under the new header, which is the defect.
 _CLEARED_ON_SWITCH = {
-    # the case file itself (ux17-failure:stale-previous-case-data), and the
-    # write pickers built from it, which offered the old case's entities
+    # the case file itself, and the write pickers built from it, which would offer the old case's
+    # entities
     "ent-body", "ev-list", "ach-matrix", "ach-ranking", "tl-note",
     "edge-src", "edge-dst", "node-evidence", "edge-evidence",
     # triage (the badge is the only signal work is waiting)
@@ -86,9 +80,8 @@ _CLEARED_ON_SWITCH = {
     # comms results (case-switch-carries-previous-case-results)
     "comms-pgp-out", "comms-copart", "comms-copart-coverage",
     "comms-correlate-out", "comms-block-out", "comms-unverified",
-    # and what was typed or pasted for the case being left (fix round): a
-    # contact block pasted on one case and submitted after a switch was
-    # parsed into the other
+    # and what was typed or pasted for the case being left: a contact block pasted on one case and
+    # submitted after a switch would be parsed into the other
     "comms-observed", "comms-codecl", "comms-corr-observed",
     "comms-block-source", "comms-block-handle", "comms-block-text",
     "comms-pgp-message", "comms-pgp-key", "comms-pgp-fpr", "comms-pgp-confirms",
@@ -97,14 +90,12 @@ _CLEARED_ON_SWITCH = {
     "col-hits-list", "col-hits-counts", "ing-list",
     # the destruction register
     "tomb-list",
-    # final review, 2026-09-23 (g06): the Analysis pane (C3) and the forms
-    # whose typed content was written into the next case (C18, U14)
+    # the Analysis pane and the forms whose typed content would be written into the next case
     "an-body", "an-leads", "an-hist-body", "an-hist-who", "an-run",
     "cap-text", "cap-title", "cap-url", "ev-file", "ev-title",
     "ach-statement", "asm-statement", "asm-basis",
     "smp-file", "smp-note", "smp-case",
-    # Comms, F10a, F10b and F10c (2026-09-24): the detached signature
-    # and its data, the key registry, the lookups and the recorded checks
+    # Comms: the detached signature and its data, the key registry, the lookups and the recorded checks
     "comms-pgp-sig", "comms-pgp-sig-file", "comms-pgp-data",
     "comms-pgp-data-file", "comms-pgp-fpr-ref", "comms-pgpkey-list",
     "comms-pgpkey-lookups", "comms-pgp-ledger", "comms-pgpkey-armor",
@@ -146,16 +137,14 @@ _GUARDED = ("openCase", "loadCaseGraph", "loadEvidence", "loadAch",
             "loadTriage", "loadWatchHits", "loadIngestQueue", "loadTombstones",
             "loadUnverified", "loadCoParticipation", "verifyPgp",
             "buildReport", "releaseReport",
-            # the comms writes whose replies rendered into the next case's
-            # pane (fix round, 2026-09-22)
+            # the comms writes whose replies rendered into the next case's pane
             "initCommsBind", "initCommsBlocks", "initCommsCorrelate",
-            # final review, 2026-09-23 (g06): the Analysis pane (C3), the
-            # saved layout and presets (U15), and the writes whose replies
-            # landed in the next case's pane (C18, U14)
+            # the Analysis pane, the saved layout and presets, and the writes whose replies would land
+            # in the next case's pane
             "runAnalysis", "loadLatestAnalysis", "loadMetricHistory",
             "loadLayout", "loadPresets", "runCapture", "uploadEvidence",
             "submitSample",
-            # Comms, F10a, F10b and F10c (2026-09-24)
+            # Comms: the PGP and key-directory loaders and writes
             "loadPgpAttribution", "loadPgpLedger", "loadPgpKeys",
             "confirmPgpKey", "retirePgpKey", "importPgpKey",
             "loadKeyDirectory", "loadKeyLookups", "requestKeyLookup",
@@ -172,9 +161,8 @@ def test_a_late_reply_for_a_case_the_analyst_left_is_dropped(name):
 
 
 def test_a_comms_write_answered_after_a_switch_is_not_drawn_in_the_new_case():
-    """The contact-block parse and the binding took no token, so a reply
-    for the case the analyst had left rendered in the output the switch
-    had just cleared (verifier, fix round of 2026-09-22)."""
+    """The contact-block parse and the binding take a token, so a reply for the case the analyst has
+    left is not rendered in the output the switch just cleared."""
     blocks = _fn("initCommsBlocks")
     assert blocks.index("caseChanged(token)") < blocks.index(
         "renderContactBlock(block)")
@@ -216,9 +204,8 @@ def test_the_failure_notice_is_a_sibling_and_says_unknown():
 
 
 def test_the_failure_sentence_is_grammatical_for_any_subject():
-    """Behavioural. The notice built "<what> was refused", so a 403 on the
-    inbox read "Your notifications was refused" (verifier, fix round of
-    2026-09-22). Runs the shipped function on singular and plural subjects
+    """Behavioural. The notice is built as "<what> was refused", which must stay grammatical for
+    singular and plural subjects ("Your notifications were refused"). Runs the shipped function on both
     and on both kinds of failure."""
     js = _js()
     source = (js[js.index("function failureReason("):
@@ -303,8 +290,8 @@ def test_the_preview_reads_the_fields_the_server_sends():
                  "r.has_evidence", "body.assumptions", "c.legal_basis",
                  "h.statement", "body.document"):
         assert live in pane, f"the preview does not show {live}"
-    # The saved copy is rebuilt when it is cleared, so its Generated line
-    # differs; the preview must not promise "exactly" (fix round).
+    # The saved copy is rebuilt when it is cleared, so its Generated line differs; the preview must not
+    # promise "exactly".
     assert "exactly as it would be saved" not in pane
     assert '"Generated" line' in pane
     builder = (SRC / "reports.py").read_text(encoding="utf-8")
@@ -354,8 +341,7 @@ def test_every_choice_withdraws_what_depended_on_it():
                 in js), f"changing #{control} leaves the old egress verdict up"
     assert "resetReport();" in _fn("withdrawReport")
     assert "resetReportVerdict();" in _fn("withdrawReportVerdict")
-    # A reset must also void a request still in flight, not only a result
-    # already drawn (verifier, fix round of 2026-09-22).
+    # A reset must also void a request still in flight, not only a result already drawn.
     assert "reportGen += 1" in _fn("resetReport")
     assert "verdictGen += 1" in _fn("resetReportVerdict")
     assert "gen !== reportGen" in _fn("buildReport")
@@ -430,11 +416,9 @@ function snapshot() {
 
 
 def test_a_request_in_flight_is_voided_by_the_choice_that_withdrew_it():
-    """Behavioural, the verifier's two reproductions. The listeners used to
-    withdraw only what had already arrived, so a Prepare in flight when
-    the target changed drew an AMBER preview under a GREEN control, and a
-    Check egress in flight when the destination changed drew "May leave
-    ... to smtp", with its Save, under in_app."""
+    """A choice that withdraws a result also voids a request in flight: a Prepare in flight when the
+    target changes must not draw an AMBER preview under a GREEN control, nor a Check egress in flight
+    when the destination changes draw "May leave ... to smtp", with its Save, under in_app."""
     script = _report_harness() + """
 (async () => {
   const out = {};
@@ -549,11 +533,10 @@ def test_no_time_is_formatted_in_the_browsers_zone_or_locale():
 _UTC_LABELLED = ("ingestRow", "deadLetterRow", "unhealthyRow", "neverPolledRow",
                  "dueRow", "personaRow", "runRow", "tombRow", "glassRow",
                  "assumptionRow",
-                 # the Lab and Deception sites the fix round moved (the
-                 # finding's own evidence is the Lab's "SUBMITTED 15:18")
+                 # the Lab and Deception row builders
                  "captureRow", "openCapture", "callRow", "sampleRow",
-                 # The analysis time moved out of openSample into its own
-                 # builder with the Lab's analysis rows (g09, 2026-09-23).
+                 # The analysis time lives in its own builder with the Lab's analysis rows, not in
+                 # openSample.
                  "analysisRow", "detonationRow")
 
 
@@ -592,9 +575,8 @@ def test_the_observed_at_field_says_utc_and_is_read_as_utc():
 def test_the_inspector_shows_days_as_days_and_both_ends_of_an_interval():
     body = _fn("renderInspector")
     assert "fmtInterval(e.valid_from, e.valid_to)" in body
-    # The node's line is built by nodeSubLine since ux05-inspector:first-
-    # last-seen-always-dash (2026-09-23), which repaints it with the
-    # observed window once the claims arrive.
+    # The node's line is built by nodeSubLine, which repaints it with the observed window once the
+    # claims arrive.
     assert "nodeSubLine(n, null)" in body
     assert "fmtInterval(n.valid_from, n.valid_to)" in _fn("nodeSubLine")
     assert "fmtTime(e.valid_from)" not in body
@@ -704,9 +686,8 @@ def test_the_workspace_names_every_state_the_server_can_be_in():
 
 
 def test_the_state_chip_cannot_be_mistaken_for_a_handling_marking():
-    """It sits beside the TLP chip. In the alert amber it read as a second
-    TLP:AMBER marking, "DORMANT" beside "TLP:RED" included (verifier, fix
-    round of 2026-09-22). No colour any TLP chip uses may appear in it."""
+    """The state chip sits beside the TLP chip, so no colour any TLP chip uses may appear in it: in the
+    alert amber it reads as a second TLP:AMBER marking."""
     css = re.sub(r"/\*.*?\*/", "", APP_CSS.read_text(encoding="utf-8"), flags=re.S)
     tlp_tokens = set()
     for m in re.finditer(r"\.tlp-[A-Z_]+\s*\{([^}]*)\}", css):
@@ -732,11 +713,9 @@ def test_the_state_strip_does_not_steal_the_workspace_row():
 
 
 def test_the_workspace_cannot_be_scrolled_out_from_under_the_header():
-    """README screenshot review, 2026-09-24: Trend's scrollIntoView, on a
-    heading its pane could not bring to the top, scrolled #main, which is
-    overflow:hidden and so still a scroll container nobody can scroll
-    back. `overflow: clip` leaves nothing for a script to scroll, for all
-    of the console's scrollIntoView calls at once."""
+    """Trend's scrollIntoView, on a heading its pane cannot bring to the top, would scroll #main, which
+    is overflow:hidden and so still a scroll container nobody can scroll back. `overflow: clip` leaves
+    nothing for a script to scroll, for all of the console's scrollIntoView calls at once."""
     css = re.sub(r"/\*.*?\*/", "", APP_CSS.read_text(encoding="utf-8"), flags=re.S)
     m = re.search(r"(?m)^\.main\s*\{([^}]*)\}", css)
     assert m, "app.css has no .main rule"

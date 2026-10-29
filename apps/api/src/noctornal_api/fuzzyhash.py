@@ -1,28 +1,22 @@
-"""Fuzzy hashes for the Lab's static triage: TLSH and ssdeep, their
-comparisons, and the checks a similarity search makes before any work
-(F11, 2026-09-24).
+"""Fuzzy hashes for the Lab's static triage: TLSH and ssdeep, their comparisons, and the checks a similarity
+search makes before any work.
 
-Pure: standard library only, no I/O, no environment. It runs inside the
-static-triage child (`lab_static`), under that child's memory, CPU and
-file limits, and in the API process for the comparisons a similarity
-search makes over digests already stored.
+Pure: standard library only, no I/O, no environment. It runs inside the static-triage child (`lab_static`), under
+that child's memory, CPU and file limits, and in the API process for the comparisons a similarity search makes
+over digests already stored.
 
-## Why ports, and why these two
-
-No binding for either hash has wheels for this stack's platforms (py-tlsh
-and python-ssdeep ship source only and need a C toolchain), and the pure
-Python ssdeep on PyPI (ppdeep) rescans its input once per block-size
-halving, which measured 0.24 MiB/s on zero padding, and scores with an
-identity shortcut that compares only the first half of a digest, so its
-score is not the ssdeep score analysts compare with anywhere else. Both
-ports below are held to golden vectors produced by the reference builds
-(apps/api/tests/data/fuzzy_vectors.json), so a drifted port fails a test
-instead of clustering unrelated samples with confidence.
+Why ports: no binding for either hash has wheels for this stack's platforms (py-tlsh and python-ssdeep ship
+source only and need a C toolchain), and the pure Python ssdeep on PyPI (ppdeep) rescans its input once per
+block-size halving, which measured 0.24 MiB/s on zero padding, and scores with an identity shortcut that
+compares only the first half of a digest, so its score is not the ssdeep score analysts compare with anywhere
+else. Both ports below are held to golden vectors produced by the reference builds
+(apps/api/tests/data/fuzzy_vectors.json), so a drifted port fails a test instead of clustering unrelated samples
+with confidence.
 
 ## Code adapted from third parties
 
-TLSH, the Trend Micro Locality Sensitive Hash, 4.12.1 / 5.0.0 algorithm
-(128 buckets, 1-byte checksum), ported from the py-tlsh C++ sources:
+TLSH, the Trend Micro Locality Sensitive Hash, 4.12.1 / 5.0.0 algorithm (128 buckets, 1-byte checksum), ported
+from the py-tlsh C++ sources:
 
     Trend Locality Sensitive Hash (TLSH)
     Copyright 2010-2014 Trend Micro
@@ -58,8 +52,7 @@ the 3-clause licence, whose terms are:
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-ssdeep, the context triggered piecewise hash of libfuzzy 2.14.1, ported
-from fuzzy.c and edit_dist.c:
+ssdeep, the context triggered piecewise hash of libfuzzy 2.14.1, ported from fuzzy.c and edit_dist.c:
 
     Copyright (C) 2002 Andrew Tridgell <tridge@samba.org>
     Copyright (C) 2006 ManTech International Corporation
@@ -68,11 +61,9 @@ from fuzzy.c and edit_dist.c:
     Copyright (C) 2014 Jesse Kornblum <research@jessekornblum.com>
     Copyright (C) 2017 Tsukasa OI <floss_ssdeep@irq.a4lg.com>
 
-libfuzzy is free software under the GNU General Public License, version 2
-or (at your option) any later version. This port is used under version 3,
-which section 13 of the GNU Affero General Public License this project is
-released under allows it to be combined with. Both notices are repeated in
-NOTICE.md.
+libfuzzy is free software under the GNU General Public License, version 2 or (at your option) any later
+version. This port is used under version 3, which section 13 of the GNU Affero General Public License this
+project is released under allows it to be combined with. Both notices are repeated in NOTICE.md.
 """
 from __future__ import annotations
 
@@ -384,13 +375,10 @@ def _scan(data: bytes, lo: int, top: int) -> tuple[list[int], list[_Level], int]
 def ssdeep_digest(data: bytes) -> str:
     """libfuzzy's `fuzzy_hash_buf`, character for character.
 
-    Single pass over the input for the rolling hash, whatever its content,
-    then the partial FNV hashes of the two block sizes the digest shows,
-    over their own segments. ppdeep's rescan per block-size halving is what
-    made zero padding cost 0.24 MiB/s; here the cost does not depend on
-    what the bytes are (a second pass happens only when neither of the
-    expected block sizes triggered 32 times, which low-variety input can
-    cause, and it too is one pass).
+    Single pass over the input for the rolling hash, whatever its content, then the partial FNV hashes of the two
+    block sizes the digest shows, over their own segments. The cost does not depend on what the bytes are (a
+    second pass happens only when neither of the expected block sizes triggered 32 times, which low-variety
+    input can cause, and it too is one pass).
     """
     n = len(data)
     if n > SSDEEP_MAX_BYTES:
@@ -528,10 +516,9 @@ def _split(digest: str) -> tuple[int, str, str]:
 def ssdeep_compare(a: str, b: str) -> int:
     """libfuzzy's `fuzzy_compare`, 0 to 100 (-1 for a malformed digest).
 
-    Not ppdeep's: libfuzzy returns 100 for two digests only when BOTH
-    halves match after sequence stripping, and ppdeep's shortcut compared
-    the first half alone, so '3:abc:x' against '3:abc:y' scored 100 there
-    and scores 0 here (measured 2026-09-24)."""
+    Not ppdeep's: libfuzzy returns 100 for two digests only when BOTH halves match after sequence stripping, and
+    ppdeep's shortcut compared the first half alone, so '3:abc:x' against '3:abc:y' scores 100 there and 0
+    here."""
     try:
         bs1, a1, a2 = _split(a)
         bs2, b1, b2 = _split(b)

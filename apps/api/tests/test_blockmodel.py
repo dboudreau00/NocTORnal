@@ -1,13 +1,10 @@
-"""F1: CONCOR structural equivalence, the Roles card's maths (2026-09-24),
-without a database.
+"""CONCOR structural equivalence, the Roles card's maths, without a database.
 
-Every fixture spells out each vertex and each tie as (src, edge_type,
-dst), taking sign and directedness from the ontology, with ids
-UUID(int=k) so a failure reproduces (with uuid4, one fixture's positions
-depended on which vertex sorted first). The expected correlations were
-computed independently of the module and are reproduced here by it, and
-the pair-excluding correlation is held against a brute-force Pearson over
-explicitly deleted entries.
+Every fixture spells out each vertex and each tie as (src, edge_type, dst), taking sign and
+directedness from the ontology, with ids UUID(int=k) so a failure reproduces (with uuid4, one
+fixture's positions depended on which vertex sorted first). The expected correlations were computed
+independently of the module and are reproduced here by it, and the pair-excluding correlation is held
+against a brute-force Pearson over explicitly deleted entries.
 
 Pure: no database. numpy is a hard dependency of this module.
 """

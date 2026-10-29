@@ -1,16 +1,12 @@
-"""The console's hold controls, as the console ships them (2026-10-08).
+"""The console's hold controls, as the console ships them.
 
-Pure: no database. The markup is read from the shipped index.html and the
-functions run under Node over a stub DOM, judged by what they draw and what
-they send. The server halves are `test_legal_holds_http_pg.py` (the register's
-`may_hold`, the case record's hold fields, the audit rows) and
-`test_g44_http_pg.py` (what the routes decide).
+Pure: no database. The markup is read from the shipped index.html and the functions run under Node over a
+stub DOM, judged by what they draw and what they send. The server halves are
+`test_legal_holds_http_pg.py` and `test_evidence_retention_http_request_role_pg.py`.
 
-Two controls, one for each half of the hold route pair: an exhibit's card
-(`exhibitHoldButton`, a row form like the collected document's) and the case
-header's Hold… dialog (`openCaseHold` and `submitCaseHold`). Either one asks
-for a written reason and a sign-in from the last 15 minutes, and the routes
-decide everything; the console only offers the control to a reader whose
+Two controls, one per half of the hold route pair: an exhibit's card (`exhibitHoldButton`) and the case
+header's Hold dialog (`openCaseHold`, `submitCaseHold`). Either asks for a written reason and a sign-in
+from the last 15 minutes; the routes decide everything, and the console only offers the control when the
 register or case record said `may_hold`.
 """
 from __future__ import annotations
@@ -468,10 +464,9 @@ console.log(JSON.stringify({ short: short, cancelled: cancelled, refused: refuse
 
 @needs_node
 def test_the_report_pane_states_each_figure_as_the_cases_setting_allows(tmp_path):
-    """The three figures follow the case's withheld-disclosure setting
-    (decision 179, 2026-10-08): the number under COUNT, whether there are some
-    under PRESENCE, and nothing under NONE, where even a 0 would say what the
-    case chose not to. A server that sends no setting is read as before."""
+    """The three figures follow the case's withheld-disclosure setting (decision 179): the number under
+    COUNT, whether there are some under PRESENCE, and nothing under NONE, where even a 0 would say what the
+    case chose not to."""
     got = _run(["renderRedaction", "withStrongRuns"], r"""
 const out = {};
 const base = { built_at_tlp: 'GREEN', nodes_withheld: 0, edges_withheld: 0,

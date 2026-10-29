@@ -1,12 +1,10 @@
-"""The Telegram suite's fakes (roadmap F5.3, 2026-09-24).
+"""The Telegram suite's fakes. Importable, no test functions.
 
-Importable, no test functions. No Telegram test touches the network:
-`guard_sockets` refuses every connection that is not loopback, Telegram's
-data centres first, and FakeTransport stands in for Telethon. Routes are
-PROXY routes built the way the egress proxy's contract builds them
-(egress_contract_cases), so the wire username and the token are the real
-grammar; `patch_routes` makes the collection foundation's route_for return
-them without a proxy or a provider in the test process.
+No Telegram test touches the network: `guard_sockets` refuses every connection that is not loopback,
+Telegram's data centres first, and FakeTransport stands in for Telethon. Routes are PROXY routes built
+the way the egress proxy's contract builds them (egress_contract_cases), so the wire username and the
+token are the real grammar; `patch_routes` makes the collection foundation's route_for return them
+without a proxy or a provider in the test process.
 """
 from __future__ import annotations
 

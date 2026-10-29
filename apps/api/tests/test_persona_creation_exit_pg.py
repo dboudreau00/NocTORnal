@@ -1,16 +1,12 @@
-"""F35 (docs/17, 2026-10-02): a persona is refused at creation on an egress
-profile that cannot carry persona traffic, with the egress proxy's own
-sentence.
+"""A persona is refused at creation on an egress profile that cannot carry persona traffic (docs/17).
 
-`persona_capable` is an exit other than this host's own, switched on, not
-retired and not the passive default. Before F35 the persona was created, the
-readiness register flagged it and the proxy refused every connection it made
-(`no_exit`, `persona_needs_exit`), so an operator believed a persona was ready
-that could never leave. The refusal is the proxy's sentence, taken from
-`egress_policy.explain`, so the two cannot say different things.
+`persona_capable` is an exit other than this host's own, switched on, not retired and not the passive
+default. Without the refusal the persona is created, the readiness register flags it and the proxy refuses
+every connection it makes (`no_exit`, `persona_needs_exit`). The refusal is the proxy's own sentence, taken
+from `egress_policy.explain`, so the two cannot disagree.
 
-The vault is exercised directly and through POST /collection/personas, which
-is the only way a persona is created. DATABASE_URL-gated; prefix `f35pe-`.
+The vault is exercised directly and through POST /collection/personas, the only way a persona is created.
+DATABASE_URL-gated; prefix `f35pe-`.
 """
 from __future__ import annotations
 
@@ -135,8 +131,7 @@ def test_the_passive_default_refuses_a_persona_even_with_an_exit(conn):
 
 
 def test_a_switched_off_or_unknown_profile_keeps_its_own_older_sentence(conn):
-    """F35 adds a refusal after the existing ones: a retired or switched-off
-    profile is still `no such egress profile, or it is retired` (a 404 over
+    """A retired or switched-off profile still gives `no such egress profile, or it is retired` (a 404 over
     HTTP), whatever its exit."""
     from uuid import uuid4
 

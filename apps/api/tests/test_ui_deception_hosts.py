@@ -1,11 +1,9 @@
 """The deception pane draws a host the sender chose only defanged.
 
-2026-09-23. The email row's "sending host" and
-"message-id host" and the detail card's Received chain rendered the raw
-`host`, `message_id_domain`, `from_host` and `by_host`. None of them is
-constrained to a hostname, so EHLO `pay.evil.example/verify` reached the
-screen as a working URL. The service now serves `*_defanged` forms beside
-them (`test_deception_hosts_pg.py` reads them back) and the console reads
+The email row's "sending host" and "message-id host" and the detail card's Received chain must not
+render the raw `host`, `message_id_domain`, `from_host` and `by_host`. None of them is constrained to a
+hostname, so EHLO `pay.evil.example/verify` would reach the screen as a working URL. The service serves
+`*_defanged` forms beside them (`test_deception_hosts_pg.py` reads them back) and the console reads
 only those.
 
 Pure, beside `test_ui_invariants.py`: it reads the shipped static assets
@@ -26,8 +24,7 @@ def _js() -> str:
 
 
 def _code(text: str) -> str:
-    """JavaScript without its comments, so a check matches what runs and
-    not the comment recording what used to run."""
+    """JavaScript without its comments, so a check matches what runs and not what a comment says."""
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     return re.sub(r"(?m)^\s*//.*$", "", text)
 

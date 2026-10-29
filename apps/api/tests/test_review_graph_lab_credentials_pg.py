@@ -1,18 +1,13 @@
-"""A URL found in the Lab never carries its password onto the graph
-(graph-url-selector-keeps-credentials, the verifier's round, 2026-10-03).
+"""A URL found in the Lab never carries its password onto the graph.
 
-The first fix made `url_norm` drop a URL's userinfo and credential-bearing
-parameters, so a proposal's LABEL is clean. A lab or sandbox extraction also
-copies the value as the analysis recorded it into `attrs.raw_value`, and an
-accepted proposal copies `attrs` onto the entity: `core.node.attrs`, served
-by GET /graph, shown in the inspector and indexed for search, held the whole
-URL with its password and token, while the label and the selector index row
-were clean. Here the value is redacted where the proposal is raised, redacted
-again where an older proposal is accepted, and refused by the one writer if a
-path skips both.
+`url_norm` drops a URL's userinfo and credential-bearing parameters, so a proposal's LABEL is clean. A
+lab or sandbox extraction also copies the value as the analysis recorded it into `attrs.raw_value`, and an
+accepted proposal copies `attrs` onto the entity: `core.node.attrs`, served by GET /graph, shown in the
+inspector and indexed for search, would hold the whole URL with its password and token while the label and
+the selector index row were clean. So the value is redacted where the proposal is raised, redacted again
+where an older proposal is accepted, and refused by the one writer if a path skips both.
 
-Reuses the Lab workflow's own helpers. Email prefix `labw-`. Gated on
-DATABASE_URL.
+Reuses the Lab workflow's own helpers. Email prefix `labw-`. Gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -96,8 +91,7 @@ def _accept(client, w, proposal_id):
 
 def test_a_url_extracted_in_the_lab_is_proposed_and_accepted_without_its_credentials(
         conn, client, store):
-    """The verifier's reproduction, verbatim: the label was clean, the
-    payload's raw value and then the entity's attributes were the whole URL."""
+    """The label is clean; so must be the payload's raw value and then the entity's attributes."""
     w = _analysis(conn, client, store)
     sent = _propose(client, w)
     assert sent.status_code == 202, sent.text
@@ -143,10 +137,9 @@ def test_a_value_that_is_not_a_url_is_proposed_as_it_was_recorded(conn, client, 
 
 def test_a_lab_proposal_raised_before_the_fix_is_accepted_with_its_raw_value_redacted(
         conn, client, store):
-    """A proposal that already carries the whole URL in `attrs.raw_value`
-    has a clean label, and a second one cannot be raised for the same label
-    in any state, so refusing it would leave the reviewer nothing to do.
-    The accept redacts the copy it writes."""
+    """A proposal that already carries the whole URL in `attrs.raw_value` has a clean label, and a second
+    one cannot be raised for the same label in any state, so refusing it would leave the reviewer nothing
+    to do. The accept redacts the copy it writes."""
     from noctornal_api.proposals import KIND_NODE, ProposalStore
     w = _analysis(conn, client, store)
     pid = ProposalStore(conn).propose(

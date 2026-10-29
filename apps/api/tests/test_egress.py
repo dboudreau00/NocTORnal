@@ -1,14 +1,11 @@
-"""The classification egress gate (invariant 8, docs/07, Phase 5).
+"""The classification egress gate (invariant 8, docs/07).
 
-docs/07: "Every outbound path checks classification before it sends. One
-function, `can_egress(object, destination)`, called by SMTP, Jira,
-webhooks and export alike. AMBER_STRICT and RED never leave the platform
-boundary, regardless of who clicked what."
+docs/07: "Every outbound path checks classification before it sends. One function,
+`can_egress(object, destination)`, called by SMTP, Jira, webhooks and export alike. AMBER_STRICT and RED
+never leave the platform boundary, regardless of who clicked what."
 
-The gate is pure, so it can be tested exhaustively — which matters more
-here than almost anywhere else in the codebase, because this is the
-function standing between a case file and a Jira project with a different
-access model and a much wider audience.
+The gate is pure, so it is tested exhaustively: it is the function standing between a case file and a Jira
+project with a different access model and a much wider audience.
 """
 from __future__ import annotations
 
@@ -29,16 +26,16 @@ from noctornal_api.egress import (
 OUTBOUND = [Destination.EXPORT, Destination.SMTP, Destination.JIRA,
             Destination.WEBHOOK,
             Destination.COLLECTION_TARGET,  # a collection adapter's read
-            Destination.KEY_DIRECTORY,  # F10c, a Web Key Directory
-            Destination.MODEL_REMOTE,  # F6.2, a model endpoint outside this host
-            Destination.SANDBOX,  # F14, the self-hosted CAPEv2.
+            Destination.KEY_DIRECTORY,  # a Web Key Directory
+            Destination.MODEL_REMOTE,  # a model endpoint outside this host
+            Destination.SANDBOX,  # the self-hosted CAPEv2
             ]
-OUTBOUND.append(Destination.LOOKUP)  # F15.3
+OUTBOUND.append(Destination.LOOKUP)
 
 
 def test_the_sandbox_needs_a_ceiling_and_its_ceiling_binds():
-    """F14 (2026-09-24): a sandbox with no declared ceiling receives
-    nothing, a ceiling lowers what may go, and none raises the floor."""
+    """A sandbox with no declared ceiling receives nothing, a ceiling lowers what may go, and none raises
+    the floor."""
     from noctornal_api.egress import DENY_NO_CEILING
     assert can_egress("GREEN", Destination.SANDBOX).reason == DENY_NO_CEILING
     assert can_egress("AMBER", Destination.SANDBOX,
@@ -172,9 +169,8 @@ def test_enforce_raises_with_the_decision_attached():
 # --- there is only ONE copy of the rule ----------------------------------
 
 def test_evidence_export_shares_the_gates_definition():
-    """docs/07 wants one function. Evidence used to carry its own frozenset
-    of non-egressable classifications; a second copy is how the copies
-    drift, and the one that drifts is the leak."""
+    """docs/07 wants one function: evidence export shares the gate's set of non-egressable classifications.
+    A second copy would drift, and the one that drifts is the leak."""
     from noctornal_api.egress import NEVER_EGRESS
     from noctornal_api.evidence import _NO_EGRESS
     assert _NO_EGRESS == frozenset(t.name for t in NEVER_EGRESS)

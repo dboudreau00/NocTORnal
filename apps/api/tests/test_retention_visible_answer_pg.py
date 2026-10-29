@@ -1,17 +1,14 @@
-"""The purge's own answer, and the meters of the three acts that spend one
-(2026-10-08).
+"""The purge's own answer, and the meters of the three acts that spend one.
 
-- the purge's own answer: the dry run's totals and its withheld notice
-  followed the case's setting while the real run's answer totalled what the
-  sweep acted on, exhibits above the caller included, so a caller who may run
-  a real purge learned the count afterwards. The real run answers over what
-  the caller may see: counts, warnings (which named a hidden exhibit's storage
-  key) and the tombstone ids. The tombstone itself is the record of
-  destruction and totals everything.
-- the destruction meter: a lift, a dry run and a real purge each have a meter
-  of their own, and a request refused for a stale sign-in spends none.
+- the purge's own answer: the dry run's totals and its withheld notice follow the case's setting, so a
+  real run must not total what the sweep acted on, exhibits above the caller included, or a caller who may
+  run a real purge learns the count afterwards. The real run answers over what the caller may see: counts,
+  warnings (which could name a hidden exhibit's storage key) and the tombstone ids. The tombstone itself
+  is the record of destruction and totals everything.
+- the destruction meter: a lift, a dry run and a real purge each have a meter of their own, and a request
+  refused for a stale sign-in spends none.
 
-Accounts `g44t-*`; the object store is `g44_support.VersionedStore`.
+Accounts `g44t-*`; the object store is `evidence_retention_support.VersionedStore`.
 """
 from __future__ import annotations
 
@@ -20,7 +17,7 @@ from dataclasses import replace
 
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -232,7 +229,7 @@ def _case_with_hidden_exhibits(conn, store, mode, *, locked=False):
 
 
 class LockingStore(g.VersionedStore):
-    """A store whose lock still holds on the keys it was told of."""
+    """A store whose lock holds on the keys it was told of."""
 
     def __init__(self):
         super().__init__()

@@ -1,28 +1,19 @@
 """The console's failure states, loading states and one-click verdicts.
 
-The review of 2026-09-22 (ux15-report, ux17-failure) found, among others:
-
-- loading-shows-empty-claims: the empty lines shipped visible, so while a
-  read was in flight the Sources tab said "Every source is healthy." and
-  the triage queue "Nothing awaiting review.";
-- sticky-error-text-in-empty-slot: a refusal written into an empty line
-  was never taken back, and every failure was phrased as a permission;
-- banners-block-appbar: the banner stack covered All cases and Log out,
-  never expired, never merged, and never said which pane had failed;
-- inbox-actions-fail-silently: Mark read, Acknowledge and Mark all read
-  were bare awaits, and Mark all read had no confirmation;
-- breakglass-review-one-click: admin Deactivate and Revoke SYS_ADMIN were
-  single clicks whose errors landed far from the row;
-- case-status-purged-free-text: the terminal PURGED status was one free
-  text prompt away, with CLOSED prefilled for an ACTIVE case;
-- due-list-no-forward-view-no-names / unruled-categories-invisible: the
-  retention panel's client half (the server half is
-  test_retention_due_named_pg.py).
+- While a read is in flight the empty lines are hidden, so the Sources tab does not say "Every source
+  is healthy." nor the triage queue "Nothing awaiting review.".
+- A refusal written into an empty line is taken back by the next answer, and a failure is not phrased
+  as a permission.
+- The banner stack does not cover All cases and Log out, expires, merges, and says which pane failed.
+- Mark read, Acknowledge and Mark all read report failure, and Mark all read confirms.
+- Admin Deactivate and Revoke SYS_ADMIN report errors at the row.
+- The terminal PURGED status is not one free-text prompt away.
+- The retention panel's client half (the server half is test_retention_due_named_pg.py): the due list
+  has a forward view and names, and unruled categories are visible.
 
 Pure: these read the shipped static assets and, where behaviour is the
 point, run the shipped functions under node against a small stand-in DOM.
-Their own file, so they do not collide with other groups' edits to
-test_ui_invariants.py.
+Their own file, so they do not collide with edits to test_ui_invariants.py.
 """
 from __future__ import annotations
 
@@ -188,9 +179,7 @@ def _helpers() -> str:
                 "bumpBanner", "armBannerExpiry", "requestLabel", "fail")))
 
 
-# ---------------------------------------------------------------------------
-# ux17-failure:loading-shows-empty-claims
-# ---------------------------------------------------------------------------
+# Empty lines must not claim anything while a read is in flight
 
 #: Every empty line a read answers, which must not claim anything before it.
 _CLAIM_EMPTIES = (
@@ -200,8 +189,7 @@ _CLAIM_EMPTIES = (
     "src-runs-empty", "key-empty", "ach-empty", "ret-due-empty",
     "tomb-empty", "glass-empty", "adm-empty", "dcp-cap-empty",
     "dcp-eml-empty", "dcp-call-empty",
-    # The Compartments subpane's two lists (g11's registry, g17's rename
-    # and retire), which arrived beside this rule (merged 2026-09-24).
+    # The Compartments subpane's two lists (the registry, and rename and retire).
     "adm-comp-empty", "adm-cmp-life-empty",
 )
 
@@ -287,9 +275,7 @@ console.log(JSON.stringify(out));
     ], got
 
 
-# ---------------------------------------------------------------------------
-# ux17-failure:sticky-error-text-in-empty-slot
-# ---------------------------------------------------------------------------
+# A refusal is not written straight into an empty line
 
 def test_no_refusal_is_written_straight_into_an_empty_line():
     """Every refusal goes through `listRefused`, which marks it so the next
@@ -323,8 +309,7 @@ console.log(JSON.stringify(out));
 
 
 def test_a_deception_outage_is_not_phrased_as_a_permission():
-    """The sentence the finding quoted, reproduced: a 503 on captures must
-    say the list could not be loaded, and never "needs evidence.read"."""
+    """A 503 on captures says the list could not be loaded, and never "needs evidence.read"."""
     js = _js()
     harness = (_helpers() + _const("DCP_LISTS")
                + "const DCP_DETAIL = {};\nfunction dcpDetailClose() {}\n"
@@ -357,12 +342,10 @@ console.log(JSON.stringify([down, refused]));
 
 
 def test_a_rejected_request_is_not_phrased_as_a_permission():
-    """The verifier's nit (2026-09-23): co-participation and the metric
-    trend gave a 400 the "needs comms.read" / "needs analytics.run"
-    sentence. Only a 403, or the 404 a case route hides a case behind, is
-    about access; a 400 says the server's own reason."""
-    # refusalText names roles through permissionRefusal (ux19-copy
-    # developer-speak-in-copy); with no role table loaded it keeps the code.
+    """Co-participation and the metric trend must not give a 400 the "needs comms.read" / "needs
+    analytics.run" sentence. Only a 403, or the 404 a case route hides a case behind, is about access;
+    a 400 says the server's own reason."""
+    # refusalText names roles through permissionRefusal; with no role table loaded it keeps the code.
     harness = (_helpers() + _fn("refusalText") + _fn("closeClause")
                + _fn("refusedWords") + _fn("permissionRefusal")
                + _fn("roleWords") + _fn("rolesFor") + _fn("listWords")
@@ -392,9 +375,7 @@ def test_a_refusal_is_styled_as_one():
         "a refusal in the muted grey of .empty reads as the list's answer")
 
 
-# ---------------------------------------------------------------------------
-# ux17-failure:banners-block-appbar
-# ---------------------------------------------------------------------------
+# The banner stack starts below the app bar
 
 def test_the_banner_stack_starts_below_the_app_bar():
     rule = _rule(".banners")
@@ -453,11 +434,11 @@ def _session_harness() -> str:
 
 
 def test_session_banners_stay_and_only_they_are_taken_down():
-    """The verifier's two catches (2026-09-23): session banners were raised
-    as ordinary warnings, so "Session ended" and "Signed in again: the change
-    ... was not saved" passed after 8 seconds; and `sessionBanner` kept the
-    stack's LAST card, which after a merge is whatever was raised in
-    between, so the next sign-in took down an unrelated failure."""
+    """Session banners stay and only they are taken down.
+
+    They are raised sticky, so "Session ended" and "Signed in again: the change ... was not saved" do
+    not pass after 8 seconds; and `sessionBanner` removes its own cards, not the stack's LAST card,
+    which after a merge is whatever was raised in between."""
     got = _run(_session_harness() + r"""
 make('banners', 'div');
 const stack = $('banners');
@@ -482,11 +463,9 @@ console.log(JSON.stringify(out));
 
 
 def test_the_clear_pins_undo_does_not_pass_by_itself():
-    """g01's Clear pins confirms with "The message that follows can put
-    them back", and that card carries the only Undo. Under the expiry it
-    went after 8 seconds unless pointed at (merged 2026-09-24). A second
-    identical clear is counted on the same card, so the card keeps every
-    clear and its one Undo puts them all back, newest first."""
+    """Clear pins confirms with "The message that follows can put them back", and that card carries the
+    only Undo, so it is sticky. A second identical clear is counted on the same card, so the card keeps
+    every clear and its one Undo puts them all back, newest first."""
     code = _code(_fn("clearPins"))
     assert "'warn', { sticky: true })" in code
     assert "(b._pinClears || (b._pinClears = [])).push(" in code
@@ -555,9 +534,7 @@ def test_api_errors_carry_their_request():
     assert "err.path = path" in body and "err.method =" in body
 
 
-# ---------------------------------------------------------------------------
-# ux17-failure:inbox-actions-fail-silently
-# ---------------------------------------------------------------------------
+# Inbox writes disable and report where pressed
 
 def test_inbox_writes_disable_and_report_where_pressed():
     render = _code(_fn("renderInbox"))
@@ -607,14 +584,11 @@ def test_preferences_that_could_not_be_read_say_so():
     assert 'id="inbox-read-all-msg"' in _html()
 
 
-# ---------------------------------------------------------------------------
-# ux17-failure:breakglass-review-one-click (the admin half)
-# ---------------------------------------------------------------------------
+# Deactivate and role revocation are confirmed
 
 def test_deactivate_and_revoking_a_governance_role_are_confirmed():
-    """In the Admin card's danger row (ux16-admin, which restructured the
-    card the same day): Deactivate names the account, and revoking a
-    load-bearing role asks first."""
+    """In the Admin card's danger row: Deactivate names the account, and revoking a load-bearing role
+    asks first."""
     row = _code(_fn("removalRow"))
     assert "window.confirm('Sign ' + who + ' out everywhere and deactivate '" in row, (
         "Deactivate is one click")
@@ -636,8 +610,7 @@ def test_an_admin_error_lands_on_the_row_that_was_pressed():
 
 
 def test_the_break_glass_review_needs_a_note_and_a_confirmation():
-    """Already true when this pass began (the g06 fix of 2026-09-23); held
-    here so it stays true."""
+    """The break-glass review needs a note (at least 10 characters) and a confirmation."""
     row = _code(_fn("glassRow"))
     assert "why.length < 10" in row
     assert "window.confirm('Record \"' + label" in row
@@ -646,13 +619,7 @@ def test_the_break_glass_review_needs_a_note_and_a_confirmation():
     assert "Could not check whether you are operating under break-glass" in mine
 
 
-# ---------------------------------------------------------------------------
-# ux17-failure:case-status-purged-free-text
-# ---------------------------------------------------------------------------
-
-#: The status dialog is ux02-cases's (status-prompt-free-text-one-way-
-#: transitions), which fixed this finding the same day; these hold it to
-#: what this finding asked for.
+#: The status dialog is not a free-text prompt.
 
 def test_the_status_control_is_not_a_free_text_prompt():
     wire = _code(_fn("wireCaseActions"))
@@ -693,9 +660,7 @@ def test_nothing_is_chosen_for_the_analyst_and_purged_is_typed():
     assert "to === 'PURGED' && !confirmed && stepUpStale()" in _code(_fn("submitStatus"))
 
 
-# ---------------------------------------------------------------------------
-# ux15-report: the retention panel's client half
-# ---------------------------------------------------------------------------
+# The retention panel's client half
 
 def test_the_due_list_looks_forward_and_states_the_case_clocks():
     body = _code(_fn("loadRetention"))
@@ -716,12 +681,10 @@ def _ingest_retain_until() -> str:
 
 
 def test_the_case_clocks_say_an_ingest_record_can_outlive_the_case():
-    """The verifier's catch (2026-09-23): the first wording said ingest
-    clocks "can only be shorter" than the case's. `ingest._retain_until`
-    stamps ingest time plus the category's days and never reads the case,
-    so a CHAT_EXPORT record (730 days) on a case kept one more year outlives
-    it. The line must say so; if ingest ever starts reading the case clock,
-    the second assertion fails and the wording changes with it."""
+    """Ingest clocks do not read the case: `ingest._retain_until` stamps ingest time plus the
+    category's days, so a CHAT_EXPORT record (730 days) on a case kept one more year outlives it. The
+    line must say so; if ingest ever starts reading the case clock, the second assertion fails and the
+    wording changes with it."""
     retain = _code(_ingest_retain_until())
     assert "retention_until" not in retain and "effective_deadline" not in retain, (
         "ingest now clamps to the case clock: renderCaseClocks' ingest "

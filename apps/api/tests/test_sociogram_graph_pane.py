@@ -1,23 +1,17 @@
-"""The graph pane around the sociogram, held to the 2026-09-22 review.
+"""The graph pane around the sociogram.
 
-Two lenses of that review (ux03 graph navigation, ux04 reading the graph)
-found the pane around the canvas working against it: a four-row control
-bar that left a 1366x768 sociogram 257px tall; a metrics call on the
-Analysis suite's budget that ordinary navigation spent, taking Node size
-and the "0% evidenced" headline with it; Space that worked only while the
-canvas had focus; pins that could not be undone one at a time and a Clear
-pins that wiped the case with no question; a zoom level shown nowhere; the
-TRUNCATED and INCOMPLETE warnings buried in a developer-syntax readout; an
-empty case told to widen a projection already at its widest; a node size
-scale that spent its range on 0 against 1 tie; a density strip flattened
-by one import-time spike; victims painted as groups; a legend missing
-marks the canvas draws. Each check below is named for what it would have
-caught.
+The pane around the canvas must not work against it: a control bar that leaves a 1366x768 sociogram only
+257px tall; a metrics call on the Analysis suite's budget that ordinary navigation spends, taking Node
+size and the "0% evidenced" headline with it; Space that works only while the canvas has focus; pins that
+cannot be undone one at a time and a Clear pins that wipes the case with no question; a zoom level shown
+nowhere; the TRUNCATED and INCOMPLETE warnings buried in a developer-syntax readout; an empty case told
+to widen a projection already at its widest; a node size scale that spends its range on 0 against 1 tie;
+a density strip flattened by one import-time spike; victims painted as groups; a legend missing marks the
+canvas draws. Each check below is named for what it would catch.
 
-Pure, like test_sociogram_canvas: the static assets are read, and where a
-number or a branch matters the function is lifted out of app.js and RUN
-under node against stubs. No database, no browser. The node runs skip only
-where node is absent; the CI runner image ships it.
+Pure, like test_sociogram_canvas: the static assets are read, and where a number or a branch matters the
+function is lifted out of app.js and RUN under node against stubs. No database, no browser. The node runs
+skip only where node is absent; the CI runner image ships it.
 """
 from __future__ import annotations
 
@@ -96,10 +90,6 @@ def _run(script: str) -> dict:
 _CLAMP = "function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }\n"
 
 
-# ---------------------------------------------------------------------------
-# ux03 metrics-rate-limit-degrades-view (high)
-# ---------------------------------------------------------------------------
-
 def test_the_evidence_headline_never_waits_on_the_metered_call():
     """The "0% evidenced" line came from /graph/metrics, so when that call
     was refused the red line vanished while the analyst was exploring."""
@@ -110,8 +100,7 @@ def test_the_evidence_headline_never_waits_on_the_metered_call():
     line = _fn("coverageLine")
     assert "backedCount(nodes, edges)" in line
     assert "row.has_evidence" in _fn("backedCount")
-    # The metrics answer may only cross-check the figure in the title
-    # (ux07 coverage-vanishes-with-metrics); the figure is the canvas's.
+    # The metrics answer may only cross-check the figure in the title; the figure is the canvas's.
     figure = line[line.index("return { text: 'evidence: '"):]
     assert "fromMetrics" not in figure, (
         "the coverage headline reads the metrics call again")
@@ -209,9 +198,9 @@ const out = {};
 
 
 def test_a_refused_metrics_call_retries_by_itself_and_navigation_is_cached():
-    """ux03 metrics-rate-limit-degrades-view: nothing re-fetched when the
-    budget refilled, so the degraded view stood until another control was
-    touched; and every control change spent a call."""
+    """A refused metrics call re-fetches when the budget refills, so the degraded view does not stand
+    until another control is touched; and navigation is cached, so a control change does not spend a
+    call."""
     got = _run(_METRICS_HARNESS)
     assert got["refused"]["down"] == {"why": "the rate limit", "retryIn": 3}, got
     assert got["refused"]["timers"] == [3000], "the retry does not wait out Retry-After"
@@ -225,10 +214,6 @@ def test_a_refused_metrics_call_retries_by_itself_and_navigation_is_cached():
     assert "let go" in got["holdMiss"]["note"]
     assert got["forbidden"] == {"failed": [403], "timers": 1}, got["forbidden"]
 
-
-# ---------------------------------------------------------------------------
-# ux03 space-needs-canvas-focus
-# ---------------------------------------------------------------------------
 
 def test_space_is_answered_for_the_whole_graph_tab():
     init = _fn("initCanvas")
@@ -246,8 +231,8 @@ def test_space_is_answered_for_the_whole_graph_tab():
     sheet = html[html.index('<h3 class="h-xs">Sociogram</h3>'):]
     space = " ".join(sheet[:sheet.index("</dl>")].split())
     assert "anywhere on the graph tab, the timeline and the inspector included" in space
-    # The sheet no longer promises a peek after ANY click: an inspector
-    # button just used keeps its own Space.
+    # The sheet does not promise a peek after ANY click: an inspector button just used keeps its own
+    # Space.
     assert "an inspector button you just used" in space
     # While held, the canvas says what it hid.
     assert "hidden: release Space" in _fn("noteHold")
@@ -304,11 +289,9 @@ console.log(JSON.stringify(out));
 
 
 def test_a_click_on_the_timeline_hands_space_back_to_the_canvas():
-    """Fix round: a mouse click on "as-of: now" kept the focus, so Space
-    pressed it again, and a mouse drag of the slider left Space dead. Run
-    under node: every zone's pointer click on a button hands focus back to
-    the canvas, the slider keeps its own focus, and a key press never
-    moves it."""
+    """A mouse click on "as-of: now" must not keep the focus (Space would press it again), and a mouse
+    drag of the slider must not leave Space dead. Run under node: every zone's pointer click on a button
+    hands focus back to the canvas, the slider keeps its own focus, and a key press never moves it."""
     script = r"""
 let focused = 0;
 const canvas = { focus() { focused += 1; } };
@@ -363,10 +346,6 @@ console.log(JSON.stringify(out));
     got = _run(script)
     assert got == {"asOfNow": 1, "sliderDrag": 1, "keyPress": 1, "otherZones": 4}, got
 
-
-# ---------------------------------------------------------------------------
-# ux03 pin-layout-work-lost
-# ---------------------------------------------------------------------------
 
 def test_one_pin_can_be_undone_and_the_hint_says_a_drag_pins():
     assert "togglePin(ids[cur])" in _fn("onCanvasKey")
@@ -442,9 +421,8 @@ console.log(JSON.stringify(out));
 
 
 def test_a_click_with_a_wobble_neither_moves_nor_silently_pins():
-    """Fix round: pointermove pinned the node on ANY movement, pointerup
-    marked it unsaved only past 3px, so a click with a 2px wobble pinned the
-    entity with no dot on Save layout, and the next save stored it."""
+    """pointermove pins the node on ANY movement, so pointerup must mark it unsaved too: a click with a
+    2px wobble must not pin the entity with no dot on Save layout, for the next save to store."""
     got = _run(_POINTER_HARNESS.replace("{INIT}", _fn("initCanvas")))
     assert got["wobble"] == {"pinned": False, "dirty": [], "x": 100}, got["wobble"]
     assert got["picked"] == 1, "the wobbly click no longer selects"
@@ -530,10 +508,9 @@ function resetThen(next) {
 
 
 def test_reading_the_same_case_again_keeps_placements_unsaved_and_says_nothing():
-    """Fix round: a title edit or a status change re-opens the SAME case,
-    and the leave-save ran anyway: a banner said the placements were
-    "saved as you left" when the analyst had not left, and its PUT raced
-    the layout read of the same case."""
+    """A title edit or a status change re-opens the SAME case, and the leave-save must not run: a banner
+    would say the placements were "saved as you left" when the analyst had not left, and its PUT would
+    race the layout read of the same case."""
     fns = "\n".join(_fn(f) for f in ("leaveLayout", "loadLayout", "saveLayoutOnLeave",
                                      "layoutPositions", "caseReadOnly"))
     got = _run(_LEAVE_HARNESS.replace("{FNS}", fns))
@@ -557,7 +534,7 @@ def test_clear_pins_asks_with_a_count_stores_only_its_own_pins_and_can_undo():
     restore = _fn("restorePins")
     assert "'/cases/' + caseId + '/graph/layout'" in restore
     assert "caseChanged(token)" in restore
-    # The palette's entry no longer promises to unpin every node silently.
+    # The palette's entry does not promise to unpin every node silently.
     assert "hint: 'unpin every node'" not in _js()
 
 
@@ -580,10 +557,6 @@ console.log(JSON.stringify(out));
     got = _run(script)
     assert got == {"whole": ["a", "c", "z"], "focus": ["a", "c"]}, got
 
-
-# ---------------------------------------------------------------------------
-# ux03 control-bar-squeezes-canvas, ux04 canvas-squeezed-on-laptop
-# ---------------------------------------------------------------------------
 
 def test_the_projection_bar_holds_controls_and_the_canvas_holds_its_own():
     html = _html()
@@ -622,10 +595,6 @@ def test_the_scrubber_is_two_rows():
     assert re.search(r"\.tl-track \{[^}]*display: grid", css)
 
 
-# ---------------------------------------------------------------------------
-# ux03 zoom-state-invisible
-# ---------------------------------------------------------------------------
-
 def test_the_zoom_level_and_its_controls_are_on_the_canvas():
     html = _html()
     wrap = _between('<div class="canvas-wrap">', "<!-- THE SIGNATURE ELEMENT", html)
@@ -643,10 +612,6 @@ def test_the_zoom_level_and_its_controls_are_on_the_canvas():
         assert cap in keys, f"the hint strip omits {cap}"
 
 
-# ---------------------------------------------------------------------------
-# ux03 readout-buries-warnings
-# ---------------------------------------------------------------------------
-
 def test_the_warnings_are_on_the_canvas_and_the_readout_is_words():
     readout = _fn("renderReadout")
     for dev in ("'preset='", "'include_inferred='", "'min_confidence='", "TRUNCATED",
@@ -663,8 +628,8 @@ def test_the_warnings_are_on_the_canvas_and_the_readout_is_words():
 
 
 def test_the_readout_counts_inferred_ties_in_metrics_only_when_there_are_some():
-    """Fix round: an empty case, a refused metrics call or a timeline drag
-    has no metrics, and the readout said "counted in the metrics" anyway."""
+    """An empty case, a refused metrics call or a timeline drag has no metrics, so the readout must not
+    say "counted in the metrics"."""
     script = r"""
 const box = { kids: [], appendChild(n) { this.kids.push(n); } };
 function $() { return box; }
@@ -699,9 +664,9 @@ console.log(JSON.stringify(out));
 
 
 def test_the_canvas_chrome_is_two_wrapping_rows_that_cannot_overlap():
-    """Fix round: four absolutely placed boxes held apart by guessed
-    max-widths. At 1024 wide the canvas note covered the zoom cluster's
-    names note, and disabled tools let the graph show through their words."""
+    """The canvas chrome is two wrapping rows that cannot overlap, not four absolutely placed boxes held
+    apart by guessed max-widths: at 1024 wide the canvas note must not cover the zoom cluster's names
+    note, and disabled tools must not let the graph show through their words."""
     html = _html()
     wrap = _between('<div class="canvas-wrap">', "<!-- THE SIGNATURE ELEMENT", html)
     head = _between('<div class="canvas-head">', '<div class="canvas-foot">', wrap)
@@ -722,10 +687,6 @@ def test_the_canvas_chrome_is_two_wrapping_rows_that_cannot_overlap():
     assert "background: var(--surface-1)" in disabled.group(1)
     assert ".canvas-tools .btn:disabled { opacity" not in css
 
-
-# ---------------------------------------------------------------------------
-# ux03 empty-case-says-widen
-# ---------------------------------------------------------------------------
 
 _EMPTY_HARNESS = r"""
 const els = {};
@@ -784,8 +745,8 @@ def test_an_empty_canvas_says_which_thing_is_empty():
                                 "act": "Add the first entity"}, got["newActive"]
     assert got["newDraft"]["act"] == "Change status…" and "DRAFT" in got["newDraft"]["text"]
     assert got["newClosed"]["act"] is None and "CLOSED" in got["newClosed"]["text"]
-    # Fix round: every entity above the reader's clearance is not an empty
-    # case, and there is nothing for the reader to press.
+    # Every entity above the reader's clearance is not an empty case, and there is nothing for the reader
+    # to press.
     assert got["aboveCount"] == {
         "shown": True, "act": None,
         "text": "5 entities in this case are above your clearance, and none is "
@@ -806,10 +767,6 @@ def test_an_empty_canvas_says_which_thing_is_empty():
     for button in ("btn-fit", "btn-relayout", "btn-save-layout"):
         assert f"setDisabled('{button}', none)" in sync
 
-
-# ---------------------------------------------------------------------------
-# ux04 size-scale-flattens-hubs
-# ---------------------------------------------------------------------------
 
 def test_node_area_is_in_proportion_to_the_metric_from_zero():
     """log1p then sqrt, normalised to the smallest value on screen, put
@@ -857,10 +814,6 @@ console.log(JSON.stringify([sizeKeyRef(18, true), sizeKeyRef(8, true), sizeKeyRe
     assert _run(script) == [5, 2, 0.2, None, 1]
 
 
-# ---------------------------------------------------------------------------
-# ux04 density-strip-flattened
-# ---------------------------------------------------------------------------
-
 def test_the_density_strip_is_world_time_and_one_spike_cannot_flatten_it():
     script = _fn("pushTime") + _fn("computeTimeSpan") + _fn("densityBarHeight") + r"""
 const state = { nodes: [
@@ -888,10 +841,6 @@ console.log(JSON.stringify({
     assert "PLAYHEAD_CARET" in density
     assert "undated" in _fn("renderScrubber")
 
-
-# ---------------------------------------------------------------------------
-# ux04 victims-painted-as-groups, legend-missing-drawn-encodings
-# ---------------------------------------------------------------------------
 
 def test_a_victim_is_not_drawn_as_a_group():
     assert "VICTIM: 'square'" in _const("SHAPE_BY_TYPE")

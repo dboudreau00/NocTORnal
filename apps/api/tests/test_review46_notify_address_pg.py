@@ -1,10 +1,8 @@
-"""egress-notify-address-list (review of 2026-10-03).
+"""A personal notification address is a single address.
 
-The F19 allowlist for a personal notification address read only the text
-after the LAST '@', so 'collector@attacker.example, me@corp.example' was
-accepted and smtplib sent one RCPT per address. These tests fail on the code
-as it stood (dc28ffa): the list was stored, and the drain sent to whatever
-was stored.
+The allowlist for a personal notification address must not read only the text after the LAST '@', or
+'collector@attacker.example, me@corp.example' would be accepted and smtplib would send one RCPT per
+address: the list stored, and the drain sending to whatever was stored.
 """
 from __future__ import annotations
 

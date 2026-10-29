@@ -1,10 +1,8 @@
-"""egress_policy.py, the one address classifier, destination rule and code
-table every outbound client and the egress proxy share (2026-09-24;
-docs/00 decisions 68 and 77, docs/20 section 2).
+"""egress_policy.py, the one address classifier, destination rule and code table every outbound client and
+the egress proxy share (docs/00 decisions 68 and 77, docs/20 section 2).
 
-Pure: no database and no network. A fake getaddrinfo stands in for the
-resolver, as the rebinding suite does, because resolve_and_pin looks the
-function up as a module attribute of `socket`.
+Pure: no database and no network. A fake getaddrinfo stands in for the resolver, as the rebinding suite
+does, because resolve_and_pin looks the function up as a module attribute of `socket`.
 """
 from __future__ import annotations
 

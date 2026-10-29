@@ -1,48 +1,36 @@
-"""RunContext: what one poll of an authority adapter holds (the collection
-foundation, docs/00 decision 69, 2026-09-24).
+"""RunContext: what one poll of an authority adapter holds (docs/00 decision 69).
 
-Everything a forum or Telegram poll does around its adapter lives here once,
-so the adapters only parse: the route run_once resolved, the user
-agent, ONE wall clock for the whole poll, the page and byte budgets, the
-per-request pacing, the same-origin rule, the redirect rule, the 429 rule
-and the custody log of every request sent.
+Everything a forum or Telegram poll does around its adapter lives here once, so the adapters only
+parse: the route run_once resolved, the user agent, one wall clock for the whole poll, the page and
+byte budgets, the per-request pacing, the same-origin, redirect and 429 rules, and the custody log
+of every request sent.
 
-## One call site
-
-`_http_get` is the ONLY place a collection adapter's HTTP leaves this
-process, and it is exactly docs/20 section 9's call:
+`_http_get` is the only place a collection adapter's HTTP leaves this process, and it is exactly
+docs/20 section 9's call:
 
     collection.fetch_response(url, route=self.route, max_redirects=0,
         accept_status=accept_status | REDIRECT_CODES,
         user_agent=self.user_agent, deadline=self.deadline, max_bytes=...)
 
-`max_redirects=0` means the client never follows: a 3xx comes back as a
-Fetched with its absolute `location` (query kept), and this module decides
-(rule e below). The collector's wrapper is used rather than pinned_http
-directly, so the suites that patch `collection._is_blocked` still reach
-the connect.
+`max_redirects=0` means the client never follows: a 3xx comes back as a Fetched with its absolute
+`location` (query kept), and rule (e) decides. The collector's wrapper is used rather than
+pinned_http directly, so the suites that patch `collection._is_blocked` still reach the connect.
 
-## The rules of `fetch`, in order
+The rules of `fetch`, in order:
 
-(a) budget: BudgetSpent when the poll's wall clock is nearly spent, when
-    the page budget is used, or when the byte budget is spent, and nothing
-    is sent;
-(b) same origin: the URL (absolute, or relative to the source's address)
-    has the source's scheme, host and effective port and no user name, or
-    nothing is sent;
+(a) budget: BudgetSpent when the poll's wall clock is nearly spent or the page or byte budget is
+    used, and nothing is sent;
+(b) same origin: the URL (absolute, or relative to the source's address) has the source's scheme,
+    host and effective port and no user name, or nothing is sent;
 (c) pace: the source's max_rps and, for a persona, its gap;
-(d) one GET through `_http_get`. A route refusal is EgressUnavailable (a
-    BLOCKED run); the poll's shared deadline running out mid request, or a
-    page larger than the bytes the run has left, is BudgetSpent after the
-    request is logged (2026-09-24: a slow board otherwise
-    failed the whole walk and was read as parser ill health);
-(e) a same-origin redirect is followed, paced and counted, at most three
-    hops; any other comes back unfollowed, so an adapter can tell a login
-    page by where it points;
-(f) a 429, or a 503 carrying Retry-After, that the adapter did not accept
-    is RateLimited;
-(g) one request-log entry per request sent, the first 100 kept and the
-    rest counted in a note.
+(d) one GET through `_http_get`. A route refusal is EgressUnavailable (a BLOCKED run); the shared
+    deadline running out mid request, or a page larger than the bytes the run has left, is
+    BudgetSpent after the request is logged, so a slow board does not fail the whole walk and read
+    as parser ill health;
+(e) a same-origin redirect is followed, paced and counted, at most three hops; any other comes back
+    unfollowed, so an adapter can tell a login page by where it points;
+(f) a 429, or a 503 carrying Retry-After, that the adapter did not accept is RateLimited;
+(g) one request-log entry per request sent, the first 100 kept and the rest counted in a note.
 """
 from __future__ import annotations
 
@@ -78,16 +66,14 @@ from noctornal_api.wording import agree, count_of
 
 #: A same-origin redirect chain is followed at most this far.
 MAX_SAME_ORIGIN_HOPS = 3
-#: The methods an adapter may use through the seam: a read, and the member
-#: adapter's sign-in and sign-out forms. PUT, PATCH, DELETE and the rest are
-#: refused here, so no adapter can act on a site by a method the invariant
-#: "nothing posts, replies, reacts, messages or buys" never meant (2026-10-03; which adapter
-#: may POST is still its own).
+#: The methods an adapter may use through the seam: a read, and the member adapter's sign-in and
+#: sign-out forms. PUT, PATCH, DELETE and the rest are refused here, so no adapter can act on a site
+#: by a method the invariant "nothing posts, replies, reacts, messages or buys" never meant; which
+#: adapter may POST is still its own.
 ALLOWED_METHODS = ("GET", "POST")
-#: Nothing is started with less of the poll's wall clock left than this,
-#: or a tenth of the whole allowance when that is smaller: a request that
-#: will certainly be cut by the deadline only adds noise to the custody
-#: log (2026-09-24).
+#: Nothing is started with less of the poll's wall clock left than this, or a tenth of the whole
+#: allowance when that is smaller: a request that will certainly be cut by the deadline only adds
+#: noise to the custody log.
 REQUEST_FLOOR_S = 5.0
 #: Each socket operation of one request.
 REQUEST_TIMEOUT_S = 15.0
@@ -105,16 +91,13 @@ _TOKEN_NAME_TEXT = re.compile(
     r"(?i)(?:_xfToken|my_post_key|csrf|xsrf|authenticity_token|logout_hash|_token)")
 _TOKEN_IN = re.compile(rb"(?i)" + _TOKEN_NAME)
 
-# LINEAR, and it has to be (2026-09-25). The first version
-# put the token name between two bounded repetitions of the characters a
-# name may carry, so on a hostile run such as b"csrf-" repeated every start
-# position tried every split of the run: about 6 s of CPU per MiB, inside
-# the persist transaction. Now a name is entered only where no name
-# character precedes it (so a run is never re-scanned from inside), a
-# lookahead confined to that run asks whether a token is in it, and the
-# name is then taken whole and possessive ({1,128}+ never gives characters
-# back). The substitutions are templates, so the regex engine does all of
-# it. test_the_scrubber_is_linear_on_hostile_input times each shape.
+# Linear, and it has to be. A token name between two bounded repetitions of the characters a name
+# may carry tries every split of a hostile run such as b"csrf-" repeated, from every start position:
+# about 6 s of CPU per MiB, inside the persist transaction. So a name is entered only where no name
+# character precedes it (a run is never re-scanned from inside), a lookahead confined to that run
+# asks whether a token is in it, and the name is then taken whole and possessive ({1,128}+ never
+# gives characters back). The substitutions are templates, so the regex engine does all of it.
+# test_the_scrubber_is_linear_on_hostile_input times each shape.
 
 #: The characters an attribute or input name may carry, and where one may
 #: start: nowhere a name character precedes.
@@ -205,11 +188,10 @@ def _scrub_raw(fragment: bytes) -> bytes:
 
 
 def _logged_path(path: str) -> str:
-    """A path for the custody log with the value of every token it carries
-    removed, then redacted and capped (2026-09-25: a hostile
-    same-origin Location controls the path, and some boards carry the form
-    token in it). Two shapes: a path parameter (/logout;csrf=abc) and a
-    segment named for a token followed by its value (/_xfToken/abc)."""
+    """A path for the custody log with the value of every token it carries removed, then redacted
+    and capped (a hostile same-origin Location controls the path, and some boards carry the form
+    token in it). Two shapes: a path parameter (/logout;csrf=abc) and a segment named for a token
+    followed by its value (/_xfToken/abc)."""
     segments = (path or "/").split("/")
     blank_next = False
     for i, segment in enumerate(segments):
@@ -265,10 +247,9 @@ def _origin(url: str) -> tuple[str, str, int] | None:
 
 
 def origin_text(url: str) -> str | None:
-    """`_origin` as one string, `scheme://host:port`: the key a persona's
-    sealed forum session is filed under (`forum_session.origin_key`), so the
-    cookies a run carries and the origin it may request are one reading
-    (2026-10-03)."""
+    """`_origin` as one string, `scheme://host:port`: the key a persona's sealed forum session is
+    filed under (`forum_session.origin_key`), so the cookies a run carries and the origin it may
+    request are one reading."""
     origin = _origin(url)
     return None if origin is None else f"{origin[0]}://{origin[1]}:{origin[2]}"
 
@@ -401,13 +382,12 @@ class RunContext:
     def fetch(self, url: str, *, accept_status=frozenset(),
               max_bytes: int | None = None, method: str = "GET",
               headers: dict | None = None, body: bytes | None = None):
-        """One request on the source's own origin (the rules in the module
-        docstring). Returns the pinned client's Fetched.
+        """One request on the source's own origin (the rules in the module docstring). Returns the
+        pinned client's Fetched.
 
-        `method`, `headers` and `body` (the authenticated forum path,
-        2026-10-02) are the member adapter's sign-in POST and its session
-        cookie; a same-origin redirect is followed as a bare GET with no
-        body, as a browser follows one, so a form is never posted twice."""
+        `method`, `headers` and `body` are the member adapter's sign-in POST and its session cookie;
+        a same-origin redirect is followed as a bare GET with no body, as a browser follows one, so
+        a form is never posted twice."""
         if method not in ALLOWED_METHODS:
             raise ValueError(f"a collection request is a GET or a POST, not {method!r}")
         accept = frozenset(accept_status)
@@ -457,8 +437,7 @@ class RunContext:
         self.pages_used += 1
         extra = {}
         if method != "GET" or headers or body is not None:
-            # Only the member adapter passes these (2026-10-02); a plain
-            # read calls the client exactly as it always did.
+            # Only the member adapter passes these; a plain read calls the client with none of them.
             extra = {"method": method, "headers": headers, "body": body}
         try:
             fetched = fetcher(

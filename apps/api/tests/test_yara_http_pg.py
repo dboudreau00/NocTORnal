@@ -1,4 +1,4 @@
-"""YARA rule sets over HTTP (F12 I, 2026-09-24).
+"""YARA rule sets over HTTP.
 
 Every route that names a set or a version answers a set above the
 caller's labels exactly as one that does not exist; the officer's list
@@ -119,9 +119,9 @@ def test_every_yara_route_answers_404_for_a_red_set_to_an_amber_caller(conn, htt
 
 
 def test_creating_a_key_a_hidden_set_holds_confirms_nothing(conn, http):
-    """Found 2026-09-24: an AMBER caller creating a key a RED set
-    held got 409 naming it, an oracle for what another unit hunts. The
-    key is unique only among sets at the same labels (0080)."""
+    """Creating a key a hidden set holds confirms nothing: an AMBER caller creating a key a RED set
+    held would get a 409 naming it, an oracle for what another unit hunts. The key is unique only among
+    sets at the same labels (0080)."""
     _lab, lab = _person(conn, "MALWARE_ANALYST")
     key = f"yht-{uuid4().hex[:8]}"
     r = http.post(f"{API}/rulesets", headers=lab,
@@ -144,9 +144,7 @@ def test_creating_a_key_a_hidden_set_holds_confirms_nothing(conn, http):
 
 
 def test_the_version_view_reads_one_version(conn, http, monkeypatch):
-    """Found 2026-09-24: the version view rebuilt every set's
-    listing per request. It reads its own version, and the listing is no
-    longer called."""
+    """The version view reads one version; it does not rebuild every set's listing per request."""
     from noctornal_api import yara_rules
     _lab, lab = _person(conn, "MALWARE_ANALYST")
     set_id, vid = _red_set_with_version(conn, http, lab)
@@ -214,9 +212,8 @@ def test_the_upload_body_cap(conn, http, monkeypatch):
 
 
 def test_a_hostile_zip_is_refused_off_the_event_loop(conn, http, monkeypatch):
-    """The preflight bypass of 2026-09-24 over HTTP: a zip64 record behind
-    a plain end record claiming one entry. It is parsed in a worker thread,
-    not on the event loop, and refused in a sentence."""
+    """The preflight bypass over HTTP: a zip64 record behind a plain end record claiming one entry. It
+    is parsed in a worker thread, not on the event loop, and refused in a sentence."""
     import asyncio
 
     from noctornal_api import yara_rules

@@ -1,12 +1,9 @@
-"""docs/17, "Tests and code structure", test isolation (Beta 1.1): one logger
-namespace.
+"""One logger namespace (docs/17, "Tests and code structure", test isolation).
 
-Twenty-five modules logged under `noctornal.<name>` and thirteen under
-`noctornal_api.<module>` (`getLogger(__name__)`), so a setting made for one
-namespace, `logging.getLogger("noctornal").setLevel(...)` or a handler on it,
-reached two thirds of the product. Every logger of ours is `noctornal.<name>`
-now. The one other name is `telethon`, the library's own logger, which
-`telegram_wire.install_log_scrub` configures on purpose and does not own.
+Every logger of ours is `noctornal.<name>`, so a setting made for that namespace,
+`logging.getLogger("noctornal").setLevel(...)` or a handler on it, reaches the whole product. The one other
+name is `telethon`, the library's own logger, which `telegram_wire.install_log_scrub` configures on purpose
+and does not own.
 
 Pure: reads the source.
 """

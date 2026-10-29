@@ -1,57 +1,25 @@
-"""Phase 9 -- ingest API and stealer-log handling (docs/12).
+"""Ingest API and stealer-log handling (docs/12).
 
-=====================================================================
-STEALER LOGS ARE IN SCOPE by operator directive, 2026-07-25, answering
-docs/12's open question 3.
+Stealer logs are in scope by operator directive (docs/12 open question 3). The compartment and masking
+are resolved in code and in migration 0033. The minimisation policy and the lawful basis for holding data
+about uninvolved people are not resolvable here (docs/16 L2 is a blocking entry); this module makes the
+safe path the easy one and the unsafe path loud, narrow and logged.
 
-The compartment and masking are resolved in code and in migration 0033.
-**The minimisation policy and the lawful basis for holding data about
-thousands of uninvolved people are NOT resolved and are not resolvable
-here** -- docs/16 L2 is a BLOCKING entry and this module cannot close it.
+Design principle (docs/12): almost everything useful (infection timeline, victim organisation
+attribution, the C2 and builder metadata that links a log to its operator) lives in
+`ingest.record.payload` and needs no password. Credential values go to a separate table, encrypted, with
+no searchable index, and the analytic path never joins to it.
 
-What this module does is make the safe path the easy one and the unsafe
-path loud, narrow and logged. It cannot make an unlawful holding lawful.
-=====================================================================
+Free-text search across victim PII is impossible, not forbidden: `ingest.victim_credential` has no
+tsvector, no trigram index and no plaintext value column. Correlation works through `value_fingerprint`:
+the same credential in two feeds is findable without either being readable. `search_by_fingerprint` is
+the only lookup and takes a live `pii_authorisation` or refuses.
 
-## The design principle for stealer logs
+Keys are HMAC'd, not Argon2'd (docs/12): machine keys are high-entropy, so a slow hash adds no defence,
+a per-request KDF at ingest volume melts the API, and a slow hash cannot be indexed.
 
-docs/12, and it is the whole architecture of this module:
-
-    You can extract almost all of that from the metadata without ever
-    exposing the credential contents. Design for that.
-
-Infection timeline, victim organisation attribution, and the C2 and builder
-metadata that links a log back to the operator -- all of it lives in
-`ingest.record.payload` and none of it needs a password. So credential
-VALUES go to a separate table, encrypted, with no searchable index, and the
-analytic path never joins to it.
-
-## Free-text search across victim PII is impossible, not forbidden
-
-A permission check can be routed around by the next person who needs a
-number for a report. `ingest.victim_credential` has no tsvector, no trigram
-index and no plaintext value column -- there is nothing to run a LIKE
-against. Correlation still works, through `value_fingerprint`: the same
-credential appearing in two feeds is findable without either being
-readable.
-
-`search_by_fingerprint` is the only lookup, and it takes a live
-`pii_authorisation` or refuses.
-
-## Keys are HMAC'd, not Argon2'd
-
-docs/12 is explicit and the reasoning is worth keeping: machine keys are
-high-entropy by construction, so the slow-hash defence against guessing is
-unnecessary; a per-request KDF at ingest volume melts the API; and a slow
-hash cannot be indexed, so every request would scan the table. HMAC with a
-pepper is correct here and Argon2 is correct for user passwords, and they
-are different problems.
-
-## Raw before parse, always
-
-`accept()` writes the raw bytes and returns 202 before anything is parsed.
-When the parser is wrong -- and it will be -- you re-parse from the
-original rather than asking a partner to resend three months of feed.
+Raw before parse: `accept()` writes the raw bytes and returns 202 before anything is parsed, so a wrong
+parser is fixed by re-parsing the original rather than asking a partner to resend the feed.
 """
 from __future__ import annotations
 
@@ -91,12 +59,9 @@ HIGH_RISK_CATEGORIES = frozenset({
     STEALER_LOG, "CREDENTIAL_DUMP", "DATABASE_LEAK",
 })
 
-#: Every category `ingest.record` accepts, in the order of migration 0033's
-#: `record_category_known` CHECK. Named here so the Keys form and the
-#: category correction offer the list the database enforces rather than a
-#: second copy in the console that drifts (ux12-feeds:keys-tab-read-only
-#: and confidence-label-ambiguous, 2026-09-23). Held to the constraint by
-#: test_feeds_review_pg.py.
+#: Every category `ingest.record` accepts, in the order of migration 0033's `record_category_known` CHECK.
+#: Named here so the Keys form and the category correction offer the list the database enforces rather
+#: than a second copy in the console that drifts. Held to the constraint by test_feeds_review_pg.py.
 CATEGORIES: tuple[str, ...] = (
     "STEALER_LOG", "CREDENTIAL_DUMP", "DATABASE_LEAK", "RANSOM_LEAK_POST",
     "MARKET_LISTING", "FORUM_POST", "CHAT_EXPORT", "PASTE", "IOC_FEED",
@@ -122,10 +87,8 @@ class IngestError(Exception):
 
 
 class RepairInvalid(IngestError):
-    """A repaired fragment that is not one JSON object. Its own type so the
-    router answers 400 (the request is wrong) rather than 409 (the dead
-    letter is in the wrong state): until 2026-09-23 `json.loads` raised
-    straight through `replay` and a typo in a repair was a 500."""
+    """A repaired fragment that is not one JSON object. Its own type so the router answers 400 (the
+    request is wrong) rather than 409 (the dead letter is in the wrong state)."""
 
 
 class AuthorisationRequired(IngestError):
@@ -135,9 +98,8 @@ class AuthorisationRequired(IngestError):
 
 
 class _Uncounted(Exception):
-    """A reveal's count changed no row (F51, 2026-10-02): `what` names the
-    row it missed. Private: `reveal_credential` turns it into the refusal
-    the caller already handles, after the transaction has rolled back."""
+    """A reveal's count changed no row: `what` names the row it missed. Private: `reveal_credential`
+    turns it into the refusal the caller already handles, after the transaction has rolled back."""
 
     def __init__(self, what: str):
         super().__init__(what)
@@ -167,20 +129,11 @@ def hash_secret(secret: str) -> bytes:
 
 def _admitted(allowlist: list[str], peer_ip: str | None) -> bool:
     """Whether a key's address allowlist admits `peer_ip`."""
-    # CR6 (2026-07-26). This used to read `if allowlist and peer_ip:`,
-    # which SKIPS the check whenever the peer address is unknown —
-    # exactly the case a fail-closed control exists for. uvicorn behind
-    # a unix-socket reverse proxy leaves `request.client` as None, so a
-    # key restricted to a partner's CIDR was accepted from anywhere.
-    #
-    # The router carried a second guard for this, and it was dead code:
-    # the dict `authenticate` returns omitted `ip_allowlist` entirely, so
-    # `key.get("ip_allowlist")` was always None and could never fire.
-    # A defence written twice and connected zero times.
-    #
-    # Invariant 11 bounds the damage — an ingest key is write-only, so
-    # a leaked one buys junk in quarantine and never the case file —
-    # but a restriction the operator configured must actually restrict.
+    # Fail closed: an unknown peer address is refused when an allowlist is set. uvicorn behind a
+    # unix-socket reverse proxy leaves `request.client` as None, and skipping the check then would accept a
+    # key restricted to a partner's CIDR from anywhere. An ingest key is write-only (invariant 11), so a
+    # leaked one buys junk in quarantine, never the case file, but a restriction the operator configured
+    # must actually restrict.
     if not allowlist:
         return True
     if not peer_ip:
@@ -212,19 +165,12 @@ _ENVELOPE_KEYS = frozenset({
 
 
 def _value_tokens(value, path: str = "", depth: int = 0) -> list[str]:
-    """Path-qualified tokens over VALUES only.
+    """Path-qualified tokens over values only.
 
-    docs/17 F15(g). The previous version ran `\\w+` over the serialised
-    JSON, which meant key names counted as content and field position was
-    lost entirely: `{"note": "leaked by LockBit", "victim": "ACME"}` and the
-    same document with those two values SWAPPED produced an identical hash,
-    hamming distance 0, and the second was silently filed as a duplicate of
-    the first. A ransom-leak post and its inverse are not the same record.
-
-    Qualifying each token with its path fixes that, and dropping envelope
-    keys fixes the other half -- a mirror's `source_url` and `seen_at` used
-    to push a genuine repost past the threshold, so the feature failed in
-    both directions at once.
+    Hashing the serialised JSON would count key names as content and lose field position, so a document
+    and the same one with two values swapped would hash identically and the second would be filed as a
+    duplicate. Qualifying each token with its path fixes that, and dropping envelope keys (a mirror's
+    `source_url` and `seen_at`) stops a genuine repost being pushed past the threshold.
     """
     if depth > 8:
         return []
@@ -258,17 +204,10 @@ def simhash_payload(payload: dict, bits: int = 64) -> int:
 def simhash(text: str, bits: int = 64) -> int:
     """A 64-bit simhash over token shingles.
 
-    docs/12: "Near-duplicate suppression matters more than it sounds. Feeds
-    re-publish each other constantly. Without minhash or simhash
-    clustering, the queue fills with the same leak post from nine sources
-    and analysts stop reading it."
-
-    Deliberately simple and dependency-free. It is a triage aid, not a
-    forensic identity -- exact duplicates are caught by `content_sha256`,
-    and this catches the reposted-with-a-different-header case.
-
-    This remains the plain-text form, for prose. Structured payloads go
-    through `simhash_payload`, which is field-aware.
+    Near-duplicate suppression keeps the queue from filling with the same leak post from many sources
+    (docs/12). Deliberately simple and dependency-free: a triage aid, not a forensic identity. Exact
+    duplicates are caught by `content_sha256`; this catches the repost with a different header. This is
+    the plain-text form, for prose; structured payloads go through the field-aware `simhash_payload`.
     """
     return _simhash_tokens(re.findall(r"\w+", (text or "").lower()), bits)
 
@@ -295,45 +234,24 @@ def hamming(a: int, b: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Dead-letter redaction (docs/17 F15(d))
+# Dead-letter redaction
 # ---------------------------------------------------------------------------
 #
-# `collection.py` redacts with a keyword blocklist. That is the wrong shape
-# here and arguably there: you cannot enumerate the keys a partner will use
-# for a password, and `pass`, `p`, `credential`, an unlabelled second CSV
-# column and a bare `user:pass` line all walk through a blocklist.
+# A keyword blocklist (as in `collection.py`) cannot work here: the keys a partner uses for a password
+# cannot be enumerated, and `pass`, `p`, `credential`, an unlabelled second CSV column and a bare
+# `user:pass` line all walk through it. So a dead letter keeps the shape (keys, types, lengths, nesting)
+# and no leaf value at all. The shape is the whole diagnostic: a dead letter exists because a partner
+# changed their schema, and that is visible in the keys. The error class and detail are stored separately.
 #
-# So this inverts it. A dead letter keeps the SHAPE -- keys, types, lengths,
-# nesting -- and keeps no leaf value at all. That is not a compromise; the
-# shape is the entire diagnostic. A dead letter exists because a partner
-# changed their schema, and a schema change is visible in the keys. The
-# error class and detail are stored separately and answer "why".
-#
-# Invariant 12 is satisfied by the row existing with the digest of what
-# arrived, not by the row being quotable. The verbatim bytes stay in the
-# batch's raw object under the batch's own retention and access rules,
-# which is where third-party credentials belong if they are held at all.
-#
-# That last sentence was FALSE when it was first written: `accept()` only
-# stored the payload when constructed with a storage adapter and every
-# construction in the router passed none, so redaction was lossy and the
-# original was simply gone. `rawstore.py` closes it, and `accept()` now
-# refuses rather than acknowledging bytes it has nowhere to put. Recorded
-# because "the original is recoverable" is the assumption the whole
-# redaction design rests on, and it was load-bearing before it was true.
+# Invariant 12 is satisfied by the row existing with the digest of what arrived, not by the row being
+# quotable. The verbatim bytes stay in the batch's raw object under the batch's own retention and access
+# rules (`rawstore.py`), and `accept()` refuses rather than acknowledging bytes it has nowhere to put.
 
-#: Deliberately NOT `[A-Za-z0-9._%+-]+@...`, which is the pattern everybody
-#: writes and which is ASCII on both sides. `josé@corp.example` did not
-#: match at ALL — the character before the `@` falls outside the local-part
-#: class, so the `+` cannot end there — and `ivan@корп.рф` failed on the
-#: domain and the TLD. Both survived every redaction path, including
-#: `_redact_key`, whose entire reason for existing is the feed keyed by
-#: victim address.
-#:
-#: So this is defined by what an address CANNOT contain rather than by what
-#: it can. Over-matching here costs a false `[redacted email]` in a
-#: diagnostic; under-matching costs a victim identifier in a table with no
-#: index and no encryption. Those are not comparable.
+#: Deliberately not `[A-Za-z0-9._%+-]+@...`, which is ASCII on both sides: an address with an accented
+#: local part or a Cyrillic domain would escape every redaction path, including `_redact_key` (the feed
+#: keyed by victim address). So this is defined by what an address cannot contain rather than by what it
+#: can. Over-matching costs a false `[redacted email]` in a diagnostic; under-matching costs a victim
+#: identifier in a table with no index and no encryption.
 _ADDR_STOP = r"\s@,;:\"'<>()\[\]{}\\"
 _EMAIL = re.compile(
     rf"[^{_ADDR_STOP}]+@[^{_ADDR_STOP}]+\.[^{_ADDR_STOP}.]{{2,}}")
@@ -344,18 +262,10 @@ _LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
 #: which is the single commonest shape in this corpus and carries no key
 #: name to match on.
 _PAIR_LINE = re.compile(r"^(\s*)(\S+?)([:|;,\t])(\S+)\s*$")
-#: Any quoted string. Used by `_mask_json_like` below, which decides
-#: key-or-value by what FOLLOWS the string rather than by trying to match
-#: a pair.
-#:
-#: The pair form this replaces was
-#: `("(?:[^"\\]|\\.)*"\s*:\s*)("(?:[^"\\]|\\.)*"|[^,\s}\]]+)`, and it did
-#: the opposite of its job on the input it named as most common. Given a
-#: truncated `…"credentials": [{"password": "Hunter2"…`, the value
-#: alternative `[^,\s}\]]+` matched `[{"password":` — swallowing the NEXT
-#: KEY — so the output was `"credentials": "[redacted]" "Hunter2"` and the
-#: password was stored verbatim. Regex-matching pairs in a document that
-#: does not parse is the wrong shape: there is no reliable pair.
+#: Any quoted string. Used by `_mask_json_like` below, which decides key-or-value by what follows the
+#: string rather than by matching a pair. Pair-matching is the wrong shape in a document that does not
+#: parse: on a truncated `"credentials": [{"password": "..."` a value pattern swallows the next key and
+#: the password is stored verbatim, because there is no reliable pair.
 _QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
 #: An unquoted value after a colon: numbers, bare tokens, `nan`. `true`,
 #: `false` and `null` are structure and are kept.
@@ -395,11 +305,9 @@ def redact_structure(value, *, depth: int = 0):
     if depth > 12:
         return "[redacted depth]"
     if isinstance(value, dict):
-        # Masked keys are DE-DUPLICATED, not merged. A feed keyed by victim
-        # address masks every key to the same string, and a plain dict
-        # comprehension then collapses two hundred victims into one entry —
-        # turning "this feed carried 200 people" into "1" in the only view
-        # anybody looks at. The count is the shape.
+        # Masked keys are de-duplicated, not merged. A feed keyed by victim address masks every key to the
+        # same string, and a plain dict comprehension would collapse two hundred victims into one entry.
+        # The count is the shape.
         out: dict = {}
         for key, item in list(value.items())[:200]:
             masked = _redact_key(str(key))
@@ -422,17 +330,12 @@ def redact_structure(value, *, depth: int = 0):
 def _mask_json_like(line: str) -> str:
     """Keep the keys of a JSON-ish line, redact everything else.
 
-    Inverted from the pair-matching version, and the inversion is the fix.
-    A quoted string is a KEY if the next non-space character is a colon;
-    every other quoted string is a value and goes. That decision needs no
-    pair, so it holds on a document truncated mid-token — which is the
-    case the pair matcher got exactly backwards, leaving the password
-    exposed and redacting the key that named it.
+    A quoted string is a key if the next non-space character is a colon; every other quoted string is a
+    value and goes. That needs no pair, so it holds on a document truncated mid-token.
 
-    The dangling-quote tail is handled explicitly: a batch cut at a byte
-    limit ends mid-string, `_QUOTED` cannot match an unterminated string,
-    and `"cookies": [{"value": "sid-8812` would otherwise keep `sid-8812`
-    verbatim. An odd number of quotes means the tail is inside a string.
+    The dangling-quote tail is handled explicitly: a batch cut at a byte limit ends mid-string,
+    `_QUOTED` cannot match an unterminated string, and `"cookies": [{"value": "sid-8812` would otherwise
+    keep `sid-8812` verbatim. An odd number of quotes means the tail is inside a string.
     """
     out = []
     pos = 0
@@ -478,18 +381,13 @@ def redact_text(text: str | None, *, keep: int = TEXT_FRAGMENT_KEEP) -> str:
 
 
 def redact_message(text: str | None, *, keep: int = 2000) -> str:
-    """The conservative pass, for text WE generated.
+    """The conservative pass, for text we generated.
 
-    An error detail is our own exception message, not the partner's bytes,
-    and the aggressive `key: value` rule mangles it: `Expecting value: line
-    1 column 31` became `Expecting value:[redacted] 1 column 31`, which
-    destroys the one thing the message is for. The `column` survived and
-    the `line` did not, which is worse than either — it reads like a bug.
-
-    So the detail gets only the rules that cannot fire on prose: addresses,
-    long opaque runs, and quoted JSON pairs. A library that stringifies its
-    input into an exception is the residual risk, and it is covered by the
-    fragment being redacted independently.
+    An error detail is our own exception message, not the partner's bytes, and the aggressive `key: value`
+    rule mangles it (`Expecting value: line 1 column 31` loses its `line`). So the detail gets only the
+    rules that cannot fire on prose: addresses, long opaque runs, and quoted JSON pairs. A library that
+    stringifies its input into an exception is the residual risk, covered by the fragment being redacted
+    independently.
     """
     if not text:
         return ""
@@ -517,11 +415,8 @@ def redact_fragment(fragment: str) -> str:
 def scrub_nuls(text: str) -> str:
     """Postgres `text` cannot hold U+0000 and raises from the driver.
 
-    docs/17 F15(e): this raised from INSIDE the `except` handler in
-    `parse_batch`, so the fragment that caused it was never dead-lettered,
-    every later fragment was never processed, and the batch stayed in
-    PARSING for ever with its records already committed. Invariant 12
-    failing on the exact path built to catch loss.
+    Unscrubbed, a NUL raised from inside the `except` handler in `parse_batch` would leave the fragment
+    that caused it unrecorded, skip every later fragment and strand the batch in PARSING (invariant 12).
     """
     return text.replace("\x00", "\\x00") if "\x00" in text else text
 
@@ -566,15 +461,12 @@ class CaseMismatch(IngestError):
 
 
 class IngestService:
-    """docs/17 F15(a,b,c). The three victim-PII methods used to take a
-    `case_id` and never join back to the object's own case, and the service
-    took no clearance at all -- `CommsService` and `GraphService` both do.
-    An authorisation on ANY case decrypted any credential in the corpus,
-    and the audit event recorded the wrong case against the disclosure.
+    """The ingest service: keys, batches, records, dead letters and victim credentials.
 
-    The routers were fixed first because that closed the reachable attack.
-    This is the same fix one layer down, where a worker or a script calling
-    the service directly gets it too.
+    The victim-PII methods take the caller's clearance and compartments and join each object back to its
+    own case, as `CommsService` and `GraphService` do, so an authorisation on one case cannot decrypt a
+    credential in another. The routers enforce this too; the service enforces it again so a worker or a
+    script calling it directly gets it as well.
     """
 
     def __init__(self, conn: psycopg.Connection, storage=None, *,
@@ -660,22 +552,13 @@ class IngestService:
                   replaces_key_id: UUID | None = None) -> IssuedKey:
         """Mint a key. The secret is returned once and never stored.
 
-        A stealer-log feed without a compartment is refused here AND by a
-        CHECK constraint. The constraint is the guarantee; this is the
-        readable error, and it names the reason rather than the rule.
+        A stealer-log feed without a compartment is refused here and by a CHECK constraint. The constraint
+        is the guarantee; this is the readable error, and it names the reason rather than the rule.
 
-        The compartment itself is checked by the database alone. Until
-        2026-09-09 `forced_compartment` was free text: a stealer-log key
-        issued under `OP-KESTRAL` was accepted, every record it ingested
-        was filed under a lock nobody held, and nothing said so. Migration
-        0059 binds the column to `iam.compartment`, and its refusal names
-        the key and the registration route on the one line
-        `http/errors.safe_detail` forwards -- so it is wrapped as an
-        `IngestError` below rather than re-checked here. Two authored
-        messages for one rule would be two things to keep identical, and
-        the trigger's is the one a psql operator also reads. Before the
-        wrap the same refusal left this method as a raw psycopg error and
-        reached the operator as a 500 with no key in it.
+        The compartment itself is checked by the database alone: migration 0059 binds the column to
+        `iam.compartment`, and its refusal names the key and the registration route on the one line
+        `http/errors.safe_detail` forwards, so it is wrapped as an `IngestError` below rather than
+        re-checked here. Two authored messages for one rule would be two things to keep identical.
         """
         if environment not in {"live", "test"}:
             raise IngestError("environment must be live or test")
@@ -690,12 +573,9 @@ class IngestService:
                 "the parent case. A single archive holds credentials, "
                 "cookies and documents belonging to one victim who is not "
                 "your subject, and a feed holds thousands.")
-        # The other high-risk categories too (2026-09-23). `_store_record`
-        # has always refused a CREDENTIAL_DUMP or DATABASE_LEAK record on a
-        # key with no compartment, so a key declared as either without one
-        # was issued happily and then dead-lettered every record it
-        # brought. Issuing is now possible from the Keys tab, which is the
-        # moment to say so.
+        # The other high-risk categories too: `_store_record` refuses a CREDENTIAL_DUMP or DATABASE_LEAK
+        # record on a key with no compartment, so a key declared as either without one would be issued and
+        # then dead-letter every record it brought.
         if declared_category in HIGH_RISK_CATEGORIES and not forced_compartment:
             raise IngestError(
                 f"a {declared_category} feed carries third-party personal "
@@ -725,14 +605,11 @@ class IngestService:
                  now + ttl, owner_user_id, replaces_key_id)).fetchone()
         except (psycopg.errors.RaiseException,
                 psycopg.errors.CheckViolation) as exc:
-            # RaiseException is 0059's compartment binding refusing an
-            # unregistered `forced_compartment`; CheckViolation is one of
-            # 0033's row rules (an unknown category, for instance) that
-            # this method does not pre-check. Both are the caller's input
-            # being wrong, so both are an IngestError -- the router's 400
-            # -- with the database as the cause, which `safe_detail`
-            # renders as the authored first line plus a correlation id.
-            # Until 2026-09-09 neither was caught and both were 500s.
+            # RaiseException is 0059's compartment binding refusing an unregistered `forced_compartment`;
+            # CheckViolation is one of 0033's row rules (an unknown category, for instance) that this
+            # method does not pre-check. Both are the caller's input being wrong, so both are an
+            # IngestError (the router's 400) with the database as the cause, which `safe_detail` renders as
+            # the authored first line plus a correlation id.
             raise IngestError(str(exc)) from exc
         self._audit(None, owner_user_id, "INGEST_KEY_ISSUED", {
             "key_id": key_id, "category": declared_category,
@@ -794,12 +671,8 @@ class IngestService:
                    reason: str) -> None:
         """Revoke a live key, with the reason the Keys tab shows.
 
-        Raises for a key that does not exist or is already revoked. Until
-        2026-09-23 this ran a bare UPDATE and audited a revocation whether
-        or not a row matched, so a mistyped id answered "revoked": true and
-        wrote an INGEST_KEY_REVOKED event about nothing. The console now
-        offers Revoke on the Keys tab (ux12-feeds:keys-tab-read-only), and
-        a revocation that did not happen must not read as one that did.
+        Raises for a key that does not exist or is already revoked: a revocation that did not happen must
+        not read as one that did, or audit an INGEST_KEY_REVOKED event about nothing.
         """
         if not (reason or "").strip():
             raise IngestError("a revocation has to say why")
@@ -834,21 +707,15 @@ class IngestService:
     def accept(self, key: dict, raw: bytes, *,
                content_type: str | None = None,
                idempotency_key: str | None = None) -> AcceptResult:
-        """Persist the raw bytes and return. **Nothing is parsed here.**
+        """Persist the raw bytes and return. Nothing is parsed here.
 
-        docs/12: respond 202 immediately, parse asynchronously, never block
-        the client on processing -- and persist raw BEFORE parsing, always,
-        so a wrong parser is recoverable without a resend.
+        docs/12: respond 202 immediately, parse asynchronously, and persist raw before parsing, always, so a
+        wrong parser is recoverable without a resend.
 
-        The length check below is this method's own guarantee for any
-        caller handing it bytes it already holds. It is NOT how the HTTP
-        route bounds an upload: `raw` is a complete `bytes`, so by the
-        time this runs the caller has already paid for buffering it.
-        Until 2026-09-09 that caller was `POST /ingest` via `await
-        request.body()`, which made the key's cap a check on memory
-        already spent; the route now refuses at the cap while the body is
-        still arriving (`http.limits.read_body_capped`) and this check
-        stays as the second, cheaper line.
+        The length check below is this method's own guarantee for any caller handing it bytes it already
+        holds. It is not how the HTTP route bounds an upload: `raw` is a complete `bytes`, so the caller has
+        already paid for buffering it. The route refuses at the cap while the body is still arriving
+        (`http.limits.read_body_capped`), and this check is the second, cheaper line.
         """
         if not raw:
             raise IngestError("empty body")
@@ -872,12 +739,9 @@ class IngestService:
         digest = hashlib.sha256(raw).digest()
         key_name = f"ingest/{digest.hex()[:2]}/{digest.hex()}"
         if self._storage is None:
-            # Refuse rather than accept-and-drop. `accept()` returning 202
-            # writes a batch row whose `raw_key` points at nothing: the
-            # partner is told their submission was accepted, `parse` has
-            # nothing to read, and the loss is discovered months later when
-            # somebody tries to re-parse. docs/12's "raw before parse,
-            # always" is not satisfied by recording that we meant to.
+            # Refuse rather than accept-and-drop. A 202 would write a batch row whose `raw_key` points at
+            # nothing: the partner is told their submission was accepted, `parse` has nothing to read, and
+            # the loss surfaces months later at the first re-parse (docs/12: raw before parse, always).
             raise IngestError(
                 "no raw-payload storage is configured, so these bytes would "
                 "be acknowledged and dropped. The raw payload must be "
@@ -898,11 +762,9 @@ class IngestService:
     def raw_for(self, batch_id: UUID) -> bytes:
         """The bytes as they arrived, for a re-parse.
 
-        Verified against `raw_sha256` before they are returned. The digest
-        is on the batch row and the object is content-addressed, so a
-        mismatch means either the object was replaced or the row was — and
-        re-parsing something that is not what arrived would produce records
-        attributed to a submission that never happened.
+        Verified against `raw_sha256` before they are returned. The digest is on the batch row and the
+        object is content-addressed, so a mismatch means the object or the row was replaced, and
+        re-parsing it would produce records attributed to a submission that never happened.
         """
         if self._storage is None:
             raise IngestError("no raw-payload storage is configured")
@@ -929,25 +791,17 @@ class IngestService:
                     parser_version: str = "1") -> ParseResult:
         """Turn raw bytes into records. Every failure is a dead letter.
 
-        Invariant 12: nothing is silently dropped. A record that will not
-        parse goes to `ingest.dead_letter` with its fragment redacted (see
-        "Dead-letter redaction" above and `redact_fragment`: JSON keeps its
-        keys, types and lengths and no leaf value; anything else keeps a
-        short head with its values masked), the digest of what arrived,
-        the error and the parser version. The verbatim bytes stay in the
-        batch's raw object, and a repair-and-replay path exists. This said
-        "the raw fragment", which the table has not held since the
-        redaction landed (README screenshot set review, 2026-09-23).
+        Invariant 12: nothing is silently dropped. A record that will not parse goes to
+        `ingest.dead_letter` with its fragment redacted (see "Dead-letter redaction" above and
+        `redact_fragment`: JSON keeps its keys, types and lengths and no leaf value; anything else keeps a
+        short head with its values masked), the digest of what arrived, the error and the parser version.
+        The verbatim bytes stay in the batch's raw object, and a repair-and-replay path exists.
 
-        On a system connection (F51, 2026-10-02): the parse dedupes against
-        every record in the deployment, writes each record and dead letter
-        at the feed key's label, which may sit above the operator who asked
-        for the parse, and scores against every watch. As the request role
-        the dedupe would miss a record above the operator, and the INSERT
-        of a record above them would be refused, which `_store_record`
-        would have filed as a dead letter: a parse that turned good records
-        into failures because of who pressed the button. The route's gates
-        run on the request connection first.
+        Runs on a system connection: the parse dedupes against every record in the deployment, writes each
+        record and dead letter at the feed key's label, which may sit above the operator who asked for the
+        parse, and scores against every watch. As the request role the dedupe would miss a record above the
+        operator and the INSERT of one would be refused, so `_store_record` would file good records as dead
+        letters because of who pressed the button. The route's gates run on the request connection first.
         """
         with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
             return self._on(sconn)._parse_batch(
@@ -969,26 +823,18 @@ class IngestService:
             "UPDATE ingest.batch SET state = 'PARSING' WHERE id = %s",
             (batch_id,))
 
-        # The state is settled in a `finally` on purpose. docs/17 F15(e): a
-        # single NUL byte used to raise from inside the `except` below, and
-        # because nothing caught THAT, the batch stayed in PARSING for ever
-        # with its already-inserted records committed and the fragment that
-        # broke it never recorded. A batch must always end somewhere.
+        # The state is settled in a `finally` on purpose: an exception raised from inside the `except`
+        # below must not strand the batch in PARSING with its inserted records committed and the failing
+        # fragment unrecorded. A batch must always end somewhere.
         state = "FAILED"
         stored: list[UUID] = []
         try:
             seen = 0
-            # The generator is advanced INSIDE the try, not by a `for`.
-            # `for fragment in iter_fragments(raw)` puts the `next()` call
-            # outside both inner handlers, so anything the generator itself
-            # raises — `csv.Error` on a field over 128 KiB, which a stealer
-            # log's cookie column routinely is — escaped past them, past
-            # the router's `except IngestError`, and out as a 500. Every
-            # remaining fragment was dropped with `dead_count` still 0, so
-            # nothing recorded that anything was lost OR how much, and
-            # re-parsing died at the same row for ever. That is invariant
-            # 12 failing on the path built to catch loss, which is the
-            # second time this exact shape has done so (see `scrub_nuls`).
+            # The generator is advanced inside the try, not by a `for`: `for fragment in
+            # iter_fragments(raw)` puts the `next()` call outside both inner handlers, so anything the
+            # generator itself raises (`csv.Error` on a field over 128 KiB, which a stealer log's cookie
+            # column routinely is) would escape past the router's `except IngestError` as a 500, drop every
+            # remaining fragment with `dead_count` still 0, and make re-parsing die at the same row for ever.
             fragments = iter_fragments(raw)
             while True:
                 try:
@@ -996,13 +842,8 @@ class IngestService:
                 except StopIteration:
                     break
                 except Exception as exc:  # noqa: BLE001
-                    # The container broke mid-stream. Record the break and
-                    # what was reached, then stop: the remainder is not
-                    # recoverable by this parser, and a repair replays from
-                    # the raw object.
-                    # Counts agreed, not a bracketed plural: both lines
-                    # are read by an operator (README screenshot set review,
-                    # 2026-09-23).
+                    # The container broke mid-stream. Record the break and what was reached, then stop: the
+                    # remainder is not recoverable by this parser, and a repair replays from the raw object.
                     reached = count_of(seen, "fragment", "fragments")
                     self._dead_letter(
                         batch_id, key,
@@ -1041,11 +882,9 @@ class IngestService:
                     result.dead += 1
 
             if seen == 0:
-                # `accept()` refuses an empty body, so a batch that yields
-                # no fragments at all held SOMETHING and we made nothing of
-                # it. Whitespace, a BOM alone, a container we cannot open.
-                # Reporting `records=0 dead=0 state=PARSED` for that is a
-                # silent drop with a green light on it -- invariant 12.
+                # `accept()` refuses an empty body, so a batch that yields no fragments at all held
+                # something we made nothing of (whitespace, a BOM alone, a container we cannot open).
+                # Reporting `records=0 dead=0 state=PARSED` for that is a silent drop (invariant 12).
                 self._dead_letter(
                     batch_id, key, raw.decode("utf-8", errors="replace"),
                     "EmptyParse",
@@ -1078,13 +917,9 @@ class IngestService:
                 "every record in this batch dead-lettered. That is usually "
                 "the partner changing their schema without telling you, "
                 "not a transient fault.")
-        # Scored as they arrive (ux12-feeds:feeds-badge-never-set,
-        # 2026-09-23). Nothing did: every parsed record sat at 0.0 until
-        # somebody pressed Rescore on it, which is the opposite of a
-        # watched selector surfacing in seconds. After the batch state is
-        # settled and outside the parse loop, so a scoring failure can
-        # neither dead-letter a record that parsed nor leave the batch in
-        # PARSING; it is a warning and the records keep their 0.0.
+        # Scored as they arrive, after the batch state is settled and outside the parse loop, so a scoring
+        # failure can neither dead-letter a record that parsed nor leave the batch in PARSING; it is a
+        # warning and the records keep their 0.0.
         if stored:
             try:
                 self.score_records(stored)
@@ -1159,20 +994,15 @@ class IngestService:
         row = self._c.execute(
             "SELECT retain_days FROM core.retention_rule WHERE category = %s",
             (category,)).fetchone()
-        # The fallback is named where the retention panel can read it
-        # (ux15-report:unruled-categories-invisible, 2026-09-23).
+        # The fallback is named where the retention panel can read it.
         days = row[0] if row else UNRULED_RETAIN_DAYS
         return datetime.now(timezone.utc) + timedelta(days=days)
 
     def _case_capped(self, until: datetime, case_id: UUID | None) -> datetime:
-        """The category clock, never later than the case's own retention
-        instant (00:00 UTC on its retention day) when the record arrives in
-        a case. A category clock may only SHORTEN (retention.py rule 2,
-        docs/00 decision 50); it was stamped from the rule alone, so a
-        CHAT_EXPORT in a case kept two more months was stamped 670 days past
-        it (evidence-category-clock-outlives-case, 2026-10-03). The sweep
-        takes the earlier of the two as well, so a case this connection
-        cannot read, or a record attached later, is still covered."""
+        """The category clock, never later than the case's own retention instant (00:00 UTC on its
+        retention day) when the record arrives in a case. A category clock may only shorten (retention.py
+        rule 2, docs/00 decision 50). The sweep takes the earlier of the two as well, so a case this
+        connection cannot read, or a record attached later, is still covered."""
         if case_id is None:
             return until
         row = self._c.execute(
@@ -1202,12 +1032,10 @@ class IngestService:
                      error_class: str, detail: str, parser_version: str) -> None:
         """Record the loss, redacted, labelled and on a clock.
 
-        docs/17 F15(d). The fragment is redacted structurally before it is
-        stored, and the row inherits the issuing key's classification and
-        compartment -- a parse failing does not declassify the data. The
-        digest is of what ACTUALLY arrived, taken before redaction, so a
-        later repair can be checked against the batch's raw object without
-        a second copy of the credential living in this table.
+        The fragment is redacted structurally before it is stored, and the row inherits the issuing key's
+        classification and compartment: a parse failing does not declassify the data. The digest is of what
+        actually arrived, taken before redaction, so a later repair can be checked against the batch's raw
+        object without a second copy of the credential living in this table.
         """
         key_id, declared_category, ceiling, compartment = (
             key[0], key[1], key[2], key[3])
@@ -1226,11 +1054,9 @@ class IngestService:
                  [compartment] if compartment else [],
                  self._dead_letter_retention(declared_category), digest))
         except Exception:  # noqa: BLE001
-            # The fact of the loss outranks the detail of it. Retry with
-            # only what cannot fail: no fragment, no error text, just the
-            # digest of what arrived and the class of the failure. If this
-            # raises too, it propagates -- and `parse_batch`'s `finally`
-            # still settles the batch state.
+            # The fact of the loss outranks the detail of it. Retry with only what cannot fail: no fragment,
+            # no error text, just the digest of what arrived and the class of the failure. If this raises
+            # too, it propagates, and `parse_batch`'s `finally` still settles the batch state.
             self._c.execute(
                 """INSERT INTO ingest.dead_letter
                        (batch_id, api_key_id, raw_fragment, error_class,
@@ -1259,26 +1085,17 @@ class IngestService:
 
     def replay(self, dead_letter_id: UUID, *, actor_id: UUID,
                repaired: str, case_id: UUID | None = None) -> UUID:
-        """Repair and replay. The original fragment is NOT overwritten --
-        what arrived and what was made of it are different facts.
+        """Repair and replay. The original fragment is not overwritten: what arrived and what was made of
+        it are different facts.
 
-        The `redacted` check is not bureaucracy. Migration 0040's
-        constraint is `CHECK (redacted) NOT VALID`, and NOT VALID exempts
-        rows that already existed at ALTER time -- it does not exempt
-        UPDATES to them. So on a pre-0040 row this method used to INSERT
-        the record (committed, because the connection is autocommit), then
-        raise `CheckViolation` on the UPDATE, which the router did not
-        catch. The caller got a 500, `replayed_at` stayed NULL, and the
-        dead letter still claimed the fragment was unresolved while a
-        record made from it existed -- invariant 12 inverted.
-
-        Refusing FIRST, with the repair named, is the honest order. The
-        migration reasoned about one writer (`redact_dead_letters.py`) and
-        missed this one; the fix belongs on both sides.
+        The `redacted` check is not bureaucracy. Migration 0040's constraint is `CHECK (redacted) NOT
+        VALID`, which exempts rows that existed at ALTER time but not UPDATEs to them. On a pre-0040 row the
+        record would be inserted (the connection is autocommit) and the UPDATE then raise
+        `CheckViolation`, leaving `replayed_at` NULL while a record made from the fragment exists: invariant
+        12 inverted. So the refusal comes first, with the repair named.
         """
-        # Parsed BEFORE anything is locked or written, and refused as its
-        # own error: a typo in a repair is the caller's to fix, and until
-        # 2026-09-23 `json.loads` raised through this method as a 500.
+        # Parsed before anything is locked or written, and refused as its own error: a typo in a repair is
+        # the caller's to fix.
         try:
             payload = json.loads(repaired)
         except json.JSONDecodeError as exc:
@@ -1293,11 +1110,9 @@ class IngestService:
             raise RepairInvalid(
                 "the repair must be one JSON object, the shape a record has. "
                 "Nothing was written.")
-        # On a system connection (F51, 2026-10-02), as a parse is: the
-        # record it makes is deduped against every record and written at the
-        # feed key's label, and the dead letter is locked and marked, which
-        # the request role, reading dead letters only, cannot do. The route
-        # has gated the dead letter and the target case already.
+        # On a system connection, as a parse is: the record it makes is deduped against every record and
+        # written at the feed key's label, and the dead letter is locked and marked, which the request role,
+        # reading dead letters only, cannot do. The route has gated the dead letter and the target case.
         with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
             return self._on(sconn)._replay(dead_letter_id, actor_id=actor_id,
                                            payload=payload, case_id=case_id)
@@ -1305,12 +1120,9 @@ class IngestService:
     def _replay(self, dead_letter_id: UUID, *, actor_id: UUID, payload: dict,
                 case_id: UUID | None) -> UUID:
         """`replay` from the lock on, on the INGEST connection."""
-        # One transaction with the row locked, so two people pressing
-        # Replay on the same dead letter make one record, not two. The
-        # console offers the action since 2026-09-23 (ux12-feeds:dead-
-        # letters-no-feed-no-scope), and a double click is the ordinary
-        # case: the "already replayed" check was a read, then a write, on
-        # an autocommit connection.
+        # One transaction with the row locked, so two people pressing Replay on the same dead letter make
+        # one record, not two: the "already replayed" check is a read, then a write, on an autocommit
+        # connection.
         with self._c.transaction():
             row = self._c.execute(
                 """SELECT dl.batch_id, dl.api_key_id, dl.replayed_at,
@@ -1342,8 +1154,7 @@ class IngestService:
                     WHERE id = %s""",
                 (actor_id, f"replayed as record {created['id']}",
                  dead_letter_id))
-            # Audited: a replay puts a record in a queue on a person's say
-            # so, and nothing recorded who until 2026-09-23.
+            # Audited: a replay puts a record in a queue on a person's say so.
             self._audit(case_id, actor_id, "INGEST_DEAD_LETTER_REPLAYED",
                         {"record_id": str(created["id"]),
                          "batch_id": str(row[0]) if row[0] else None},
@@ -1382,14 +1193,12 @@ class IngestService:
 
     def credentials_masked(self, record_id: UUID, *,
                            case_id: UUID) -> list[dict]:
-        """The analytic view. **Never returns a value.**
+        """The analytic view. Never returns a value.
 
-        This is the shape docs/12 asks for: service, kind and timing are
-        what the investigation needs, and none of it is the credential.
-
-        `case_id` is required and is checked against the record's own. Even
-        the masked view discloses which victims of which organisation are
-        in a compartmented case, which is the thing the compartment is for.
+        Service, kind and timing are what the investigation needs (docs/12), and none of it is the
+        credential. `case_id` is required and is checked against the record's own: even the masked view
+        discloses which victims of which organisation are in a compartmented case, which is what the
+        compartment is for.
         """
         scope = self._record_scope(record_id, what="credentials_masked")
         self._require_same_case(scope["case_id"], case_id, what="record")
@@ -1458,13 +1267,10 @@ class IngestService:
         if not (reason or "").strip():
             raise IngestError("a reveal has to say why")
 
-        # The credential's OWN case, resolved before anything is decrypted
-        # and before the authorisation is even looked up. docs/17 F15(a):
-        # this used to check an authorisation for the case the CALLER
-        # named and then decrypt by credential id with no join back to the
-        # record, so an authorisation on any case opened any credential in
-        # the corpus -- and the audit event recorded the wrong case against
-        # the disclosure, which is worse than no event.
+        # The credential's own case, resolved before anything is decrypted and before the authorisation is
+        # looked up. Checking an authorisation for the case the caller named and then decrypting by
+        # credential id would let an authorisation on any case open any credential in the corpus, and the
+        # audit event would record the wrong case against the disclosure.
         clearance, compartments = self._ceiling("reveal_credential")
         scope = self._c.execute(
             """SELECT r.case_id, vc.value_ciphertext, vc.value_key_id
@@ -1494,13 +1300,11 @@ class IngestService:
                 "this credential's value was not retained; only its metadata "
                 "was ingested")
         value = envelope.decrypt(bytes(row[0]), key_id=row[1])
-        # Both counts and the audit row commit together or not at all, and a
-        # count that changed no row refuses the reveal (F51, 2026-10-02).
-        # Under row-level security an UPDATE of a row the caller can no
-        # longer reach changes nothing and says nothing: a credential raised
-        # above them mid-request, or an authorisation revoked or lapsed
-        # between the check above and its count (0154 counts only a live
-        # one). A value whose reveal was not counted is never returned.
+        # Both counts and the audit row commit together or not at all, and a count that changed no row
+        # refuses the reveal. Under row-level security an UPDATE of a row the caller can no longer reach
+        # changes nothing and says nothing: a credential raised above them mid-request, or an authorisation
+        # revoked or lapsed between the check above and its count (0154 counts only a live one). A value
+        # whose reveal was not counted is never returned.
         try:
             with self._c.transaction():
                 if self._c.execute(
@@ -1533,14 +1337,11 @@ class IngestService:
 
     def search_by_fingerprint(self, value: str, *, actor_id: UUID,
                               case_id: UUID) -> list[dict]:
-        """The ONLY lookup across victim credentials, and it is a correlation
-        rather than a search.
+        """The only lookup across victim credentials, and it is a correlation rather than a search.
 
-        You must already hold the value to ask about it -- this answers
-        "does this credential appear anywhere else", never "give me the
-        credentials for this domain". Still requires an authorisation,
-        because knowing that a specific credential is in the corpus is
-        itself a disclosure.
+        You must already hold the value to ask about it: this answers "does this credential appear
+        anywhere else", never "give me the credentials for this domain". It still requires an
+        authorisation, because knowing that a specific credential is in the corpus is itself a disclosure.
         """
         clearance, compartments = self._ceiling("search_by_fingerprint")
         if self._live_authorisation(actor_id, case_id) is None:
@@ -1551,18 +1352,14 @@ class IngestService:
                 "logged authorisation for this case")
         fingerprint = hmac.new(_pepper(), value.encode("utf-8"),
                                hashlib.sha256).digest()
-        # docs/17 F15(b). The query carries the caller's ceiling rather
-        # than the router filtering the answer afterwards. Filtering after
-        # the fact is not the same as not asking: the count, the timing and
-        # the audit event were all computed over the whole corpus, so the
-        # disclosure had already happened by the time the filter ran.
+        # The query carries the caller's ceiling rather than the router filtering the answer afterwards:
+        # filtering after the fact is not the same as not asking, because the count, the timing and the
+        # audit event would all be computed over the whole corpus.
         #
-        # On a system connection (F51, 2026-10-02): the correlation answers
-        # across the corpus at the caller's labels, quarantine included, and
-        # the route narrows it to the caller's cases and quarantine as it
-        # always has. As the request role a quarantined record would drop
-        # out for every caller but the operator, and the audited hit count
-        # would shrink with it.
+        # On a system connection: the correlation answers across the corpus at the caller's labels,
+        # quarantine included, and the route narrows it to the caller's cases and quarantine. As the request
+        # role a quarantined record would drop out for every caller but the operator, and the audited hit
+        # count would shrink with it.
         with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
             rows = sconn.execute(
                 """SELECT vc.id, vc.kind, vc.service_domain, r.category,
@@ -1583,45 +1380,31 @@ class IngestService:
     # -- triage ------------------------------------------------------------
 
     def score_record(self, record_id: UUID) -> float:
-        """docs/12's triage score.
+        """The triage score (docs/12).
 
-        The watched-selector term dominates on purpose: a record containing
-        a selector on somebody's watchlist should surface in seconds, and a
-        generic combo list should sink silently to the bottom. Volume is
-        the enemy, and a queue nobody can prioritise is a queue nobody
-        reads.
+        The watched-selector term dominates on purpose: a record containing a selector on somebody's
+        watchlist should surface in seconds, and a generic combo list should sink to the bottom. A queue
+        nobody can prioritise is a queue nobody reads.
 
-        On the INGEST connection, as `score_records` (F51, 2026-10-02).
+        Runs on the INGEST connection, as `score_records` does.
         """
         with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
             return self._on(sconn)._score(record_id, {})[0]
 
     def _watches_for(self, case_id: UUID | None, cache: dict) -> list:
-        """The watch list a record in `case_id` scores against, read once
-        per case per scoring pass. `parse_batch` scores every record it
-        stores since 2026-09-23, and reading the list again for each of a
-        stealer log's thousands of records was a query per record for the
-        same answer (fix round, 2026-09-23)."""
+        """The watch list a record in `case_id` scores against, read once per case per scoring pass, so a
+        stealer log's thousands of records do not each cost a query for the same answer."""
         if case_id not in cache:
-            # WHICH watches, and that is the fix (ux12-feeds:watched-hit-
-            # unnamed-and-contradicted, 2026-09-23). This read every active
-            # watch in the deployment and stored only a count, so a record
-            # in OP-KESTREL-26 rose to the top of KESTREL's queue on a
-            # selector OP-NIGHTJAR-26 was watching, nobody on KESTREL
-            # could find out which, and the score told them another case
-            # watches a selector this record carries. A record in a case
-            # now scores against that case's watches and the case-less
-            # ones; a record in quarantine, which no case can see yet,
-            # against all of them, because routing it to the case whose
-            # watch it matches is the operator's whole job. Each term is
-            # stored with the selector and the watch that earned it, and
-            # the router hides a watch the caller cannot read.
+            # A record in a case scores against that case's watches and the case-less ones; a record in
+            # quarantine, which no case can see yet, scores against all of them, because routing it to the
+            # case whose watch it matches is the operator's whole job. Reading every watch in the deployment
+            # for a case record would tell that case another case watches a selector. Each term is stored
+            # with the selector and the watch that earned it, and the router hides a watch the caller
+            # cannot read.
             #
-            # On a system connection (S1, 2026-09-25): a quarantined record
-            # scores against EVERY watch, including those on cases the
-            # operator is not on, and under row-level security the request
-            # role would score it against the operator's cases alone and
-            # store that lower score as the record's.
+            # On a system connection: a quarantined record scores against every watch, including those on
+            # cases the operator is not on, and under row-level security the request role would score it
+            # against the operator's cases alone and store that lower score as the record's.
             with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
                 cache[case_id] = sconn.execute(
                     """SELECT w.id, w.name, w.case_id, s.selector
@@ -1690,27 +1473,16 @@ class IngestService:
                       actor_id: UUID | None = None) -> dict:
         """Score several records and tell each case owner about new hits.
 
-        `{scored, changed, newly_hit}`. A record is NEWLY hit when it now
-        matches more watched selectors than it did before this pass, and
-        those are what the owner is told about, once per case and label
-        set rather than once per record: a batch of forty matching records
-        is one notification, not forty.
+        Returns `{scored, changed, newly_hit}`. A record is newly hit when it now matches more watched
+        selectors than it did before this pass, and those are what the owner is told about, once per case
+        and label set rather than once per record: a batch of forty matching records is one notification.
 
-        ux12-feeds:feeds-badge-never-set (2026-09-23). Nothing outside the
-        Feeds pane ever said a scored hit had arrived, and `parse_batch`
-        did not score at all: every parsed record sat at 0.0 until an
-        analyst pressed Rescore on it, so "a record containing a watched
-        selector should surface in seconds" (docs/12) held only for records
-        somebody had already found.
-
-        On a system connection (F51, 2026-10-02). A pass reads and writes
-        each record whatever its caller may read (a parse scores records at
-        the feed key's label, above the operator), scores against every
-        watch, and tells the case's owner about a hit in a case the caller
-        may not be on: as the request role a record above the caller would
-        keep its old score with nothing said, and an ingest operator off the
-        case would raise no FEED_SELECTOR_HIT at all. Every caller has
-        gated the records it names on the request connection first.
+        Runs on a system connection. A pass reads and writes each record whatever its caller may read (a
+        parse scores records at the feed key's label, above the operator), scores against every watch, and
+        tells the case's owner about a hit in a case the caller may not be on. As the request role a record
+        above the caller would keep its old score with nothing said, and an ingest operator off the case
+        would raise no FEED_SELECTOR_HIT. Every caller has gated the records it names on the request
+        connection first.
         """
         ids = [UUID(str(r)) for r in record_ids]
         if not ids:
@@ -1728,9 +1500,8 @@ class IngestService:
                     WHERE id = ANY(%s)""", (ids,)).fetchall()}
         changed = 0
         fresh: list[UUID] = []
-        # One watch list per case for the whole pass, and the hit count
-        # from the scoring itself rather than read back: two statements a
-        # record, not four (fix round, 2026-09-23).
+        # One watch list per case for the whole pass, and the hit count from the scoring itself rather
+        # than read back: two statements a record, not four.
         watches: dict = {}
         for rid in ids:
             if rid not in before:
@@ -1749,25 +1520,19 @@ class IngestService:
                               actor_id: UUID | None) -> None:
         """One FEED_SELECTOR_HIT per case and label set, to the case owner.
 
-        The three-field discipline (notify_events.py): the subject and the
-        summary carry the case code and a count and never a selector,
-        because they may leave the building by email; the body names the
-        watches, because it is read in-app behind the gate. The record's
-        own labels are the element labels, so a stealer-log hit is marked
-        with its compartment and an owner who does not hold it is not told
-        (suppression 2), which is the compartment doing its job.
+        The three-field discipline (notify_events.py): the subject and the summary carry the case code and
+        a count and never a selector, because they may leave the building by email; the body names the
+        watches, because it is read in-app behind the gate. The record's own labels are the element labels,
+        so a stealer-log hit is marked with its compartment and an owner who does not hold it is not told
+        (suppression 2).
 
-        A failure here is logged and swallowed: the score is written and
-        the record is at the top of the queue, and a notification that
-        could not be raised must not undo that or fail the parse.
+        A failure here is logged and swallowed: the score is written and the record is at the top of the
+        queue, and a notification that could not be raised must not undo that or fail the parse.
 
-        It runs only from `_score_records`, on the INGEST connection that
-        `score_records` opens (F51, 2026-10-02), and that connection is
-        what lets it work for a scorer who is not on the case: row security
-        does not bind it, so the record and the case row are both read
-        whoever pressed the button. On the scorer's own connection the
-        record and the case would both be hidden from an ingest operator
-        off the case, and the owner would never be told.
+        It runs only from `_score_records`, on the INGEST connection `score_records` opens. Row security
+        does not bind that connection, so the record and the case row are both read whoever pressed the
+        button; on the scorer's own connection both would be hidden from an ingest operator off the case
+        and the owner would never be told.
         """
         from noctornal_api.notifications import NotificationService
 
@@ -1789,9 +1554,6 @@ class IngestService:
             n = len(members)
             records = count_of(n, "feed record", "feed records")
             verb = agree(n, "matches", "match")
-            # The summary's pronoun agrees with the count as the body's verb
-            # does: "1 feed record ... see them" was the slip the fix round
-            # caught (ux12-feeds:feeds-badge-never-set, 2026-09-23).
             them = agree(n, "it", "them")
             watches = sorted({
                 f"{t.get('selector')} (watch {w.get('name')})"
@@ -1828,23 +1590,11 @@ class IngestService:
 
     # -- the queue's verbs -------------------------------------------------
     #
-    # ux12-feeds:queue-is-a-dead-end (2026-09-23). The queue could be
-    # looked at and nothing else: a record that surfaced because it matched
-    # a watched selector could not be marked dealt with, so it sat at the
-    # top for ever and the next analyst re-read it, and a quarantined
-    # record could not be attached to the case it belonged to, so it
-    # expired on the category clock (invariant 12's silent loss, by
-    # inaction). These are the verbs.
-    #
-    # The triage STATE lives in the audit chain, not in a column, and that
-    # is a decision for this release rather than a preference: the
-    # migration chain is closed for Alpha 6 and `ingest.record` has no
-    # triage column. Every triage decision has to be an audit event anyway
-    # (who dismissed a watched-selector hit, when, and why, is exactly
-    # what a disclosure review asks), and the chain is append-only and
-    # hash-linked, so the latest INGEST_RECORD_TRIAGED event for a record
-    # IS its state, read by `audit.event_object_id_idx`. A column can be
-    # added later as a cache of that event without changing what it means.
+    # The triage state lives in the audit chain, not in a column: `ingest.record` has no triage column,
+    # and every triage decision has to be an audit event anyway (who dismissed a watched-selector hit,
+    # when and why is what a disclosure review asks). The chain is append-only and hash-linked, so the
+    # latest INGEST_RECORD_TRIAGED event for a record is its state, read by `audit.event_object_id_idx`.
+    # A column can be added later as a cache of that event without changing what it means.
 
     def _record_row(self, record_id: UUID) -> tuple:
         row = self._c.execute(
@@ -1904,24 +1654,19 @@ class IngestService:
                       actor_id: UUID, reason: str) -> dict:
         """Attach a quarantined record to a case.
 
-        The quarantine notice has always said "attaching it to a case is
-        what puts it under that case's authority", and there was no way to
-        attach one. Refused for a record that already has a case: moving
-        material between cases is a different act with a different
-        audience, and this verb must not become it. The category clock is
-        unchanged (`_retain_until`: a stealer log inside a two-year case
-        must not inherit that case's authority). The record is rescored
-        against its new case's watches.
+        Attaching puts the record under that case's authority (the quarantine notice says so). Refused for
+        a record that already has a case: moving material between cases is a different act with a
+        different audience. The category clock is unchanged (`_retain_until`: a stealer log inside a
+        two-year case must not inherit that case's authority). The record is rescored against its new
+        case's watches.
         """
         reason = (reason or "").strip()
         if len(reason) < 5:
             raise IngestError("say why this record belongs to that case, in "
                               "at least five characters")
-        # One transaction for the attach, its audit row and the carried
-        # triage state (F51, 2026-10-03): a connection that fails between
-        # them (a statement timeout, a dropped link) used to leave a record
-        # attached with none of its state, which a retry could not repair
-        # because the record is no longer in quarantine.
+        # One transaction for the attach, its audit row and the carried triage state: a connection that
+        # fails between them (a statement timeout, a dropped link) would leave a record attached with none
+        # of its state, which a retry could not repair because the record is no longer in quarantine.
         with self._c.transaction():
             row = self._c.execute(
                 """UPDATE ingest.record SET case_id = %s
@@ -1942,22 +1687,18 @@ class IngestService:
                          category: str, reason: str) -> dict:
         """An analyst's correction of the classifier's category.
 
-        docs/12: "Keep the confidence and let analysts correct it;
-        corrections are training data." The classifier's output is kept in
-        the audit event (`from`), the record carries the correction with
+        docs/12: "Keep the confidence and let analysts correct it; corrections are training data." The
+        classifier's output is kept in the audit event (`from`), the record carries the correction with
         source ANALYST, and the row keeps showing what the machine said.
 
         Rules, each the one `_store_record` applies on the way in:
 
-        - a high-risk category needs a compartment, and a record whose feed
-          declared none cannot be corrected into one (the fix is the key's
-          declaration and a re-parse, not the record);
-        - the expiry is the NEW category's clock counted from arrival, and
-          a correction never brings it FORWARD. Shortening a retention
-          period is a destruction decision, which belongs to retention and
-          purge where a legal hold is checked, not to a relabel. A record
-          with NO expiry (NULL, which retention reads as never due) keeps
-          none: giving it a date is the same decision (2026-10-03).
+        - a high-risk category needs a compartment, and a record whose feed declared none cannot be
+          corrected into one (the fix is the key's declaration and a re-parse, not the record);
+        - the expiry is the new category's clock counted from arrival, and a correction never brings it
+          forward. Shortening a retention period is a destruction decision, which belongs to retention and
+          purge where a legal hold is checked, not to a relabel. A record with no expiry (NULL, which
+          retention reads as never due) keeps none: giving it a date is the same decision.
         """
         category = (category or "").strip().upper()
         if category not in CATEGORIES:
@@ -1980,16 +1721,12 @@ class IngestService:
             "SELECT retain_days FROM core.retention_rule WHERE category = %s",
             (category,)).fetchone()
         by_rule = created_at + timedelta(days=rule[0] if rule else 365)
-        # A correction that changed no row is refused, never audited as made
-        # (F51, 2026-10-02): under row-level security a record raised above
-        # the caller since `_record_row` read it is one this UPDATE silently
-        # misses. The expiry is the greater of the STORED one and the rule's,
-        # decided in the statement (2026-10-03): a
-        # concurrent correction may have extended it since `_record_row`
-        # read it, and 0155's guard judges a write against the current row,
-        # so a value computed from the earlier read raised a raw 42501 the
-        # API answers with a 500. NULL stays NULL (greatest() would skip it
-        # and hand the record a date).
+        # A correction that changed no row is refused, never audited as made: under row-level security a
+        # record raised above the caller since `_record_row` read it is one this UPDATE silently misses.
+        # The expiry is the greater of the stored one and the rule's, decided in the statement: a concurrent
+        # correction may have extended it since `_record_row` read it, and 0155's guard judges a write
+        # against the current row, so a value computed from the earlier read would raise a raw 42501 that
+        # the API answers with a 500. NULL stays NULL (greatest() would skip it and hand the record a date).
         written = self._c.execute(
             """UPDATE ingest.record
                   SET category = %s, category_source = 'ANALYST',
@@ -2022,21 +1759,17 @@ class IngestService:
                                actor_id: UUID) -> None:
         """Restate on the new case what its team reads about the record.
 
-        F51, 2026-10-02. A quarantined record's triage decisions and
-        category corrections carry no case, because the record had none,
-        and under row security on the log (0168) only the operator reads
-        those rows. The case's team reads the case's rows. So the latest
-        triage state, unless it is NEW (the state of no row at all), and
-        the first correction, which holds the classifier's own output the
-        queue shows as `category_was`, are copied onto rows of the case,
-        each naming the row it carries. Written by the attacher, who holds
-        the operator verb and so reads every case-less ingest row. Called
-        inside `attach_record`'s transaction, so a record is never left
-        attached with none, or half, of its state; the savepoint here keeps
-        the two carried rows together when it is called on its own.
+        A quarantined record's triage decisions and category corrections carry no case, because the
+        record had none, and under row security on the log (0168) only the operator reads those rows. The
+        case's team reads the case's rows. So the latest triage state, unless it is NEW (the state of no
+        row at all), and the first correction, which holds the classifier's own output the queue shows as
+        `category_was`, are copied onto rows of the case, each naming the row it carries. Written by the
+        attacher, who holds the operator verb and so reads every case-less ingest row. Called inside
+        `attach_record`'s transaction, so a record is never left attached with none, or half, of its
+        state; the savepoint here keeps the two carried rows together when it is called on its own.
 
-        Records attached before 0168 had no such copy; the migration
-        writes theirs (`0168.BACKFILL_SQL`, SYSTEM actor)."""
+        Records attached before 0168 had no such copy; the migration writes theirs (`0168.BACKFILL_SQL`,
+        SYSTEM actor)."""
         rows = self._c.execute(
             """SELECT action, seq, occurred_at, actor_id, detail
                  FROM audit.event
@@ -2063,15 +1796,11 @@ class IngestService:
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
                detail: dict, *, object_id: UUID | None = None,
                outcome: str = "SUCCESS") -> None:
-        """`object_id` names the record or dead letter an event is about.
-        Every event here used to carry NULL, which was harmless while the
-        events were only read by a person; the queue's verbs (2026-09-23)
-        read their own history back by it, through the object_id index.
+        """`object_id` names the record or dead letter an event is about; the queue's verbs read their own
+        history back by it, through the object_id index.
 
-        `outcome` is DENIED for a refusal (the PII reveal and search
-        refusals), as every other refusal in the log is stored, so a reader
-        that filters on it finds them (docs/17, "refusals are recorded as
-        SUCCESS", 2026-10-08)."""
+        `outcome` is DENIED for a refusal (the PII reveal and search refusals), as every other refusal in
+        the log is stored, so a reader that filters on it finds them."""
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
@@ -2111,15 +1840,12 @@ def detect_format(raw: bytes) -> str:
 def iter_fragments(raw: bytes):
     """One JSON document per yielded fragment, whatever the container.
 
-    A JSON array is expanded rather than stored whole, because a batch of
-    ten thousand records that fails on the last one should not lose the
-    other 9,999 -- and a dead letter should name the record, not the file.
+    A JSON array is expanded rather than stored whole, because a batch of ten thousand records that fails
+    on the last one should not lose the other 9,999, and a dead letter should name the record, not the
+    file.
 
-    The order matters and was wrong. Line mode used to be tried second for
-    arrays and FIRST for everything else, so a pretty-printed JSON object
-    -- the single most common thing a human pastes into a feed test -- was
-    shredded into one dead letter per line. `detect_format` was computed at
-    accept time, stored, and then never consulted by the parser.
+    The order matters: a pretty-printed JSON object, the commonest thing a human pastes into a feed test,
+    must be tried as one document before line mode, or it is shredded into one dead letter per line.
     """
     text = raw.decode("utf-8-sig", errors="replace").strip()
     if not text:
@@ -2174,32 +1900,18 @@ def _looks_like_csv(text: str) -> bool:
 
 
 def _csv_fragments(text: str):
-    """Header-keyed rows. `csv` from the standard library, because quoting
-    and embedded commas are exactly where a hand-rolled split goes wrong
-    and a wrong split here silently mis-attributes a column.
+    """Header-keyed rows. `csv` from the standard library, because quoting and embedded commas are
+    exactly where a hand-rolled split goes wrong, and a wrong split silently mis-attributes a column.
 
-    Two silent losses lived here, both invariant 12:
+    Two silent losses are avoided (invariant 12). Overflow columns are kept under `_overflow`:
+    `DictReader` collects fields beyond the header under the key `None`, and dropping them would store a
+    truncated value that `store_credential` then fingerprints, so `search_by_fingerprint` would miss the
+    real credential for ever. Ragged rows are normal input, not an attack. And a row whose content sits
+    only in overflow is not blank: the all-blank guard looks at the row with its overflow.
 
-    **Overflow columns were deleted.** `DictReader` collects fields beyond
-    the header under the key `None`, and `{k: v for k, v in row.items() if
-    k is not None}` threw exactly those away. A row
-    `https://mail.example,alice@acme.co,Summer,2024!` under the header
-    `url,login,password` stored `password = "Summer"` — and
-    `store_credential` then fingerprinted the TRUNCATED value, so
-    `search_by_fingerprint`, the only correlation the analytic work has,
-    would miss the real credential for ever. Ragged rows are normal input,
-    not an attack. They are now kept under `_overflow` so the record is
-    complete and the drift is visible.
-
-    **A row whose content sat ONLY in overflow vanished entirely.** The
-    all-blank guard ran on the dict AFTER the overflow had been deleted, so
-    a header that drifted left produced `{'a': '', 'b': ''}` from a row
-    carrying a real password, and nothing recorded that the row existed.
-
-    `csv.Error` is raised and not swallowed: a field over
-    `csv.field_size_limit()` (128 KiB, and a stealer log's cookie column
-    routinely exceeds it) has to reach `parse_batch`, which now dead-letters
-    the remainder rather than losing it.
+    `csv.Error` is raised and not swallowed: a field over `csv.field_size_limit()` (128 KiB, which a
+    stealer log's cookie column routinely exceeds) has to reach `parse_batch`, which dead-letters the
+    remainder rather than losing it.
     """
     import csv
     import io
@@ -2235,14 +1947,12 @@ _SIGNATURES: list[tuple[str, frozenset[str], float]] = [
 def _key_sets(value, depth: int = 0, max_depth: int = 4):
     """Every object's key set in the payload, shallowest first.
 
-    docs/17 F15(h). `categorise` used to look at top-level keys ONLY, so a
-    partner who wraps their payload -- `{"log": {...}}`, `{"data": [...]}`,
-    the shape half of them use -- had their stealer log classified UNKNOWN.
-    That skipped the high-risk compartment check entirely and gave the
-    record the 365-day default instead of 90. Routine input, not an attack.
+    `categorise` looks past the top-level keys so that a partner who wraps their payload (`{"log": {...}}`,
+    `{"data": [...]}`) does not have a stealer log classified UNKNOWN, which would skip the high-risk
+    compartment check and give the record the 365-day default instead of 90.
 
-    Shallowest first so the outer document still wins when both match: a
-    `CHAT_EXPORT` containing one quoted credential dump is a chat export.
+    Shallowest first so the outer document still wins when both match: a `CHAT_EXPORT` containing one
+    quoted credential dump is a chat export.
     """
     if depth > max_depth:
         return

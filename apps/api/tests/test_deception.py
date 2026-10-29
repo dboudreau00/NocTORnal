@@ -32,9 +32,8 @@ from noctornal_api.deception import (
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
-#: The Received line our own MTA writes when it takes a message (http_ui-007,
-#: 2026-10-03): an Authentication-Results header is believed only when it
-#: sits above every Received header, the topmost of which is a trusted MTA's.
+#: The Received line our own MTA writes when it takes a message: an Authentication-Results header is
+#: believed only when it sits above every Received header, the topmost of which is a trusted MTA's.
 _STAMPED_BY_US = (b"Received: from sender.example ([203.0.113.9]) by mx.corp.example;"
                   b" Mon, 20 Jul 2026 09:00:00 +0000\r\n")
 
@@ -109,18 +108,15 @@ def test_the_received_chain_is_numbered_recipient_first():
 
 
 def test_trust_stops_at_the_last_hop_our_own_infrastructure_wrote():
-    """The test that matters, and the one whose first version was wrong.
+    """Trust stops at the last hop our own infrastructure wrote.
 
-    Trust follows the `by` host — the MTA that WROTE the header — not the
-    `from` host it received from. At seq 2 our own relay wrote
-    "from evil-vps.example [203.0.113.7]", and that is a TRUE observation:
-    our machine really did accept a connection from that address. The
-    boundary is therefore 2, not 1.
+    Trust follows the `by` host (the MTA that WROTE the header), not the `from` host it received from.
+    At seq 2 our own relay wrote "from evil-vps.example [203.0.113.7]", and that is a TRUE observation:
+    our machine really did accept a connection from that address. The boundary is therefore 2, not 1.
 
-    Getting this backwards discards the single most valuable line in the
-    chain — the attacker's real originating IP as seen by equipment we
-    control — while keeping seq 3, which the attacker's own box wrote and
-    which is fiction.
+    Getting this backwards discards the single most valuable line in the chain, the attacker's real
+    originating IP as seen by equipment we control, while keeping seq 3, which the attacker's own box
+    wrote and which is fiction.
     """
     hops = parse_received_chain(CHAIN, trusted=("corp.example",))
     assert [h.seq for h in hops if h.is_trusted_boundary] == [2]
@@ -342,27 +338,22 @@ def test_a_header_containing_a_newline_cannot_forge_a_second_field():
 
 
 def test_an_undecodable_attachment_is_not_recorded_as_an_empty_one():
-    """0 bytes is a claim about the MESSAGE; a decode failure is a claim
-    about the PARSER. Recording the second as the first invents a finding.
+    """0 bytes is a claim about the MESSAGE; a decode failure is a claim about the PARSER. Recording
+    the second as the first invents a finding.
 
-    Found 2026-08-07. `payload = b""` in the exception handler gave
-    `byte_size: 0` and `sha256: NULL`, which is exactly what a genuinely
-    empty attachment produces — so the two were indistinguishable in the
-    database and on screen. An analyst triaging a phish reads a 0-byte
-    attachment as a decoy and moves on. The payload may have been a
-    loader.
+    `payload = b""` in the exception handler would give `byte_size: 0` and `sha256: NULL`, exactly what
+    a genuinely empty attachment produces, so the two would be indistinguishable in the database and on
+    screen. An analyst triaging a phish reads a 0-byte attachment as a decoy and moves on, though the
+    payload may have been a loader.
 
-    Both columns are nullable. "Unknown" was always representable and was
-    simply not being used.
+    Both columns are nullable, so "unknown" is representable and must be used.
     """
-    # A forwarded mail carried AS an attachment. `message/rfc822` makes the
-    # part's payload a list, so `is_multipart()` is true and
-    # `get_payload(decode=True)` returns None — no exception, just None,
-    # which the `or b""` then turned into a confident zero.
+    # A forwarded mail carried AS an attachment. `message/rfc822` makes the part's payload a list, so
+    # `is_multipart()` is true and `get_payload(decode=True)` returns None: no exception, just None,
+    # which `or b""` would turn into a confident zero.
     #
-    # Not a contrived input: "FW: invoice" with the original attached is
-    # the standard shape of a thread-hijack BEC, which is the exact
-    # material this module exists to parse.
+    # Not a contrived input: "FW: invoice" with the original attached is the standard shape of a
+    # thread-hijack BEC, which is the exact material this module exists to parse.
     bad = (b"From: a@b.example\r\n"
            b"Subject: FW: invoice\r\n"
            b"MIME-Version: 1.0\r\n"
@@ -443,23 +434,18 @@ def test_defanging_is_safe_on_empty_and_odd_input():
     assert "javascript" in defang("javascript:alert(1)")
 
 
-# ---------------------------------------------------------------------------
-# The ninth adversarial pass, 2026-07-26. Each of these fails without its fix.
-# ---------------------------------------------------------------------------
-
 def test_an_appended_authentication_results_header_does_not_win():
-    """THE forged-verdict defect of this subsystem.
+    """An appended Authentication-Results header must not win: the forged-verdict defect of this
+    subsystem.
 
-    An MTA PREPENDS, so index 0 is the receiving organisation's own
-    verdict and anything the sender wrote is LAST. Reading last-wins let
-    an attacker append their own `dkim=pass header.d=microsoft.com` and
-    have it override the real `dkim=fail` -- producing microsoft.com as a
-    DURABLE, "cryptographically authenticated" DOMAIN selector.
+    An MTA PREPENDS, so index 0 is the receiving organisation's own verdict and anything the sender
+    wrote is LAST. Reading last-wins would let an attacker append their own
+    `dkim=pass header.d=microsoft.com` and have it override the real `dkim=fail`, producing
+    microsoft.com as a DURABLE, "cryptographically authenticated" DOMAIN selector. `Received` is read
+    in the right direction; this must be too.
 
-    This module gets the direction right for `Received` and got it exactly
-    backwards here. Same shape as the Phase 7 forged-PGP verdict: the DB
-    CHECK could not help, because the parser made the result and the
-    domain agree on the forged value.
+    The DB CHECK could not help, because the parser would make the result and the domain agree on the
+    forged value.
     """
     evil = (
         b"Authentication-Results: mx.corp.example; spf=fail"
@@ -513,14 +499,12 @@ def test_a_failing_method_never_carries_a_domain_even_alone():
 
 
 def test_no_infrastructure_is_proposed_when_no_trusted_mtas_are_configured():
-    """Unconfigured means unknown, and the honest output for unknown is
-    nothing.
+    """Unconfigured means unknown, and the honest output for unknown is nothing.
 
-    With no NOCTORNAL_TRUSTED_MTA_HOSTS the boundary defaults to seq 0 --
-    correct for what to EXCLUDE, and silently inverted for what to
-    include: hop 0 is the RECIPIENT'S OWN server, so this was offering the
-    victim's internal relay address as durable actor infrastructure while
-    suppressing the attacker's real sending IP one hop above it.
+    With no NOCTORNAL_TRUSTED_MTA_HOSTS the boundary defaults to seq 0, which is correct for what to
+    EXCLUDE and inverted for what to include: hop 0 is the RECIPIENT'S OWN server, so including it
+    would offer the victim's internal relay address as durable actor infrastructure while suppressing
+    the attacker's real sending IP one hop above it.
     """
     chain = [
         "from mail-internal.corp.local ([10.1.2.3]) by exchange.corp.local;"
@@ -558,17 +542,17 @@ def test_defang_breaks_a_host_that_carries_no_scheme():
 
 
 def test_defang_breaks_a_bare_host_whose_path_has_a_doubled_slash():
-    """The authority branch took index 2 whenever index 1 was empty, which
-    a doubled slash in a scheme-less PATH also produces: the host stayed
-    live and a path segment got the brackets. `defang_text` hands this
-    function bare `www.` hosts, so the gap became reachable on 2026-09-22."""
+    """The authority branch takes index 2 only for a protocol-relative URL: a doubled slash in a
+    scheme-less PATH also leaves index 1 empty, and taking index 2 there would leave the host live and
+    bracket a path segment. `defang_text` hands this function bare `www.` hosts, so the case is
+    reachable."""
     assert defang("www.evil.example//login") == "www[.]evil[.]example//login"
     assert defang("evil.example//a/b") == "evil[.]example//a/b"
     # A protocol-relative URL still has its authority at index 2.
     assert defang("//cdn.evil.example/x") == "//cdn[.]evil[.]example/x"
 
 
-# --- the body as the console shows it (ux14-deception, 2026-09-22) --------
+# --- the body as the console shows it -------------------------------------
 
 _BEC_BODY = (
     "Hi,\n\nDetails are on the portal:\n\n"
@@ -577,10 +561,9 @@ _BEC_BODY = (
 
 
 def test_the_body_text_is_defanged_wherever_it_names_a_url():
-    """ux14-deception:body-url-not-defanged. The detail card showed the
-    attacker's working URL in the one block an analyst copies from, right
-    above a list that showed it defanged. Every URL in the runs is the
-    defanger's output, and nothing live survives anywhere in the text."""
+    """The detail card must not show the attacker's working URL in the one block an analyst copies
+    from, above a list that shows it defanged. Every URL in the runs is the defanger's output, and
+    nothing live survives anywhere in the text."""
     runs = defang_text(_BEC_BODY)
     joined = "".join(r["text"] for r in runs)
     assert "https://" not in joined and "http://" not in joined
@@ -631,10 +614,9 @@ def _live(text: str) -> str:
 
 
 def test_a_scheme_glued_to_a_word_still_gets_defanged():
-    """The body pattern began with the extractor's `\\b`, and there is no
-    word boundary between `_` or a digit and the `h` of `https`, so these
-    came back untouched. A linkifier finds the `https://` inside them
-    regardless (the verifier of the 2026-09-22 body fix)."""
+    """The body pattern cannot begin with the extractor's `\\b`: there is no word boundary between `_`
+    or a digit and the `h` of `https`, so these would come back untouched. A linkifier finds the
+    `https://` inside them regardless."""
     assert _live("click_https://evil.example/x") == (
         "click_hxxps://evil[.]example/x")
     assert _live("1https://evil.example/x") == "1hxxps://evil[.]example/x"
@@ -644,8 +626,8 @@ def test_a_scheme_glued_to_a_word_still_gets_defanged():
 
 
 def test_a_bare_host_with_a_path_is_a_url_and_gets_defanged():
-    """No scheme and no `www.`: `secure-billing.example/verify` is still a
-    URL, and every chat client links it (the same verifier)."""
+    """No scheme and no `www.`: `secure-billing.example/verify` is still a URL, and every chat client
+    links it."""
     assert _live("visit secure-billing.example/verify today") == (
         "visit secure-billing[.]example/verify today")
     assert _live("at evil.example:8443/login.") == (
@@ -689,11 +671,9 @@ def test_a_url_inside_a_url_is_defanged_too():
 
 
 def test_a_bare_host_whose_query_carries_a_url_is_bracketed_itself():
-    """Final review C5, 2026-09-23. `parts[0].endswith(":")` was taken to
-    mean "parts[0] is a scheme", and `host?next=https:` ends with a colon
-    too, so only the EMBEDDED host was bracketed. The actor's own host
-    stayed live in a run the pane marks as defanged, and the capture row's
-    copy button copied it that way."""
+    """`parts[0].endswith(":")` does not mean "parts[0] is a scheme": `host?next=https:` ends with a
+    colon too, and bracketing only the EMBEDDED host would leave the actor's own host live in a run the
+    pane marks as defanged, and the capture row's copy button would copy it that way."""
     assert defang("evil.example?next=https://google.com") == (
         "evil[.]example?next=hxxps://google[.]com")
     assert defang("evil.example#https://x.y") == "evil[.]example#hxxps://x[.]y"
@@ -703,9 +683,8 @@ def test_a_bare_host_whose_query_carries_a_url_is_bracketed_itself():
     # stays bracketed on purpose now, and a leading one is unchanged.
     assert defang("evil.example?u=ftp://a.b") == "evil[.]example?u=ftp://a[.]b"
     assert defang("ftp://a.b/c") == "ftp://a[.]b/c"
-    # So is an embedded host under any other scheme, which the first cut
-    # of this fix left live (its verifier, 2026-09-23), in a bare host's
-    # query and in a scheme-led URL's alike.
+    # So is an embedded host under any other scheme, in a bare host's query and in a scheme-led URL's
+    # alike.
     assert defang("evil.example?next=ftps://g.c") == (
         "evil[.]example?next=ftps://g[.]c")
     assert defang("https://a.b/?n=sftp://c.d&x=1") == (
@@ -730,12 +709,10 @@ def test_a_bare_host_whose_query_carries_a_url_is_bracketed_itself():
 
 
 def test_a_helo_name_or_message_id_with_a_path_is_served_defanged():
-    """2026-09-23. `_RECEIVED_FROM` and `_domain_of` keep
-    `/`, `?` and `#`, so EHLO `pay.evil.example/verify` and Message-ID
-    `<a@pay.evil.example/verify>` gave a "host" that is a URL, and the
-    email row drew both live. The service now serves a defanged form of
-    each beside the raw one, and a plain hostname passes through as
-    written, as this pane shows hostnames everywhere else."""
+    """`_RECEIVED_FROM` and `_domain_of` keep `/`, `?` and `#`, so EHLO `pay.evil.example/verify` and
+    Message-ID `<a@pay.evil.example/verify>` give a "host" that is a URL. The service serves a defanged
+    form of each beside the raw one, and a plain hostname passes through as written, as this pane shows
+    hostnames everywhere else."""
     from datetime import datetime, timezone
     from uuid import uuid4
 

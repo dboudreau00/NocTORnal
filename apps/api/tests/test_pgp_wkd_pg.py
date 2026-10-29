@@ -1,10 +1,9 @@
-"""Web Key Directory lookups against Postgres and over HTTP (F10c,
-2026-09-24): one person asks, a DIFFERENT person approves and sends
-(docs/00 decision 75), the record and the SENT audit are committed before
-anything leaves, the key is filed before the lookup says FOUND, and the
-schema holds every rule
-for a writer that skips the service. A fake route and a fake fetcher: no
-test here opens a socket.
+"""Web Key Directory lookups against Postgres and over HTTP.
+
+One person asks, a DIFFERENT person approves and sends (docs/00 decision 75), the record and the SENT audit
+are committed before anything leaves, the key is filed before the lookup says FOUND, and the schema holds
+every rule for a writer that skips the service. A fake route and a fake fetcher: no test here opens a
+socket.
 
 Rows are deleted at teardown (pgp_support.teardown).
 """
@@ -232,8 +231,8 @@ def test_decline_by_an_approver_and_by_the_lead_who_asked(conn, wkd):
 
 
 def test_decline_is_gated_by_labels(conn, wkd, monkeypatch):
-    """A GREEN approver declining an AMBER request
-    they cannot see was a write through labels, and its 409 an oracle."""
+    """A GREEN approver declining an AMBER request they cannot see is a write through labels, and its 409
+    would be an oracle."""
     from noctornal_api.pgp import PgpNotFound
     lead, reviewer, case_id = _people(conn, classification="GREEN")
     monkeypatch.setenv("NOCTORNAL_WKD_CEILING", "AMBER")
@@ -450,9 +449,8 @@ def test_over_http_step_up_is_required(conn, wkd, client):
         uuid4(), reviewer, mfa_satisfied=False)
     r = client.post(_url(case_id, f"/{lookup_id}/approve"), headers=auth(stale_r))
     assert r.status_code == 403
-    # Decline is the third step-up route, and the refusal is in the words
-    # the console's withStepUp answers with an identity prompt (F10c,
-    # 2026-09-24). A fresh sign-in of the same approver then declines.
+    # Decline is the third step-up route, and the refusal uses the words the console's withStepUp answers
+    # with an identity prompt. A fresh sign-in of the same approver then declines.
     r = client.post(_url(case_id, f"/{lookup_id}/decline"), headers=auth(stale_r),
                     json={"reason": "not wanted now"})
     assert r.status_code == 403 and "re-authentication" in r.json()["detail"]

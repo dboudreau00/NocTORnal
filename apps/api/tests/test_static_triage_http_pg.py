@@ -1,11 +1,9 @@
-"""Static triage and similarity over HTTP (F11 K, 2026-09-24).
+"""Static triage and similarity over HTTP.
 
-The on-demand route enqueues and answers 202 without waiting for a child;
-the run starts after the response when a slot is free ("now") or waits for
-the next pass. Its refusals: 404 for a sample the caller cannot see, the
-case's 409 for a closed case, 451 without a declared policy, 409 for a
-rejected sample, one above the analysis maximum or one already running.
-The sample-origin process answers neither route.
+The on-demand route enqueues and answers 202 without waiting for a child; the run starts after the
+response when a slot is free ("now") or waits for the next pass. Its refusals: 404 for a sample the caller
+cannot see, the case's 409 for a closed case, 451 without a declared policy, 409 for a rejected sample,
+one above the analysis maximum or one already running. The sample-origin process answers neither route.
 
 Email prefix `sth-`. Env-gated on DATABASE_URL.
 """

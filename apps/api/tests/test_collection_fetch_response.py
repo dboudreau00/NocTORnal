@@ -1,7 +1,6 @@
-"""fetch_response, the superset every outbound consumer needs (2026-09-24;
-docs/00 decision 72, docs/20 section 5.5), through
-collection.fetch_response so the collector's public_standin seam applies:
-127.0.0.1 plays the public address, as in test_collection_ssrf_rebinding.
+"""fetch_response, the superset every outbound consumer needs (docs/00 decision 72, docs/20 section
+5.5), through collection.fetch_response so the collector's public_standin seam applies: 127.0.0.1
+plays the public address, as in test_collection_ssrf_rebinding.
 
 Pure: no database, and no network beyond loopback.
 """

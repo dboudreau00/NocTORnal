@@ -1,9 +1,8 @@
-"""Selector storage: per-type normalisation, exact-match lookup, and the
-observation/candidate helpers (docs/09 Phase 1). Env-gated on DATABASE_URL.
+"""Selector storage: per-type normalisation, exact-match lookup, and the observation/candidate helpers
+(docs/09). Env-gated on DATABASE_URL.
 
-The load-bearing property is normaliser parity: what the store writes as
-norm_value is EXACTLY what noctornal_ontology.normalise produces, so the
-DB join key and the ontology definition can never diverge.
+The load-bearing property is normaliser parity: what the store writes as norm_value is EXACTLY what
+noctornal_ontology.normalise produces, so the DB join key and the ontology definition can never diverge.
 """
 from __future__ import annotations
 

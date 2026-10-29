@@ -1,35 +1,28 @@
-"""An exhibit of attacker markup is produced through the sample origin
-(x-hostile-export, 2026-09-24; migration 0068).
+"""An exhibit of attacker markup is produced through the sample origin (migration 0068).
 
-docs/19 section 1.1: a DOM, HAR or `.eml` exhibit leaves only from the
-separate sample origin, through the gate a Lab download passes, and "the
-API origin never serves those bytes". Since 2026-09-23 the API origin
-kept the last part (409 on `/content` and `/export`), and nothing kept
-the rest: the sample origin served sample downloads alone and its ticket
-could only name a sample, so such an exhibit could not be produced at
-all, and the card said "No export here".
+docs/19 section 1.1: a DOM, HAR or `.eml` exhibit leaves only from the separate sample origin, through the
+gate a Lab download passes, and "the API origin never serves those bytes". The API origin keeps the last
+part (409 on `/content` and `/export`); the sample origin's ticket can also name an exhibit, so such an
+exhibit can be produced at all instead of the card saying "No export here".
 
 What these tests hold, and what each would catch:
 
-- the round trip: minted on the application process under the export
-  gate, spent on the sample process by a request with no cookie and no
-  Authorization header, served as the Lab's archive whose one entry is
-  the exhibit's verified bytes, and recorded as an EXPORTED custody row
-  saying how it left;
-- the application process refuses the redemption WITHOUT spending the
-  ticket, and the sample process refuses the mint;
+- the round trip: minted on the application process under the export gate, spent on the sample process by
+  a request with no cookie and no Authorization header, served as the Lab's archive whose one entry is the
+  exhibit's verified bytes, and recorded as an EXPORTED custody row saying how it left;
+- the application process refuses the redemption WITHOUT spending the ticket, and the sample process
+  refuses the mint;
 - one-shot: a second presentation is refused;
-- the ticket is bound to its exhibit: presented on another exhibit's
-  path, or on the Lab's sample path, it matches nothing and survives;
-- the mint makes the export's decision: a non-hostile exhibit, a purged
-  one and one the egress gate keeps in are refused before a ticket
-  exists, a stale sign-in is told to sign in, a role without the verb
-  is refused;
-- authority is re-derived at redemption: an assignment removed or a case
-  raised to RED inside the ticket's minute bites before a byte moves;
+- the ticket is bound to its exhibit: presented on another exhibit's path, or on the Lab's sample path, it
+  matches nothing and survives;
+- the mint makes the export's decision: a non-hostile exhibit, a purged one and one the egress gate keeps
+  in are refused before a ticket exists, a stale sign-in is told to sign in, a role without the verb is
+  refused;
+- authority is re-derived at redemption: an assignment removed or a case raised to RED inside the ticket's
+  minute bites before a byte moves;
 - an unknown string writes nothing to the audit chain;
-- the sample process answers the console's cross-origin request for the
-  exhibit path as it does for the Lab's;
+- the sample process answers the console's cross-origin request for the exhibit path as it does for the
+  Lab's;
 - the table: a ticket names exactly one object, and the purpose matches it.
 
 No MinIO: the evidence store is a dictionary. Email prefix `xp-`.
@@ -234,9 +227,8 @@ def _custody(conn, ev):
 
 def test_attacker_markup_is_produced_through_the_sample_origin(
         conn, client, store, monkeypatch):
-    """The finding, closed: minted on the application process, refused
-    there when presented (unspent), served on the sample process as the
-    Lab's archive of the verified bytes, recorded as EXPORTED."""
+    """Minted on the application process, refused there when presented (unspent), served on the sample
+    process as the Lab's archive of the verified bytes, recorded as EXPORTED."""
     uid, token, case_id, ev = _world(conn, store)
 
     minted = _mint(client, token, case_id, ev)

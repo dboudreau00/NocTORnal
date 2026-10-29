@@ -1,18 +1,13 @@
-"""F1 against Postgres (2026-09-24): CONCOR runs, their cache, currency,
-clearance and persistence.
+"""CONCOR runs against Postgres: their cache, currency, clearance and persistence.
 
-Held here: a role analysis is cached on the graph hash AND the depth; a
-cache hit is served exactly as computed (the suite's upgrade rewrote
-CONCOR payloads on every hit); swapping an undirected tie for a directed
-one that hashes alike for the suite makes a role run stale (direction was
-not in the key); the suite and key-player
-keys are unchanged by the algorithm argument; a run never crosses a
-clearance boundary; positions land in community_assignment; a refusal
-known before computing leaves no run behind, and an unexpected failure is
-recorded as FAILED with its audit event.
+Held here: a role analysis is cached on the graph hash AND the depth; a cache hit is served exactly as
+computed; swapping an undirected tie for a directed one that hashes alike for the suite makes a role
+run stale (direction is in the key); the suite and key-player keys are unchanged by the algorithm
+argument; a run never crosses a clearance boundary; positions land in community_assignment; a refusal
+known before computing leaves no run behind, and an unexpected failure is recorded as FAILED with its
+audit event.
 
-Shares test_review_scope_pg's world and teardown. Env-gated on
-DATABASE_URL.
+Shares test_review_scope_pg's world and teardown. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

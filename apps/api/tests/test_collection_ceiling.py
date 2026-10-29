@@ -1,10 +1,8 @@
-"""The declared classification ceilings for collection (the collection
-foundation, 2026-09-24; docs/00 decision 69). No database.
+"""The declared classification ceilings for collection (docs/00 decision 69). No database.
 
-Every forum and Telegram source needs a ceiling declared for its kind, and
-invariant 8 caps it at AMBER through egress Destination.COLLECTION_TARGET:
-the fact that an exit reads a source leaves the platform with every
-request, so a RED or AMBER_STRICT source is never read by an adapter.
+Every forum and Telegram source needs a ceiling declared for its kind, and invariant 8 caps it at AMBER
+through egress Destination.COLLECTION_TARGET: the fact that an exit reads a source leaves the platform
+with every request, so a RED or AMBER_STRICT source is never read by an adapter.
 """
 from __future__ import annotations
 

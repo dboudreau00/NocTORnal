@@ -1,4 +1,4 @@
-"""Prohibited-content screening, from the host (F13, 2026-09-24).
+"""Prohibited-content screening, from the host.
 
     python scripts/sample_screen.py                  one pass (the cron entry)
     python scripts/sample_screen.py status           the screening state
@@ -6,42 +6,27 @@
         --provider PROVIDER --authority LICENCE-REF --category CATEGORY \\
         --as officer@example.org                     a list too large for HTTP
 
-A pass screens every held sample not yet screened against the newest
-active list, isolates each match, deletes the entries of lists retired with
-their purge asked for, and moves every matched sample's bytes into the
-preservation store under a legal hold (`ScreeningService.rescan` with
-`move_bytes=True`, 240 seconds of work at most). The list import and the
-console's "Start a screening pass" do the database half in the request; the
-byte moves are object-store work and belong here.
-
-Run it in a loop of its own, not the notification loop: the production
-compose file runs it in the lab-cron service beside
-scripts/sandbox_dispatch.py, so a long pass never holds back email
-delivery or the escalation of urgent alerts.
-
-Cron, every five minutes, from the install directory:
+A pass screens every held sample not yet screened against the newest active list, isolates each
+match, deletes the entries of lists retired with their purge asked for, and moves every matched
+sample's bytes into the preservation store under a legal hold (`ScreeningService.rescan` with
+`move_bytes=True`, 240 seconds of work at most). The list import and the console's screening pass
+do the database half in the request; the byte moves are object-store work and belong here. It
+runs in the lab-cron service, never the notification loop, so a long pass cannot hold back email
+or urgent escalations. Cron, every five minutes, from the install directory:
 
     */5 * * * *  cd /opt/noctornal && apps/api/.venv/bin/python \\
                  scripts/sample_screen.py >> /var/log/noctornal/sample_screen.log 2>&1
 
-Prints the counters on one line and exits 1 while matched samples still
-wait for their bytes to move or samples are behind the newest list (the
-readiness row fails on the same facts). Under NOCTORNAL_ENV=production an
-environment this job will not run on exits 2, one line per problem on stderr
-led by `sample_screen: refusing to run:`, naming variables and never a value
-(`config.JOB_REFUSAL_EXIT`, the code every job gives that refusal).
+Prints the counters on one line and exits 1 while matched samples still wait for their bytes to
+move or samples are behind the newest list (the readiness row fails on the same facts). Exits 2
+(`config.JOB_REFUSAL_EXIT`) when the production environment is refused.
 
-## The import's authority is the host operator
-
-`import` is for a list larger than the console's upload cap. On this path
-there is no session, no step-up and no browser: whoever runs the command on
-the server is the authority, and the account named with `--as` is
-attribution that operator asserts. It must exist, be active and hold
-sample.screening.manage, so the record names somebody who could have made
-the import in the console; the audit row says the path was the command
-line, that step-up does not apply, and which host user ran it. Both recorded
-authorities (the ingest policy and NOCTORNAL_HASH_SET_AUTHORITY) are
-required exactly as over HTTP. Exit 2 on any refusal.
+`import` is for a list larger than the console's upload cap. It has no session, no step-up and no
+browser: whoever runs it on the server is the authority, and `--as` is attribution that operator
+asserts. The account must exist, be active and hold sample.screening.manage; the audit row says
+the path was the command line, that step-up does not apply, and which host user ran it. Both
+recorded authorities (the ingest policy and NOCTORNAL_HASH_SET_AUTHORITY) are required as over
+HTTP. Exit 2 on any refusal.
 """
 from __future__ import annotations
 
@@ -119,10 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--as", dest="as_email")
     args = parser.parse_args(argv)
 
-    # First, before anything is connected to: the API's whole production list,
-    # through the one helper every job calls (config.py), exit 2 and no
-    # traceback (2026-10-07; it was `enforce_environment()`
-    # and exit 1).
+    # First, before anything is connected to: the API's whole production list, through the helper
+    # every job calls, exit 2 and no traceback.
     from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
     refusals = refuse_unsafe_job_environment("sample_screen", whole_environment=True)
     if refusals:
@@ -185,8 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     print(line)
     if "skipped" in counters:
         return 0
-    # An archive tree left half isolated is as unfinished as a behind pass
-    # (2026-10-03).
+    # An archive tree left half isolated is as unfinished as a behind pass.
     return 1 if (counters.get("pending", 0) or counters.get("behind", 0)
                  or counters.get("trees_open", 0)) else 0
 

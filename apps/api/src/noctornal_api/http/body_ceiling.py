@@ -1,63 +1,17 @@
-"""A request-body ceiling on every route, before anything reads the body (http_ui-005, 2026-10-03).
+"""A request-body ceiling on every route, enforced before anything reads the body.
 
-FastAPI reads and parses a body BEFORE it resolves a single dependency,
-so on every route with a Pydantic body (sign-in, first-run setup, case
-creation, approvals and about 150 more) the whole request was held in
-memory before authentication, validation or the rate limiter's endpoint
-meter could refuse it, and the proxy sets no limit either (Caddyfile).
-One unauthenticated request with a multi-gigabyte JSON body made the one
-API process allocate all of it; the review measured 100 MiB pulled from
-the socket before a 422. The caps in `limits.py` covered only the routes
-that opted in (`body_cap` + `BodyCappedRoute`, `read_body_capped`).
-
-This middleware is the default for everything else. It wraps the ASGI
-`receive` the route reads through and refuses with the same 413 as
-`limits.body_too_large` once the body passes the route's ceiling:
-
-- a route marked `body_cap` (a multipart upload behind
-  `BodyCappedRoute`) keeps its own cap, enforced here as well;
-- a route marked `raise_body_ceiling` gets the larger ceiling it names,
-  for the few JSON bodies that are legitimately big (a 1,000,000
-  character paste, a 20,000 node layout);
-- a route marked `own_body_cap` reads its body itself, after it has
-  authenticated the caller, through `read_body_capped` against a cap only
-  it knows (the ingest submit, per key); it is left alone;
-- everything else gets `DEFAULT_BODY_CEILING`.
-
-The route is known by the time its handler first asks for the body:
-routing has put its endpoint in the shared scope. A declared
-Content-Length over the ceiling is refused before a byte is read; a body
-with no length, or a lying one, is counted chunk by chunk. A refusal
-replaces whatever the application would have answered (FastAPI turns an
-exception raised under its body parser into a 400), so the caller always
-reads the 413 with the cap in it. Pure ASGI rather than
-`@app.middleware("http")`, because the body must never pass through a
-`Request` that buffers it.
-
-The same wrapper refuses a JSON body that carries a NUL character
-(http_ui-014, 2026-10-03) with a 422, once the body is complete and
-before the route parses it: Postgres cannot store U+0000 in text or
-jsonb, and several routes answered one with a 500 and a logged
-traceback. Routes that cap their own body are left to their own rules
-here too (the ingest dead-letters what it cannot parse).
-
-The same goes for a lone surrogate escape (`\\ud800` to `\\udfff` not
-paired with its other half), refused with a 422 (2026-10-07):
-it decodes to a string no UTF-8 encoder will take, so Postgres' driver
-raised `UnicodeEncodeError` and an unconstrained text field answered 500.
-
-And a `body_cap` route is refused with its own 401 before a byte is read
-when the request presents no session credential at all (2026-10-07). FastAPI parses a
-multipart form before it resolves a
-single dependency and Starlette spools the parse to disk, so an upload
-route with a 256 MiB cap wrote up to 256 MiB for a caller that was never
-going to be let in, and nothing in front of the API bounds a body. This
-refuses only a request that presents NOTHING: a junk bearer or cookie
-still reads as it always did and is judged by the route, because telling a
-live session from a junk one takes the database and this layer is
-deliberately database-free (docs/17 records the residual). A route whose
-caller presents its credential in the body (the one-shot ticket of a
-download) is marked `credential_in_body` and is left alone.
+FastAPI parses a body before it resolves any dependency, and the proxy sets no limit, so this
+pure ASGI wrapper of `receive` (a `Request` would buffer the body) answers the 413 of
+`limits.body_too_large` once a body passes its route's ceiling: `body_cap` routes keep their own
+cap, `raise_body_ceiling` routes get the larger one they name, `own_body_cap` routes read their
+body after authenticating and are left alone, and the rest get `DEFAULT_BODY_CEILING`. An
+oversized Content-Length is refused before a byte is read; otherwise the body is counted chunk
+by chunk, and the 413 replaces whatever the application would have answered. A JSON body
+carrying a NUL or a lone surrogate escape, which Postgres cannot store, gets a 422. A `body_cap`
+upload that presents no session credential at all gets a 401 before a byte is read, since
+multipart is spooled to disk before any dependency runs; a junk credential still reaches the
+route, because this layer is database-free (docs/17 records the residual), and a
+`credential_in_body` route (a download ticket) is left alone.
 """
 from __future__ import annotations
 
@@ -80,10 +34,8 @@ DEFAULT_BODY_CEILING = 1024 * 1024
 #: JSON can carry a NUL no other way; a raw 0x00 byte is not valid JSON.
 _NUL_ESCAPE = re.compile(rb"(?<!\\)(?:\\\\)*\\u0000")
 
-#: The 422 for a NUL in a JSON body (http_ui-014, 2026-10-03). Postgres
-#: text and jsonb cannot hold U+0000, so no route can store one, and
-#: until this check several answered the attempt with a 500 and a
-#: traceback (assumptions, curation sets, the node pre-check).
+#: The 422 for a NUL in a JSON body: Postgres text and jsonb cannot hold U+0000, so no route can
+#: store one, and several would answer the attempt with a 500 and a traceback.
 NUL_DETAIL = ("a text field contains a NUL character (U+0000), which "
               "cannot be stored; remove it and send the request again")
 
@@ -93,9 +45,8 @@ NUL_DETAIL = ("a text field contains a NUL character (U+0000), which "
 #: body that matches is parsed and its strings tried (`_lone_surrogate`).
 _SURROGATE_ESCAPE = re.compile(rb"(?<!\\)(?:\\\\)*\\u[dD][89a-fA-F][0-9a-fA-F]{2}")
 
-#: The 422 for text that is not text (2026-10-07). An unpaired
-#: surrogate decodes to a string no UTF-8 encoder accepts, so it can be
-#: neither stored nor logged; paired escapes are accepted.
+#: The 422 for text that is not text: an unpaired surrogate decodes to a string no UTF-8 encoder
+#: accepts, so it can be neither stored nor logged. Paired escapes are accepted.
 SURROGATE_DETAIL = ("a text field contains an unpaired surrogate escape "
                     "(a lone \\ud800 to \\udfff), which is not text and "
                     "cannot be stored; remove it and send the request again")
@@ -214,9 +165,8 @@ class BodyCeilingMiddleware:
         started = False
         total = 0
         limit: list[tuple[int, str] | None] = []
-        # The JSON body, kept (it is under the ceiling, and the parser
-        # holds it whole anyway) so the NUL check reads it once complete,
-        # whatever the chunk boundaries were (http_ui-014).
+        # The JSON body, kept (it is under the ceiling, and the parser holds it whole anyway) so
+        # the NUL check reads it once complete, whatever the chunk boundaries were.
         seen = bytearray() if _is_json(scope) else None
 
         async def capped_receive() -> dict:

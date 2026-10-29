@@ -1,13 +1,10 @@
 """A request appends a state-bearing audit row only where it may act (0176).
 
-0168's INSERT policy admitted any row, so a bound user not on a case could
-append a triage verdict, a category correction, an ACH history line or a
-hypothesis note naming it, and the readers that take those rows as state
-read it. For `STATE_BEARING` actions the request role's append must now
-name a case it may read, or be a case-less `ingest` row from an
-`ingest.manage` holder; every other append, a refusal above all, is
-admitted as before. Run as the request role bound by a real session's
-proof, seeded as the owner. Account prefix `rlsapp-`.
+Without the check, a bound user not on a case could append a triage verdict, a category correction, an ACH
+history line or a hypothesis note naming it, and the readers that take those rows as state would read it.
+For `STATE_BEARING` actions the request role's append must name a case it may read, or be a case-less
+`ingest` row from an `ingest.manage` holder; every other append, a refusal above all, is admitted. Run as
+the request role bound by a real session's proof, seeded as the owner. Account prefix `rlsapp-`.
 """
 from __future__ import annotations
 

@@ -1,7 +1,5 @@
-"""The settings the outbound integrations add (F7, F8 and F15.2,
-2026-09-24): what production refuses to start
-with, and the host switch that is the second act before any lookup
-leaves. Pure: no database, no network.
+"""The settings the outbound integrations add: what production refuses to start with, and the host switch
+that is the second act before any lookup leaves. Pure: no database, no network.
 """
 from __future__ import annotations
 

@@ -1,30 +1,24 @@
-"""The egress proxy's wire contract, as cases both sides run (2026-09-24;
-docs/20 section 8).
+"""The egress proxy's wire contract, as cases both sides run (docs/20 section 8).
 
-Importable, with no test functions of its own. `test_egress_contract.py`
-runs every `case_*` below against `StubProxy`, a loopback proxy written to
-docs/20 section 8 to the letter; the egress proxy's own suite runs the same cases
-against its real listener through a harness of the same shape, and the
-Telegram suite runs python-socks through the stub. So the client and the
-server are held to one text rather than to two readings of it.
+Importable, with no test functions of its own. `test_egress_contract.py` runs every `case_*` below
+against `StubProxy`, a loopback proxy written to docs/20 section 8 to the letter; the egress proxy's
+own suite runs the same cases against its real listener through a harness of the same shape, and the
+Telegram suite runs python-socks through the stub. So the client and the server are held to one text.
 
 A harness has:
 
 - `proxy_host`, `proxy_port`: where the one listener is;
-- `route(kind="integration", name="webhook", context=None, rules=())`: an
-  EgressRoute in PROXY mode carrying a token the proxy accepts;
-- `origin(name, port)`: make `name` reach a local server on `port` through
-  the proxy, without this process ever resolving it;
-- `refusing(code)`: a context manager in which the proxy refuses every
-  CONNECT with that code (the stub scripts it; a real listener arranges
-  the condition, or the case is skipped by its runner);
-- `records`: one dict per accepted handshake, with "protocol", "username"
-  and "target".
+- `route(kind="integration", name="webhook", context=None, rules=())`: an EgressRoute in PROXY mode
+  carrying a token the proxy accepts;
+- `origin(name, port)`: make `name` reach a local server on `port` through the proxy, without this
+  process ever resolving it;
+- `refusing(code)`: a context manager in which the proxy refuses every CONNECT with that code (the
+  stub scripts it; a real listener arranges the condition, or the case is skipped by its runner);
+- `records`: one dict per accepted handshake, with "protocol", "username" and "target".
 
-The stub is lenient where the contract says a server must be: extra
-header lines within the 8 KiB and 32 line caps are accepted and ignored,
-because python-socks 3.1.1 sends a User-Agent line between Host and
-Proxy-Authorization.
+The stub is lenient where the contract says a server must be: extra header lines within the 8 KiB and
+32 line caps are accepted and ignored, because python-socks 3.1.1 sends a User-Agent line between
+Host and Proxy-Authorization.
 """
 from __future__ import annotations
 
@@ -126,7 +120,7 @@ class StubProxy:
         self.names: dict[str, str] = {}
         #: A code every CONNECT is refused with, when set.
         self.refuse_code: str | None = None
-        #: Replaces the reply to an authenticated CONNECT: fn(conn, target).
+        #: Overrides the reply to an authenticated CONNECT: fn(conn, target).
         self.handler = None
         self.records: list[dict] = []
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

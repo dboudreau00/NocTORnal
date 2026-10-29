@@ -1,58 +1,18 @@
-"""Proof of possession for the first-run door (http_ui-010 and infra-3, 2026-10-03).
+"""Proof of possession for the first-run door.
 
-`POST /setup/first-admin` creates an account holding SYS_ADMIN,
-SECURITY_OFFICER, CASE_OWNER and ANALYST at RED clearance for whoever
-calls it while `iam.app_user` is empty, and hands back the password and
-the TOTP secret, so there is no second factor to stop the caller. The
-emptiness of the table is a sound gate AFTER the first account exists.
-Before it, on an internet-facing stack, the gate is a race: Caddy starts
-publishing 80 and 443 as soon as the API container is up, the hostname is
-in certificate-transparency logs within seconds of issuance, `GET
-/setup/status` says the instant `needs_setup` is true and the route path is
-public in this repository. The first caller to arrive owned the
-deployment's administration and the officer role that reviews break-glass.
+`POST /setup/first-admin` gives whoever calls while `iam.app_user` is empty an account holding
+SYS_ADMIN and SECURITY_OFFICER at RED, with its password and TOTP secret; on an internet-facing
+stack that is a race the operator can lose. So the door needs `NOCTORNAL_SETUP_TOKEN` (at least
+`MIN_TOKEN_CHARS`) in `X-Setup-Token`, compared in constant time over fixed-length digests, and a
+miss is metered as a sign-in failure. Under `NOCTORNAL_ENV=production` with no token the route
+answers 404 like an unknown path, and the first account is made from the server
+(`scripts/bootstrap.py create-user`); outside production the door opens without a token and
+honours one if set. Either way it opens only while the table is empty.
 
-So the door now needs a secret only the operator holds:
-
-- `NOCTORNAL_SETUP_TOKEN` is read from the environment (secrets.env in the
-  production stack), at least `MIN_TOKEN_CHARS` characters, and is
-  presented in the `X-Setup-Token` header. The comparison is constant-time
-  and made over fixed-length digests, so neither the value nor its length
-  is learnable from the timing, and a wrong or missing token is metered
-  against the sign-in failure meter like any other guess.
-- Under `NOCTORNAL_ENV=production` with NO token configured the route does
-  not exist: it answers 404, exactly as an unknown path does, and the
-  first account is made from the server (`scripts/bootstrap.py
-  create-user`). That is the safe default for a deployment whose operator
-  never set one, and it is the fail-closed reading of "unknown caller".
-- Outside production the door stays open without a token, as it always was
-  (a laptop, CI and the e2e suite have no secrets file and no internet
-  address), and a token set there is honoured all the same.
-- The token is one-time in the only sense that matters: it opens the door
-  only while the table is empty, and the door answers 409 for ever after
-  (`iam_admin.create_first_admin`). The README says to remove it from
-  secrets.env once the first account exists.
-
-`GET /setup/status` reports `needs_setup` as the console should read it:
-true only while the door can actually be used, so a closed door never
-invites the first-run card. It adds `setup_token_required` so the card
-knows to ask for the token.
-
-## A closed door answers before the request is read (2026-10-03)
-
-The first version closed the door inside the route's own dependency, and
-FastAPI reads and parses the body, and validates every parameter, BEFORE a
-dependency runs. So a closed door answered 404 only to a request that was
-well formed: invalid JSON got a 422 problem document, an `X-Setup-Token`
-header over 512 characters got a 422, a body over the 1 MiB ceiling got a
-413, a GET got a 405 and a trailing slash got a redirect, every one of
-which an unknown path answers with the plain 404. A scanner could tell the
-closed door from no door, which the README and this module both claim it
-cannot. `ClosedSetupDoor` is the fix: pure ASGI, innermost of the
-middleware, it answers the path itself, in any method, with the body of an
-unknown path's 404, before anything is read, so no request shape differs.
-`require_setup_door` keeps its own 404 as the backstop for an app built
-without the middleware.
+FastAPI reads and validates a request before any dependency runs, so a door closed inside the
+route would answer differently from no door (a 422, 413, 405 or redirect). `ClosedSetupDoor`, pure
+ASGI and innermost, answers the path in any method with an unknown path's 404 before anything is
+read; `require_setup_door` keeps its own 404 as the backstop for an app built without it.
 """
 from __future__ import annotations
 
@@ -112,16 +72,12 @@ def matches(presented: str | None) -> bool:
 
 
 class ClosedSetupDoor:
-    """While `door_closed()`, answer the first-run path as an unknown path
-    is answered, whatever the method, the headers or the body, and without
-    reading the request (see the module docstring).
+    """While `door_closed()`, answer the first-run path as an unknown path is answered, whatever
+    the method, headers or body, without reading the request.
 
-    `path` is the route's own path, taken from the router by the caller,
-    so the gate cannot drift from the route it hides; the same path with a
-    trailing slash is covered too, because the router would redirect it to
-    the real route and a redirect is an answer an unknown path never gives.
-    `door_closed()` is read per request, as the dependency read it, so a
-    token set or unset between requests (a test, a restart) is honoured.
+    `path` comes from the router, so the gate cannot drift from the route it hides; the path with
+    a trailing slash is covered too, since the router would redirect it, which an unknown path
+    never does. `door_closed()` is read per request, so a token set or unset since is honoured.
     """
 
     def __init__(self, app, path: str):

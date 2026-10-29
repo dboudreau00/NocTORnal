@@ -1,17 +1,9 @@
-"""The assumptions register over HTTP (docs/08 Phase 6).
+"""The assumptions register over HTTP; the rules are in `assumptions.py`.
 
-Thin: the rules are in `assumptions.py`. What this router decides is WHO:
-
-- listing is `case.read`, because an analyst assigned to a case must be
-  able to see what its findings rest on -- that is the point of writing
-  them down;
-- making, reviewing and withdrawing are `case.update`, because an
-  assumption is a statement about the case at the case's own level, and
-  the seed does not give ANALYST `case.update`. An analyst who disagrees
-  with a premise raises it with the owner; they do not edit the register.
-
-Both go through `require()`, so every request passes the five-part gate,
-and a denial is a 403 that reveals nothing about which check failed.
+Listing is `case.read`, so an analyst on a case can see what its findings rest on. Making,
+reviewing and withdrawing are `case.update`, because an assumption is a statement at the case's
+own level; the seed does not give ANALYST `case.update`. Both go through `require()`, so a denial
+is a 403 that does not say which check failed.
 """
 from __future__ import annotations
 
@@ -62,10 +54,9 @@ def list_assumptions(
     return {"assumptions": [r.as_dict() for r in rows], "count": len(rows)}
 
 
-# `content_write=True` on both writes: `case.update` also edits the case's
-# governance record, which a CLOSED or ARCHIVED case keeps accepting, so
-# the verb alone cannot tell the gate that the register is content and
-# must be refused there (gap-closed-case-writes, 2026-09-23).
+# `content_write=True` on both writes: `case.update` also edits the case's governance record, which
+# a CLOSED or ARCHIVED case keeps accepting, so the verb alone cannot tell the gate that the
+# register is content to refuse there.
 @router.post("", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("request"))])
 def make_assumption(

@@ -1,21 +1,15 @@
 """What an Alpha 5.2 deployment reads while it upgrades, held to the code.
 
-The Alpha 6 pre-release check (2026-09-23) upgraded a populated Alpha 5.2
-database and found three things an operator or a script client would be
-told wrongly or not at all. The upgrade notes in release/CHANGELOG.md now
-point at the files under `release/alpha6-upgrade/`, and these tests hold
-those files, and the API document a script client reads, to what the tree
-actually does:
+The upgrade notes in release/CHANGELOG.md point at the files under `release/alpha6-upgrade/`, and
+these tests hold those files, and the API document a script client reads, to what the tree does:
 
-- `app-role-grants.sql` is 0060's grants and 0063's revoke, COPIED. A copy
-  that drifted from the migrations would hand the runtime role something
-  other than what a fresh install gives it, silently.
-- `0064-ties-before.sql` runs on the Alpha 5.2 schema, so it may not call
-  anything 0064 installs. Whether it predicts the backfill is a database
-  question, answered in `test_alpha6_upgrade_ties_pg.py`.
-- `POST /samples/{id}/reject` documented itself as destroying the bytes,
-  and `purge_bytes` carried no description, so the OpenAPI a 5.2 client
-  reads showed no change at all when the default became preservation.
+- `app-role-grants.sql` is 0060's grants and 0063's revoke, copied. A copy that drifted from the
+  migrations would silently hand the runtime role something other than what a fresh install gives it.
+- `0064-ties-before.sql` runs on the Alpha 5.2 schema, so it may not call anything 0064 installs.
+  Whether it predicts the backfill is a database question, answered in
+  `test_alpha6_upgrade_ties_pg.py`.
+- `POST /samples/{id}/reject` documents that it preserves the bytes by default, and `purge_bytes` has a
+  description, so the OpenAPI a 5.2 client reads shows the change.
 
 Pure: no database. Reads the migrations, the files and the app's schema.
 """
@@ -102,9 +96,8 @@ def _reject_operation() -> tuple[dict, dict]:
 
 
 def test_the_api_document_says_a_rejection_preserves_by_default():
-    """What a script client written against Alpha 5.2 reads. Before the fix
-    the description still said the bytes go, and nothing said the same
-    request body now keeps them under a legal hold."""
+    """What a script client written against Alpha 5.2 reads: the description says a rejection
+    preserves the bytes by default, and that the same request body keeps them under a legal hold."""
     operation, _ = _reject_operation()
     text = operation["description"]
     assert "NOCTORNAL_REJECTED_SAMPLE_DISPOSITION" in text

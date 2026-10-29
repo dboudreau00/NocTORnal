@@ -1,61 +1,31 @@
-"""The persona act queue: what the API asks the collector to do, and the one
-runner both of them use (ROADMAP-REMAINING "A collector process",
-2026-10-02).
+"""The persona act queue: what the API asks the collector to do, and the runner both use.
 
-## Why this exists
+The API holds no persona key and cannot open a persona credential; the collector process
+(`scripts/collector.py`) does everything that needs one. A route that would make a persona act
+writes a row in `collect.persona_act` (0156): the kind, the source, the request's own parameters,
+who asked, from which session and when their second factor was last satisfied, and the label the act
+is held at. Never a secret. The collector claims it, runs the code the route would run, and writes
+the answer into the row. The route waits a bounded time (NOCTORNAL_ACT_WAIT_SECONDS, at most 25
+seconds) and answers with the finished act, or 202 with the act still queued; the console follows it
+on `GET /collection/acts/{id}`.
 
-Until 2026-10-02 every attended persona act ran inside the API process, on
-the request thread, with the key that opens every persona credential in the
-same process. The owner decided on 2026-10-02 to build the collector that
-decision 30 deferred: the API holds no persona key and cannot open a
-persona credential, and a separate collector process
-(`scripts/collector.py`) does everything that needs one. That reverses the
-recorded "no worker process and no queue" for this one purpose, on purpose.
+The act may run minutes after the route checked, so the collector asks again, as the person who
+asked: their session is live, every global permission the route demanded (through
+`deps.authorize_global`, with the second factor the request carried, so an old step-up is refused),
+the blocking readiness checks, and a ceiling that still reaches the act's label. Then the persona
+gate runs: the persona visible, usable and free, inside its hours, a live collection authority
+confirmed by a second person (docs/16 L3), the persona's own route on the egress proxy. A persona
+another runner holds sends the act back to the queue until it expires.
 
-So a route that would make a persona act writes a row in
-`collect.persona_act` (0156) instead: the kind, the source, the request's
-own parameters, who asked, from which session and when their second factor
-was last satisfied, and the label the act is held at. Never a secret. The
-collector claims it, runs exactly the code the route used to run, and
-writes the answer the route would have given into the row. The route waits
-a short bounded time (NOCTORNAL_ACT_WAIT_SECONDS, at most 25 seconds) and
-answers with the finished act, or 202 with the act still queued; the
-console then follows it on `GET /collection/acts/{id}`.
-
-## What the collector re-checks, at the moment it runs an act
-
-The route checked everything when it was asked. The act may run minutes
-later, so before anything else the collector asks again, as the person who
-asked: that their session is still live; every global permission the route
-demanded, through the gate the route used (`deps.authorize_global`), with
-the second factor the request carried, so a step-up older than its
-freshness window is refused; the blocking readiness checks
-(`refuse_unready`); and their ceiling now, which must still reach the act's
-label. Then the act itself runs the persona gate it always ran: the persona
-visible, usable and free, inside its hours, a live collection authority
-confirmed by a second person (docs/16 L3 holds exactly as before), the
-persona's own route on the egress proxy. A persona another runner holds is
-not a refusal here: the act goes back in the queue for a few seconds, until
-it expires.
-
-## Expiry, and an act whose collector died
-
-An attended act runs while somebody is waiting for it: one not started
-within NOCTORNAL_ACT_TTL_SECONDS (15 minutes by default, the step-up
-window) is EXPIRED, never run late. One left RUNNING by a collector that
-stopped is FAILED with "outcome unknown" and never repeated, because
-joining a chat twice, or half of a rebind, is not something to retry
+An act not started within NOCTORNAL_ACT_TTL_SECONDS (15 minutes by default, the step-up window) is
+EXPIRED, never run late. One left RUNNING by a collector that stopped is FAILED with "outcome
+unknown" and never repeated: joining a chat twice, or half of a rebind, is not something to retry
 blindly.
 
-## Inline mode, development only
-
-NOCTORNAL_COLLECTOR_INLINE=1 runs the claimed act inside the API process
-the moment it is queued, through the same runner, on a system connection as
-the collector does (0179: the personas and sources an act writes are
-read-only to the request role). That is the development and Windows shape,
-where there is no collector process and the API holds the persona key in
-.env.local. It is refused at boot under NOCTORNAL_ENV=production
-(config.py) and ignored there at run time.
+NOCTORNAL_COLLECTOR_INLINE=1 (development and Windows) runs the claimed act inside the API process
+through the same runner, on a system connection as the collector does (0179: the personas and
+sources an act writes are read-only to the request role). It is refused at boot under
+NOCTORNAL_ENV=production (config.py) and ignored there at run time.
 """
 from __future__ import annotations
 
@@ -126,10 +96,9 @@ KINDS: dict[str, ActKind] = {
                                _MANAGE),
     "SOURCE_POLL": ActKind("Poll a source a persona reads",
                            (("collection.run", False),)),
-    # A stop, asked by the persona's stop route before it writes the stop:
-    # the board's own sign-out needs the sealed session, which only the
-    # collector can open, so the API asks and waits a bounded time (merged
-    # with the authenticated forum path, 2026-10-03; migration 0165).
+    # A stop, asked by the persona's stop route before it writes the stop: the board's own sign-out
+    # needs the sealed session, which only the collector can open, so the API asks and waits a
+    # bounded time.
     "FORUM_SIGN_OUT": ActKind("Sign a forum persona out of its boards",
                               (("collection_account.manage", False),)),
 }
@@ -227,12 +196,10 @@ def _jsonable(value):
 
 
 def dedupe_key(kind: str, source_id: UUID | None, params: dict) -> str:
-    """What makes two asks the same act: the kind, the SOURCE and the
-    parameters. The source is in it because the routes pass it beside the
-    parameters, never inside them (2026-10-03): without it a
-    membership check of chat B, a Poll now of source B or a join of B with
-    the same note, asked while A's was live, was answered with A's act and
-    nothing was queued for B."""
+    """What makes two asks the same act: the kind, the SOURCE and the parameters. The routes pass
+    the source beside the parameters, never inside them, so it must be in the key: otherwise a
+    check, poll or join of source B asked while A's was live would be answered with A's act and
+    nothing queued for B."""
     canonical = json.dumps({"kind": kind,
                             "source_id": str(source_id) if source_id else None,
                             "params": _jsonable(params)},
@@ -249,10 +216,9 @@ def _audit(conn, actor_id, action: str, act_id, detail: dict) -> None:
          Json(detail)))
 
 
-#: A PENDING row still before its expiry, or a RUNNING row claimed within
-#: STALE_S: the only twins an ask may be answered with (2026-10-03). An expired PENDING act
-#: or a RUNNING act a dead runner left
-#: is no act any more, whatever the sweep has not yet written.
+#: A PENDING row still before its expiry, or a RUNNING row claimed within STALE_S: the only twins an
+#: ask may be answered with. An expired PENDING act or a RUNNING act a dead runner left is no act
+#: any more, whatever the sweep has not yet written.
 _LIVE_SQL = ("((status = 'PENDING' AND expires_at > clock_timestamp()) "
              "OR (status = 'RUNNING' AND claimed_at >= clock_timestamp() "
              "- make_interval(secs => %(stale)s)))")
@@ -277,17 +243,15 @@ def _live_twin(conn, user_id: UUID, kind: str, key: str) -> dict | None:
 def submit(conn: psycopg.Connection, *, user_id: UUID, session_id: UUID | None,
            mfa_at: datetime | None, kind: str, params: dict, classification: str,
            source_id: UUID | None) -> dict:
-    """Queue one act on the request connection (the request role's INSERT
-    policy admits only the caller's own PENDING row within their ceiling).
-    The same act asked again while the first is live is the first act: a
-    double click is one act.
+    """Queue one act on the request connection (the request role's INSERT policy admits only the
+    caller's own PENDING row within their ceiling). The same act asked again while the first is live
+    is the first act: a double click is one act.
 
-    A twin that is past its expiry, or RUNNING with a runner that died, is
-    swept first, as the system purpose, so the new ask is a new act rather
-    than the dead one answered again (2026-10-03). In
-    development's inline mode nothing else ever sweeps; in production the
-    collector does too, and this only reaches the caller's own dead twin
-    before the unique index would refuse the new row."""
+    A twin that is past its expiry, or RUNNING with a runner that died, is swept first, as the
+    system purpose, so the new ask is a new act rather than the dead one answered again. In
+    development's inline mode nothing else ever sweeps; in production the collector does too, and
+    this only reaches the caller's own dead twin before the unique index would refuse the new
+    row."""
     if kind not in KINDS:
         raise ValueError(f"no persona act is called {kind!r}")
     clean = _jsonable(params)
@@ -301,10 +265,9 @@ def submit(conn: psycopg.Connection, *, user_id: UUID, session_id: UUID | None,
             with system_connection(SystemPurpose.PERSONA_ACTS, reuse=conn) as sc:
                 sweep(sc)
         try:
-            # requested_at and expires_at from ONE clock reading, so the
-            # window is exactly the TTL and never a microsecond over the
-            # CHECK that caps it at MAX_TTL_S (persona_act_window,
-            # 2026-10-03).
+            # requested_at and expires_at come from ONE clock reading, so the window is exactly the
+            # TTL and never a microsecond over the CHECK that caps it at MAX_TTL_S
+            # (persona_act_window).
             act = _row(conn.execute(
                 f"""INSERT INTO collect.persona_act
                        (kind, source_id, classification, params, dedupe_key,
@@ -436,11 +399,10 @@ def instance_name(prefix: str = "collector") -> str:
     return f"{prefix}:{socket.gethostname()[:60]}:{os.getpid()}"
 
 
-#: What a claim admits, whatever the row says about itself (2026-10-03). The request role
-#: writes the row, so its own expiry and
-#: start are capped here by constants: asked no later than now and within
-#: MAX_TTL_S of now. persona_act_window (0156) caps expires_at the same
-#: way, so a forged far expiry is refused at the door as well.
+#: What a claim admits, whatever the row says about itself. The request role writes the row, so its
+#: own expiry and start are capped here by constants: asked no later than now and within MAX_TTL_S
+#: of now. persona_act_window (0156) caps expires_at the same way, so a forged far expiry is refused
+#: at the door.
 _CLAIMABLE_SQL = ("status = 'PENDING' AND expires_at > clock_timestamp() "
                   "AND requested_at <= clock_timestamp() "
                   "AND requested_at > clock_timestamp() "
@@ -486,12 +448,10 @@ def _finish(status_conn, act: dict, status: str, *, body: dict | None = None,
                    {"kind": act["kind"], "status": status,
                     "http_status": (problem or {}).get("status")})
             return done
-        # The sweep already finished it (it ran past STALE_S and was failed
-        # as "outcome unknown"), so the row and its FINISHED event say
-        # FAILED. Auditing the outcome computed here as well would put two
-        # contradicting FINISHED events on one act (2026-10-03). The act's own events say
-        # what it did; the log says
-        # it came back late, by id and status only.
+        # The sweep already finished it (it ran past STALE_S and was failed as "outcome unknown"),
+        # so the row and its FINISHED event say FAILED. Auditing the outcome computed here as well
+        # would put two contradicting FINISHED events on one act. The act's own events say what it
+        # did; the log says it came back late, by id and status only.
         log.warning("persona act %s (%s) came back %s after it was already "
                     "finished", act["id"], act["kind"], status)
         return _row(sc.execute(
@@ -511,22 +471,20 @@ def _requeue(status_conn, act: dict, seconds: int) -> dict:
 
 
 def _recheck(conn, act: dict) -> tuple[str, frozenset[str]]:
-    """The collector's half: the person who asked, now. Returns their
-    ceiling's name and the compartments they hold now (F43: a source filed
-    under a key they no longer hold is a missing one to the act, as it is to
-    the route). Every refusal is the gate's own sentence."""
+    """The collector's half: the person who asked, now. Returns their ceiling's name and the
+    compartments they hold now (a source filed under a key they no longer hold is a missing one to
+    the act, as it is to the route). Every refusal is the gate's own sentence."""
     from noctornal_api.http.deps import CurrentUser, authorize_global, user_ceiling
     from noctornal_api.http.errors import Problem
     from noctornal_api.http.routers.collection import refuse_unready
     from noctornal_api.security.access import tlp_from_name
     from noctornal_api.security.sessions import IDLE_TIMEOUT
 
-    # Every expiry SessionService.validate enforces, the idle one included
-    # (2026-10-03): NOCTORNAL_ACT_TTL_SECONDS reaches an hour,
-    # and an act must not run for a session the console would already 401.
-    # The second factor's time is the SESSION's, which only a sign-in writes
-    # (0144), never the act row's copy: the request role writes that row, so
-    # a forged copy would have passed the step-up (2026-10-07).
+    # Every expiry SessionService.validate enforces, the idle one included:
+    # NOCTORNAL_ACT_TTL_SECONDS reaches an hour, and an act must not run for a session the console
+    # would already 401. The second factor's time is the SESSION's, which only a sign-in writes
+    # (0144), never the act row's copy: the request role writes that row, so a forged copy would
+    # pass the step-up.
     session = act["session_id"] is not None and conn.execute(
         """SELECT mfa_satisfied_at FROM iam.session
             WHERE id = %s AND user_id = %s AND revoked_at IS NULL
@@ -539,8 +497,8 @@ def _recheck(conn, act: dict) -> tuple[str, frozenset[str]]:
     try:
         for permission, force in KINDS[act["kind"]].permissions:
             authorize_global(conn, user, permission, force_step_up=force)
-        # A stop is always allowed (F38): the stop route asks no readiness,
-        # so the sign-out it queues is not held to it either (2026-10-07).
+        # A stop is always allowed: the stop route asks no readiness, so the sign-out it queues is
+        # not held to it either.
         if act["kind"] not in STOP_KINDS:
             refuse_unready(conn)
         clearance, held = user_ceiling(conn, act["requested_by"])
@@ -557,8 +515,7 @@ def _uuid(value) -> UUID | None:
 
 def _execute(conn, act: dict, *, clearance: str, compartments=None, adapters,
              transport_factory, sleep) -> dict:
-    """Exactly the code the route ran before 2026-10-02, as the person who
-    asked, at their ceiling and with their compartments now."""
+    """Run the act as the person who asked, at their ceiling and with their compartments now."""
     p = act["params"]
     kind = act["kind"]
     actor = act["requested_by"]
@@ -566,8 +523,8 @@ def _execute(conn, act: dict, *, clearance: str, compartments=None, adapters,
         from noctornal_api.collection import CollectionService
         from noctornal_api.http.routers.collection import run_body
 
-        # As the run route does: a system connection for the poll itself
-        # (S1), the caller's ceiling deciding whether it may run at all.
+        # As the run route does: a system connection for the poll itself, the caller's ceiling
+        # deciding whether it may run at all.
         with system_connection(SystemPurpose.COLLECTION, reuse=conn) as sconn:
             result = CollectionService(sconn, adapters).run_once(
                 act["source_id"], actor_id=actor,
@@ -690,12 +647,10 @@ def _run_claimed(status_conn, work_conn, act: dict, *, adapters,
 def run_inline(conn: psycopg.Connection, act: dict, *, adapters=None,
                transport_factory=None, sleep=time.sleep
                ) -> tuple[dict, dict | None]:
-    """Development's inline mode: claim the act just queued and run it here,
-    on a system connection, as the collector runs it in production (0179,
-    Beta 1.1: the personas and sources an act writes are read-only to the
-    request role; the act holds the caller's ceiling itself). An act already
-    claimed (a double click whose first act is running) is waited for
-    instead."""
+    """Development's inline mode: claim the act just queued and run it here, on a system connection,
+    as the collector runs it in production (0179: the personas and sources an act writes are
+    read-only to the request role; the act holds the caller's ceiling itself). An act already
+    claimed (a double click whose first act is running) is waited for instead."""
     with system_connection(SystemPurpose.PERSONA_ACTS, reuse=conn) as sc:
         claimed = _claim(sc, act["id"], instance_name("inline"))
         if claimed is not None:
@@ -740,14 +695,12 @@ def drain(conn: psycopg.Connection, *, instance: str, limit: int = 20,
           max_seconds: float = 120.0, adapters=None, transport_factory=None,
           sleep=time.sleep, clock=time.monotonic,
           should_stop: Callable[[], bool] | None = None) -> dict:
-    """The collector's pass over the queue, on its system connection: the
-    sweep, then up to `limit` acts, one at a time, stopping STARTING acts
-    after `max_seconds`, or as soon as `should_stop()` says so. Counts by
-    outcome; never an act's words.
+    """The collector's pass over the queue, on its system connection: the sweep, then up to `limit`
+    acts, one at a time, no longer STARTING acts after `max_seconds` or once `should_stop()` says
+    so. Counts by outcome; never an act's words.
 
-    `should_stop` is asked before every claim (2026-10-03): a
-    SIGTERM finishes the act in hand and claims no other, so the stop
-    grace period covers one act rather than a whole pass of twenty."""
+    `should_stop` is asked before every claim: a SIGTERM finishes the act in hand and claims no
+    other, so the stop grace period covers one act rather than a whole pass of twenty."""
     counters = {"claimed": 0, "done": 0, "refused": 0, "failed": 0,
                 "requeued": 0, "expired": 0, "stale": 0}
     counters["expired"], counters["stale"] = sweep(conn)
@@ -770,9 +723,9 @@ def drain(conn: psycopg.Connection, *, instance: str, limit: int = 20,
 
 def served_body(conn: psycopg.Connection, act: dict, *, clearance: str,
                 adapters=None, compartments=None) -> dict:
-    """A finished act's body as the route answers it, its chat read again
-    at the reader's ceiling and compartments now; left out when the chat is
-    above them or filed under a key they do not hold (F43)."""
+    """A finished act's body as the route answers it, its chat read again at the reader's ceiling
+    and compartments now; left out when the chat is above them or filed under a key they do not
+    hold."""
     from noctornal_api.collection import CollectionNotFound
 
     body = dict((act.get("result") or {}).get("body") or {})
@@ -805,17 +758,13 @@ COLLECTOR_ACTION_KEY = (
     "infra/production/collector.env they were enrolled under, or name that "
     "key in NOCTORNAL_PERSONA_KEK_RETIRED; or enrol those personas again")
 
-# ---------------------------------------------------------------------------
-# The collector's heartbeat (0157, 2026-10-03)
-# ---------------------------------------------------------------------------
+# The collector's heartbeat (0157).
 
 #: How often the collector moves its heartbeat while it runs.
 HEARTBEAT_EVERY_S = 30
-#: How old the newest heartbeat may be before the register says no
-#: collector runs. Two beats are at most one drain pass apart (120 s of
-#: starting acts), plus the act in hand (120 s, a Telegram poll's whole
-#: session), plus the wait for a notification: ten minutes covers that
-#: twice over.
+#: How old the newest heartbeat may be before the register says no collector runs. Two beats are at
+#: most one drain pass apart (120 s of starting acts), plus the act in hand (120 s, a Telegram
+#: poll's whole session), plus the wait for a notification: ten minutes covers that twice over.
 HEARTBEAT_STALE_S = 600
 
 
@@ -865,18 +814,15 @@ def collector_seen(conn: psycopg.Connection) -> dict | None:
 
 
 def readiness_verdict(conn: psycopg.Connection) -> tuple[bool, str, str]:
-    """(ok, evidence, action) for the collector_split row: whether this API
-    process holds the persona key, whether persona acts run in a collector
-    and it is draining them, and how many persona credentials are still
-    sealed under the TOTP ring. Counts only: the register is read by
+    """(ok, evidence, action) for the collector_split row: whether this API process holds the
+    persona key, whether persona acts run in a collector and it is draining them, and how many
+    persona credentials are still sealed under the TOTP ring. Counts only: the register is read by
     user.manage holders below many labels.
 
-    Outside the inline mode a collector must also have been SEEN lately
-    (its heartbeat, 0157), whatever the queue holds, and the persona ring
-    it started with must have opened every credential it sampled
-    (2026-10-03). Until then an empty queue read green while
-    no collector ran, and in production that is also every scheduled poll
-    stopped, feeds no persona reads included."""
+    Outside the inline mode a collector must also have been SEEN lately (its heartbeat, 0157),
+    whatever the queue holds, and the persona ring it started with must have opened every credential
+    it sampled. An empty queue with no collector running is not green: in production that also means
+    every scheduled poll has stopped, feeds that carry no persona reads included."""
     from noctornal_api.security import persona_envelope as pe
     from noctornal_api.security.persona_sealed import sealed_before_split
     from noctornal_api.wording import agree

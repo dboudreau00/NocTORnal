@@ -1,16 +1,12 @@
-"""The Share roster names roles the way the owner decided, over HTTP.
+"""The Share roster names roles by their display name, over HTTP.
 
-2026-09-23. Migration 0062 made CASE_OWNER read as
-"Lead investigator", but the name reached only the admin pane, through
-`/admin/roles`, which needs user.manage. The Share panel is opened by every
-case worker and printed the raw key in each roster chip, in the outcome of
-a regrade and in the removal message, because nothing it could read
-carried the name. The roster, the grant and the revoke now return the name
-beside the key; `test_ui_purge_binding_and_role_names.py` holds the
-console to reading it.
+Migration 0062 made CASE_OWNER read as "Lead investigator", but `/admin/roles` needs user.manage, and the
+Share panel is opened by every case worker. So the roster, the grant and the revoke return the name beside
+the key, and the roster chip, the outcome of a regrade and the removal message show it;
+`test_ui_purge_binding_and_role_names.py` holds the console to reading it.
 
-**The email prefix is `srn-` and must stay unique**: the fixture cleans up
-by deleting on it. Env-gated on DATABASE_URL.
+**The email prefix is `srn-` and must stay unique**: the fixture cleans up by deleting on it. Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 

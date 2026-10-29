@@ -1,30 +1,20 @@
 """An entity's first and last seen, derived from its live claims.
 
-gap-first-seen (decided 2026-09-23). Nothing writes `core.node.first_seen`
-or `last_seen`: `create_node` never set them and no importer does, so the
-entity list's First seen column was blank on every row of every estate
-(0 of 146 NIGHTJAR, 22 KESTREL and 30 CORVID entities) while the claims
-under them said when each was observed. They are now derived, without a
-migration, wherever an entity is read (`projections.seen_sql`): the
-earliest and latest `observed_at` among the entity's LIVE claims, combined
-with the stored column.
+Nothing writes `core.node.first_seen` or `last_seen` (`create_node` never sets them and no importer does),
+so they are derived, without a migration, wherever an entity is read (`projections.seen_sql`): the earliest
+and latest `observed_at` among the entity's LIVE claims, combined with the stored column.
 
-What this pins, through the three read paths the console uses (the entity
-list, one entity, the projection the canvas and the inspector's fallback
-read):
+What this pins, through the three read paths the console uses (the entity list, one entity, the projection
+the canvas and the inspector's fallback read):
 
 - the dates are the claims' observed times, earliest and latest;
-- a retracted or superseded claim stops counting (the projection's rule
-  for "live");
-- a claim with no observed time, and a claim about one of the entity's
-  ties, do not move them;
+- a retracted or superseded claim stops counting (the projection's rule for "live");
+- a claim with no observed time, and a claim about one of the entity's ties, do not move them;
 - a stored value still counts, so a writer added later is not ignored;
-- the claims of every record merged into the entity count, through a chain
-  of merges, until the merge is reversed, and never past the reader's
-  ceiling (release review c10, 2026-09-24).
+- the claims of every record merged into the entity count, through a chain of merges, until the merge is
+  reversed, and never past the reader's ceiling.
 
-The email prefix is `fseen-` and must stay unique. Env-gated on
-DATABASE_URL.
+The email prefix is `fseen-` and must stay unique. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -58,7 +48,7 @@ def conn():
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'fseen-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     with c.transaction():
-        # The merge cases (release review c10) leave a ledger behind.
+        # The merge cases leave a ledger behind.
         c.execute(f"""DELETE FROM core.node_merge_edge WHERE merge_id IN
                       (SELECT id FROM core.node_merge WHERE case_id IN {csub})""")
         c.execute(f"DELETE FROM core.node_merge WHERE case_id IN {csub}")
@@ -219,11 +209,10 @@ def _merge(conn, case_id: str, source: str, target: str, by) -> object:
         merged_by=by, reason="same handle, same keys: one persona")
 
 
-# --- release review c10, 2026-09-24 -----------------------------------------
-# A merge says the two records were always one thing, and it leaves the
-# absorbed record's claims on that record, which every list and the canvas
-# then hide. The survivor's window must cover them, through chains, stop at
-# once when the merge is reversed, and never reach past the reader.
+# --- merged records ---------------------------------------------------------
+# A merge says the two records were always one thing, and it leaves the absorbed record's claims on that
+# record, which every list and the canvas then hide. The survivor's window must cover them, through chains,
+# stop at once when the merge is reversed, and never reach past the reader.
 
 T_EARLY = datetime(2024, 1, 10, tzinfo=timezone.utc)
 T_MID = datetime(2025, 6, 1, tzinfo=timezone.utc)

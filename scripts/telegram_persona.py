@@ -4,38 +4,24 @@
     python scripts/telegram_persona.py import --persona <uuid> [--replace] < session.json
     python scripts/telegram_persona.py logout --persona <uuid> --reason "..." [--local-only]
 
-## Why a script and not the console
+An enrolment carries the account's login code and, when it has one, its two-step password.
+Neither may pass through a browser or the API, so the console creates the persona with no
+credential and an operator with a shell on the server enrols it here.
 
-An enrolment carries the account's login code and, when it has one, its
-two-step password. Neither may pass through a browser or the API, so the
-console creates the persona with no credential and an operator with a
-shell on the server enrols it here (roadmap F5.2, telegram,
-2026-09-24).
+The operator signs in exactly as the console's login would verify them: email, password and a
+current authenticator code. A recovery code is refused (the login route spends it and this script
+never would, so it would stay usable for ever), so is an administrator-issued password never
+replaced, and the account must hold collection_account.manage. A failure is audited as the login
+route audits one, with `via` naming this script, and every row the script writes names the
+signed-in person.
 
-## Who runs it
-
-The operator signs in exactly as the console's login would verify them:
-email, password and a CURRENT authenticator code. A recovery code is
-refused here (it would sign the script in and stay usable for ever: the
-login route spends it, this script never does), an administrator-issued
-password that was never replaced is refused as the login route refuses it,
-and the account must hold collection_account.manage. A failure is audited
-as the login route audits one, with `via` naming this script. Every row the
-script writes names the signed-in person.
-
-## What it does, and what it never does
-
-Everything runs through the persona gate with the operator's clearance: the
-persona must be visible, in its active hours, and covered by a live
-authority a second person confirmed; its connections leave only through
-its route on the egress proxy (an `act` context, and a `stop` context for a
-logout). A platform's answer during an act (a flood wait, a revoked
-session) is on the persona before its lock is released.
-
-It writes no file (the library is only ever given a session held in
-memory), prints no secret, reads a session to import from stdin and never
-from the command line, and stores neither the phone number nor the
-two-step password. It prints exactly one line.
+Everything runs through the persona gate with the operator's clearance: the persona must be
+visible, in its active hours, and covered by a live authority a second person confirmed; its
+connections leave only through its route on the egress proxy (an `act` context, and a `stop`
+context for a logout). A platform's answer during an act (a flood wait, a revoked session) is on
+the persona before its lock is released. It writes no file (the library only ever gets a session
+held in memory), prints no secret and exactly one line, reads a session to import from stdin and
+never from the command line, and stores neither the phone number nor the two-step password.
 
 Exit 0 on success, 1 on a refusal, 2 when the environment is unusable.
 """
@@ -102,7 +88,7 @@ def sign_in(conn):
     after the fact and never spends it; must_change_password is read only
     after both factors verified, so an unauthenticated shell user learns
     nothing about an account's reset state."""
-    from noctornal_api.security.auth import AuthOutcome, AuthService
+    from noctornal_api.security.auth import AuthService
     from noctornal_api.stores import PgUserStore
 
     email = input("Email: ").strip()
@@ -112,9 +98,8 @@ def sign_in(conn):
         email, password, code, spend_recovery=False)
     # Every refusal below is stored as one (outcome DENIED), as the console's
     # sign-in stores its own (docs/17, "refusals are recorded as SUCCESS").
-    if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE or not result.ok:
-        _audit(conn, result.user_id if result.outcome is
-               AuthOutcome.SECOND_FACTOR_UNAVAILABLE else None, "AUTH_FAILED",
+    if not result.ok:
+        _audit(conn, None, "AUTH_FAILED",
                "auth", None, {"reason": result.audit_reason, "email": email,
                               "via": VIA}, outcome="DENIED")
         raise Refused(NOT_VERIFIED)
@@ -257,9 +242,8 @@ def _clearance(conn, user_id) -> str:
 
 
 def _held(conn, user_id) -> frozenset:
-    """The operator's own compartments: a persona bound to a source filed
-    under a key they do not hold is as missing to them as one above their
-    ceiling (F43; 2026-10-03)."""
+    """The operator's own compartments: a persona bound to a source filed under a key they do not
+    hold is as missing to them as one above their ceiling."""
     from noctornal_api.http.deps import user_ceiling
 
     return user_ceiling(conn, user_id)[1]
@@ -486,21 +470,17 @@ def main(argv: list[str] | None = None) -> int:
     from noctornal_api.config import enforce_persona_key_boundary
     from noctornal_api.db import SystemPurpose, connect_system
 
-    # A collector process (2026-10-02): a session is sealed and opened with
-    # the persona key, which in production only the collector holds, so in
-    # production this runs in the collector service and refuses elsewhere,
-    # before it asks anybody to sign in.
+    # A session is sealed and opened with the persona key, which in production only the collector
+    # holds, so in production this runs in the collector service and refuses elsewhere, before it
+    # asks anybody to sign in.
     try:
         enforce_persona_key_boundary(collector=True)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    # The boundary above does nothing outside production, so the ring is
-    # read here too, everywhere, before anybody is asked to sign in
-    # (2026-10-03): without NOCTORNAL_PERSONA_KEK a development
-    # machine upgraded without its launcher used to take the whole Telegram
-    # login, burn a code, and only then fail storing the session with a
-    # traceback. All three commands open or seal a session with this key.
+    # The boundary above does nothing outside production, so the ring is read here too, before
+    # anybody is asked to sign in: without NOCTORNAL_PERSONA_KEK a login would burn a code and only
+    # then fail to store the session. All three commands open or seal a session with this key.
     from noctornal_api.security import persona_envelope
     try:
         persona_envelope.ring()
@@ -509,8 +489,8 @@ def main(argv: list[str] | None = None) -> int:
               f"asked of anyone: {exc}", file=sys.stderr)
         return 2
     try:
-        # S1 (2026-09-25): a script binds no user, so on the request role it
-        # would see nothing under row-level security.
+        # A script binds no user, so on the request role it would see nothing under row-level
+        # security.
         conn = connect_system(SystemPurpose.COLLECTION)
     except Exception as exc:  # noqa: BLE001 - the environment, said once
         print(f"The database could not be reached ({type(exc).__name__}).",

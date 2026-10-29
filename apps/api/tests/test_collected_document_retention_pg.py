@@ -1,14 +1,10 @@
-"""Retention and legal hold for collected documents (2026-09-24; docs/00
-decision 74).
+"""Retention and legal hold for collected documents (docs/00 decision 74).
 
-The collector writes a document's retention clock from its category's rule,
-which arms the purge's document leg for the first time. These hold that
-decision to the code: a hold on any version of the document, a case
-under legal hold citing any version through every registered citation,
-and an unretracted assertion each keep it; the purge rechecks under
-locks, so a hold or a citation made while it runs wins; raw markup and
-identities go with the content; and the catalogue of references onto a
-document, a run or a source fails on anything unregistered.
+The collector writes a document's retention clock from its category's rule, which arms the purge's
+document leg. A hold on any version of the document, a case under legal hold citing any version
+through every registered citation, and an unretracted assertion each keep it; the purge rechecks under
+locks, so a hold or a citation made while it runs wins; raw markup and identities go with the content;
+and the catalogue of references onto a document, a run or a source fails on anything unregistered.
 DATABASE_URL-gated.
 """
 from __future__ import annotations
@@ -111,13 +107,9 @@ def _purged(conn, doc):
 
 
 def _tombstone(conn, owner):
-    """(storage_outcome, object_count) of the one document tombstone the
-    purge run by `owner` wrote. Tombstones are append-only, so every earlier
-    purge in the database has left its own, and "the newest of them all" is
-    whichever was stamped last, which need not be this one: on a host whose
-    clock steps, a purge run in the seconds BEFORE this one can be stamped
-    after it (db_clock.py). A purge names the account that ran it, and each
-    test has an account of its own."""
+    """(storage_outcome, object_count) of the one document tombstone the purge run by `owner` wrote.
+    Tombstones are append-only and a host clock can step (db_clock.py), so "the newest" is not reliable;
+    a purge names the account that ran it, and each test has an account of its own."""
     rows = conn.execute(
         """SELECT storage_outcome, object_count FROM core.purge_tombstone
             WHERE object_type = 'document' AND purged_by = %s""", (owner,)).fetchall()
@@ -332,10 +324,8 @@ def _in_thread(fn):
 
 
 def _blocked_on_a_lock(watcher, other, timeout: float = 20.0) -> bool:
-    """Whether `other`'s backend is waiting on a lock, asked of
-    `pg_stat_activity` until it is or `timeout` passes. These tests used to
-    sleep a second and assume the wait had begun, which is a guess on a
-    loaded host and a second wasted on every other."""
+    """Whether `other`'s backend is waiting on a lock, asked of `pg_stat_activity` until it is or
+    `timeout` passes. Sleeping and assuming the wait had begun is a guess on a loaded host."""
     pid = other.info.backend_pid
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -427,7 +417,7 @@ def test_the_purge_empties_content_and_identities_and_replaces_the_digest(conn, 
     assert row[7] == source and row[8] == "post:1" and row[9] == "CHAT_EXPORT"
     expected = hashlib.sha256(f"purged:{doc}".encode()).digest()
     assert bytes(row[10]) == expected and bytes(row[10]) != bytes(before)
-    # The vectors live beside the document since 0094 (F6.1).
+    # The vectors live beside the document.
     assert conn.execute("SELECT count(*) FROM collect.document_embedding "
                         "WHERE document_id = %s", (doc,)).fetchone()[0] == 0
     assert conn.execute("SELECT count(*) FROM collect.extraction WHERE document_id = %s",
@@ -477,8 +467,15 @@ def test_raw_markup_goes_with_its_document_and_a_shared_object_stays(conn, owner
     assert _purged(conn, alone) and _purged(conn, shared)
     assert not store.exists("collect/aa/one") and store.exists("collect/bb/shared")
     assert any("still used by other documents" in w for w in result.warnings)
-    outcome = _tombstone(conn, owner)
-    assert outcome[0] == "DELETED"
+    # One tombstone per outcome: the shared object was kept, so the document
+    # that named it had nothing of its own destroyed.
+    def outcomes(doc):
+        return [conn.execute(
+            "SELECT storage_outcome FROM core.purge_tombstone WHERE id = %s",
+            (stone,)).fetchone()[0]
+            for stone, ids in result.stones.items() if doc in ids]
+    assert outcomes(alone) == ["DELETED"]
+    assert outcomes(shared) == ["NOT_APPLICABLE"]
 
 
 def test_a_failed_raw_delete_keeps_the_document_due_and_names_the_key(conn, owner):
@@ -504,10 +501,8 @@ def test_the_purge_refuses_without_a_raw_store_when_raw_markup_is_due(conn, owne
 
 
 def test_no_exhibit_bytes_are_deleted_before_the_raw_store_refusal(conn, owner, monkeypatch):
-    """2026-09-25: the document leg's refusal came after
-    the evidence leg had asked the object store to delete exhibit bytes in
-    the same transaction, so its rollback would unmark rows whose bytes
-    were gone. It is now said before the transaction starts."""
+    """The document leg's refusal is said before the transaction starts, so no exhibit bytes are deleted
+    from the object store only for the rollback to unmark rows whose bytes are gone."""
     from noctornal_api.retention import DueItem, RetentionError, RetentionService
 
     source = _source(conn)
@@ -530,11 +525,8 @@ def test_no_exhibit_bytes_are_deleted_before_the_raw_store_refusal(conn, owner, 
 
 
 def test_a_hold_that_waited_on_the_purge_does_not_report_a_destroyed_document(conn, owner):
-    """2026-09-25: a hold whose
-    write waited on the purge's version locks used to go on to write, and
-    answer, a hold on the row the purge had just destroyed. It now locks
-    the versions first and reads the document after the wait: a destroyed
-    document is the 404 a missing one is, and nothing is audited."""
+    """A hold whose write waited on the purge's version locks locks the versions first and reads the
+    document after the wait: a destroyed document is the 404 a missing one is, and nothing is audited."""
     from noctornal_api.db import connect
     from noctornal_api.retention import RetentionNotFound, RetentionService
 

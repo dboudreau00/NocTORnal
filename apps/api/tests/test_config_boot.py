@@ -1,22 +1,18 @@
 """The boot-time refusals (`noctornal_api.config`).
 
-No database, no Redis, no object store: every rule under test reads a
-dictionary, which is the whole reason `verify_environment` takes one.
+No database, no Redis, no object store: every rule under test reads a dictionary, which is the whole
+reason `verify_environment` takes one.
 
 Three things this file is here to hold, beyond "each rule fires":
 
-* **The rule set is not vacuous.** A `verify_environment` that returned
-  `[]` unconditionally would pass every "a good environment is accepted"
-  test ever written, and would be the most dangerous possible outcome --
-  a refusal everyone believes in and nothing enforces. `test_bare_production_
-  environment_is_refused_on_every_count` is the guard.
-* **The mapping wins over the process.** The KEK, the rate-limit switch
-  and the session binding are decided by borrowed readers that natively
-  read `os.environ`, so a test whose verdict came from the test runner's
-  own environment would be testing nothing.
-* **`os.environ` comes back.** `_borrowing` swaps it. If it leaked, the
-  damage would land on whichever test ran next, which is the hardest kind
-  of failure to read.
+* **The rule set is not vacuous.** A `verify_environment` that returned `[]` unconditionally would pass
+  every "a good environment is accepted" test, a refusal everyone believes in and nothing enforces.
+  `test_bare_production_environment_is_refused_on_every_count` is the guard.
+* **The mapping wins over the process.** The KEK, the rate-limit switch and the session binding are
+  decided by borrowed readers that natively read `os.environ`, so a test whose verdict came from the
+  test runner's own environment would be testing nothing.
+* **`os.environ` comes back.** `_borrowing` swaps it. If it leaked, the damage would land on whichever
+  test ran next, which is the hardest kind of failure to read.
 """
 
 import base64
@@ -26,10 +22,8 @@ import pytest
 
 from noctornal_api.config import DEV_CREDENTIAL, enforce_environment, verify_environment
 
-#: 32 DISTINCT bytes. Until 2026-09-23 this fixture used `b"k" * 32`, and a
-#: key of one repeated byte is now refused as the shape of the keys the CI
-#: workflow and the suites publish (sec-dev-secrets-in-production), so the
-#: good environment has to carry a key that looks generated.
+#: 32 DISTINCT bytes: a key of one repeated byte is refused as the shape of the keys the CI workflow
+#: and the suites publish, so the good environment has to carry a key that looks generated.
 _KEK = base64.b64encode(bytes(range(1, 33))).decode()
 
 
@@ -56,8 +50,7 @@ def _production() -> dict[str, str]:
         "SMTP_HOST": "smtp.example.gov",
         "SMTP_PASSWORD": "Td5mJ1cV",
         "NOCTORNAL_MAX_EVIDENCE_BYTES": "268435456",
-        # The system role's DSN, required on every process but the
-        # sample origin (row-level security, S1 2026-09-25).
+        # The system role's DSN, required on every process but the sample origin (row-level security).
         "NOCTORNAL_WORKER_DATABASE_URL":
             "postgresql+psycopg://noctornal_worker:Rt8vWq@db:5432/noctornal",
     }
@@ -145,12 +138,9 @@ def test_unusable_totp_kek_is_refused(kek):
 
 
 def test_a_kek_with_a_trailing_newline_is_accepted():
-    """The envelope decodes leniently, and a KEK read out of a Docker or
-    Kubernetes secret file routinely carries a newline. Until 2026-09-02
-    `readiness.py` reported exactly this configuration as not-ready
-    because it kept its own stricter copy of the rule; a boot refusal
-    making the same mistake would not report a working deployment as
-    broken, it would stop it from starting."""
+    """The envelope decodes leniently, and a KEK read out of a Docker or Kubernetes secret file
+    routinely carries a newline. `readiness.py` must not report that configuration as not-ready, and a
+    boot refusal must not stop a working deployment from starting."""
     env = _production()
     env["NOCTORNAL_TOTP_KEK"] = _KEK + "\n"
     assert verify_environment(env) == []
@@ -343,7 +333,6 @@ _ALL_BROKEN_NAMES = (
     "NOCTORNAL_BASE_URL", "NOCTORNAL_SESSION_STRICT_BINDING",
     "NOCTORNAL_ENABLE_DOCS", "SAMPLE_ACCESS_KEY", "SAMPLE_SECRET_KEY",
     "NOCTORNAL_MAX_EVIDENCE_BYTES",
-    # S1, 2026-09-25.
     "NOCTORNAL_WORKER_DATABASE_URL",
 )
 
@@ -353,9 +342,8 @@ def _all_broken() -> dict[str, str]:
     published password, and every other rule fails by omission."""
     return {
         "NOCTORNAL_ENV": "production",
-        # noctornal_app, not the owner `noctornal`: this fixture is about one
-        # refusal per rule, and a request DSN naming the owner is a refusal of
-        # its own now (infra-4, 2026-10-03; test_g48_request_role_boot.py).
+        # noctornal_app, not the owner `noctornal`: this fixture is about one refusal per rule, and a
+        # request DSN naming the owner is a refusal of its own (test_request_role_boot_refusals.py).
         "DATABASE_URL": f"postgresql+psycopg://noctornal_app:{DEV_CREDENTIAL}@db:5432/n",
         "MINIO_SECRET_KEY": DEV_CREDENTIAL,
         "NOCTORNAL_RATELIMIT": "off",
@@ -375,18 +363,15 @@ def test_every_problem_is_reported_at_once():
     assert len(problems) == len(_ALL_BROKEN_NAMES), problems
 
 
-#: Every rule whose failure mode is OMISSION, and therefore everything a
-#: production environment with nothing at all set must be refused on. The
-#: four that need a bad value rather than a missing one -- the published
-#: password, the rate-limit off-switch, the SMTP plaintext exception and
-#: the published schema -- cannot fire on an empty mapping and are held by
-#: `_all_broken` instead.
+#: Every rule whose failure mode is OMISSION, and therefore everything a production environment with
+#: nothing at all set must be refused on. The four that need a bad value rather than a missing one (the
+#: published password, the rate-limit off-switch, the SMTP plaintext exception and the published
+#: schema) cannot fire on an empty mapping and are held by `_all_broken` instead.
 _REFUSED_ON_AN_EMPTY_ENVIRONMENT = (
     "NOCTORNAL_TOTP_KEK", "NOCTORNAL_INGEST_PEPPER", "REDIS_URL",
     "MINIO_SECURE", "SAMPLE_SECURE", "NOCTORNAL_BASE_URL",
     "NOCTORNAL_SESSION_STRICT_BINDING", "SAMPLE_ACCESS_KEY",
     "SAMPLE_SECRET_KEY", "NOCTORNAL_MAX_EVIDENCE_BYTES",
-    # S1, 2026-09-25.
     "NOCTORNAL_WORKER_DATABASE_URL",
 )
 
@@ -512,7 +497,7 @@ def test_enforce_does_nothing_in_this_process():
     enforce_environment()
 
 
-# --- the key ring (2026-09-11) ------------------------------------------------
+# --- the key ring ---------------------------------------------------------------
 
 def test_a_complete_ring_is_accepted():
     env = _production()
@@ -543,7 +528,7 @@ def test_the_ring_is_not_reported_twice_when_the_active_key_is_the_fault():
     assert "not set" in _only(verify_environment(env), "NOCTORNAL_TOTP_KEK")
 
 
-# --- the exhibit size policy (2026-09-11) --------------------------------------
+# --- the exhibit size policy ----------------------------------------------------
 
 def test_an_undeclared_evidence_cap_is_refused():
     env = _production()
@@ -573,13 +558,11 @@ def test_every_spelling_of_a_size_the_reader_accepts_is_accepted(value):
     assert verify_environment(env) == []
 
 
-# --- an outbound switch and the processes that send nothing (2026-10-07) -------
+# --- an outbound switch and the processes that send nothing ---------------------
 #
-# 2026-10-07: secrets.env.example says to turn outbound lookups
-# and the sandbox on in secrets.env, which the sample origin and the static
-# triage loop read too. Neither is given the egress proxy, and both refused
-# for want of one: the sample origin would not start and every triage pass
-# exited 2. They send nothing out; the processes that do keep the refusal.
+# secrets.env.example says to turn outbound lookups and the sandbox on in secrets.env, which the sample
+# origin and the static triage loop read too. Neither is given the egress proxy, and they send nothing
+# out, so they must not refuse for want of one; the processes that do send keep the refusal.
 
 _SANDBOX = {
     "NOCTORNAL_SANDBOX_PROVIDER": "capev2",
@@ -630,10 +613,8 @@ def test_static_triage_is_not_refused_for_an_outbound_switch_it_never_sends(swit
     ("false", True), (" ", True), ("TRUE", False), ("true", False), ("", False), (None, False),
 ])
 def test_a_preservation_store_without_tls_is_refused(value, refused):
-    """2026-10-07: PRESERVE_SECURE overrides
-    SAMPLE_SECURE for the preservation bucket when it is set to anything
-    (samples.PreservationStorage), and nothing refused a value that turned
-    TLS off there."""
+    """PRESERVE_SECURE overrides SAMPLE_SECURE for the preservation bucket when it is set to anything
+    (samples.PreservationStorage), so a value that turns TLS off there must be refused."""
     env = _production()
     if value is not None:
         env["PRESERVE_SECURE"] = value

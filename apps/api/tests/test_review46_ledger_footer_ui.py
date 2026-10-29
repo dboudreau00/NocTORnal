@@ -1,12 +1,9 @@
-"""egress-ledger-withheld-oracle, wording left behind (verification of the
-review of 2026-10-03).
+"""The connection log's withheld count is the whole log's and the console says so.
 
-The server now counts the connection log's withheld rows over the WHOLE log,
-whatever route, event or window the reader asked about. The console still
-printed `and N rows you are not cleared to see` under a list the reader had
-filtered, which reads as N hidden rows that match the filter, the figure the
-fix exists to stop being. The sentence now says the count is the whole log's
-and ignores the filter.
+The server counts the connection log's withheld rows over the WHOLE log, whatever route, event or window
+the reader asked about. The console must not print `and N rows you are not cleared to see` under a list
+the reader has filtered, which reads as N hidden rows that match the filter, the figure the count exists
+not to give. The sentence says the count is the whole log's and ignores the filter.
 
 Static, in the test_ui_egress.py style: no browser, no database.
 """

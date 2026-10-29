@@ -1,21 +1,17 @@
-"""Four deployment residuals of docs/17, closed (2026-10-08).
+"""Four deployment defaults (docs/17).
 
-* "bucket names have no shell default": `minio-init` expanded
-  `$EVIDENCE_BUCKET`, `$INGEST_BUCKET` and `$SAMPLE_BUCKET` bare, though the
-  code defaults all three, so a secrets.env that left one out failed the init
-  on `mc mb "local/"` and the API never started. The script now defaults them
-  to the code's names.
-* "the volume name": `install.sh` and `install.ps1` decided whether to
-  generate the schema owner's password by asking Docker for a volume of one
-  fixed name, so a stack started under another project name looked new and
-  was given a password initdb had never been given. They ask Docker for the
-  volume by the label Compose puts on it.
-* "a missing hop count": the readiness register reports
-  `NOCTORNAL_TRUSTED_PROXY_HOPS` in production.
-* The development compose file's pins are held in test_g48_image_context.
+* Bucket names have a shell default: `minio-init` defaults `$EVIDENCE_BUCKET`, `$INGEST_BUCKET` and
+  `$SAMPLE_BUCKET` to the code's names, so a secrets.env that leaves one out does not fail the init on
+  `mc mb "local/"` and stop the API starting.
+* The volume is found by label: `install.sh` and `install.ps1` decide whether to generate the schema
+  owner's password by asking Docker for the volume by the label Compose puts on it, not by one fixed
+  name, so a stack started under another project name is not taken for new and given a password
+  initdb never had.
+* The readiness register reports a missing `NOCTORNAL_TRUSTED_PROXY_HOPS` in production.
+* The development compose file's pins are held in test_image_context_and_production_stack.
 
-No Docker, no database: the shell and the PowerShell are run with stand-ins
-for `mc` and `docker`, and the register's probe is called directly.
+No Docker, no database: the shell and the PowerShell are run with stand-ins for `mc` and `docker`, and
+the register's probe is called directly.
 """
 from __future__ import annotations
 
@@ -25,7 +21,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from test_g48_image_context import _posix_shell, _script, _text
+from test_image_context_and_production_stack import _posix_shell, _script, _text
 from test_install_wizard import POWERSHELL, _ps_function, _shell_function
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -145,7 +141,7 @@ def test_the_installers_ask_for_the_volume_by_the_key_postgres_mounts():
 
 
 def _sh(tmp_path: Path, lines: list[str]) -> str:
-    from test_g48_install_env_data import _bash
+    from test_install_env_local_is_data import _bash
     bash = _bash()
     if bash is None:
         pytest.skip("no bash")
@@ -204,7 +200,7 @@ def test_an_engine_that_does_not_answer_or_refuses_is_unknown_never_new(tmp_path
 
 def test_the_question_asked_of_docker_is_the_one_the_comment_says(tmp_path):
     log = tmp_path / "docker.log"
-    from test_g48_install_env_data import _bash
+    from test_install_env_local_is_data import _bash
     bash = _bash()
     if bash is None:
         pytest.skip("no bash")

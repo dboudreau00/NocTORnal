@@ -1,8 +1,7 @@
-"""The persona gate, persona_session and a persona's polls (2026-09-24).
+"""The persona gate, persona_session and a persona's polls.
 
-The six steps (check, lock, hours, authority, pace, route and lease), the
-platform's answers recorded on the persona before it is unlocked, the
-suspension notifications, the reseal of a moved credential, and the route
+The six steps (check, lock, hours, authority, pace, route and lease), the platform's answers recorded on the
+persona before it is unlocked, the suspension notifications, the reseal of a moved credential, and the route
 token kept out of every stored error. DATABASE_URL-gated; no network.
 """
 from __future__ import annotations
@@ -209,8 +208,7 @@ def test_the_persona_gap_is_waited(conn, world):
 
 
 def test_a_stamp_ahead_of_the_clock_waits_the_whole_gap(conn, world):
-    """The database clock stepped back after the last request: the gap is
-    waited in full, never skipped (2026-09-25)."""
+    """If the database clock steps back after the last request, the gap is waited in full, never skipped."""
     from noctornal_api.collection import persona_session
 
     conn.execute("UPDATE collect.collection_account SET last_request_at = "
@@ -269,10 +267,8 @@ def test_abandoned_work_cools_the_persona_before_the_unlock(conn, world, monkeyp
 
 
 def test_an_attended_act_answers_the_platforms_wait_with_its_end_in_utc(conn, world):
-    """The sentence for a platform's wait carries the end of the wait in
-    UTC, which until 2026-09-25 it left out. The act that met the wait and
-    the next act, refused at the gate by the live hold, give the same
-    answer."""
+    """The sentence for a platform's wait carries the end of the wait in UTC. The act that met the wait and
+    the next act, refused at the gate by the live hold, give the same answer."""
     from noctornal_api.collection import (
         PersonaUnavailable,
         RateLimited,
@@ -472,10 +468,8 @@ def test_a_persona_resting_outside_its_hours_is_held_and_spread_past_the_opening
 
 
 def test_one_reading_of_the_schedule_counts_a_resting_source_as_held(conn, world):
-    """2026-09-25: the cron read the schedule twice, due
-    and then held, and the first reading moves a source resting outside
-    its persona's hours past `now`, so the second no longer counted it.
-    due_and_held answers both from one reading."""
+    """due_and_held answers both lists from one reading of the schedule: a first reading moves a source
+    resting outside its persona's hours past `now`, so a second reading would not count it as held."""
     from noctornal_api.collection import CollectionService
 
     now = datetime.now(timezone.utc)
@@ -489,6 +483,4 @@ def test_one_reading_of_the_schedule_counts_a_resting_source_as_held(conn, world
     due, held = svc.due_and_held()
     assert world["source"] in {s["id"] for s in held}
     assert world["source"] not in {s["id"] for s in due}
-    # The two-reading shape this replaced: the source was moved by the
-    # first reading, so a second one does not see it at all.
     assert world["source"] not in {s["id"] for s in svc.held_sources()}

@@ -1,8 +1,6 @@
-"""The Lab pane's later fixes (review of 2026-09-22, closed on
-2026-09-23), held by reading the shipped console and the sample router.
+"""The Lab pane's workflow invariants, held by reading the shipped console and the sample router.
 
-Beside `test_lab_ui_invariants.py`, which holds the earlier fixes. Each test
-names the finding it holds. Pure: no database, no browser.
+Beside `test_lab_ui_invariants.py`. Pure: no database, no browser.
 """
 from __future__ import annotations
 
@@ -54,10 +52,6 @@ def _route(name: str) -> str:
     return src[start:nxt if nxt > 0 else len(src)]
 
 
-# ---------------------------------------------------------------------------
-# ux13-lab:no-assign-or-record-analysis
-# ---------------------------------------------------------------------------
-
 def test_a_malware_analyst_can_assign_and_record_from_the_card():
     """The API had assign and analysis routes and the console called
     neither, so the lifecycle the filter advertises could not be advanced
@@ -105,8 +99,8 @@ def test_the_propose_route_derives_the_proposal_and_takes_only_an_index():
     svc = (SRC / "samples.py").read_text(encoding="utf-8")
     body = svc[svc.index("def propose_extracted_selector("):]
     body = body[:body.index("\n    def ", 10)]
-    # The read-only states by the shared set, not a literal copy (c7,
-    # 2026-09-24); the route also calls the gate's own refusal first.
+    # The read-only states come from the shared set, not a literal copy; the route also calls the gate's own
+    # refusal first.
     for refusal in ("not attached to a case", "in CONTENT_READ_ONLY_STATES",
                     "compartments its case"):
         assert refusal in body, f"proposing no longer refuses: {refusal}"
@@ -115,10 +109,9 @@ def test_the_propose_route_derives_the_proposal_and_takes_only_an_index():
 
 
 def test_proposing_answers_the_same_whatever_the_case_holds():
-    """The verifier's existence oracle (2026-09-23): a malware analyst holds
-    no case access, and the answer said which of the values they typed were
-    entities in the case (with node ids), which were proposed and in what
-    state, and the case's code."""
+    """Proposing answers the same whatever the case holds: a malware analyst holds no case access, so the
+    answer must not say which typed values are entities in the case (with node ids), which were proposed and
+    in what state, or the case's code."""
     svc = (SRC / "samples.py").read_text(encoding="utf-8")
     body = svc[svc.index("def propose_extracted_selector("):]
     body = body[:body.index("\n    def ", 10)]
@@ -133,7 +126,7 @@ def test_proposing_answers_the_same_whatever_the_case_holds():
     # Which it was goes to the audit trail instead.
     for outcome in ('"queued"', '"already_proposed"', '"already_in_graph"'):
         assert outcome in code
-    # And the closed-case refusal no longer names the case.
+    # And the closed-case refusal does not name the case.
     assert "f\"{code} is" not in code
     assert "status_code=202" in _route("propose_selector")
     sel = _code(_fn("extractedSelector"))
@@ -149,10 +142,6 @@ def test_assign_analysis_and_detonation_refuse_a_sample_the_caller_cannot_see():
     assert "eligible_assignees(sample_id)" in assign, (
         "any uuid can still be assigned the sample")
 
-
-# ---------------------------------------------------------------------------
-# ux13-lab:detail-opens-offscreen
-# ---------------------------------------------------------------------------
 
 def test_the_card_opens_under_its_row_takes_focus_and_marks_the_row():
     """The card sat after the whole queue and opened off-screen, so Open
@@ -188,9 +177,8 @@ def test_close_puts_focus_back_on_the_row_it_came_from():
 
 
 def test_close_still_finds_the_row_after_an_action_redrew_the_list():
-    """The verifier (2026-09-23): assign, record and reject redraw the list
-    and re-open the card with no opener, so the card kept the old,
-    disconnected Open button and Close dropped focus on the page."""
+    """Assign, record and reject redraw the list and re-open the card with no opener, so Close must find the
+    redrawn row's button rather than the old, disconnected one, or it drops focus on the page."""
     place = _code(_fn("smpPlaceDetail"))
     assert "smpOpen.opener.isConnected" in place
     assert "smpOpen.opener = row.querySelector('.smp-open')" in place, (
@@ -203,10 +191,6 @@ def test_close_still_finds_the_row_after_an_action_redrew_the_list():
     # The actions that redraw really do re-open without an opener.
     assert "await openSample(s.id);" in _lab()
 
-
-# ---------------------------------------------------------------------------
-# ux13-lab:submit-form-ignores-refusal-and-scope
-# ---------------------------------------------------------------------------
 
 def test_submit_is_closed_with_the_reason_while_ingest_is_refused():
     gate = _fn("paintSubmitGate")
@@ -228,10 +212,6 @@ def test_submit_offers_the_analysts_own_compartments_and_sends_them():
         assert key in policy
 
 
-# ---------------------------------------------------------------------------
-# ux13-lab:label-chip-understates-handling
-# ---------------------------------------------------------------------------
-
 def test_the_chips_show_the_labels_a_sample_is_handled_at():
     for fn in ("sampleRow", "sampleProvenance"):
         body = _fn(fn)
@@ -249,16 +229,12 @@ def test_the_chips_show_the_labels_a_sample_is_handled_at():
         assert field in router
 
 
-# ---------------------------------------------------------------------------
-# ux13-lab:lab-times-utc-unlabelled
-# ---------------------------------------------------------------------------
-
 def test_every_lab_time_is_utc_and_says_so():
     """The Lab sliced the ISO string, which is UTC with no label, while the
     rest of the console used the browser's zone. Every time in the Lab now
     goes through fmtTime, which prints UTC and says so."""
     lab = _code(_lab())
-    # The old shape: an ISO string cut to the minute and its T replaced.
+    # Refused: an ISO string cut to the minute with its T replaced.
     assert ".slice(0, 16).replace('T'" not in lab
     assert not re.search(r"_at\)?\.slice\(0, 1[0-9]\)", lab), (
         "a timestamp is cut out of its ISO string instead of formatted")
@@ -269,10 +245,6 @@ def test_every_lab_time_is_utc_and_says_so():
                "detonationRow", "analysisRow"):
         assert "fmtTime(" in _fn(fn), f"{fn} prints a time some other way"
 
-
-# ---------------------------------------------------------------------------
-# ux13-lab:detonation-authoriser-uuid
-# ---------------------------------------------------------------------------
 
 def test_the_authoriser_is_picked_by_name_and_echoed():
     panel = _fn("detonationPanel")
@@ -287,10 +259,6 @@ def test_the_authoriser_is_picked_by_name_and_echoed():
     assert "authorised_by == requested_by" in det, "a requester can sign off their own"
     assert "detonation_authorisers(" in det
 
-
-# ---------------------------------------------------------------------------
-# ux13-lab:legal-banner-copy
-# ---------------------------------------------------------------------------
 
 def test_the_banner_says_it_once_in_the_analysts_words_and_folds():
     policy = _fn("loadSamplePolicy")
@@ -314,10 +282,6 @@ def test_the_banner_says_it_once_in_the_analysts_words_and_folds():
     assert "absolute sense" not in notice, "the notice's garbled phrase is back"
     assert notice.count("Counsel must review") == 1
 
-
-# ---------------------------------------------------------------------------
-# gap-reject-step-up
-# ---------------------------------------------------------------------------
 
 def test_rejecting_needs_a_fresh_sign_in_server_and_console():
     reject = _route("reject")

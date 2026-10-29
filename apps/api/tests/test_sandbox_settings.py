@@ -1,13 +1,10 @@
-"""The sandbox settings reader and its production refusals (F14,
-2026-09-24). Pure.
+"""The sandbox settings reader and its production refusals. Pure.
 
-Unset means off with no problem; the exposure and the ceiling are the
-operator's declarations with no default; AMBER_STRICT and RED are refused
-as ceilings; network routes and machines are classed; the default route
-must be offered; a private sandbox address needs its network; production
-refuses http, credentials in the URL, a missing token, an undeclared
-exposure or ceiling, a bad route list, and a sandbox with no egress proxy,
-naming variables and never values; there is no raw-submission setting.
+Unset means off with no problem; the exposure and the ceiling are the operator's declarations with no
+default; AMBER_STRICT and RED are refused as ceilings; network routes and machines are classed; the
+default route must be offered; a private sandbox address needs its network; production refuses http,
+credentials in the URL, a missing token, an undeclared exposure or ceiling, a bad route list, and a
+sandbox with no egress proxy, naming variables and never values; there is no raw-submission setting.
 """
 from __future__ import annotations
 

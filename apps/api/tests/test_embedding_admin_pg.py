@@ -1,10 +1,9 @@
-"""Administration, Embeddings (F6.3, embeddings, 2026-09-24).
+"""Administration, Embeddings.
 
-Every route needs embedding.manage (SYS_ADMIN) and a fresh step-up.
-Figures need the global collection.read as well and follow the caller's
-own case-less clearance and compartments; a caller without it gets the
-spaces and the endpoint facts and no count anywhere. Activation refuses in
-words without a number; the console's pass answers in flags.
+Every route needs embedding.manage (SYS_ADMIN) and a fresh step-up. Figures need the global collection.read
+as well and follow the caller's own case-less clearance and compartments; a caller without it gets the
+spaces and the endpoint facts and no count anywhere. Activation refuses in words without a number; the
+console's pass answers in flags.
 
 Env-gated on DATABASE_URL. Prefix `eam-`.
 """
@@ -116,9 +115,8 @@ def _denials(conn, uid, permission):
 
 
 def test_the_gaps_refusal_is_the_gates_and_leaves_its_authz_denied_row(conn, world):
-    """The administrator who reads no documents is refused the gaps list by
-    the gate, which records it. The check used to sit in the handler and wrote
-    no row, so an officer reading the log never saw the attempt."""
+    """The administrator who reads no documents is refused the gaps list by the gate, which records it, so
+    an officer reading the log sees the attempt."""
     cl, auth = world["client"], H.auth(conn, world["admin"])
     space = world["svc"].active("WORDING")
     url = f"/api/v1/admin/embeddings/gaps?space_id={space.id}"
@@ -228,8 +226,7 @@ def test_the_console_pass_answers_in_flags_and_spends_its_meter(conn, world):
 
 
 def test_a_malformed_page_key_is_a_422_never_a_500(conn, world):
-    """An after_at of notadate reached a SQL cast and answered 500
-    (2026-09-25)."""
+    """An after_at of notadate is a 422: it must not reach a SQL cast and answer 500."""
     cl, auth = world["client"], H.auth(conn, world["reader_admin"])
     space = world["svc"].active("WORDING")
     base = f"/api/v1/admin/embeddings/gaps?space_id={space.id}"

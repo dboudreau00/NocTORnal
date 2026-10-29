@@ -1,8 +1,6 @@
-"""A socket timeout capped at the time left can wake a few milliseconds
-before the allowance's end (Windows' socket timer is coarser than the
-monotonic clock). It is still the allowance running out, and is reported
-as DeadlineExceeded, not as an uncertain request (found under load,
-2026-09-24). Nothing else near the end is.
+"""A socket timeout capped at the time left can wake a few milliseconds before the allowance's end
+(Windows' socket timer is coarser than the monotonic clock). It is still the allowance running out, and is
+reported as DeadlineExceeded, not as an uncertain request. Nothing else near the end is.
 """
 from __future__ import annotations
 

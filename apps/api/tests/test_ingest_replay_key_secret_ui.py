@@ -1,19 +1,13 @@
-"""The Feeds pane's replay target and the issued ingest key's secret
-(final review r2, 2026-09-24: c19 console half, and u25).
+"""The Feeds pane's replay target and the issued ingest key's secret.
 
-- c19: the dead-letter "Repair and replay" form offered "This case" for
-  every row and selected it, whatever case the row named, so with "All my
-  feeds" ticked the ordinary submit moved a fragment from its own case
-  into the open one. The server now refuses that move
-  (`test_breakglass_ingest_export_pg.py`); the form offers a row's own
-  cases and quarantine, and selects the row's own case.
-- the ingest key secret shown once under Feeds > Keys stayed on the
-  screen through a case switch, a pane change and a Feeds subtab change,
-  unlike the Admin card's one-time credentials, until the session ended.
+- The dead-letter "Repair and replay" form offers a row's own cases and quarantine, and selects the row's own
+  case, so an ordinary submit with "All my feeds" ticked cannot move a fragment from its own case into the
+  open one. The server refuses that move too (`test_breakglass_ingest_export_pg.py`).
+- The ingest key secret shown once under Feeds > Keys is cleared on a case switch, a pane change and a Feeds
+  subtab change, like the Admin card's one-time credentials.
 
-Pure, like `test_ui_invariants.py`: these read the shipped static assets.
-The check marked `needs_node` EXECUTES `replayTargets` under Node and
-skips where Node is absent.
+Pure, like `test_ui_invariants.py`: these read the shipped static assets. The check marked `needs_node`
+executes `replayTargets` under Node and skips where Node is absent.
 """
 from __future__ import annotations
 

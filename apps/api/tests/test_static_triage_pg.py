@@ -1,12 +1,10 @@
-"""The static-triage runner against the database (F11, 2026-09-24).
+"""The static-triage runner against the database.
 
-What these hold: one queued run per sample, merged requests that name
-every requester in custody; claim, verify, custody, children, results,
-in that order; a tamper alarm that survives and is never retried;
-findings discarded when the sample is rejected or its case closed
-mid-run; liveness by advisory lock with the lock taken before the claim
-commits; slots across connections; nothing written to the graph; machine rows that
-name their run and no analyst, and whose selectors an analyst proposes.
+What these hold: one queued run per sample, merged requests that name every requester in custody; claim,
+verify, custody, children, results, in that order; a tamper alarm that survives and is never retried;
+findings discarded when the sample is rejected or its case closed mid-run; liveness by advisory lock with
+the lock taken before the claim commits; slots across connections; nothing written to the graph; machine
+rows that name their run and no analyst, and whose selectors an analyst proposes.
 
 Email prefix `stt-`. Env-gated on DATABASE_URL.
 """
@@ -474,11 +472,9 @@ def test_a_dead_runner_is_swept_through_its_run_lock_and_requeued(conn, store):
 
 
 def test_a_retried_yara_scoped_request_keeps_its_versions_when_it_merges(conn, store):
-    """Found 2026-09-24: the RETRY a sweep queues unioned the
-    steps of the queued run it merged into but not the rule set versions,
-    so a retried yara-scoped request lost its version, or had its scope
-    widened to every open set, while its requester was still named in
-    custody. A RETRY now merges by the rule `enqueue` merges by."""
+    """The RETRY a sweep queues merges by the rule `enqueue` merges by: it unions the rule set versions
+    as well as the steps of the queued run it merged into, so a retried yara-scoped request keeps its
+    version and is not widened to every open set while its requester is still named in custody."""
     from noctornal_api import lab_triage
     who = make_user(conn, PREFIX)
     asker = make_user(conn, PREFIX)
@@ -578,7 +574,6 @@ def test_backfill_is_recorded_as_the_operators_decision(conn, store):
         """SELECT detail FROM audit.event WHERE action = 'SAMPLE_STATIC_TRIAGE_BACKFILL'
             ORDER BY seq DESC LIMIT 1""").fetchone()[0]
     assert detail["host_user"] == "operator-x" and detail["count"] == n
-    # Leave the rest of the estate's queue as it was.
     conn.execute("DELETE FROM lab.static_run WHERE trigger = 'BACKFILL' AND "
                  "status = 'QUEUED' AND requests->0->>'via' = "
                  "'lab_triage.py --backfill'")

@@ -115,10 +115,8 @@ Write-Host "  repo: $RepoRoot"
 
 Write-Step 'Checking the Python environment'
 
-# Every remedy printed below carries -c constraints.txt, the pins the
-# installers, CI and the image install from. Without it pip resolves each
-# >= floor to the newest release, and a developer who follows the remedy
-# word for word runs a stack nobody tested (c3, 2026-09-24).
+# Every remedy printed below carries -c constraints.txt, the pins the installers, CI and the image
+# use. Without it pip resolves each >= floor to the newest release, a stack nobody tested.
 
 if (-not (Test-Path -LiteralPath $Python)) {
     Stop-With "no virtual environment at $($RepoRoot)\.venv" @(
@@ -129,11 +127,9 @@ if (-not (Test-Path -LiteralPath $Python)) {
     )
 }
 
-# uvicorn and the two editable packages are what the last step actually needs.
-# numpy, selectolax and pefile are hard dependencies since 2026-09-24: a
-# venv built before then is told to reinstall here, not at the first CONCOR
-# run or forum poll. The optional extras (telegram, yara) are not probed;
-# their absence is a readiness gap.
+# Probe what the API needs, numpy, selectolax and pefile included, so a stale venv is told to
+# reinstall here rather than at the first CONCOR run or forum poll. The optional extras (telegram,
+# yara) are not probed: their absence is a readiness gap.
 $probe = Invoke-Capture $Python @('-c', 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile')
 if ($probe.Code -ne 0) {
     Write-Indented $probe.Text
@@ -230,9 +226,7 @@ else {
     if ($up.Code -ne 0) {
         Stop-With 'docker compose up failed' @(
             'Read the output above. Common causes:',
-            # The ports the compose file publishes today. 8080 and 4222
-            # were OpenFGA and NATS, removed in R13, and Mailpit's 1025
-            # was missing (Alpha 6 pre-release check, 2026-09-23).
+            # The ports infra/docker-compose.yml publishes; a test holds the two lists together.
             '  - a port is already taken (5432, 6379, 9000, 9001, 1025, 8025)',
             '    stop whatever else is using it, or stop a stale stack:',
             "      docker compose -f `"$ComposeFile`" down",
@@ -308,15 +302,11 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
 
-        # A name that changes how programs start is left out (2026-10-03). This loop is
-        # data, not script, but it
-        # still set any name, so `PATH`, `PYTHONPATH` or `COMSPEC` in a
-        # handed-over file redirected the next program this script starts.
-        # Not an allow-list on purpose: a new setting would silently stop
-        # loading. The same list is in scripts/_env.py, release/install.sh,
-        # scripts/launch.sh and scripts/open-ui.ps1; a test holds all five
-        # together. -contains and
-        # -like are case-insensitive, as Windows names are.
+        # Names that change how programs start are left out, so a handed-over file cannot redirect
+        # the next program this script starts. A deny-list, because an allow-list would silently
+        # drop a new setting. A test holds this list equal to the ones in scripts/_env.py,
+        # release/install.sh, scripts/launch.sh and scripts/open-ui.ps1. -contains and -like are
+        # case-insensitive, as Windows names are.
         $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4', 'PSMODULEPATH')
         $refusedPrefixes = @('BASH_', 'LD_', 'DYLD_', 'PYTHON', 'DOCKER_', 'COMPOSE_', 'GIT_', 'PIP_', 'NODE_')
         $refused = ($refusedExact -contains $name)
@@ -326,17 +316,10 @@ if (Test-Path -LiteralPath $EnvLocal) {
             continue
         }
 
-        # `$null -ne`, not `IsNullOrWhiteSpace`. GetEnvironmentVariable
-        # returns $null when the variable does not exist and "" when it
-        # exists and is empty -- and a variable that is DEFINED AND EMPTY
-        # is a deliberate choice the file must not overrule.
-        #
-        # Treating empty as absent meant an operator who blanked a
-        # variable to turn something OFF had the file's value put straight
-        # back. `SMTP_ALLOW_PLAINTEXT=` is the case that matters: emptied
-        # to stop plaintext SMTP, silently re-enabled on the next launch.
-        # `db.py` and `scripts/_env.py` both make this distinction on
-        # purpose; the launchers were undoing it.
+        # `$null -ne`, not `IsNullOrWhiteSpace`: GetEnvironmentVariable returns $null for an unset
+        # variable and "" for an empty one, and defined-but-empty is a deliberate choice the file
+        # must not overrule (`SMTP_ALLOW_PLAINTEXT=` emptied to stop plaintext SMTP, say). db.py and
+        # scripts/_env.py make the same distinction.
         $current = [System.Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $current) {
             if ($current -eq '') {
@@ -351,13 +334,9 @@ if (Test-Path -LiteralPath $EnvLocal) {
     }
 }
 
-# The key store is private to this user from the first byte (infra-9,
-# 2026-10-03). On Windows a new file inherits its folder's ACL, which is
-# every account that can read the project directory, and nothing restricted
-# it afterwards. The file is created empty, restricted, and only then
-# written, so the keys never exist in a file others can read. Not fatal when
-# icacls refuses (a FAT volume, say): the installer says so and goes on,
-# because a stopped install would leave no key store at all.
+# The key store is private to this user from the first byte: a new file inherits its folder's ACL,
+# so it is created empty, restricted, and only then written. Not fatal when icacls refuses (a FAT
+# volume, say): it says so and goes on, because a stopped install would leave no key store at all.
 function Protect-EnvLocal {
     param([string] $Path)
     if ($env:OS -ne 'Windows_NT') { return }
@@ -383,11 +362,8 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
         Add-Content -LiteralPath $EnvLocal -Value "NOCTORNAL_TOTP_KEK=$generated"
     }
     else {
-        # The header and the box below say everything the key seals, from
-        # security/sealed.py's SEALED_COLUMNS, and what the ingest pepper
-        # keys if it is kept here too. They said only that users would
-        # re-enrol their authenticators (Alpha 6 pre-release check,
-        # 2026-09-23).
+        # The header and the box below list everything the key seals (SEALED_COLUMNS in
+        # security/sealed.py) and what the ingest pepper keys if it is kept here too.
         # Create it empty and restrict it BEFORE the key is written.
         New-Item -ItemType File -Path $EnvLocal -Force | Out-Null
         Protect-EnvLocal -Path $EnvLocal
@@ -439,10 +415,9 @@ elseif (-not $kekFromEnvironment) {
     Write-Good 'TOTP key ready'
 }
 
-# A collector process (2026-10-02): persona credentials seal under a key of
-# their own. On this machine the API holds it and runs persona acts inline
-# (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector
-# service does. Appended, never replacing anything in the file.
+# Persona credentials seal under a key of their own. On this machine the API holds it and runs
+# persona acts inline (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector service
+# does. Appended, never replacing anything in the file.
 if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_PERSONA_KEK)) {
     $pbytes = New-Object byte[] 32
     $prng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -461,16 +436,11 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_PERSONA_KEK)) {
 
 Write-Step 'Setting the service connection details'
 
-# Dev-only credentials, mirroring infra/docker-compose.yml. They are the only
-# literal secrets allowed in this repo, they only ever address containers on
-# this machine's loopback, and a real deployment supplies all of these from
-# the environment or Vault instead.
-#
-# 127.0.0.1 rather than localhost: the compose file publishes on 127.0.0.1
-# only, so nothing answers on ::1, and Windows by default tries ::1 first
-# and waits about two seconds for each refused connection before trying
-# IPv4 (Alpha 6 pre-release check, 2026-09-23). These apply only where
-# .env.local and the environment say nothing.
+# Dev-only credentials, mirroring infra/docker-compose.yml: the only literal secrets allowed in this
+# repo, addressing containers on this machine's loopback only; a real deployment supplies them from
+# the environment or Vault. They apply only where .env.local and the environment say nothing.
+# 127.0.0.1, not localhost: compose publishes on 127.0.0.1 only, and Windows tries ::1 first and
+# waits about two seconds for each refused connection.
 $defaults = [ordered]@{
     DATABASE_URL     = 'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'
     # Rate limiting. Unset, the limiter falls back to per-process metering
@@ -481,35 +451,21 @@ $defaults = [ordered]@{
     MINIO_ACCESS_KEY = 'noctornal'
     MINIO_SECRET_KEY = 'dev_only_change_me'
     EVIDENCE_BUCKET  = 'noctornal-evidence'
-    # Raw ingest payloads, in their OWN bucket and deliberately without
-    # object lock. An exhibit is locked so not even root can delete it
-    # before its deadline; a partner's raw submission must stay deletable,
-    # because it runs on a short category clock and may have to go in
-    # response to a deletion order (decision 50). Compose creates it with
-    # `mc mb --ignore-existing local/noctornal-raw` -- note the absent
-    # `--with-lock`, which is the difference that matters.
+    # Raw ingest payloads, in their own bucket and deliberately without object lock: a partner's
+    # raw submission runs on a short category clock and may have to go on a deletion order
+    # (decision 50). Compose creates it without `--with-lock`.
     INGEST_BUCKET    = 'noctornal-raw'
-    # 2026-09-24: raw markup of collected forum pages, again without
-    # object lock, because it is deleted with its document.
+    # Raw markup of collected forum pages, also without object lock: it is deleted with its document.
     COLLECT_RAW_BUCKET = 'noctornal-collect-raw'
-    # A collector process (2026-10-02): there is no collector process on
-    # this machine, so persona acts run inside the API, as they always did
-    # here. Refused in production.
+    # No collector process runs on this machine, so persona acts run inside the API. Refused in
+    # production.
     NOCTORNAL_COLLECTOR_INLINE = '1'
 }
 
 foreach ($name in $defaults.Keys) {
-    # Same "defined, not merely non-empty" rule as the .env.local loader
-    # above. Found by the test written for that one, which is the point of
-    # having written it: this is a SECOND implementation of the same rule
-    # in the same file, and it disagreed.
-    #
-    # It matters most for DATABASE_URL. `db.py` distinguishes set-but-empty
-    # from unset precisely so a blanked DSN produces a refusal instead of
-    # a silent default -- and this quietly replaced it with the local
-    # development stack, which is the one outcome an operator who blanked
-    # it was trying to prevent. `REDIS_URL=` is the other: emptied to force
-    # per-process metering, restored to the dev stack's Redis here.
+    # The same "defined, not merely non-empty" rule as the .env.local loader above. It matters most
+    # for DATABASE_URL, where db.py turns a blanked DSN into a refusal rather than a silent default,
+    # and for `REDIS_URL=`, emptied to force per-process metering.
     $current = [System.Environment]::GetEnvironmentVariable($name, 'Process')
     if ($null -eq $current) {
         [System.Environment]::SetEnvironmentVariable($name, $defaults[$name], 'Process')
@@ -572,13 +528,10 @@ Write-Step 'Checking for a user account'
 $countCode = 'import noctornal_api.db as d; print(d.connect().execute(''select count(*) from iam.app_user'').fetchone()[0])'
 $count = Invoke-Capture $Python @('-c', $countCode)
 
-# Active SECURITY_OFFICER holders, read for the closing message only. The
-# account `create-user` makes by default holds CASE_OWNER and SYS_ADMIN, so
-# on a fresh install nobody holds this role and the readiness register's
-# blocking security_officer_present check fails with nothing on screen to
-# say so (Alpha 6 pre-release check, 2026-09-23). No double quotes inside
-# the Python: Windows PowerShell 5.1 does not escape them when it passes an
-# argument to a native program. -1 means the count could not be read.
+# Active SECURITY_OFFICER holders, for the closing message only: `create-user` does not grant the
+# role by default, so a fresh install fails the blocking security_officer_present check. No double
+# quotes inside the Python: Windows PowerShell 5.1 does not escape them for a native program. -1
+# means the count could not be read.
 $officerCode = 'import noctornal_api.db as d; print(d.connect().execute(''select count(distinct u.id) from iam.app_user u join iam.user_role ur on ur.user_id = u.id where ur.role_key = %s and u.is_active'', (''SECURITY_OFFICER'',)).fetchone()[0])'
 $officers = -1
 $officerCount = Invoke-Capture $Python @('-c', $officerCode)
@@ -595,8 +548,6 @@ if ($count.Code -ne 0) {
 else {
     $users = 0
     if ([int]::TryParse($count.Text.Trim(), [ref] $users) -and $users -gt 0) {
-        # Agreed with the count, not bracketed (Alpha 6 pre-release check,
-        # 2026-09-23).
         if ($users -eq 1) { Write-Good '1 user account exists' }
         else { Write-Good "$users user accounts exist" }
     }
@@ -648,10 +599,8 @@ Write-Host ''
 Write-Host '  Everything is up. Open this in your browser:' -ForegroundColor Green
 Write-Host "      http://127.0.0.1:$Port/ui/" -ForegroundColor White
 Write-Host ''
-# What to do next, for the Windows installer as for install.sh: the
-# README's showcase recipe with this platform's interpreter, and the
-# Security Officer the first account does not hold (Alpha 6 pre-release
-# check, 2026-09-23).
+# What to do next, as install.sh says it: the README's showcase recipe with this platform's
+# interpreter, and the Security Officer the first account does not hold.
 Write-Host '  Next, in a second terminal at the repo root (no exports needed:'
 Write-Host '  bootstrap.py reads .env.local). To fill the console with the'
 Write-Host '  showcase case the README screenshots come from, follow README.md,'
@@ -671,11 +620,9 @@ if ($officers -le 0) {
     Write-Host '  fails, so collection runs are refused, and break-glass is refused' -ForegroundColor Yellow
     Write-Host '  because nobody could review it. Give the role to a second person,' -ForegroundColor Yellow
     Write-Host '  not to your own account (release\INSTALL.md, "After installing"):' -ForegroundColor Yellow
-    # security.officer@, not officer@: officer@example.org is the account
-    # seed_readme_showcase.py creates, so after the README recipe this
-    # command exited 1 with "already exists", and run first it would have
-    # made the seeder adopt the real officer (Alpha 6 pre-release check,
-    # 2026-09-23).
+    # security.officer@, not officer@: seed_readme_showcase.py creates officer@example.org, so
+    # that address fails with "already exists" after the README recipe, and the seeder would adopt
+    # the account if this ran first.
     Write-Host '      .venv\Scripts\python scripts\bootstrap.py create-user --email security.officer@example.org --name "Officer Name" --roles SECURITY_OFFICER'
 }
 Write-Host ''

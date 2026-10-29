@@ -1,34 +1,27 @@
-"""Redis isolation, enforced: the limiter's own Redis user (ROADMAP-REMAINING
-"Redis isolation, enforced"; 2026-10-02).
+"""Redis isolation, enforced: the limiter's own Redis user.
 
-Until this date `redis_limiter_isolated` could only REPORT keys somebody
-else had written to the limiter's Redis, and the production Redis had one
-user, `default`, holding every command on every key behind one password.
-Now infra/production/compose.yml starts Redis with an ACL file in which
-`default` is off and `noctornal_limiter` may touch keys under `rl:` and run
-the commands the limiter sends, and nothing else.
+`redis_limiter_isolated` can only REPORT keys somebody else has written to the limiter's Redis, and a
+production Redis with one user, `default`, holds every command on every key behind one password.
+So infra/production/compose.yml starts Redis with an ACL file in which `default` is off and
+`noctornal_limiter` may touch keys under `rl:` and run the commands the limiter sends, and nothing else.
 
 Held here:
 
-* the compose file writes exactly `ratelimit_redis.limiter_acl_rules()`,
-  disables `default`, uses no `requirepass`, refuses a REDIS_URL naming it
-  that does not sign in as the limiter and starts idle for one naming
-  another host (its start script RUN under sh since the review of
-  2026-10-02), and health-checks as the limiter;
-* the limiter sends no CLIENT SETINFO, so the ACL grants none, and CI
-  starts the ACL Redis the real-Redis leg below needs, so it never skips;
-* `LIMITER_ACL_COMMANDS` covers every command the limiter's code sends
-  (the Lua script's calls included) and is what the readiness row allows;
-* the readiness row parses ACL GETUSER in every shape Redis has used, and
-  under NOCTORNAL_ENV=production fails closed on each way the isolation
-  can be missing, while a development Redis still passes on its census;
-* `maxmemory_policy` asks INFO first, so the production user needs no
-  CONFIG.
+* the compose file writes exactly `ratelimit_redis.limiter_acl_rules()`, disables `default`, uses no
+  `requirepass`, refuses a REDIS_URL naming it that does not sign in as the limiter and starts idle for one
+  naming another host (its start script is RUN under sh), and health-checks as the limiter;
+* the limiter sends no CLIENT SETINFO, so the ACL grants none, and CI starts the ACL Redis the real-Redis
+  leg below needs, so it never skips;
+* `LIMITER_ACL_COMMANDS` covers every command the limiter's code sends (the Lua script's calls included)
+  and is what the readiness row allows;
+* the readiness row parses ACL GETUSER in every shape Redis has used, and under NOCTORNAL_ENV=production
+  fails closed on each way the isolation can be missing, while a development Redis still passes on its
+  census;
+* `maxmemory_policy` asks INFO first, so the production user needs no CONFIG.
 
-The last section runs against a Redis started with the compose file's own
-start script when NOCTORNAL_TEST_ACL_REDIS_URL is set (the limiter's URL on
-it), and against a second user on that server when
-NOCTORNAL_TEST_ACL_REDIS_TENANT_URL is set. Nothing else needs a server.
+The last section runs against a Redis started with the compose file's own start script when
+NOCTORNAL_TEST_ACL_REDIS_URL is set (the limiter's URL on it), and against a second user on that server
+when NOCTORNAL_TEST_ACL_REDIS_TENANT_URL is set. Nothing else needs a server.
 """
 from __future__ import annotations
 
@@ -93,10 +86,9 @@ def test_the_server_runs_the_acl_file_and_no_requirepass(redis_service):
     assert "--maxmemory-policy noeviction" in script
 
 
-# The start check, RUN (review of 2026-10-02): the compose file's own script
-# under sh, with `echo` where redis-server is exec'd. Until then it was read
-# as text, and a REDIS_URL naming the operator's own Redis was refused with
-# a pointer to the installer step, which leaves such a URL alone.
+# The start check, RUN: the compose file's own script under sh, with `echo` where redis-server is exec'd.
+# Read as text, it would miss a REDIS_URL naming the operator's own Redis being refused with a pointer to
+# the installer step, which leaves such a URL alone.
 
 needs_sh = pytest.mark.skipif(posix_shell() is None, reason="no POSIX sh on this machine")
 _PW = "Sx4-acl-pass"
@@ -208,9 +200,8 @@ def test_the_commands_cover_what_the_script_calls():
 
 
 def test_the_limiter_sends_no_client_command_so_none_is_granted():
-    """CLIENT SETINFO was granted only so redis-py's library naming did not
-    write denials into ACL LOG; the client now sends none (review of
-    2026-10-02). The real-Redis leg reads ACL LOG to hold it."""
+    """CLIENT SETINFO would be granted only so redis-py's library naming did not write denials into ACL
+    LOG; the client sends none. The real-Redis leg reads ACL LOG to hold it."""
     assert not any(c.startswith("client") for c in LIMITER_ACL_COMMANDS)
     backend = RedisBackend("redis://limiter.test:6379/0")
     kwargs = backend._redis.connection_pool.connection_kwargs
@@ -384,8 +375,7 @@ def test_a_confined_limiter_passes_and_says_what_it_read(served):
     assert (f"lets the limiter's user {LIMITER_ACL_USER} read and write only keys "
             f"under rl: and run only the {len(LIMITER_ACL_COMMANDS)} commands it sends, "
             f"and the default user is disabled") in check.evidence, check.evidence
-    # And what it does not confine, which "confined to rl:" had hidden
-    # (review of 2026-10-02).
+    # And what it does not confine, which "confined to rl:" would hide.
     assert ("can still list every key name in its database, read INFO and read "
             "any user's ACL rules") in check.evidence
     assert "would show only in the key census" in check.evidence
@@ -483,11 +473,9 @@ def _ci_step(text: str, name: str) -> str:
 
 
 def test_ci_starts_the_acl_redis_and_names_both_urls(redis_service):
-    """The leg below skips without its two variables, and CI's "No tests
-    were skipped" gate then fails the build (review of 2026-10-02); set
-    without a server, it fails instead. So the workflow starts one from
-    the compose file's own start script, on both legs and before the Tests
-    step, and points both variables at it."""
+    """The leg below skips without its two variables, and CI's "No tests were skipped" gate then fails the
+    build; set without a server, it fails instead. So the workflow starts one from the compose file's own
+    start script, on both legs and before the Tests step, and points both variables at it."""
     text = CI.read_text(encoding="utf-8")
     env = text[text.index("\nenv:\n"):text.index("\njobs:\n")]
     urls = dict(re.findall(r"^  (NOCTORNAL_TEST_ACL_REDIS_\w*URL): (\S+)$", env, re.M))
@@ -511,12 +499,9 @@ def test_ci_starts_the_acl_redis_and_names_both_urls(redis_service):
     assert re.search(r"ACL_TENANT_PASSWORD=(\S+)", step).group(1) == tenant.password
 
 
-#: Every skip the files of the 2026-10 secrets and Redis work may carry, each
-#: with what makes it false on CI's runner. A skip is a line in the first
-#: leg's summary, and "No tests were skipped" fails the build for it (2026-10-03: a skipif
-#: on Windows PowerShell did, on the Linux
-#: runner, under a count the fixer took on Windows). A new skip has to be
-#: added here with its reason, which is the moment to ask whether CI has it.
+#: Every skip the secrets and Redis test files may carry, each with what makes it false on CI's runner. A
+#: skip is a line in the first leg's summary, and "No tests were skipped" fails the build for it. A new
+#: skip has to be added here with its reason, which is the moment to ask whether CI has it.
 CI_SATISFIES = {
     "no POSIX sh on this machine": "ubuntu-latest has /bin/sh",
     "no bash on this machine": "ubuntu-latest has bash",
@@ -687,11 +672,9 @@ def test_the_row_passes_on_the_real_acl_in_production(monkeypatch):
 @pytest.mark.skipif(not (ACL_URL and TENANT_URL),
                     reason="a second user on the ACL Redis is not configured")
 def test_the_limiter_and_its_rows_leave_acl_log_empty(monkeypatch):
-    """Nothing the limiter or its two readiness rows send is refused by
-    the ACL, so a denial in ACL LOG is always somebody else's attempt. It
-    is what took CLIENT SETINFO off the grants (review of 2026-10-02): an
-    ACL without it and a client still sending it fail here. The tenant
-    reads the log, which the limiter's user may not."""
+    """Nothing the limiter or its two readiness rows send is refused by the ACL, so a denial in ACL LOG is
+    always somebody else's attempt. An ACL without CLIENT SETINFO and a client still sending it fail here.
+    The tenant reads the log, which the limiter's user may not."""
     tenant = _client(TENANT_URL)
     try:
         tenant.execute_command("ACL", "LOG", "RESET")

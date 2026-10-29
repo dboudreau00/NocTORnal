@@ -1,26 +1,19 @@
-"""The audit chain verifier — and the proof that it can fail.
+"""The audit chain verifier, and the proof that it can fail.
 
-A tamper-evidence check that has only ever been run against intact data is
-not known to work. These tests deliberately break the chain in each of the
-two ways it can break and assert the verifier notices, because the failure
-mode that matters is a verifier which returns "intact" unconditionally —
-that is strictly worse than having none, since it manufactures assurance.
+A tamper-evidence check that has only ever been run against intact data is not known to work. These
+tests deliberately break the chain in each of the two ways it can break and assert the verifier
+notices, because a verifier that returns "intact" unconditionally is worse than none: it manufactures
+assurance.
 
-## How the tampering is done, and why it is safe
+How the tampering is done, and why it is safe: `audit.event` carries row-level and statement-level
+triggers that block UPDATE, DELETE and TRUNCATE (0013, 0052), so ordinary SQL cannot corrupt it. `ALTER
+TABLE ... DISABLE TRIGGER USER` is the established idiom in this suite for exactly this (see
+`test_evidence_pg.py`), and DDL in Postgres is transactional: the disable, the tamper and the re-read
+all happen inside one transaction that is then rolled back. Nothing persists, the triggers are never
+left off, and no other test can observe a broken chain.
 
-`audit.event` carries row-level and statement-level triggers that block
-UPDATE, DELETE and TRUNCATE (0013, 0052), so ordinary SQL cannot corrupt
-it — which is the point of the table and also the obstacle to testing it.
-
-`ALTER TABLE ... DISABLE TRIGGER USER` is the established idiom in this
-suite for exactly this (see `test_evidence_pg.py`), and **DDL in Postgres
-is transactional**: the disable, the tamper and the re-read all happen
-inside one transaction that is then rolled back. Nothing persists, the
-triggers are never left off, and no other test can observe a broken chain.
-
-The connection here is deliberately NOT the autocommit one from
-`db.connect()` — with autocommit there is no transaction to roll back and
-the tamper would be permanent.
+The connection here is deliberately not the autocommit one from `db.connect()`: with autocommit there
+is no transaction to roll back and the tamper would be permanent.
 """
 from __future__ import annotations
 
@@ -49,20 +42,16 @@ def tamperable():
 
 
 def _seed(conn, n: int = 6) -> int:
-    """Write real audit rows through the trigger; return the seq to verify FROM.
+    """Write real audit rows through the trigger; return the seq to verify from.
 
-    Hand-inserting `row_hash` would test the verifier against the
-    verifier's own idea of the hash, which is circular. These go in as
-    plain INSERTs and `audit.chain_hash()` computes the chain.
+    Hand-inserting `row_hash` would test the verifier against its own idea of the hash, which is
+    circular. These go in as plain INSERTs and `audit.chain_hash()` computes the chain.
 
-    THE RETURNED WATERMARK MATTERS. These tests must verify only the rows
-    they wrote, never the whole table, because the table is shared with
-    every other suite and accumulates real history. The development
-    database currently carries 67 pre-existing FORK anomalies (two rows
-    claiming one predecessor) from concurrent writes; asserting `intact`
-    over all 60,000 rows would fail for reasons that have nothing to do
-    with the code under test, and "fix the test by loosening the
-    assertion" is how a real finding gets buried.
+    The returned watermark matters. These tests must verify only the rows they wrote, never the whole
+    table, because the table is shared with every other suite and accumulates real history, including
+    pre-existing FORK anomalies from concurrent writes. Asserting `intact` over all of it would fail for
+    reasons unrelated to the code under test, and loosening the assertion is how a real finding gets
+    buried.
     """
     start = conn.execute("SELECT COALESCE(MAX(seq), 0) FROM audit.event").fetchone()[0]
     for i in range(n):
@@ -97,10 +86,9 @@ def test_in_place_edit_is_a_CONTENT_break(tamperable):
     report = verify_chain(tamperable, since_seq=since)
     assert not report.intact
     kinds = [b.kind for b in report.breaks]
-    # CONTENT only: the row's own hash no longer matches its columns, but
-    # its stored prev_hash is still its predecessor's, so the LINK holds.
-    # If this ever reports LINK too, the recompute is reading the wrong
-    # prev_hash and the two checks are not independent.
+    # CONTENT only: the row's own hash no longer matches its columns, but its stored prev_hash is still
+    # its predecessor's, so the LINK holds. If this also reports LINK, the recompute is reading the
+    # wrong prev_hash and the two checks are not independent.
     assert kinds == ["CONTENT"], kinds
 
 
@@ -117,8 +105,8 @@ def test_deleted_row_is_a_LINK_break(tamperable):
     report = verify_chain(tamperable, since_seq=since)
     assert not report.intact
     kinds = [b.kind for b in report.breaks]
-    # Exactly one: the SUCCESSOR of the deleted row, whose stored prev_hash
-    # now points at a hash no longer present. Every other row is untouched.
+    # Exactly one: the successor of the deleted row, whose stored prev_hash now points at a hash no
+    # longer present. Every other row is untouched.
     assert kinds == ["LINK"], kinds
 
 
@@ -162,10 +150,8 @@ class _RowCounter:
 
 
 def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
-    """2026-10-07: every row of the chain came back to Python, 380 MB
-    and 35 seconds of the API process for a 1.5 million row log. A clean
-    chain now answers one summary row however long it is, and a tampered
-    one adds the rows that do not verify."""
+    """A clean chain answers one summary row however long it is, and a tampered one adds the rows that
+    do not verify, so the API process does not pull the whole log into Python."""
     from noctornal_api.audit_verify import verify_chain
 
     since = _seed(tamperable, n=12)
@@ -204,12 +190,10 @@ def test_empty_window_is_not_reported_as_a_pass(tamperable):
 def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
     """Add a second row claiming the newest row's predecessor.
 
-    The twin's `row_hash` is computed with the SAME expression the trigger
-    uses, imported from the module under test rather than re-typed, so the
-    fork is LINK-clean and CONTENT-clean: the only thing wrong with it is
-    that two rows now claim one predecessor. A hand-invented hash would be
-    flagged CONTENT and the test would prove nothing about forks — which
-    is exactly what the first version of this did.
+    The twin's `row_hash` is computed with the same expression the trigger uses, imported from the
+    module under test rather than re-typed, so the fork is LINK-clean and CONTENT-clean: the only thing
+    wrong with it is that two rows claim one predecessor. A hand-invented hash would be flagged CONTENT
+    and prove nothing about forks.
     """
     from noctornal_api.audit_verify import _HASH_EXPR
 
@@ -230,18 +214,12 @@ def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
 
 
 def test_a_fork_written_since_0149_is_reported_AND_is_tampering(tamperable):
-    """Two rows sharing a predecessor, written after the boundary 0149
-    records, are a break.
+    """Two rows sharing a predecessor, written after the boundary 0149 records, are a break.
 
-    This test used to say the opposite, for the reason its docstring gave:
-    `seq` was drawn from `nextval()` before the chaining trigger took its
-    advisory lock, so concurrent writers could chain off the same tail, and
-    counting forks as breaks made `/audit/verify` answer BROKEN on untouched
-    history. That held until 0149 (2026-10-03), which draws the number inside
-    the lock. A fork written since cannot come from honest traffic and is the
-    dead-end row an owner can delete without orphaning anything. The legacy
-    half (a fork with a claimant at or below the boundary is listed, not a
-    break) is `test_ledger_chain_g49_pg.py`.
+    0149 draws `seq` inside the chaining trigger's advisory lock, so a fork written since cannot come
+    from honest traffic and is the dead-end row an owner can delete without orphaning anything. The
+    legacy half (a fork with a claimant at or below the boundary is listed, not a break) is
+    `test_ledger_chain_pg.py`.
     """
     from noctornal_api.audit_verify import verify_chain
 
@@ -287,12 +265,10 @@ def test_a_fork_does_not_mask_real_tampering(tamperable):
 def _forge_second_genesis(conn, action="SECOND_GENESIS") -> None:
     """Insert a row claiming to be the chain's first.
 
-    LINK-clean and CONTENT-clean by construction: the hash input for a
-    NULL-predecessor row is the literal string 'GENESIS', so a forgery
-    computed with the module's own `_HASH_EXPR` recomputes exactly. Before
-    the anchor check existed this row was not merely unreported as
-    tampering -- it was dropped from the report entirely, and `intact`
-    stayed True.
+    LINK-clean and CONTENT-clean by construction: the hash input for a NULL-predecessor row is the
+    literal string 'GENESIS', so a forgery computed with the module's own `_HASH_EXPR` recomputes
+    exactly. Without the anchor check it would be dropped from the report entirely and `intact` would
+    stay True.
     """
     from noctornal_api.audit_verify import _HASH_EXPR
 
@@ -314,18 +290,15 @@ def _forge_second_genesis(conn, action="SECOND_GENESIS") -> None:
 
 
 def test_a_second_genesis_is_reported_as_tampering(tamperable):
-    """A row with `prev_hash NULL` passed every check: LINK exempts it by
-    construction, FORK filters `prev_hash IS NOT NULL` (and a NULL never
-    equals a NULL in the join anyway), and CONTENT blesses it because the
-    hash input for such a row is the literal 'GENESIS'.
+    """A row with `prev_hash NULL` passes every relative check: LINK exempts it by construction, FORK
+    filters `prev_hash IS NOT NULL` (and a NULL never equals a NULL in the join anyway), and CONTENT
+    blesses it because the hash input for such a row is the literal 'GENESIS'.
 
-    That is the shape of a TRUNCATION -- delete the first k rows,
-    re-anchor row k+1 -- and it is the one thing no relative check can
-    see, because every surviving row still agrees with its predecessor.
-
-    Unlike a fork this is not reachable by honest traffic: 0013 writes a
-    NULL predecessor only into an empty table, under the advisory lock,
-    and no application code writes prev_hash. So it counts as tampering.
+    That is the shape of a truncation (delete the first k rows, re-anchor row k+1), and the one thing
+    no relative check can see, because every surviving row still agrees with its predecessor. Unlike a
+    fork it is not reachable by honest traffic: 0013 writes a NULL predecessor only into an empty
+    table, under the advisory lock, and no application code writes prev_hash. So it counts as
+    tampering.
     """
     from noctornal_api.audit_verify import verify_chain
 
@@ -366,15 +339,11 @@ def test_the_anchor_is_checked_over_the_whole_table_not_the_window(tamperable):
 # ---------------------------------------------------------------------------
 
 def test_the_chaining_lock_serialises_concurrent_writers(tamperable):
-    """With one transaction holding the xact advisory lock mid-INSERT, a
-    second connection's INSERT blocks until commit.
+    """With one transaction holding the xact advisory lock mid-INSERT, a second connection's INSERT
+    blocks until commit.
 
-    This was once offered as the reason forks "are not known to be reachable
-    by ordinary traffic". It measured the lock and not the choice of tail:
-    `seq` was drawn before the lock, so a writer that locked second could
-    still chain off a row with a higher number. 0149 draws the number inside
-    the lock (see `test_ledger_chain_g49_pg.py` for the concurrency proof);
-    this stays as the proof that the lock itself holds.
+    This proves the lock itself holds. The choice of tail is a separate matter: 0149 draws `seq` inside
+    the lock (see `test_ledger_chain_pg.py` for the concurrency proof).
     """
     import psycopg
 

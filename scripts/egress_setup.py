@@ -1,5 +1,4 @@
-"""Set up and change the egress configuration without the console
-(S2, the egress proxy, 2026-09-24; docs/00 decision 68).
+"""Set up and change the egress configuration without the console (docs/00 decision 68).
 
     python scripts/egress_setup.py keygen            new keys, printed once
     python scripts/egress_setup.py dev-env           .env.local lines for a proxy on this host
@@ -248,10 +247,9 @@ def preflight(directory: Path, *, compose=compose_version) -> list[str]:
             if not values.get(key):
                 problems.append(f"{name} has no {key}.")
     for name, values in files.items():
-        # A template value left in place (`replace-me`, which the
-        # database password lines of two of these files ship, and which
-        # agreeing in both files does not make private). Names the variable,
-        # never the value (infra-12, 2026-10-03).
+        # A template value left in place (`replace-me`, which the database password lines of two
+        # of these files ship, and which agreeing in both files does not make private). Names the
+        # variable, never the value.
         for published in published_credentials(values):
             problems.append(f"{name}: {published.refusal}")
     for name, values in files.items():
@@ -346,8 +344,7 @@ def adopt(conn, user_id, via, *, ask=input, out=print) -> list[str]:
             f"{', '.join(str(p) for p in passive['allowed_ports'])}, carrying feeds "
             f"labelled up to {passive['ceiling']}")
         if passive.get("feeds_above_ceiling"):
-            # egress-rss-floor (2026-10-03): nothing above AMBER leaves, so a
-            # feed labelled above it is not carried and is not polled.
+            # Nothing above AMBER leaves, so a feed labelled above it is not carried or polled.
             out("  Some active feeds carry a label above AMBER, which never "
                 "leaves this deployment, so the collector does not poll them: "
                 "collect them by hand, or correct the label if it is wrong.")
@@ -379,10 +376,9 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_parser(name)
     pre = sub.add_parser("preflight")
     pre.add_argument("--dir", default=str(PROD_DIR))
-    # Run inside the application image (a production host has no python with
-    # this tree's dependencies), where there is no docker to ask: the host's
-    # shell asks it and passes the answer, `$(docker compose version --short)`
-    # (2026-10-07).
+    # Run inside the application image (a production host has no python with this tree's
+    # dependencies), where there is no docker to ask: the host's shell asks it and passes the
+    # answer, `$(docker compose version --short)`.
     pre.add_argument("--compose-version")
 
     def policy_options(p):

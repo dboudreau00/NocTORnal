@@ -1,91 +1,39 @@
-"""Phase 7 -- PGP signature verification (docs/10).
+"""PGP signature verification (docs/10): the one path that produces a CONFIRMATION, not a claim.
 
-docs/10, on why this is worth building at all:
+A CONFIRMED binding may carry weight in automatic identity resolution (docs/10), so getting this
+wrong is the worst failure here.
 
-    PGP signed messages are the strong case. A message signed by a key
-    whose fingerprint appears in the contact block is real cryptographic
-    evidence of control, not a claim. Verify signatures where you can and
-    record the verification as its own assertion.
+No cryptography is implemented here. Verification is delegated to the `gpg` binary and this module
+parses only its machine-readable `--status-fd` output, never the localised, spoofable human-readable
+text. The packet walker (`_pgp_packets`) reads OpenPGP framing before gpg runs: it decides what gpg
+may be shown, never what gpg concluded. If `gpg` is absent, unusable or below the version floor
+(docs/16 C11), the outcome is `NO_VERIFIER` and the binding stays CLAIMED: a missing verifier is a
+failure to look, recorded as distinct from a failure of the evidence, and no code path turns it into
+a confirmation.
 
-Everything else in Phase 7 produces CLAIMS. This is the one path that
-produces a CONFIRMATION, which is why it is also the one place where
-getting it wrong is worst: a CONFIRMED binding is what docs/10 says may
-carry weight in automatic identity resolution.
+Three traps are held by the schema as well as here (CHECK constraints on `comms.pgp_verification`
+for the first two, a trigger for the third), because checks like these get refactored away in code
+and a constraint does not:
 
-## No cryptography is implemented here
+- The wrong key. A good signature proves control of whatever key signed it, which matters only if it
+  is the key the actor CLAIMED. The claimed fingerprint may be the signing subkey or the primary it
+  is bound under (gpg's VALIDSIG names both), because vendors publish the primary and sign with a
+  subkey.
+- The replayed message. A valid signature over other text says nothing about an identifier appended
+  afterwards, and `value in message` passes because the value is in the message, just not in the
+  signed part. The payload compared against is gpg's own `--output` of the verified region, never
+  the text handed in: in a clearsigned message everything after `-----END PGP SIGNATURE-----` is
+  unsigned and not emitted.
+- The escrow error. A guarantor's signed vouch for vendor X's identifier is a good signature by the
+  claimed key, but nothing ties that key to X's binding. A binding is confirmed only when a cited
+  contact block lists the fingerprint as its publisher's own and ties that publisher to the binding
+  (the same block lists the identifier, or the publisher IS the binding's identity), with no
+  identity conflict; otherwise the check is UNATTRIBUTED and the binding stays CLAIMED.
 
-Verification is delegated to the `gpg` binary. This module parses its
-machine-readable `--status-fd` output and nothing else -- never the
-human-readable text, which is localised, reformatted between versions,
-and has historically been spoofable by crafted user IDs.
-
-The packet walker below (`_pgp_packets`, F10a, 2026-09-24) reads OpenPGP
-FRAMING before gpg is run: packet tags and lengths, and a signature's one
-type byte. It decides what gpg may be shown, never what gpg concluded.
-
-If `gpg` is absent or unusable, the outcome is `NO_VERIFIER` and the
-binding stays CLAIMED. A missing verifier is a failure to LOOK, and it is
-recorded as distinct from a failure of the evidence so that "nobody has
-checked these" is a query rather than a guess. There is no code path in
-which an absent verifier produces a confirmation. A gpg below the version
-floor is treated as absent (F10a): a build with a known forgery or
-parser defect is not a verifier whose word is evidence (docs/16 C11).
-
-## The two traps, and why the schema holds them rather than this file
-
-**Trap 1 -- the wrong key.** A signature that verifies proves control of
-whatever key signed it. That is only interesting if it is the key the
-actor CLAIMED. Verifying against "some key in our keyring" and reporting
-success is evidence about a stranger. Since F10a the claimed fingerprint
-may be the signing subkey itself or the primary that subkey is bound
-under (gpg's VALIDSIG names both): vendors publish the primary and sign
-with a subkey, and reading only the first field recorded every such
-genuine signature as KEY_MISMATCH.
-
-**Trap 2 -- the replayed message.** A valid signature over some other
-text says nothing about an identifier appended afterwards. Any signed
-message a vendor ever published can be reposted with an attacker's Tox ID
-pasted below it, and a naive `value in message` check passes -- because
-the value IS in the message, just not in the part that was signed.
-
-So the payload compared against is **gpg's own output of the verified
-region**, obtained with `--output`, never the text we were handed. In a
-clearsigned message everything after `-----END PGP SIGNATURE-----` is
-unsigned and gpg does not emit it. For a DETACHED signature the payload
-is the data supplied beside it, which gpg checked whole.
-
-Both traps are ALSO CHECK constraints on `comms.pgp_verification`. That is
-deliberate duplication: these are exactly the checks that survive review
-and then get refactored away, and a constraint does not get refactored
-away by accident.
-
-## A third trap: the escrow error, cryptographically (F10b)
-
-A guarantor's signed vouch "vendor X's Tox is ABC", checked with the
-GUARANTOR's key and naming X's binding, is a good signature by the
-claimed key over text naming the identifier, and used to upgrade X's
-binding. Nothing tied the key to the binding's holder. A binding is now
-confirmed only when a cited contact block lists the fingerprint as its
-publisher's own and ties that publisher to the binding (the same block
-lists the identifier as its own, or the block's publisher IS the
-binding's identity), with no identity conflict; otherwise the check is
-UNATTRIBUTED and the binding stays CLAIMED. A trigger holds the same rule.
-
-## There is no TRUSTED outcome
-
-GnuPG's web of trust answers "do I trust this key's owner", which is a
-different question from "did this key sign this text". Only the second is
-evidence here, so `--trust-model always` is passed and trust is never
-consulted or reported. An investigator's keyring trust has no bearing on
-whether a vendor controls a key.
-
-## Expired and revoked keys
-
-Both still prove the key signed the text, so both are recorded with their
-own outcome rather than as failures. Neither is `VERIFIED`, so neither
-upgrades a binding to CONFIRMED: a signature from a key revoked before
-the message was published is a fact that needs a person to interpret, not
-one a parser should convert into an attribution.
+There is no TRUSTED outcome: the web of trust answers "do I trust this key's owner", not "did this
+key sign this text", so `--trust-model always` is passed and trust is never reported. Expired and
+revoked keys still prove the key signed the text, so each has its own outcome; neither is
+`VERIFIED`, so neither upgrades a binding to CONFIRMED.
 """
 from __future__ import annotations
 
@@ -115,34 +63,29 @@ REVOKED_KEY = "REVOKED_KEY"
 EXPIRED_SIGNATURE = "EXPIRED_SIGNATURE"
 MALFORMED = "MALFORMED"
 NO_VERIFIER = "NO_VERIFIER"
-#: A good signature by the claimed key over text naming the identifier,
-#: with nothing on record tying that key to the binding's holder (F10b,
-#: 2026-09-24). Its own outcome, because KEY_MISMATCH means a DIFFERENT
-#: key signed, and this is the right key with a missing link.
+#: A good signature by the claimed key over text naming the identifier, with nothing on record tying
+#: that key to the binding's holder. Its own outcome, because KEY_MISMATCH means a DIFFERENT key
+#: signed, and this is the right key with a missing link.
 UNATTRIBUTED = "UNATTRIBUTED"
 
-#: The two forms a check takes (F10a, 2026-09-24).
 CLEARSIGNED = "CLEARSIGNED"
 DETACHED = "DETACHED"
 FORMS = (CLEARSIGNED, DETACHED)
 
-#: How the claimed fingerprint was arrived at (F10b): typed or pasted at
-#: the check, or a registry key somebody confirmed against a publication.
+#: How the claimed fingerprint was arrived at: typed or pasted at the check, or a registry key
+#: somebody confirmed against a publication.
 BASIS_STATED = "STATED"
 BASIS_CONFIRMED_KEY = "CONFIRMED_KEY"
 
-#: How a contact block ties the key to the binding's holder (F10b).
+#: How a contact block ties the key to the binding's holder.
 SAME_BLOCK = "SAME_BLOCK"
 SAME_IDENTITY = "SAME_IDENTITY"
 
-#: Outcomes for which gpg reported a good signature over the payload, so
-#: the payload really is "the exact bytes that were signed". For anything
-#: else the file gpg produced is attacker plaintext nobody signed, and
-#: digesting it under that column's name would be a false record.
-#: UNATTRIBUTED is here (F10b, 2026-09-24): it is a good
-#: signature by the claimed key over the payload, and the schema requires
-#: its digest, so leaving it out turned the console's default path into a
-#: CheckViolation with no row and no audit.
+#: Outcomes for which gpg reported a good signature over the payload, so the payload really is "the
+#: exact bytes that were signed". For anything else the file gpg produced is attacker plaintext
+#: nobody signed, and digesting it under that column's name would be a false record. UNATTRIBUTED is
+#: here: it is a good signature by the claimed key over the payload, and the schema requires its
+#: digest.
 _SIGNED_PAYLOAD_OUTCOMES = frozenset({
     "VERIFIED", "KEY_MISMATCH", "VALUE_NOT_IN_PAYLOAD",
     "EXPIRED_KEY", "REVOKED_KEY", EXPIRED_SIGNATURE, UNATTRIBUTED,
@@ -150,9 +93,8 @@ _SIGNED_PAYLOAD_OUTCOMES = frozenset({
 
 _FPR = re.compile(r"^[0-9A-F]{40}$|^[0-9A-F]{64}$")
 _WS = re.compile(r"\s+")
-#: How long gpg gets, for EVERYTHING one call does (F10a): one budget per
-#: ephemeral keyring however many runs it makes, so reading a key file of
-#: eight keys cannot hold a worker for eleven times this.
+#: How long gpg gets for EVERYTHING one call does: one budget per ephemeral keyring however many
+#: runs it makes, so reading a key file of eight keys cannot hold a worker for eleven times this.
 GPG_TIMEOUT_SECONDS = 20
 #: Refuse absurd input before handing it to a subprocess.
 MAX_MESSAGE_BYTES = 1_000_000
@@ -162,12 +104,10 @@ MAX_KEY_BYTES = 1_000_000
 MAX_SIGNATURE_BYTES = 65_536
 #: A loop bound for the packet walker. A 1 MB key cannot hold more.
 MAX_PACKETS = 20_000
-#: Cap on what gpg may PRODUCE, not just what it is given. An armored
-#: compressed message a few hundred KB long expands to hundreds of MB --
-#: measured at 760x from a naive zeros bomb at half the input limit -- and
-#: the result was previously read into memory whole. Bounded in two places
-#: because either alone is insufficient: `--max-output` stops gpg writing
-#: it, and the capped read stops US reading a file some other path created.
+#: Cap on what gpg may PRODUCE, not just what it is given: an armored compressed message a few
+#: hundred KB long expands to hundreds of MB (760x measured from a zeros bomb at half the input
+#: limit). Bounded in two places because either alone is insufficient: `--max-output` stops gpg
+#: writing it, and the capped read stops us reading a file some other path created.
 MAX_PAYLOAD_BYTES = 4_000_000
 #: How much of the status stream to retain on the row. Kept from the FRONT:
 #: the verdict is decided by the first VALIDSIG, and keeping the tail would
@@ -179,17 +119,15 @@ MAX_STATUS_CHARS = 8_000
 #: strings appear inside longer numbers by coincidence, and a coincidence
 #: that reads as cryptographic proof is worse than no answer.
 MIN_CONFIRMABLE_LENGTH = 4
-#: A value at least this long may match as a PREFIX of a longer token --
-#: which is the normal Tox case, where the actor prints the full 76-hex ID
-#: and the durable value is its 64-hex head. Below it, both ends must be
-#: delimited.
-PREFIX_MATCH_LENGTH = 32
+#: The one value that may match as the PREFIX of a longer token: a 64-hex Tox public key followed by
+#: exactly the twelve hex digits of nospam and checksum, because the actor prints the 76-hex ID and
+#: the durable value is its head. Every other value needs a token boundary at both ends.
+_TOX_PUBLIC_KEY = re.compile(r"[0-9a-f]{64}")
+_TOX_ID_TAIL = re.compile(r"[0-9a-f]{12}(?![0-9a-z])")
 
-#: The signature classes a document signature carries: 00 over binary
-#: bytes, 01 over canonical text (a clearsigned message is always 01).
-#: Anything else (a certification, a key binding, a timestamp) is not a
-#: signature over the text, whatever gpg says of its validity (F10a,
-#: 2026-09-24).
+#: The signature classes a document signature carries: 00 over binary bytes, 01 over canonical text
+#: (a clearsigned message is always 01). Anything else (a certification, a key binding, a timestamp)
+#: is not a signature over the text, whatever gpg says of its validity.
 DOCUMENT_SIGNATURE_CLASSES = frozenset({"00", "01"})
 
 
@@ -199,9 +137,8 @@ class PgpError(Exception):
 
 
 class PgpNotFound(PgpError):
-    """404: the object is unknown, in another case, or above the caller's
-    labels. One class and one wording for all three, because a status that
-    tells them apart is an existence oracle (F10-fix, 2026-09-24)."""
+    """404: the object is unknown, in another case, or above the caller's labels. One class and one
+    wording for all three, because a status that tells them apart is an existence oracle."""
 
 
 class PgpConflict(PgpError):
@@ -210,12 +147,12 @@ class PgpConflict(PgpError):
 
 
 class PgpUnavailable(PgpError):
-    """503: no usable gpg, so nothing can be read (F10a)."""
+    """503: no usable gpg, so nothing can be read."""
 
 
 class PgpShapeError(PgpError):
-    """The OpenPGP framing is not what this path accepts. Raised by the
-    packet walker BEFORE any subprocess (F10a)."""
+    """The OpenPGP framing is not what this path accepts. Raised by the packet walker BEFORE any
+    subprocess."""
 
 
 def normalise_fingerprint(value: str) -> str:
@@ -254,8 +191,8 @@ class VerificationResult:
     verifier: str = "GPG"
     verifier_version: str | None = None
     detail: str = ""
-    #: F10a: CLEARSIGNED or DETACHED; the primary key the signing key is
-    #: bound under (VALIDSIG's last field); the signature class, 00 or 01.
+    #: CLEARSIGNED or DETACHED; the primary key the signing key is bound under (VALIDSIG's last
+    #: field); the signature class, 00 or 01.
     form: str = CLEARSIGNED
     signing_primary_fingerprint: str | None = None
     signature_class: str | None = None
@@ -274,30 +211,24 @@ class VerificationResult:
         return bool(self.signed_payload)
 
 
-# ---------------------------------------------------------------------------
-# The verifier: where it is, which version, and whether that version counts
-# ---------------------------------------------------------------------------
+# The verifier: where it is, which version, and whether that version counts.
 
-#: F10a, 2026-09-24: the first release in
-#: each series that carries the fixes for CVE-2022-34903 (a status-line
-#: injection that can forge VALIDSIG, 2.2.36 and 2.3.7) AND CVE-2025-68973
-#: (an out-of-bounds write in the armour parser that crafted armour reaches,
-#: 2.4.9 and 2.5.14; 2.2.51 is the extended-support fix). Every path here
-#: hands gpg armour an attacker chose. The 2.3 series ended without the
-#: second fix and is refused; anything before 2.2 is refused; a series
-#: after 2.5 postdates both fixes.
+#: The first release in each series that carries the fixes for CVE-2022-34903 (a status-line
+#: injection that can forge VALIDSIG, 2.2.36 and 2.3.7) AND CVE-2025-68973 (an out-of-bounds write
+#: in the armour parser that crafted armour reaches, 2.4.9 and 2.5.14; 2.2.51 is the
+#: extended-support fix). Every path here hands gpg armour an attacker chose. The 2.3 series ended
+#: without the second fix and is refused; anything before 2.2 is refused; a series after 2.5
+#: postdates both fixes.
 MIN_GPG_VERSIONS: dict[tuple[int, int], tuple[int, int, int]] = {
     (2, 2): (2, 2, 51),
     (2, 4): (2, 4, 9),
     (2, 5): (2, 5, 14),
 }
-#: An operator's attestation that a distribution build carries the fixes
-#: of an upstream release although its version string is older (Debian
-#: 13's 2.4.7-21+deb13u1 and Ubuntu 24.04's 2.4.4-2ubuntu17.4 both do).
-#: The value is that upstream release, for example "2.4.9". It is
-#: recorded on every verification row and shown in the readiness row as
-#: the operator's word, because the build cannot tell a patched 2.4.4 from
-#: an unpatched one (2026-09-24).
+#: An operator's attestation that a distribution build carries the fixes of an upstream release
+#: although its version string is older (Debian 13's 2.4.7-21+deb13u1 and Ubuntu 24.04's
+#: 2.4.4-2ubuntu17.4 both do). The value is that upstream release, for example "2.4.9". It is
+#: recorded on every verification row and shown in the readiness row as the operator's word, because
+#: the build cannot tell a patched 2.4.4 from an unpatched one.
 PATCHED_AS_ENV = "NOCTORNAL_GPG_PATCHED_AS"
 _VERSION = re.compile(r"\(GnuPG[^)]*\)\s+(\d+)\.(\d+)\.(\d+)")
 _ATTESTED = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -459,12 +390,10 @@ _monotonic = time.monotonic
 #: Every gpg run's fixed arguments, all RELATIVE (see `_EphemeralGpg`).
 _BASE_ARGS: tuple[str, ...] = (
     "--homedir", "home", "--batch", "--no-tty", "--yes", "--quiet",
-    # No agent is ever started (F10a, 2026-09-24). gpg 2.4.9 imported a
-    # SECRET key armoured as a public key block and autostarted a
-    # gpg-agent in the ephemeral home that outlived the deleted directory.
-    # With this flag secret material cannot be imported at all (measured:
-    # return code 2, nothing imported, no socket), and nothing outlives
-    # the temporary home.
+    # No agent is ever started. gpg 2.4.9 imported a SECRET key armoured as a public key block and
+    # autostarted a gpg-agent in the ephemeral home that outlived the deleted directory. With this
+    # flag secret material cannot be imported at all (return code 2, nothing imported, no socket),
+    # and nothing outlives the temporary home.
     "--no-autostart",
     # Trust answers a different question (see the module docstring) and
     # consulting it here would make the result depend on the
@@ -485,20 +414,15 @@ _BASE_ARGS: tuple[str, ...] = (
 class _EphemeralGpg:
     """A throwaway keyring for one call, and one time budget for it.
 
-    Runs in an EPHEMERAL keyring so the host's own keys are never
-    consulted and nothing is imported anywhere durable -- a verification
-    must not depend on what somebody imported last week, and a keyring
-    that accumulates attacker-supplied keys is a liability of its own.
+    Runs in an EPHEMERAL keyring so the host's own keys are never consulted and nothing is imported
+    anywhere durable: a verification must not depend on what somebody imported last week, and a
+    keyring that accumulates attacker-supplied keys is a liability of its own.
 
-    RELATIVE paths, with cwd set to the work directory.
-
-    Not a style choice. The common Windows gpg is the MSYS build shipped
-    with Git, which expects POSIX paths: handed `C:\\Users\\...\\home` it
-    resolves it against its own cwd and produces a nonsense path, then
-    reports "the supplied public key could not be read" -- a MALFORMED
-    outcome for a perfectly good key. Relative paths sidestep drive-letter
-    translation entirely and work identically under a native Windows gpg
-    and a POSIX one. `put` returns a relative name for that reason.
+    Paths are RELATIVE, with cwd set to the work directory. The common Windows gpg is the MSYS build
+    shipped with Git, which expects POSIX paths: handed a drive-letter path it resolves it against
+    its own cwd and reports "the supplied public key could not be read" (a MALFORMED outcome for a
+    perfectly good key). Relative paths sidestep drive-letter translation and work identically under
+    a native Windows gpg and a POSIX one; `put` returns a relative name for that reason.
     """
 
     def __init__(self, binary: str):
@@ -551,9 +475,7 @@ class _EphemeralGpg:
             return fh.read(cap + 1)
 
 
-# ---------------------------------------------------------------------------
-# The packet walker: framing only, before gpg sees anything (F10a)
-# ---------------------------------------------------------------------------
+# The packet walker: framing only, before gpg sees anything.
 
 #: The armour kinds this reader can place. Anything else that looks like
 #: an armour line is refused rather than skipped: a block the walker
@@ -566,10 +488,9 @@ _SECRET_KINDS = frozenset({"PRIVATE KEY BLOCK", "SECRET KEY BLOCK"})
 _SECRET_TAGS = frozenset({5, 7})
 _SECRET_SENTENCE = ("this is a SECRET key. It is not stored or read here; "
                     "lodge it as an exhibit if it is evidence.")
-#: Public key material: public key, public subkey, user id, user
-#: attribute, signature. Trust packets (12) are refused: they exist only
-#: in local keyrings, and a forged signature cache in one is how a subkey
-#: is attached to somebody else's key (2026-09-24).
+#: Public key material: public key, public subkey, user id, user attribute, signature. Trust packets
+#: (12) are refused: they exist only in local keyrings, and a forged signature cache in one is how a
+#: subkey is attached to somebody else's key.
 _PUBLIC_KEY_TAGS = frozenset({6, 14, 13, 17, 2})
 _ARMOUR_LINE = re.compile(rb"^-----(BEGIN|END) PGP ([A-Z ]+)-----$")
 _HEADER_LINE = re.compile(rb"^[A-Za-z][A-Za-z0-9-]*: ")
@@ -835,12 +756,11 @@ def verify_clearsigned(signed_message: str, public_key: str | bytes, *,
 def verify_detached(signature: bytes, data: bytes, public_key: str | bytes, *,
                     claimed_fingerprint: str, confirms_value: str | None = None,
                     data_was_pasted: bool = False) -> VerificationResult:
-    """Check a detached signature over `data` against a public key (F10a).
+    """Check a detached signature over `data` against a public key.
 
-    The payload compared against the identifier, and digested on the row,
-    is `data` itself: gpg verified those bytes whole. For a text-mode
-    (class 01) signature they are the bytes BEFORE gpg's line-ending
-    canonicalisation, which is what was supplied."""
+    The payload compared against the identifier, and digested on the row, is `data` itself: gpg
+    verified those bytes whole. For a text-mode (class 01) signature they are the bytes BEFORE gpg's
+    line-ending canonicalisation, which is what was supplied."""
     claimed = normalise_fingerprint(claimed_fingerprint)
     if not signature:
         return VerificationResult(MALFORMED, form=DETACHED,
@@ -911,12 +831,10 @@ def verify_detached(signature: bytes, data: bytes, public_key: str | bytes, *,
 def _show(raw: bytes | None, limit: int = MAX_STATUS_CHARS) -> str:
     """Attacker bytes, rendered for the record and never for a decision.
 
-    `errors="replace"` because an OpenPGP user ID is arbitrary bytes and
-    gpg re-emits it unvalidated. Decoding it strictly threw
-    `UnicodeDecodeError` from inside `subprocess`, which on Windows killed
-    the reader thread and silently produced an empty stream -- reported as
-    BAD_SIGNATURE for a signature that verified perfectly -- and on POSIX
-    propagated out uncaught, so no row was recorded at all.
+    `errors="replace"` because an OpenPGP user ID is arbitrary bytes and gpg re-emits it
+    unvalidated. Strict decoding raises `UnicodeDecodeError` from inside `subprocess`, which on
+    Windows kills the reader thread and silently yields an empty stream (reported as BAD_SIGNATURE
+    for a good signature), and on POSIX propagates uncaught so no row is recorded at all.
     """
     if not raw:
         return ""
@@ -927,36 +845,24 @@ def _show(raw: bytes | None, limit: int = MAX_STATUS_CHARS) -> str:
 
 
 def _status_lines(status: bytes) -> list[list[str]]:
-    """Parse gpg's --status-fd stream. BYTES, split on b"\\n" ONLY.
+    """Parse gpg's --status-fd stream. BYTES, split on the newline byte ONLY.
 
-    This is the whole defence against a forged verdict, so it is worth
-    stating what goes wrong otherwise.
-
-    gpg delimits status lines with `\\n` and percent-escapes `%` and every
-    byte below 0x20 in the attacker-controlled user-ID field. It does NOT
-    escape bytes at or above 0x80. Python's `str.splitlines()` splits on
-    far more than `\\n`: it also breaks on U+0085, U+2028 and U+2029, none
-    of which gpg escapes.
-
-    So an attacker generated a key whose user ID was:
+    This is the whole defence against a forged verdict. gpg delimits status lines with a newline and
+    percent-escapes `%` and every byte below 0x20 in the attacker-controlled user-ID field, but not
+    bytes at or above 0x80. `str.splitlines()` also splits on U+0085, U+2028 and U+2029, none of
+    which gpg escapes, so a key whose user ID was:
 
         Attacker Persona<U+0085>[GNUPG:] VALIDSIG <victim fingerprint> ...
 
-    gpg emitted that verbatim inside GOODSIG -- which it emits BEFORE the
-    real VALIDSIG -- `splitlines()` cut it into two lines, and the parser
-    read the forged one first. Outcome VERIFIED, `signing_fingerprint` the
-    victim's, binding upgraded to CONFIRMED, for a key the attacker did
-    not hold. Reproduced end to end.
+    would be emitted verbatim inside GOODSIG (which comes BEFORE the real VALIDSIG), cut into two
+    lines, and the forged one read first: outcome VERIFIED, `signing_fingerprint` the victim's, the
+    binding upgraded to CONFIRMED for a key the attacker does not hold.
 
-    The CHECK constraints could not catch it: they compare
-    `signing_fingerprint` to `claimed_fingerprint`, and both came from the
-    same lied-to parse, so they agreed. A constraint defends against the
-    application forgetting to check; it cannot defend against the
-    application checking a forged input.
-
-    It was invisible on the Windows dev host because cp1252 does not map
-    those bytes to line terminators. The deployment target is Linux under
-    UTF-8, where it works.
+    The CHECK constraints cannot catch it: they compare `signing_fingerprint` to
+    `claimed_fingerprint`, and both would come from the same lied-to parse. A constraint defends
+    against the application forgetting to check, not against it checking a forged input. (A Windows
+    dev host would not show it: cp1252 does not map those bytes to line terminators. The deployment
+    target is Linux under UTF-8.)
     """
     out: list[list[str]] = []
     for line in (status or b"").split(b"\n"):
@@ -974,25 +880,20 @@ _TOKEN_CHAR = re.compile(r"[0-9A-Za-z]")
 def _payload_contains(payload_text: str, value: str) -> tuple[bool, str]:
     """Is `value` genuinely NAMED in the signed text? (present, reason)
 
-    A bare substring test is not enough, and the failure is not
-    hypothetical. Telegram durable values are bare digits, so a vendor who
-    signed an ordinary sentence containing an order number could confirm a
-    stranger's account:
+    A bare substring test is not enough. Telegram durable values are bare digits, so a vendor who
+    signed an ordinary sentence containing an order number could confirm a stranger's account:
 
-        signed: "Escrow order 3877451900 shipped 2026-07-25."
+        signed: "Escrow order 3877451900 shipped Monday."
         value : "77451"      -> substring: True
 
-    That drove a binding to CONFIRMED and recorded it as "cryptographic
-    evidence ... of the key's holder publishing that identifier", which is
-    false. The same collision happens by accident, which is worse, because
-    nothing about it looks like an attack.
+    That would drive a binding to CONFIRMED and record it as cryptographic evidence of the key's
+    holder publishing that identifier, which is false. The same collision happens by accident, with
+    nothing looking like an attack.
 
-    The rule: the match must START at a token boundary, and must also END
-    at one unless the value is long enough to be unambiguous on its own.
-    The exception is load-bearing rather than a loophole -- an actor
-    normally prints the full 76-hex Tox ID while the durable value is its
-    64-hex head, so demanding a boundary at both ends would refuse the
-    commonest legitimate case.
+    The rule: the match must START and END at a token boundary. The one exception is load-bearing:
+    an actor normally prints the full 76-hex Tox ID while the durable value is its 64-hex head, so a
+    64-hex value followed by exactly twelve hex digits and then a boundary also matches. Length
+    alone is no exception: a fingerprint at the head of a longer token is not the fingerprint.
     """
     needle = (value or "").strip()
     if len(needle) < MIN_CONFIRMABLE_LENGTH:
@@ -1003,12 +904,14 @@ def _payload_contains(payload_text: str, value: str) -> tuple[bool, str]:
             f"as cryptographic proof is worse than no answer.")
 
     hay, low = payload_text.lower(), needle.lower()
+    tox_key = _TOX_PUBLIC_KEY.fullmatch(low) is not None
     start = hay.find(low)
     while start != -1:
         left_ok = start == 0 or not _TOKEN_CHAR.match(hay[start - 1])
         end = start + len(low)
-        right_ok = end == len(hay) or not _TOKEN_CHAR.match(hay[end])
-        if left_ok and (right_ok or len(needle) >= PREFIX_MATCH_LENGTH):
+        right_ok = (end == len(hay) or not _TOKEN_CHAR.match(hay[end])
+                    or (tox_key and _TOX_ID_TAIL.match(hay, end) is not None))
+        if left_ok and right_ok:
             return True, ""
         start = hay.find(low, start + 1)
     return False, (
@@ -1029,10 +932,9 @@ _CLASS = re.compile(r"^[0-9a-f]{2}$")
 
 
 def _validsig(parts: list[str]) -> _ValidSig:
-    """VALIDSIG <fpr> <date> <ts> <expire> <version> <reserved> <pk-algo>
-    <hash-algo> <class> [<primary-fpr>]. The FIRST field is the key that
-    made the signature, a subkey whenever the vendor signs with one; the
-    primary it is bound under is the LAST (F10a, measured on 2.4.9)."""
+    """VALIDSIG <fpr> <date> <ts> <expire> <version> <reserved> <pk-algo> <hash-algo> <class>
+    [<primary-fpr>]. The FIRST field is the key that made the signature, a subkey whenever the
+    vendor signs with one; the primary it is bound under is the LAST (gpg 2.4.9)."""
     primary = parts[10].upper() if len(parts) > 10 and _FPR.match(
         parts[10].upper()) else None
     sig_class = parts[9].lower() if len(parts) > 9 and _CLASS.match(
@@ -1063,12 +965,10 @@ def _read_status(status: bytes, payload: bytes, *, claimed: str,
               "signing_primary_fingerprint": sig.primary if sig else None,
               "signature_class": sig.sig_class if sig else None}
 
-    # Taking the FIRST of several is what made line injection profitable,
-    # and it is also wrong on its own terms: a message carrying two
-    # signatures has two answers, and picking one silently is a guess
-    # about which the analyst meant. Both fixed by refusing. LINES are
-    # counted (F10a): this counted a set of one identical string, which
-    # was never more than one.
+    # More than one signature is refused. Taking the FIRST of several is what makes line injection
+    # profitable, and it is wrong on its own terms: a message carrying two signatures has two
+    # answers, and picking one silently is a guess about which the analyst meant. LINES are counted,
+    # not a set of strings, so repeated identical lines still count.
     goodsigs = sum(1 for parts in lines if parts and parts[0] == "GOODSIG")
     newsigs = sum(1 for parts in lines if parts and parts[0] == "NEWSIG")
     if len(validsigs) > 1 or goodsigs > 1 or newsigs > 1:
@@ -1112,12 +1012,10 @@ def _read_status(status: bytes, payload: bytes, *, claimed: str,
                    "binding without a person deciding the expiry is "
                    "immaterial.")
     if "EXPSIG" in codes:
-        # The SIGNATURE expired, which is not the same as the KEY expiring.
-        # gpg emits EXPSIG in place of GOODSIG, so without this branch it
-        # fell through to "gpg did not report a good signature" -- failing
-        # closed, but mislabelling the evidence as forged when it is
-        # merely stale. The module gives expired KEYS their own outcome
-        # for exactly this reason.
+        # The SIGNATURE expired, which is not the same as the KEY expiring. gpg emits EXPSIG in
+        # place of GOODSIG, so without this branch it would fall through to "gpg did not report a
+        # good signature", which fails closed but mislabels stale evidence as forged. Expired KEYS
+        # get their own outcome for the same reason.
         return VerificationResult(
             EXPIRED_SIGNATURE, **common,
             detail="the signature is good but has EXPIRED. It still shows "
@@ -1145,8 +1043,8 @@ def _read_status(status: bytes, payload: bytes, *, claimed: str,
             BAD_SIGNATURE, **common,
             detail="gpg did not report a good signature")
 
-    # A good signature that is not over a document (a certification, a
-    # key binding) says nothing about any text (F10a).
+    # A good signature that is not over a document (a certification, a key binding) says nothing
+    # about any text.
     if sig.sig_class not in DOCUMENT_SIGNATURE_CLASSES:
         return VerificationResult(
             MALFORMED, **common,
@@ -1209,15 +1107,12 @@ def _read_status(status: bytes, payload: bytes, *, claimed: str,
 # Recording, and who may see a record
 # ---------------------------------------------------------------------------
 
-#: ONE visibility predicate for verification rows, over alias `v`, with
-#: named parameters %(clearance)s and %(held)s (F10-fix, 2026-09-24). A
-#: verification carries no labels of its own but cites a binding, a block
-#: and (F10b) a registry key, each of which may sit above its case; a row
-#: is shown only when everything it cites is. The ledger, the queue's
-#: "attempted" flag and last outcome, and pgp_keys.py's reads all use this
-#: constant: the queue once had its own unfiltered EXISTS, which would
-#: have been an existence and outcome oracle for checks the reader may not
-#: see the moment the console displayed it.
+#: ONE visibility predicate for verification rows, over alias `v`, with named parameters
+#: %(clearance)s and %(held)s. A verification carries no labels of its own but cites a binding, a
+#: block and a registry key, each of which may sit above its case; a row is shown only when
+#: everything it cites is. The ledger, the queue's "attempted" flag and last outcome, and
+#: pgp_keys.py's reads all use this constant: a separate unfiltered EXISTS would be an existence and
+#: outcome oracle for checks the reader may not see.
 _VISIBLE_VERIFICATION = """
     (v.channel_binding_id IS NULL OR EXISTS (
         SELECT 1 FROM comms.channel_binding vb
@@ -1301,8 +1196,8 @@ class PgpService:
 
     def _registry_key(self, case_id: UUID, key_id: UUID, *, clearance: str,
                       held: frozenset[str]) -> dict:
-        """A registry key for a check (F10b): visible, confirmed and not
-        retired, with its material and the block its confirmation cites."""
+        """A registry key for a check: visible, confirmed and not retired, with its material and the
+        block its confirmation cites."""
         row = self._c.execute(
             """SELECT k.id, k.material, k.confirmed_fingerprint, k.retired_at,
                       a.classification::text, a.compartments,
@@ -1381,17 +1276,14 @@ class PgpService:
                           note: str | None = None) -> dict:
         """Verify, record the outcome, and upgrade the binding IF earned.
 
-        Every outcome is recorded, including the ones that failed and the
-        one that means nobody looked. A verification queue you can only
-        see the successes of is a queue that hides its own gaps.
+        Every outcome is recorded, including the ones that failed and the one that means nobody
+        looked: a verification queue you can only see the successes of hides its own gaps.
 
-        `clearance` and `compartments` are REQUIRED keyword arguments with
-        no default (F10-fix, 2026-09-24): the binding, the block and the
-        key are loaded under them, and a forgotten argument must fail
-        loudly rather than read at the wrong level (collection.py gives
-        the same reason for its own). Everything that could refuse runs
-        before gpg is forked, and before any message names a value: an
-        object the caller may not see is one 404 whatever the reason.
+        `clearance` and `compartments` are REQUIRED keyword arguments with no default: the binding,
+        the block and the key are loaded under them, and a forgotten argument must fail loudly
+        rather than read at the wrong level (collection.py gives the same reason for its own).
+        Everything that could refuse runs before gpg is forked, and before any message names a
+        value: an object the caller may not see is one 404 whatever the reason.
         """
         held = frozenset(compartments)
         if form not in FORMS:
@@ -1405,9 +1297,8 @@ class PgpService:
             binding = self._binding(case_id, channel_binding_id,
                                     clearance=clearance, held=held)
             binding_value = binding["durable_value"]
-            # The 0037 trigger refuses to confirm a binding with no durable
-            # value, and reaching it cost a gpg run and answered an
-            # unaudited 500 (2026-09-24). Refused here, first.
+            # The 0037 trigger refuses to confirm a binding with no durable value; refuse here,
+            # first, rather than cost a gpg run and answer an unaudited 500.
             if binding_value is None:
                 raise PgpConflict(
                     "No durable form was recorded for this identifier, so a "
@@ -1446,8 +1337,8 @@ class PgpService:
             raise PgpError("name the fingerprint the signature should be made by")
 
         if binding is not None:
-            # Labels run block <= key <= binding (F10b): a binding is never
-            # confirmed on material its readers may not see.
+            # Labels run block <= key <= binding: a binding is never confirmed on material its
+            # readers may not see.
             labels = (binding["classification"], binding["compartments"])
             if key is not None and not _labels_within(
                     (key["classification"], key["compartments"]), labels):
@@ -1596,13 +1487,11 @@ class PgpService:
                       ) -> list[dict]:
         """The verification ledger for a case.
 
-        `comms.pgp_verification` carries no labels of its own -- but it
-        carries `confirms_value`, which IS the identifier held by the
-        binding it cites, and a binding can be classified above its case.
-        So a listing filtered only by case handed an under-cleared reader
-        the durable value of a RED binding through a table that looked
-        label-free. A row is shown when everything it cites is visible
-        (`_VISIBLE_VERIFICATION`).
+        `comms.pgp_verification` carries no labels of its own, but it carries `confirms_value`,
+        which IS the identifier held by the binding it cites, and a binding can be classified above
+        its case. A listing filtered only by case would hand an under-cleared reader the durable
+        value of a RED binding through a table that looks label-free, so a row is shown only when
+        everything it cites is visible (`_VISIBLE_VERIFICATION`).
         """
         rows = self._c.execute(
             f"""SELECT v.id, v.channel_binding_id, v.contact_block_id,
@@ -1639,14 +1528,13 @@ class PgpService:
                           ) -> list[dict]:
         """CLAIMED bindings, and what the reader may see of their checks.
 
-        The queue that exists because `NO_VERIFIER` is a distinct outcome:
-        without it, "not confirmed" and "not checked" look identical, and
-        an analyst reads an unchecked claim as a checked-and-failed one.
+        The queue that exists because `NO_VERIFIER` is a distinct outcome: without it, "not
+        confirmed" and "not checked" look identical, and an analyst reads an unchecked claim as a
+        checked-and-failed one.
 
-        `verification_attempted` and the last outcome come from checks
-        the READER may see (`_VISIBLE_VERIFICATION`, F10-fix 2026-09-24): a
-        check citing a block above them reads to them as no check, which
-        is the truth about what they can see and no oracle.
+        `verification_attempted` and the last outcome come from checks the READER may see
+        (`_VISIBLE_VERIFICATION`): a check citing a block above them reads to them as no check,
+        which is the truth about what they can see and no oracle.
         """
         rows = self._c.execute(
             f"""SELECT cb.id, cb.platform_key, cb.observed_value,

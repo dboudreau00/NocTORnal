@@ -1,38 +1,30 @@
-"""The one outbound HTTP client (2026-09-24; docs/00 decisions 72 and 77,
-docs/20 section 5).
+"""The one outbound HTTP client (docs/00 decisions 72 and 77, docs/20 section 5).
 
-Every process that makes an outbound HTTP request makes it here: the
-collector through collection.fetch and collection.fetch_response, and every
-integration (Jira, the webhook, WKD, the lookups, the embeddings endpoint,
-the CAPEv2 sandbox) by importing this module. Before 2026-09-24 the only
-hardened client was collection.fetch, and each integration that needed
-HTTP would have written its own extension of it: a urllib3 pool that
-resent a POST after an SSLError, a `set_tunnel` proxy path that dialled
-the proxy and shook hands outside the watchdog, a classifier admitting
-metadata addresses. Seven clients would have been seven places for the
-next SSRF.
+Every process that makes an outbound HTTP request makes it here: the collector through
+collection.fetch and collection.fetch_response, and every integration (Jira, the webhook, WKD, the
+lookups, the embeddings endpoint, the CAPEv2 sandbox) by importing this module. One client is one
+place to harden against SSRF: a urllib3 pool that resends a POST after an SSLError, a `set_tunnel`
+proxy path that dials the proxy and shakes hands outside the watchdog, or a classifier admitting
+metadata addresses would each be an SSRF hole repeated in every client.
 
-## What it promises
+What it promises:
 
-- It connects only to an address it checked (DIRECT) or tunnels to the
-  NAME through the egress proxy (PROXY), and there is no second lookup
-  anywhere for an answer to change in (sec-ssrf-rebinding, 2026-09-23).
-- One wall-clock allowance bounds a whole call, every hop, the proxy dial,
-  the CONNECT exchange, the TLS handshake, the request and the response,
-  enforced by a watchdog that cuts the socket under a read still going
-  when it runs out (c2, 2026-09-24).
-- It never retries. Retry policy is the caller's, so a POST is never sent
-  twice, and a request counts as sent the moment its first byte is
-  written, so a custody record errs towards "may have been disclosed".
-- A credential never rides a redirect off its origin, and a request with a
-  body never follows a redirect at all.
-- Every message it reports from elsewhere passes through `redact()`, and
-  nothing from a proxy reply is reflected but a known code.
+- It connects only to an address it checked (DIRECT) or tunnels to the NAME through the egress proxy
+  (PROXY), and there is no second lookup anywhere for an answer to change in (DNS rebinding).
+- One wall-clock allowance bounds a whole call: every hop, the proxy dial, the CONNECT exchange, the
+  TLS handshake, the request and the response. A watchdog cuts the socket under a read still going
+  when it runs out.
+- It never retries. Retry policy is the caller's, so a POST is never sent twice, and a request
+  counts as sent the moment its first byte is written, so a custody record errs towards "may have
+  been disclosed".
+- A credential never rides a redirect off its origin, and a request with a body never follows a
+  redirect at all.
+- Every message it reports from elsewhere passes through `redact()`, and nothing from a proxy reply
+  is reflected but a known code.
 
-It takes its route from egress.route_for and applies the route's policy
-through egress_policy, the one classifier. It carries no classifier of its
-own and no public switch to change one: the collector's test seam reaches
-the private `_fetch_response` only.
+It takes its route from egress.route_for and applies the route's policy through egress_policy, the
+one classifier. It carries no classifier of its own and no public switch to change one: the
+collector's test seam reaches the private `_fetch_response` only.
 """
 from __future__ import annotations
 
@@ -85,31 +77,21 @@ LOOKUP_USER_AGENT = "NocTORnal-lookup/1"
 #: exhaust the validator. urllib's own default is 10.
 MAX_REDIRECTS = 5
 
-#: How much of a response body is worth reading. 16 MiB is far above any
-#: legitimate RSS or forum page and far below what it takes to hurt the
-#: collector. There is no "unlimited" option on purpose: the one host in
-#: this system holding every persona credential should not have a code
-#: path whose memory use is chosen by a monitored source.
+#: How much of a response body is worth reading: far above any legitimate RSS or forum page, far
+#: below what hurts the collector. There is no "unlimited" option on purpose: the host holding every
+#: persona credential should not have a code path whose memory use is chosen by a monitored source.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
-#: A body is read this much at a time, so what one read holds beside the
-#: body itself is bounded whatever the chunking (2026-10-07).
+#: A body is read this much at a time, so what one read holds beside the body itself is bounded
+#: whatever the chunking.
 READ_PIECE = 64 * 1024
 
-#: The whole of one call, by the wall clock, when the caller names no
-#: allowance: every hop, every connect attempt, the TLS handshake, the
-#: headers and the body, together.
-#:
-#: c2 (2026-09-24): `timeout` was the only limit, and it is a limit on ONE
-#: socket operation. A server that answers `Content-Length: 16000000` and
-#: then sends a byte every ten seconds keeps every single recv inside it,
-#: so the read ran for as long as the far end liked, and the far end is by
-#: the collector's own account the people under investigation. One such
-#: source held its poll lock and its RUNNING run row for ever, stopped the
-#: pass it was in, and in the production cron loop stopped the
-#: notification drain queued behind that pass. A minute is generous for
-#: anything a feed legitimately is, and it makes one slow source cost a
-#: pass a minute rather than the whole pass; scripts/collection_poll.py
-#: keeps a clock of its own for the pass.
+#: The whole of one call, by the wall clock, when the caller names no allowance: every hop, every
+#: connect attempt, the TLS handshake, the headers and the body, together. `timeout` alone limits
+#: only ONE socket operation, so a server that sends a byte every ten seconds would keep every
+#: single recv inside it and hold a poll for as long as the far end liked (the far end being, by the
+#: collector's own account, the people under investigation). A minute is generous for anything a
+#: feed legitimately is, and makes one slow source cost a pass a minute rather than the whole pass;
+#: scripts/collection_poll.py keeps a clock of its own for the pass.
 MAX_FETCH_SECONDS = 60.0
 LOOKUP_MAX_SECONDS = 20.0
 #: No call may ask for longer: the largest any consumer needs is a CAPEv2
@@ -307,11 +289,10 @@ _SECRET_PATTERNS = [
     # `user:pass` alone on a line: the shape a form echo takes, with no key
     # name anywhere near it.
     re.compile(r"(?m)^(\s*)([^\s:|]{1,64})([:|])([^\s:|]{4,})\s*$"),
-    # `anything=<long opaque value>`. The field NAME is not the signal --
-    # `p=` is a real one in real feeds, and that is precisely what a
-    # keyword list cannot express. The length floor is what keeps ordinary
-    # prose readable: assignments in an error message with an eight-plus
-    # character unbroken value are overwhelmingly parameters, not English.
+    # `anything=<long opaque value>`. The field NAME is not the signal (`p=` is a real one in real
+    # feeds, which a keyword list cannot express). The length floor keeps ordinary prose readable:
+    # assignments in an error message with an eight-plus character unbroken value are overwhelmingly
+    # parameters, not English.
     re.compile(r"([A-Za-z0-9_.\-]{1,40})=([^\s,;&\"'<>]{8,})"),
 ]
 
@@ -346,10 +327,9 @@ def _secret_forms(value: str):
 def secret_in_scope(*values: str):
     """Register secrets as live, so `redact` removes them exactly.
 
-    docs/17 F15(j). Shape-matching is a backstop for secrets we do not
-    hold; for the one we just handed to an adapter, exact removal is
-    strictly better and is the only defence that does not depend on
-    guessing what the remote server will call it.
+    Shape-matching is a backstop for secrets we do not hold; for the one we just handed to an
+    adapter, exact removal is strictly better and the only defence that does not depend on guessing
+    what the remote server will call it.
     """
     live = tuple(v for v in values if v and len(v) >= MIN_REDACTABLE_LENGTH)
     token = _LIVE_SECRETS.set(_LIVE_SECRETS.get() + live)
@@ -362,21 +342,18 @@ def secret_in_scope(*values: str):
 def redact(text: str | None, *, secrets: tuple[str, ...] = ()) -> str:
     """Mask anything that looks like a credential, and anything that IS one.
 
-    Applied to EVERY adapter error before it reaches the database. A
-    persona's password lands in an HTTP error body far more often than
-    anybody expects -- a 401 that echoes the submitted form, a proxy error
-    quoting the request line, a library that stringifies its config.
+    Applied to EVERY adapter error before it reaches the database. A persona's password lands in an
+    HTTP error body far more often than anybody expects: a 401 that echoes the submitted form, a
+    proxy error quoting the request line, a library that stringifies its config.
 
     Two layers, and the order is the point:
 
-    1. **Exact.** Every secret currently live in a `PersonaVault.use`
-       block, in each of the forms it takes on the wire. This is the layer
-       that actually holds invariant 7, because it does not depend on the
-       remote server labelling the field in a way we anticipated.
-    2. **Structural**, for secrets we do not hold: labelled fields, URL
-       credentials, unlabelled high-entropy runs, bare `user:pass` lines.
-       docs/17 F15(j) is right that a keyword list alone is not enough --
-       `pass`, `p=`, `credential` and any unlabelled echo walk through one.
+    1. **Exact.** Every secret currently live in a `PersonaVault.use` block, in each of the forms it
+       takes on the wire. This is the layer that actually holds invariant 7, because it does not
+       depend on the remote server labelling the field in a way we anticipated.
+    2. **Structural**, for secrets we do not hold: labelled fields, URL credentials, unlabelled
+       high-entropy runs, bare `user:pass` lines. A keyword list alone is not enough: `pass`, `p=`,
+       `credential` and any unlabelled echo walk through one.
     """
     if not text:
         return ""
@@ -407,15 +384,13 @@ def scrub_live_secrets(text: str | None, *, markup: bool = False,
                        json_escaped: bool = False) -> str:
     """`text` with every live secret removed, EXACTLY and nothing else.
 
-    `redact` is for an error message: it also masks anything shaped like a
-    credential, which would change an investigator's words. This is for
-    material that is stored as evidence (a collected post, its markup, a
-    vendor's answer): only a secret this process holds is removed, in each
-    form `redact` knows, with `markup` the HTML-escaped forms a page spells
-    it in, and with `json_escaped` the forms a JSON string spells it in. A
-    board that reflects the persona's password or session cookie back into
-    a page otherwise gets it stored (2026-10-07), and so does an answer
-    that echoes the API key it was asked under."""
+    `redact` is for an error message: it also masks anything shaped like a credential, which would
+    change an investigator's words. This is for material stored as evidence (a collected post, its
+    markup, a vendor's answer): only a secret this process holds is removed, in each form `redact`
+    knows, with `markup` the HTML-escaped forms a page spells it in, and with `json_escaped` the
+    forms a JSON string spells it in. A board that reflects the persona's password or session cookie
+    back into a page would otherwise get it stored, and so would an answer that echoes the API key
+    it was asked under."""
     if not text:
         return text or ""
     out = text
@@ -452,20 +427,17 @@ def live_secret_in(text: str | None) -> bool:
 
 @dataclass(frozen=True)
 class Hop:
-    """One checked hop: the name a request is addressed to, and the only
-    addresses it may be sent to.
+    """One checked hop: the name a request is addressed to, and the only addresses it may be sent
+    to.
 
-    `addresses` is `(family, type, proto, sockaddr)` straight from the ONE
-    lookup `resolve` made, every entry already admitted. The dialler
-    connects to these and to nothing else, which is the whole of the
-    rebinding fix: the answer that was checked is the answer that is used
-    (sec-ssrf-rebinding, 2026-09-23). A PROXY hop carries no addresses: the
-    proxy is the one resolver at the boundary.
+    `addresses` is `(family, type, proto, sockaddr)` straight from the ONE lookup `resolve` made,
+    every entry already admitted. The dialler connects to these and to nothing else, which is the
+    whole of the rebinding defence: the answer that was checked is the answer that is used. A PROXY
+    hop carries no addresses: the proxy is the one resolver at the boundary.
 
-    `fetch_response(hop=...)` accepts only a hop `resolve()` issued for the
-    same route and mode, and re-admits its addresses before dialling
-    (2026-09-24): a hand-built hop naming 169.254.169.254
-    was otherwise a way past the classifier and past the proxy.
+    `fetch_response(hop=...)` accepts only a hop `resolve()` issued for the same route and mode, and
+    re-admits its addresses before dialling: a hand-built hop naming 169.254.169.254 would otherwise
+    be a way past the classifier and past the proxy.
     """
 
     scheme: str
@@ -517,30 +489,22 @@ def _cut(sock: socket.socket) -> None:
 
 
 class Deadline:
-    """One wall-clock allowance for a whole call, and the watchdog that
-    holds the call to it (c2, 2026-09-24; was collection._Deadline).
+    """One wall-clock allowance for a whole call, and the watchdog that holds the call to it.
 
-    Checking the clock between operations is not enough, because the slow
-    operations are the ones that never come back to be checked:
-    `BufferedReader.read(n)` loops on recv until it has n bytes and header
-    parsing loops on `readline`, each recv getting a fresh `timeout`, over
-    TLS as much as over plain TCP. So a timer shuts the socket down
-    under the reader when the allowance runs out, which ends a blocked read
-    wherever it is, and the reader then finds the allowance `spent()` and
-    reports the budget rather than whatever the cut looked like from
-    inside (an EOF, a reset, a short body that would otherwise have passed
-    as the whole one).
+    Checking the clock between operations is not enough, because the slow operations are the ones
+    that never come back to be checked: `BufferedReader.read(n)` loops on recv until it has n bytes
+    and header parsing loops on `readline`, each recv getting a fresh `timeout`, over TLS as much as
+    plain TCP. So a timer shuts the socket down under the reader when the allowance runs out, which
+    ends a blocked read wherever it is, and the reader then finds the allowance `spent()` and
+    reports the budget rather than whatever the cut looked like from inside (an EOF, a reset, a
+    short body that would otherwise pass as the whole one).
 
-    `left()` is checked before each lookup and each connect attempt, and
-    caps each connect, so neither a name with many answers nor a chain of
-    redirects can spend more than the allowance either. A lookup itself
-    cannot be interrupted from here: the system resolver's own timeout
-    bounds it, which is why the promise is that the allowance is CHECKED
-    before each lookup, not that it covers one.
+    `left()` is checked before each lookup and each connect attempt, and caps each connect, so
+    neither a name with many answers nor a chain of redirects can spend more than the allowance. A
+    lookup itself cannot be interrupted from here: the system resolver's own timeout bounds it.
 
-    One Deadline watches one socket at a time, so it is shared by
-    SEQUENTIAL calls only (a poll's pages, a walk), never by two threads at
-    once.
+    One Deadline watches one socket at a time, so it is shared by SEQUENTIAL calls only (a poll's
+    pages, a walk), never by two threads at once.
     """
 
     def __init__(self, seconds: float):
@@ -579,13 +543,11 @@ class Deadline:
         return self.expired or time.monotonic() >= self._at
 
     def ran_out(self, exc: BaseException) -> bool:
-        """Whether `exc` is the allowance running out. `spent()`, or a
-        socket timeout that woke within TIMEOUT_SLACK of the end: a timeout
-        capped at what was left can wake a few milliseconds EARLY on
-        Windows (the socket layer's timer is coarser than the monotonic
-        clock), and then spent() is still false by a hair and the budget
-        was reported as an uncertain request (found under load,
-        2026-09-24)."""
+        """Whether `exc` is the allowance running out. `spent()`, or a socket timeout that woke
+        within TIMEOUT_SLACK of the end: a timeout capped at what was left can wake a few
+        milliseconds EARLY on Windows (the socket layer's timer is coarser than the monotonic
+        clock), and then spent() is still false by a hair and the budget would be reported as an
+        uncertain request."""
         if self.spent():
             return True
         return (isinstance(exc, TimeoutError)
@@ -627,15 +589,12 @@ class Deadline:
 def _dial(hop: Hop, timeout: float, deadline: Deadline) -> socket.socket:
     """A TCP connection to one of the hop's CHECKED addresses.
 
-    Tries them in the resolver's order, the fallback
-    `socket.create_connection` gives, without its lookup: nothing here
-    takes a name, so there is no step at which a different answer could
-    arrive (sec-ssrf-rebinding, 2026-09-23).
+    Tries them in the resolver's order, the fallback `socket.create_connection` gives, without its
+    lookup: nothing here takes a name, so there is no step at which a different answer could arrive.
 
-    Each attempt gets `timeout` or what is left of the call's allowance,
-    whichever is less, and none starts once the allowance is gone (c2,
-    2026-09-24): a name answering eight unreachable addresses used to cost
-    eight full timeouts per hop, on every hop.
+    Each attempt gets `timeout` or what is left of the call's allowance, whichever is less, and none
+    starts once the allowance is gone: a name answering eight unreachable addresses would otherwise
+    cost eight full timeouts per hop, on every hop.
     """
     failure: OSError | None = None
     for family, kind, proto, sockaddr in hop.addresses:
@@ -666,12 +625,11 @@ class _Facts:
 
 def _wrap_tls(sock: socket.socket, tls: ssl.SSLContext, host: str,
               deadline: Deadline) -> socket.socket:
-    """TLS with SNI and the certificate checked against the NAME, never
-    against the number that was dialled, the handshake under the watchdog.
+    """TLS with SNI and the certificate checked against the NAME, never against the number that was
+    dialled, the handshake under the watchdog.
 
-    The handshake is run by hand rather than inside `wrap_socket`, so the
-    TLS socket is in the watchdog's reach before the first handshake byte
-    is awaited (c2, 2026-09-24)."""
+    The handshake is run by hand rather than inside `wrap_socket`, so the TLS socket is in the
+    watchdog's reach before the first handshake byte is awaited."""
     try:
         wrapped = tls.wrap_socket(sock, server_hostname=host,
                                   do_handshake_on_connect=False)
@@ -720,11 +678,10 @@ class _PinnedConnection(http.client.HTTPConnection):
         self.sock = sock
 
     def send(self, data):
-        # http.client connects lazily inside its first send, so the
-        # connection is made here first: a refusal while connecting sent
-        # nothing. Then the flag goes up before the write, not after:
-        # sendall cannot report partial progress, and a write that failed
-        # half way must read as SENT (2026-09-24).
+        # http.client connects lazily inside its first send, so the connection is made here first: a
+        # refusal while connecting sent nothing. Then the flag goes up before the write, not after:
+        # sendall cannot report partial progress, and a write that failed half way must read as
+        # SENT.
         if self.sock is None:
             self.connect()
         self._facts.request_sent = True
@@ -732,12 +689,10 @@ class _PinnedConnection(http.client.HTTPConnection):
 
 
 class _ProxiedConnection(_PinnedConnection):
-    """The same exchange through the egress proxy: the proxy is dialled by
-    its own checked address, the CONNECT exchange runs under the watchdog,
-    and the TLS handshake with the TARGET's name runs inside the tunnel.
-    The target is never resolved here; `set_tunnel` is not used, because it
-    dials the proxy and shakes hands outside the watchdog
-    (2026-09-24)."""
+    """The same exchange through the egress proxy: the proxy is dialled by its own checked address,
+    the CONNECT exchange runs under the watchdog, and the TLS handshake with the TARGET's name runs
+    inside the tunnel. The target is never resolved here; `set_tunnel` is not used, because it dials
+    the proxy and shakes hands outside the watchdog."""
 
     def __init__(self, hop: Hop, *, route: EgressRoute, timeout: float,
                  tls: ssl.SSLContext | None, deadline: Deadline,
@@ -757,11 +712,9 @@ class _ProxiedConnection(_PinnedConnection):
 
 
 def _refuse_unverifying(context: ssl.SSLContext) -> None:
-    """A caller's own TLS context (a private CA, a test's) is accepted only
-    if it still verifies the certificate AND checks it against the name.
-    Without both, TLS proves nothing about who answered, and the address
-    pin would be the only thing left standing (sec-ssrf-rebinding,
-    2026-09-23)."""
+    """A caller's own TLS context (a private CA, a test's) is accepted only if it still verifies the
+    certificate AND checks it against the name. Without both, TLS proves nothing about who answered,
+    and the address pin would be the only thing left standing."""
     if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
         raise OutboundError(
             "refusing a TLS context that does not verify the certificate "
@@ -822,18 +775,15 @@ def _dial_proxy(host: str, port: int, *, timeout: float,
 
 
 def _read_head(sock: socket.socket, deadline: Deadline, timeout: float) -> bytes:
-    """The proxy's reply head, read WITHOUT over-reading, under the
-    watchdog: every byte after the blank line stays in the socket, because
-    a server-first protocol (the SMTP 220 banner) may speak in the same
-    segment as the 200.
+    """The proxy's reply head, read WITHOUT over-reading, under the watchdog: every byte after the
+    blank line stays in the socket, because a server-first protocol (the SMTP 220 banner) may speak
+    in the same segment as the 200.
 
-    MSG_PEEK shows what has arrived; the bytes before the terminator are
-    consumed as they come, so a head arriving a byte at a time never spins
-    on bytes already seen (2026-09-24).
+    MSG_PEEK shows what has arrived; the bytes before the terminator are consumed as they come, so a
+    head arriving a byte at a time never spins on bytes already seen.
 
-    At the deadline the watchdog shuts the socket, and a pending read then
-    returns nothing rather than raising: an empty read after the deadline
-    is the deadline, not a malformed reply (2026-09-25)."""
+    At the deadline the watchdog shuts the socket, and a pending read then returns nothing rather
+    than raising: an empty read after the deadline is the deadline, not a malformed reply."""
     head = b""
     peek = getattr(socket, "MSG_PEEK", 0)
     while True:
@@ -964,13 +914,11 @@ _PROBE_HEADERS = ("x-egress-keys", "x-egress-unopenable")
 def probe_proxy(host: str, port: int, *, token: str, target_host: str,
                 target_port: int, deadline: Deadline,
                 timeout: float = 5.0) -> ProbeReply:
-    """One CONNECT as `probe.readiness`, for the egress_boundary readiness
-    probe of the route provider (2026-09-24): the
-    probe reads the X-Egress-Keys and X-Egress-Unopenable headers the
-    pinned client never exposes, and this gives it the same resolve-once
-    proxy hop, head reader and watchdog rather than a second client. The
-    probe route reaches nothing: a 200 is closed at once and reported.
-    `deadline` is an ENTERED Deadline."""
+    """One CONNECT as `probe.readiness`, for the egress_boundary readiness probe of the route
+    provider: the probe reads the X-Egress-Keys and X-Egress-Unopenable headers the pinned client
+    never exposes, and this gives it the same resolve-once proxy hop, head reader and watchdog
+    rather than a second client. The probe route reaches nothing: a 200 is closed at once and
+    reported. `deadline` is an ENTERED Deadline."""
     if not isinstance(deadline, Deadline) or not deadline.entered:
         raise ValueError("probe_proxy takes an entered Deadline")
     target = egress_policy.normalise_host(target_host)
@@ -1181,12 +1129,10 @@ def _counted(stream: BodyStream):
 
 @dataclass(frozen=True)
 class Fetched:
-    """One accepted answer. `url` is the final URL after redirects (a
-    login wall is told by where it landed). `location` is set only for an
-    unfollowed 3xx, and it is the RAW absolute Location (joined, query
-    kept, not redacted), because a caller following it (the collector's
-    same-origin walk) must follow the URL the server named; only an
-    error's copy is stripped and redacted (2026-09-24)."""
+    """One accepted answer. `url` is the final URL after redirects (a login wall is told by where it
+    landed). `location` is set only for an unfollowed 3xx, and it is the RAW absolute Location
+    (joined, query kept, not redacted), because a caller following it (the collector's same-origin
+    walk) must follow the URL the server named; only an error's copy is stripped and redacted."""
 
     status: int
     headers: http.client.HTTPMessage
@@ -1226,10 +1172,9 @@ def _validate_headers(headers: Mapping[str, str] | None) -> list[tuple[str, str]
 def _deadline_for(deadline, max_seconds: float):
     """A new Deadline to enter, or the caller's entered one to share.
 
-    A number is its own allowance, bounded by MAX_SECONDS_CEILING and
-    never cut to max_seconds: the CAPEv2 row passes up to 900 seconds and
-    the embeddings row up to 300, and a numeric deadline silently cut to
-    the 60 second default broke both (2026-09-24)."""
+    A number is its own allowance, bounded by MAX_SECONDS_CEILING and never cut to max_seconds: the
+    CAPEv2 row passes up to 900 seconds and the embeddings row up to 300, which the 60 second
+    default would silently cut."""
     if deadline is None:
         return Deadline(max_seconds), True
     if isinstance(deadline, Deadline):
@@ -1329,14 +1274,11 @@ def _one_exchange(hop: Hop, *, route: EgressRoute, method: str,
         wanted = plan(status)
         data = b""
         if wanted == "body" and method != "HEAD" and status not in (204, 304):
-            # Capped, and read one byte past the cap so the difference
-            # between "exactly at the limit" and "more coming" is
-            # knowable. The cap bounds the MEMORY; the time is bounded by
-            # `deadline`, whose watchdog ends this read wherever it has got
-            # to (c2, 2026-09-24). In pieces: one read of a chunked body
-            # holds an object per chunk until the end, so 16 MiB served as
-            # two-byte chunks cost a gigabyte in one call (2026-10-07); a piece holds at
-            # most READ_PIECE of them.
+            # Capped, and read one byte past the cap so "exactly at the limit" can be told from
+            # "more coming". The cap bounds the MEMORY; the time is bounded by `deadline`, whose
+            # watchdog ends this read wherever it has got to. In pieces: one read of a chunked
+            # body holds an object per chunk until the end, so 16 MiB served as two-byte chunks
+            # would cost a gigabyte in one call; a piece holds at most READ_PIECE of them.
             held = bytearray()
             while len(held) <= max_bytes:
                 piece = response.read(min(READ_PIECE, max_bytes + 1 - len(held)))
@@ -1355,11 +1297,9 @@ def _one_exchange(hop: Hop, *, route: EgressRoute, method: str,
                     f"collector; raise max_bytes deliberately if it is "
                     f"the first.", max_bytes=max_bytes)
             if response.length:
-                # `HTTPResponse.read(n)` returns a short body without
-                # complaint when the connection ends before the declared
-                # Content-Length, and that is also exactly what a read cut
-                # by the watchdog looks like. A partial feed is not the
-                # feed, so it is refused (c2, 2026-09-24).
+                # `HTTPResponse.read(n)` returns a short body without complaint when the connection
+                # ends before the declared Content-Length, which is also exactly what a read cut by
+                # the watchdog looks like. A partial feed is not the feed, so it is refused.
                 raise ResponseTruncated(
                     f"the response ended "
                     f"{count_of(response.length, 'byte', 'bytes')} short of "
@@ -1483,9 +1423,8 @@ def _fetch_response(url: str, *, route: EgressRoute, method: str = "GET",
     with secret_in_scope(*secrets):
         if max_redirects > 0:
             if method not in ("GET", "HEAD") or body is not None:
-                # A body cannot be sent twice (a BodyStream is one pass) and
-                # 301, 302 and 303 rewrite the method, so a request with a
-                # body never follows (2026-09-24).
+                # A body cannot be sent twice (a BodyStream is one pass) and 301, 302 and 303
+                # rewrite the method, so a request with a body never follows.
                 raise ValueError(
                     "a request with a body, or a method other than GET or "
                     "HEAD, never follows a redirect: pass max_redirects=0")
@@ -1525,10 +1464,9 @@ _ANSWERED = {"connected": True, "request_sent": True, "request_complete": True}
 def _walk(url, *, route, method, items, body, accept, max_redirects, redirects,
           user_agent, etag, timeout, max_bytes, deadline, tls_context, hop,
           error_excerpt, _blocked_override) -> Fetched:
-    """The hops of one call, each re-checked and re-resolved (DIRECT) or
-    re-tunnelled (PROXY). Redirects are followed here, never inside the
-    HTTP library: urlopen used to follow them internally, so hops 2..N
-    were reached with no check at all (docs/17 F15(f))."""
+    """The hops of one call, each re-checked and re-resolved (DIRECT) or re-tunnelled (PROXY).
+    Redirects are followed here, never inside the HTTP library, which would reach hops 2..N with no
+    check at all."""
     context = tls_context
     origin = _origin(url)
     seen = [url]
@@ -1538,8 +1476,7 @@ def _walk(url, *, route, method, items, body, accept, max_redirects, redirects,
     request_headers: list[tuple[str, str]] = []
     if user_agent is not None:
         request_headers.append(("User-Agent", user_agent))
-    # One request per connection, as urlopen sent it: a kept-alive socket
-    # would outlive the hop it was checked for.
+    # One request per connection: a kept-alive socket would outlive the hop it was checked for.
     request_headers.append(("Connection", "close"))
     if etag:
         request_headers.append(("If-None-Match", etag))
@@ -1587,9 +1524,8 @@ def _walk(url, *, route, method, items, body, accept, max_redirects, redirects,
             # hop we are ON, not against the original URL.
             target = urllib.parse.urljoin(current, raw_location)
             if target in seen:
-                # Agreed, not a bracketed plural (README screenshot set
-                # review, 2026-09-23): the count is known when the line is
-                # written.
+                # Agreed in number, not a bracketed plural: the count is known when the line
+                # is written.
                 raise RedirectRefused(
                     f"redirect loop at {followed + 1} "
                     f"{'hop' if followed == 0 else 'hops'}", code="redirect_loop",

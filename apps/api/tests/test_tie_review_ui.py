@@ -1,18 +1,11 @@
-"""The tie inspector's Review section: the console half of gap-tie-review.
+"""The tie inspector's Review section: the console half of tie review.
 
-gap-tie-review and ux05-inspector:review-state-never-leaves-proposed
-(2026-09-23). Nothing could move `core.edge.review`, so every tie read
-"review PROPOSED", the canvas ringed every node, and the Metrics row
-"Unreviewed proposals" always equalled "Ties in projection" while its
-tooltip told the analyst to dispose of something no control could.
-`test_tie_review_pg.py` holds the server half (born state, the audited
-route, its refusals); this file holds the console: the section exists on a
-tie and only there, it asks for a note where the server will, it posts to
-the route, and a review recounts the rings the canvas draws.
+`test_tie_review_pg.py` holds the server half (born state, the audited route, its refusals); this file
+holds the console: the section exists on a tie and only there, it asks for a note where the server
+will, it posts to the route, and a review recounts the rings the canvas draws.
 
-Pure: reads the shipped static assets, as `test_ui_invariants.py` does,
-and runs the section's pure functions and the ring recount under Node
-(skipped where Node is not installed).
+Pure: reads the shipped static assets, as `test_ui_invariants.py` does, and runs the section's pure
+functions and the ring recount under Node (skipped where Node is not installed).
 """
 from __future__ import annotations
 
@@ -207,13 +200,10 @@ console.log(JSON.stringify({before, after, list: state.edges[0].review}));"""])
 
 
 def test_a_tie_waiting_on_a_person_is_marked_and_listed_first():
-    """The entity's "Ties awaiting review" row sends the analyst to
-    Relationships to open each PROPOSED tie. ux08-triage had taken the
-    review off the row while nothing wrote the column, and the merge kept
-    that removal, so the tie to open could not be told from the rest, and
-    on a hub it sat behind "Show all N ties". A PROPOSED or DISPUTED tie is
-    marked and spoken, an ACCEPTED one is not, and among the drawn ties
-    the PROPOSED ones come first."""
+    """The entity's "Ties awaiting review" row sends the analyst to Relationships to open each
+    PROPOSED tie, so that tie must be told from the rest and, on a hub, not sit behind "Show all N
+    ties". A PROPOSED or DISPUTED tie is marked and spoken, an ACCEPTED one is not, and among the drawn
+    ties the PROPOSED ones come first."""
     script = "\n".join([
         _fn("tieReviewFlag"),
         "function tieEndLabel(e, end) { return end === 'src' ? e.src_node_id : e.dst_node_id; }",

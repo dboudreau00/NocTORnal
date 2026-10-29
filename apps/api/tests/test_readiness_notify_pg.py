@@ -1,6 +1,5 @@
-"""The two readiness rows for notifications (F8 F and F7, 2026-09-24):
-notify_outbox_draining and jira_destination. Neither is blocking; both
-are settled under Administration, Integrations.
+"""The two readiness rows for notifications: notify_outbox_draining and jira_destination. Neither is
+blocking; both are settled under Administration, Integrations.
 
 **The email prefix is `nrdy-`.** Env-gated on DATABASE_URL.
 """

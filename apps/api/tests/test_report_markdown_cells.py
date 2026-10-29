@@ -1,16 +1,12 @@
-"""The saved report is a table of forum data, and forum data must not be
-able to rearrange it.
+"""The saved report is a table of forum data, and forum data must not be able to rearrange it.
 
-Final review U13 (2026-09-23). `render_markdown` put node labels, tie
-endpoints, exhibit titles, assumptions and hypothesis statements into pipe
-tables verbatim, and a label is only checked for being blank. A collected
-handle "x | RED" shifted every later cell one column right, so the saved
-TLP:GREEN file said that entity was RED; a handle holding a newline ended
-its row and printed "**TLP:CLEAR**" on a line of its own partway through
-an AMBER document.
+`render_markdown` puts node labels, tie endpoints, exhibit titles, assumptions and hypothesis statements
+into pipe tables, and a label is only checked for being blank. A collected handle "x | RED" would shift
+every later cell one column right, so the saved TLP:GREEN file would say that entity was RED; a handle
+holding a newline would end its row and print "**TLP:CLEAR**" on a line of its own partway through an AMBER
+document.
 
-Also here, because they are pure: the hypothesis half of the redaction
-statement and its section (final review C2).
+Also here, because they are pure: the hypothesis half of the redaction statement and its section.
 
 Pure: builds `Report` objects directly; no database.
 """
@@ -32,9 +28,8 @@ PLAIN_BACKSLASHES = "C:\\evidence\\capture.txt"
 
 def _redaction(**kw):
     from noctornal_api.reports import Redaction
-    # Under COUNT, the setting whose statement states the figures it is
-    # given; a Redaction built by hand says nothing of them otherwise
-    # (2026-10-08).
+    # Under COUNT, the setting whose statement states the figures it is given; a Redaction built by hand
+    # says nothing of them otherwise.
     base = dict(built_at_tlp="AMBER", ceiling_tlp="AMBER", case_tlp="AMBER",
                 nodes_withheld=0, edges_withheld=0, evidence_withheld=0,
                 disclosure="COUNT")
@@ -142,7 +137,7 @@ def test_no_value_can_move_a_column():
 
 
 def test_the_entity_s_own_tlp_column_still_says_its_classification():
-    """The finding's reproduction: "x | RED" made the TLP column read RED."""
+    """"x | RED" must not make the TLP column read RED."""
     from noctornal_api.reports import render_markdown
     rows = _table(render_markdown(_report()), "| Type | Label | TLP | Evidenced |")
     hostile = next(r for r in rows if "x \\| RED" in r)
@@ -151,9 +146,8 @@ def test_the_entity_s_own_tlp_column_still_says_its_classification():
 
 
 def test_no_value_can_start_a_line_of_its_own():
-    """A newline, a carriage return or a Unicode line separator in a label
-    no longer ends the row, so the only handling marks on their own lines
-    are the document's."""
+    """A newline, a carriage return or a Unicode line separator in a label does not end the row, so the
+    only handling marks on their own lines are the document's."""
     from noctornal_api.reports import render_markdown
     document = render_markdown(_report())
     assert document.split("\n") == document.splitlines(), (
@@ -195,7 +189,7 @@ def test_a_backslash_before_a_pipe_is_kept_in_the_cell():
     assert _cell(None) == "None"
 
 
-# --- C2: the hypotheses half of the statement -------------------------------
+# --- the hypotheses half of the statement ----------------------------------
 
 def test_withheld_hypotheses_are_stated_and_the_section_says_so():
     from noctornal_api.reports import render_markdown
@@ -227,9 +221,9 @@ def test_the_statement_still_never_says_which_classification():
     statement = _redaction(case_tlp="RED", header_withheld=True,
                            hypotheses_withheld=1,
                            hypothesis_evidence_withheld=3).statement()
-    # The case's own mark is stated, as it always was; nothing names the
-    # level of what was withheld.
-    assert statement.count("RED") == 1
+    # The header is withheld, so the case's own level is part of what was
+    # withheld, and nothing names the level of what was withheld.
+    assert "RED" not in statement
 
 
 # --- the ruled-out alternatives say they were ruled out ------------------

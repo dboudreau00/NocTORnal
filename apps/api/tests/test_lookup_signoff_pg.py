@@ -1,11 +1,9 @@
-"""Sign-off for a lookup that sends case material to somebody else's system
-(docs/00 decision 75, F15.3, 2026-09-24): requested by one
-person, signed off by the different, eligible person they named, in a
-separate action, before it lapses, with every gate run again at that
-moment; held by the database as well as by the service.
+"""Sign-off for a lookup that sends case material to somebody else's system (docs/00 decision 75):
+requested by one person, signed off by the different, eligible person they named, in a separate action,
+before it lapses, with every gate run again at that moment; held by the database as well as by the service.
 
-The fetcher and the routes are fakes; nothing reaches a provider. **The
-email prefix is `lksign-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. The email prefix is `lksign-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

@@ -1,11 +1,9 @@
-"""Batch lookups (F15.4, 2026-09-24): to your own
-instance (NONE) only, previewed with nothing sent or written, committed
-against the digest of what was previewed, cancellable, and reported from
-the rows the reader can read, with no totals that would count what they
-cannot.
+"""Batch lookups: to your own instance (NONE) only, previewed with nothing sent or written, committed
+against the digest of what was previewed, cancellable, and reported from the rows the reader can read, with
+no totals that would count what they cannot.
 
-The fetcher and the routes are fakes; nothing reaches a provider. **The
-email prefix is `lkbatch-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. The email prefix is `lkbatch-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -223,9 +221,8 @@ def test_the_plan_route_takes_the_selection_in_the_body(conn, monkeypatch):
 
 
 def test_the_list_says_who_may_cancel_what_is_still_queued(conn):
-    """The console offers Cancel where cancel_batch takes it: the requester
-    or a lead investigator, while rows are queued
-    (2026-09-25)."""
+    """The console offers Cancel where cancel_batch takes it: the requester or a lead investigator, while
+    rows are queued."""
     from uuid import UUID
 
     from outbound_support import assign, make_user

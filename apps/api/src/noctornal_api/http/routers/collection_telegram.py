@@ -1,37 +1,13 @@
-"""Telegram chats and personas over HTTP (roadmap F5.2 and F5.3,
-2026-09-24).
+"""Telegram chats and personas over HTTP.
 
-Every route that makes the persona do something Telegram sees (looking a
-chat up, joining it, checking its membership, rebinding it to another
-persona) is an attended persona act: 409 while a blocking readiness check
-fails (the collection router's refuse_unready, one sentence), the
-foundation's persona gate with the caller's own clearance, the persona's
-act route on the egress proxy, a live confirmed authority, and the
-`collection.persona_act` rate limit. Stopping and resuming a chat carry no
-act and no limit beyond the global one: stopping is always allowed.
-
-Binding a chat to a persona is a change the foundation keeps behind
-collection_account.manage, which is step-up; creating a chat, rebinding one
-and marking one as a member chat therefore need it too, and joining needs a
-fresh second factor (2026-09-24).
-
-A source above the caller, or a persona the caller may not see, answers
-exactly like a missing one. An outcome answers a fixed status and sentence,
-never a library's text: the foundation's answers for a wait, a refused
-credential and an abandoned session, and Telegram's own for an egress
-refusal (503), a transport failure (502) and a chat Telegram will not show
-this persona (409).
-
-## Where the act runs (A collector process, 2026-10-02)
-
-Not here. Each act route checks what it always checked first (the
-permissions, the second factor, the readiness register, the chat's
-visibility), then queues the act in `collect.persona_act` for the
-collector, the one process that holds the persona key, and answers with
-the act's outcome when it finishes within NOCTORNAL_ACT_WAIT_SECONDS, or
-202 with the act while it is queued. The outcome is the same status and
-sentence as before, through `act_problem`. Development's inline mode
-(NOCTORNAL_COLLECTOR_INLINE) runs it here, in this request.
+A route that makes the persona do something Telegram sees is an attended persona act, held to the
+readiness register (`refuse_unready`), the persona gate at the caller's clearance, the persona's
+egress route, a live confirmed authority and the `collection.persona_act` limit. The route checks
+what it can first, then queues the act for the collector (NOCTORNAL_COLLECTOR_INLINE runs it
+here). Binding, creating, rebinding and marking a chat need the step-up
+`collection_account.manage`, and joining a fresh second factor; stopping is always allowed. A
+source or persona the caller may not see answers as a missing one, and an outcome is a fixed
+status and sentence, never a library's text.
 """
 from __future__ import annotations
 
@@ -83,16 +59,9 @@ router = APIRouter(prefix="/collection/telegram", tags=["collection"])
 
 
 def _storable(value: str) -> str:
-    """U+0000 is text pydantic accepts and Postgres cannot store: it raised
-    UntranslatableCharacter on the act's INSERT, so a join note or a reason
-    carrying one answered 500 (2026-10-03). clean_text
-    swaps it, and a lone surrogate should one ever get here, for U+FFFD, one
-    character for one, so the field's own length limits still hold. (A lone
-    surrogate in a request body never gets here: pydantic refuses it with a
-    422. Neither does a JSON body with a NUL escape, since the request layer
-    refuses one with a 422 before any route parses it, http_ui-014,
-    2026-10-03: `http/body_ceiling.py`. This is what holds for a model built
-    anywhere else, and is the second wall.)"""
+    """Postgres cannot store U+0000, which pydantic accepts, so `clean_text` swaps it (and a lone
+    surrogate) for U+FFFD, one character for one, keeping the field's length limits. A second wall:
+    `http/body_ceiling.py` already refuses a request body with a NUL escape."""
     return clean_text(value, len(value)) or ""
 
 
@@ -108,8 +77,8 @@ _TITLES = {400: "Invalid request", 404: "Not found", 409: "Conflict",
 
 
 def get_transport_factory():
-    """The Telegram transport the chat routes use; None is Telethon. An HTTP
-    test replaces it through app.dependency_overrides with a fake."""
+    """The Telegram transport the chat routes use; None is Telethon. An HTTP test swaps in a fake
+    through app.dependency_overrides."""
     return None
 
 
@@ -147,9 +116,8 @@ MEMBER_MARKED = "The chat is now a member chat. "
 
 
 def act_problem(kind: str, exc: Exception) -> Problem:
-    """The answer for a Telegram act's outcome, whichever process ran it
-    (A collector process, 2026-10-02): `_problem`, and for a mark as
-    member the sentence that says the mark stood."""
+    """The answer for a Telegram act's outcome, whichever process ran it: `_problem`, and for a
+    mark as member the sentence that says the mark stood."""
     problem = _problem(exc)
     if (kind == "TELEGRAM_MARK_MEMBER" and problem.status == 409
             and not isinstance(exc, TelegramActError)):
@@ -163,10 +131,9 @@ def _chats(conn, adapters, factory) -> TelegramChats:
 
 def _act(conn, user, kind: str, *, source_id: UUID | None, classification: str,
          params: dict, adapters, factory):
-    """Queue the act for the collector, the one process that holds the
-    persona key (A collector process, 2026-10-02), and answer as the route
-    always did once it has run, or 202 while it waits. Development's
-    inline mode runs it here."""
+    """Queue the act for the collector, the one process that holds the persona key, and answer
+    with its outcome once it has run, or 202 while it waits. Development's inline mode runs it
+    here."""
     from noctornal_api.http.routers.collection_acts import act_answer
 
     return act_answer(conn, user, kind=kind, source_id=source_id,
@@ -176,9 +143,8 @@ def _act(conn, user, kind: str, *, source_id: UUID | None, classification: str,
 
 def _chat_label(conn, source_id: UUID, clearance: str,
                 compartments=None) -> str:
-    """The chat's source label, at which its act is held; a chat the
-    caller may not see (its label above them, or a compartment they do not
-    hold, F43) answers exactly as a missing one, before anything is
+    """The chat's source label, at which its act is held. A chat the caller may not see (its label
+    above them, or a compartment they do not hold) answers as a missing one, before anything is
     queued."""
     from noctornal_api.telegram_service import _chat_row
 
@@ -204,8 +170,7 @@ def persona_window(
     persona_id: UUID, body: WindowBody,
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
-    # Written on a system connection: personas are read-only to the
-    # request role (0179, Beta 1.1).
+    # Written on a system connection: personas are read-only to the request role (0179).
     sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     """A Telegram persona's active hours in UTC, or none. Outside them the
@@ -253,9 +218,8 @@ class ChatCreate(BaseModel):
     poll_interval_s: int = Field(default=1800, ge=300, le=7 * 86400)
     jitter_pct: int = Field(default=25, ge=0, le=50)
     max_rps: float = Field(default=0.2, ge=0.05, le=1.0)
-    #: F43 (2026-10-03): the compartments the chat's
-    #: source and everything it collects are filed under; the creator must
-    #: hold each. Until now this route could not set them.
+    #: The compartments the chat's source and everything it collects are filed under; the creator
+    #: must hold each.
     compartments: list[str] = Field(default_factory=list, max_length=32)
 
 
@@ -275,12 +239,10 @@ def create_chat(
     by somebody the caller cannot see answer the same."""
     refuse_unready(conn)
     clearance, held = user_ceiling(conn, user.user_id)
-    # Everything that needs no key and no network is refused here, before
-    # anything is queued (2026-10-03): a private invite link is
-    # a bearer join credential, and the queue's rows are never deleted, so
-    # it must never be written; a typo is a cheap 400 now, not one that
-    # waits for the collector. Only the reference as it was understood is
-    # queued, never the text typed.
+    # Everything that needs no key and no network is refused here, before anything is queued: a
+    # private invite link is a bearer join credential and queue rows are never deleted, so it must
+    # never be written, and a typo is a cheap 400. Only the parsed reference is queued, never the
+    # text typed.
     try:
         parsed = check_create_request(body.ref, body.access_mode,
                                       body.classification,
@@ -290,9 +252,8 @@ def create_chat(
         raise _problem(exc) from None
     params = body.model_dump()
     params["ref"] = normal_reference(parsed)
-    # Held at the label asked for. One that is no label, or above the
-    # caller, is held at their own clearance and refused when it runs, in
-    # create's own words and order (2026-10-02).
+    # Held at the label asked for. One that is no label, or above the caller, is held at their own
+    # clearance and refused when it runs, in create's own words and order.
     try:
         label = (body.classification
                  if tlp_from_name(body.classification) <= clearance
@@ -374,8 +335,8 @@ def mark_member_chat(
     persona's membership without joining."""
     refuse_unready(conn)
     clearance, held = user_ceiling(conn, user.user_id)
-    # The mark and the check run together, where the persona key is
-    # (2026-10-02); act_problem says the mark stood when the check refused.
+    # The mark and the check run together, where the persona key is; act_problem says the mark
+    # stood when the check refused.
     return _act(conn, user, "TELEGRAM_MARK_MEMBER", source_id=source_id,
                 classification=_chat_label(conn, source_id, clearance.name, held),
                 params={"reason": body.reason}, adapters=adapters,
@@ -405,8 +366,7 @@ def _set_active(source_id, body, user, conn, adapters, active: bool,
                 sconn) -> dict:
     clearance, held = user_ceiling(conn, user.user_id)
     try:
-        # Written on a system connection: sources are read-only to the
-        # request role (0179, Beta 1.1).
+        # Written on a system connection: sources are read-only to the request role (0179).
         return _chats(sconn, adapters, None).set_active(
             source_id, active=active, reason=body.reason, actor_id=user.user_id,
             clearance=clearance.name, compartments=held)

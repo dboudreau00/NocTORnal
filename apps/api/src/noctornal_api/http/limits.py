@@ -1,36 +1,15 @@
-"""Wiring the rate limiter into HTTP: subject derivation, the dependency
-that guards a named endpoint, and the blanket middleware behind it.
+"""Wiring the rate limiter into HTTP: subject derivation, the dependency that guards a named
+endpoint, and the blanket middleware behind it.
 
-Two layers, because they fail differently:
-
-**The middleware** applies one ceiling to every request, keyed on the
-presented credential. It needs no database, so it runs before session
-validation and therefore limits an unauthenticated flood too. It fails
-OPEN when the backend is down -- see `ratelimit.py` -- because a Redis
-restart must not take an investigation tool offline.
-
-**The dependency** applies a specific, much smaller limit to a named
-endpoint, keyed on the authenticated user. It runs after the session is
-resolved and before the access gate, so a limited caller does not get to
-spend the gate's queries either. It fails CLOSED, because these are the
-endpoints where being unlimited is the actual danger.
-
-## X-Forwarded-For is not read unless a deployment says so
-
-An IP-scoped limit derived from a header the client controls is worse than
-no limit at all. The attacker rotates the header and is never limited; and
-because the header names the SUBJECT, they can also send a victim's
-address and exhaust the victim's login bucket instead of their own -- a
-remotely triggerable lockout of a named analyst, which is the same defect
-class the DB lockout decay fixed.
-
-So the peer address is used, full stop, unless `NOCTORNAL_TRUSTED_PROXY_HOPS`
-is set to the number of proxies the operator actually runs. Then the
-(hops)-th entry from the RIGHT of the header is taken: the rightmost
-entries were appended by infrastructure the operator controls, everything
-to the left of them is client-supplied and still untrusted. Counting from
-the left -- the common mistake -- reads whatever the client put there
-first.
+The middleware applies one ceiling to every request, keyed on the presented credential; it
+needs no database, so it also limits an unauthenticated flood, and it fails open when the
+backend is down (`ratelimit.py`) so a Redis restart cannot take the tool offline. The
+dependency applies a much smaller limit to a named endpoint, keyed on the authenticated user,
+after the session and before the access gate; it fails closed, because on those endpoints
+being unlimited is the danger. X-Forwarded-For is read only when
+`NOCTORNAL_TRUSTED_PROXY_HOPS` names the proxies the operator runs, and then counted from the
+right: a client-controlled header would let an attacker rotate past the limit or exhaust a
+named analyst's login bucket.
 """
 from __future__ import annotations
 
@@ -69,12 +48,8 @@ EVICTION_WARNING = "RATE-LIMIT REDIS EVICTS KEYS"
 def rate_limiting_disabled() -> bool:
     """Is the NOCTORNAL_RATELIMIT off-switch thrown?
 
-    ONE reader for the off-set. `build_limiter` decides whether to build
-    a limiter from it, and the readiness register (`readiness.py`) reports
-    whether one was built from it; if each kept its own list of off-values
-    they would eventually disagree, and a deployment would be reported
-    ready with a limiter that never built. Public since 2026-09-02, when
-    the readiness check was added and needed the same answer.
+    One reader for the off-set: `build_limiter` and the readiness register (`readiness.py`)
+    both ask it, so a deployment cannot be reported ready with a limiter that never built.
     """
     setting = os.environ.get("NOCTORNAL_RATELIMIT", "").strip().lower()
     return setting in _OFF
@@ -88,10 +63,9 @@ HOPS_ENV = "NOCTORNAL_TRUSTED_PROXY_HOPS"
 def trusted_proxy_hops() -> int:
     """How many proxies sit in front of this process, as the operator said.
 
-    ONE reader for the count: `client_ip` takes the address from it, and the
-    readiness register (`proxy_hops_declared`) reports on it, so the two
-    cannot read the variable differently. Public since 2026-10-08, when the
-    register needed the same answer. Unset, negative or not a number is 0."""
+    One reader for the count: `client_ip` takes the address from it and the readiness register
+    (`proxy_hops_declared`) reports on it, so the two cannot read the variable differently.
+    Unset, negative or not a number is 0."""
     raw = os.environ.get(HOPS_ENV, "0")
     try:
         return max(0, int(raw))
@@ -103,15 +77,10 @@ def trusted_proxy_hops() -> int:
 def client_ip(request: Request) -> str | None:
     """The peer address, or the address the outermost trusted proxy saw.
 
-    EVERY `X-Forwarded-For` field line is joined before splitting, not just
-    the first. RFC 9110 makes repeated field lines semantically identical to
-    one comma-joined value, and real proxies differ about which they emit --
-    HAProxy's `option forwardfor` appends a SEPARATE header line by default.
-    Reading only the first line would mean `parts[-hops]` indexes a list the
-    client authored in full, with the proxy's own entry sitting unread in a
-    second line: the entire "count from the right" defence this module is
-    built around, silently reading the attacker's value. Found by
-    adversarial review.
+    Every `X-Forwarded-For` field line is joined before splitting: RFC 9110 makes repeated lines
+    one comma-joined value, and HAProxy's `option forwardfor` appends a separate line, so reading
+    only the first would index a list the client wrote in full and defeat counting from the
+    right.
     """
     hops = trusted_proxy_hops()
     if hops:
@@ -132,27 +101,12 @@ def client_ip(request: Request) -> str | None:
 def credential_subject(request: Request) -> str:
     """A stable per-caller key with no database lookup.
 
-    The token itself is never used as a key -- a Redis key is not a secret
-    store, and `KEYS *` on a shared instance would hand over live session
-    tokens. The hash is enough to be stable and useless to a reader.
-
-    **This key SUBDIVIDES; it does not bound.** It is derived from a value
-    the caller sends and nothing here verifies that the token is a live
-    session, so a caller rotating a random token per request mints a fresh
-    meter every time. Adversarial review demonstrated exactly that: with the
-    blanket limit shrunk to 3, a fixed token gave 27 refusals out of 30 and
-    a rotating one gave zero. Worse, the early return meant a garbage token
-    also suppressed the address fallback, so sending one extra header made a
-    caller strictly LESS limited than sending no credential at all.
-
-    The fix is not here -- a subject derived from client input cannot be
-    made trustworthy. It is in the middleware, which checks an
-    address-scoped ceiling (`request.source`) as well, so a rotating token
-    can only carve up a source's budget and never escape it.
-
-    An anonymous caller still falls back to their address, so one attacker
-    cannot deny service to every other anonymous caller by sharing a bucket
-    with them.
+    The token is hashed, never used as a key: a Redis key is not a secret store, and `KEYS *` on
+    a shared instance would hand over live session tokens. This key subdivides; it does not
+    bound. Nothing here verifies the token, so a caller rotating tokens mints a fresh meter each
+    time; the middleware's address-scoped ceiling (`request.source`) is what bounds them. An
+    anonymous caller falls back to their address, so one attacker cannot share, and exhaust,
+    every other anonymous caller's bucket.
     """
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
@@ -197,11 +151,9 @@ def build_limiter() -> RateLimiter:
         log.info("rate limiting via Redis at %s", redacted_url(url))
         _warn_if_evicting(backend, url)
     else:
-        # Not fatal: the per-limit policy already says what an unreachable
-        # backend means, and refusing to boot would make a cache outage an
-        # application outage. But it must not be discovered from a graph.
-        # No eviction probe either: a second question to a backend that
-        # just failed to answer the first would only add a second timeout.
+        # Not fatal: the per-limit policy says what an unreachable backend means, and refusing to
+        # boot would make a cache outage an application outage; but it is logged loudly. No
+        # eviction probe either: it would only add a second timeout.
         log.error(
             "rate-limit Redis at %s did not answer PING. Limits with "
             "on_backend_failure=DENY will refuse until it does.", redacted_url(url),
@@ -212,25 +164,13 @@ def build_limiter() -> RateLimiter:
 def _warn_if_evicting(backend, url: str) -> None:
     """Shout at startup if the limiter's Redis may delete its own meters.
 
-    Under an evicting policy, memory pressure deletes rate-limit keys, and
-    an evicted meter is a reset meter (docs/16 C8). `infra/docker-compose.yml`
-    ran Redis with `allkeys-lru` from Phase 7 until the Alpha 6 pre-release
-    check (2026-09-23), and until 2026-09-02 nothing in the process read
-    the policy, so a deployment that copied the compose file had a limiter
-    that silently stopped limiting whoever the cache evicted, and the
-    operator had to know to look. This is the same failure shape as
-    RATE LIMITING IS DISABLED, so it is reported in the same voice.
-
-    The bundled file runs `noeviction` now, so on that stack this stays
-    quiet. It still matters for an operator's own Redis, and for a dev
-    stack started from the older file and never recreated, which keeps
-    `allkeys-lru` until compose recreates the container; the warning says
-    how.
-
-    A Redis that refuses CONFIG (managed offerings usually rename it away)
-    is reported as UNKNOWN below WARNING: it is the true statement, and
-    nagging every boot of a deployment that cannot answer trains people
-    to ignore the line that matters.
+    Under an evicting policy, memory pressure deletes rate-limit keys, and an evicted meter is a
+    reset meter (docs/16), so this is reported in the same voice as RATE LIMITING IS DISABLED.
+    The bundled compose file runs `noeviction`; this matters for an operator's own Redis and for
+    a dev stack created from an older compose file, which keeps `allkeys-lru` until the
+    container is recreated (the warning says how). A Redis that refuses CONFIG (managed
+    offerings usually rename it) is reported as UNKNOWN below WARNING, because nagging every
+    boot trains people to ignore the line that matters.
     """
     from noctornal_api.ratelimit_redis import is_evicting_policy
 
@@ -262,15 +202,11 @@ _QUERY_PASSWORD = re.compile(r"(?i)([?&]password=)[^&#]*")
 
 
 def redacted_url(url: str) -> str:
-    """A Redis URL may carry a password. It is going into a log line, or
-    into readiness evidence an administrator reads -- never either with
-    the secret in it.
+    """A Redis URL with its password masked, for a log line or readiness evidence.
 
-    In the userinfo OR as a `password=` query argument, which redis-py
-    honours just the same: this masked only the first, so a URL with the
-    second went into the log and the readiness evidence whole (c23,
-    2026-09-24). Matched without regard to case, because masking a value
-    redis-py would not have read costs nothing."""
+    The password can sit in the userinfo or in a `password=` query argument, which redis-py
+    honours just the same; both are masked, the argument matched without regard to case,
+    because masking a value redis-py would not have read costs nothing."""
     if "@" in url:
         scheme, _, rest = url.partition("://")
         url = f"{scheme}://***@{rest.rpartition('@')[2]}"
@@ -339,12 +275,10 @@ def enforce(request: Request, response: Response, name: str, subject: str, *,
     if consume:
         for key, value in decision.headers.items():
             response.headers[key] = value
-        # ...and stash it, because FastAPI discards `sub_response` entirely
-        # when a handler returns a Response object directly (evidence export
-        # and download both do). The blanket middleware reads this back and
-        # writes the endpoint's headers onto the real response. Without it a
-        # client is not merely told nothing, it is told the 600/min blanket
-        # ceiling, which is actively the wrong number.
+        # ...and stash it, because FastAPI discards `sub_response` when a handler returns a
+        # Response directly (evidence export and download do). The blanket middleware writes
+        # the endpoint's headers onto the real response, or the client is told the blanket
+        # ceiling, which is the wrong number.
         request.state.rate_limit_decision = decision
 
     if decision.allowed:
@@ -372,18 +306,12 @@ def enforce(request: Request, response: Response, name: str, subject: str, *,
 
 
 def consume_on_failure(request: Request, name: str) -> None:
-    """Spend one slot on an IP-scoped meter because something FAILED.
+    """Spend one slot on an IP-scoped meter because something failed.
 
-    The login failure meter exists because an IP-scoped limit on login
-    *attempts* cannot be tight enough to stop spraying without also taking
-    a NAT'd organisation offline -- see the catalogue in `ratelimit.py`.
-    Metering failures instead makes the control asymmetric: a building full
-    of analysts signing on successfully never moves it, and a sprayer moves
-    nothing else.
-
-    Never raises. This runs on a path that is already returning 401, and
-    turning a metering hiccup into a 500 there would replace a clear
-    refusal with a confusing one.
+    A limit on login attempts tight enough to stop spraying would take a NAT'd organisation
+    offline (`ratelimit.py`); a meter of failures never moves for analysts signing on
+    successfully. Never raises: this runs on a path already returning 401, where a metering
+    hiccup must not become a 500.
     """
     try:
         limiter_of(request).check(name, ip_subject(client_ip(request)))
@@ -478,26 +406,12 @@ def _blanket_check(limiter: RateLimiter, credential: str, source: str):
 def install_rate_limit_middleware(app) -> None:
     """The blanket ceiling: two meters, and it takes both.
 
-    Registered as middleware rather than a global dependency because it must
-    cover every path -- including the static UI mount and any route added
-    later without remembering to opt in. A limit you have to remember to
-    apply is a limit that is missing from the endpoint added in a hurry.
-
-    **Why two.** The credential-scoped meter subdivides fairly between the
-    analysts behind one address; the address-scoped one is the actual
-    ceiling. On its own the credential meter is no ceiling at all, because
-    its subject is client-supplied: rotate the Bearer token and every
-    request gets a fresh, empty bucket. Adversarial review reproduced that
-    against the real app.
-
-    **Why off the event loop.** `RedisBackend` drives the SYNCHRONOUS
-    redis-py client. Calling it from an `async def` middleware would do
-    blocking socket I/O on the loop thread, so one slow Redis would
-    serialise every request in the process -- and the whole point of this
-    limit failing OPEN is that a sick Redis must not become a sick API. The
-    250ms socket timeout would then cost 250ms of loop time per request
-    before it even raised. `run_in_threadpool` is what keeps the fail-open
-    policy meaningful rather than nominal.
+    Middleware rather than a global dependency, so it covers every path, the static UI mount and
+    any route added later included. The credential-scoped meter subdivides fairly between the
+    analysts behind one address; the address-scoped one is the ceiling, since a client-supplied
+    token can be rotated for a fresh bucket. Run off the event loop (`run_in_threadpool`)
+    because `RedisBackend` drives the synchronous redis-py client: blocking the loop, a slow
+    Redis would stall every request and make failing open meaningless.
     """
     from starlette.concurrency import run_in_threadpool
 
@@ -522,11 +436,9 @@ def install_rate_limit_middleware(app) -> None:
                                     problem.type, problem.headers)
 
         response = await call_next(request)
-        # A specific endpoint limit's numbers beat the blanket ceiling's:
-        # telling a caller about 600/min when they just hit the 10-per-5-min
-        # analytics limit points them at the wrong number. The endpoint's
-        # decision arrives via request.state because FastAPI throws away
-        # `sub_response` for any handler that returns a Response directly.
+        # A specific endpoint limit's numbers beat the blanket ceiling's, or a caller who hit a
+        # small endpoint limit is shown the wrong number. The endpoint's decision arrives via
+        # request.state because FastAPI drops `sub_response` when a handler returns a Response.
         endpoint = getattr(request.state, "rate_limit_decision", None)
         source = endpoint or decision
         for key, value in source.headers.items():
@@ -538,53 +450,21 @@ def install_rate_limit_middleware(app) -> None:
 # Body caps: refusing an oversized body BEFORE it is buffered
 # ---------------------------------------------------------------------------
 #
-# Added 2026-09-09, answering the Alpha 4 product review. Two write paths
-# accepted a body of any size and only then decided it was too big:
-#
-# - `POST /cases/{id}/evidence` did `await file.read()` with no cap at all.
-#   A caller could hand the API gigabytes; nothing refused; and the bytes
-#   went into a bucket under a COMPLIANCE object lock that no credential --
-#   not the API's own, not a root MinIO principal -- can shorten. An
-#   accidental upload loop was a permanent storage commitment.
-# - `POST /ingest` did `await request.body()` and THEN `accept()` compared
-#   the length with the key's `max_bytes_per_request`. The cap was real and
-#   the refusal arrived only after the whole body had been accumulated in
-#   memory, which is the one thing a cap exists to prevent.
-#
-# `samples._read_capped` was the one path that stopped at the cap, and it
-# lived in the samples router where nothing else could reach it (the
-# deception router carried a copy). This is that idea, shared, in the
-# module that already owns the other request ceilings -- and since
-# 2026-09-09 the two donors use it too. Their chunked reads ran AFTER
-# the multipart parser had spooled the whole body to a temporary file,
-# so they bounded the process's memory and nothing else; both are gone.
-# Two mechanisms, because the routes read their bodies differently:
-#
-# `read_body_capped` is for a handler that reads the raw body itself.
-# `BodyCappedRoute` + `body_cap` is for a handler whose body FastAPI parses
-# before the handler runs -- a multipart upload. FastAPI reads the form
-# BEFORE it resolves dependencies (`get_request_handler`: `request.form()`
-# first, `solve_dependencies` second), so no dependency can stand in front
-# of the parser. The route class can: it wraps the ASGI `receive` the
-# parser reads through, and the refusal fires on the chunk that crosses
-# the cap, whatever the parser had planned to do with it.
-#
-# In both, `Content-Length` is a reason to refuse EARLY and never a reason
-# to accept: a declared length over the cap is refused before a byte is
-# read, and a declared length under it -- or none, for a chunked body -- is
-# still measured chunk by chunk. A header the client wrote cannot be the
-# bound; the stream is.
+# Evidence matters most: it lands under a COMPLIANCE object lock that no credential can shorten.
+# Two mechanisms, because routes read their bodies differently. `read_body_capped` is for a
+# handler that reads the raw body itself. `BodyCappedRoute` with `body_cap` is for a multipart
+# upload, which FastAPI parses before it resolves any dependency, so only the route class can
+# stand in front of the parser: it wraps the ASGI `receive` and refuses on the chunk that
+# crosses the cap. In both, `Content-Length` is a reason to refuse early, never to accept: a
+# declared length over the cap is refused before a byte is read, and anything else is still
+# measured chunk by chunk.
 
 
 def body_too_large(cap: int, what: str, *, declared: int | None = None) -> Problem:
-    """The one 413 for every over-cap body, with the cap in the message.
+    """The one 413 for every over-cap body, with the cap in the message so the caller can act.
 
-    The cap is in the text because the caller has to act on it, and
-    "payload too large" with no number sends them guessing. `Connection:
-    close` is set because the remainder of the body is never read: a
-    client that keeps sending on a kept-alive connection would be writing
-    into a socket nobody drains, and the server closes it after this
-    response. Saying so lets a well-behaved client stop sending.
+    `Connection: close` is set because the rest of the body is never read and the server closes
+    the socket after this response; saying so lets a well-behaved client stop sending.
     """
     detail = (f"{what} is capped at {cap} bytes; the request was refused at "
               f"the cap rather than buffered whole")
@@ -614,12 +494,9 @@ def declared_length(request: Request) -> int | None:
 async def read_body_capped(request: Request, cap: int, *, what: str) -> bytes:
     """Read the request body, refusing on the chunk that crosses `cap`.
 
-    The replacement for `await request.body()` on a route with a cap.
-    `request.body()` buffers everything and returns; a length check after
-    it has already paid the cost the check was for. Here the refusal fires
-    before the crossing chunk is appended, so the process never holds more
-    than the cap plus one chunk, and a declared length over the cap is
-    refused before the first chunk is read at all.
+    Use it instead of `await request.body()`, which buffers everything before a length check can
+    run. The process never holds more than the cap plus one chunk, and a declared length over
+    the cap is refused before the first chunk is read.
     """
     declared = declared_length(request)
     if declared is not None and declared > cap:
@@ -667,14 +544,9 @@ _BODY_CAP_ATTR = "__body_cap__"
 def body_cap(cap: int | Callable[[], int], *, what: str):
     """Mark an endpoint's body cap for `BodyCappedRoute` to enforce.
 
-    `cap` may be a callable so the number is read at request time rather
-    than at import: the evidence cap is a module constant in the same shape
-    as `samples.MAX_SAMPLE_BYTES`, and a test that has to send 256 MB to
-    prove a 413 is a test nobody runs. The marker does nothing on its own
-    -- the router has to be built with `route_class=BodyCappedRoute`, and
-    the regression test in `test_body_caps_http_pg.py` proves the two are
-    connected by feeding the route a body from a generator that raises if
-    asked for the byte past the cap.
+    `cap` may be a callable, read at request time, so a test can lower it instead of sending
+    256 MB. The marker does nothing unless the router is built with
+    `route_class=BodyCappedRoute`; `test_body_caps_http_pg.py` proves the two are connected.
     """
     def mark(endpoint):
         setattr(endpoint, _BODY_CAP_ATTR, (cap, what))
@@ -685,17 +557,11 @@ def body_cap(cap: int | Callable[[], int], *, what: str):
 class BodyCappedRoute(APIRoute):
     """An `APIRoute` that enforces a `body_cap` marker on its endpoint.
 
-    Only endpoints carrying the marker are wrapped; every other route on a
-    router built with this class runs exactly as before, so declaring the
-    class on a router does not silently cap routes nobody meant to cap.
-
-    Why a route class and not a dependency: FastAPI parses a form body
-    before it resolves any dependency, so by the time a dependency could
-    run the multipart parser has already spooled the whole upload. The
-    route handler is the one seam that sits between the ASGI `receive` and
-    the parser. FastAPI 0.141 calls `get_route_handler()` on the ORIGINAL
-    route object at request time (its `handle()` builds the handler under
-    the include context), so the override survives `include_router`.
+    Only endpoints carrying the marker are wrapped, so declaring the class on a router caps
+    nothing by accident. A route class, not a dependency, because FastAPI spools a multipart
+    upload before any dependency runs; the route handler is the one seam between the ASGI
+    `receive` and the parser. FastAPI 0.141 calls `get_route_handler()` on the original route
+    object at request time, so the override survives `include_router`.
     """
 
     def get_route_handler(self):
@@ -710,28 +576,18 @@ class BodyCappedRoute(APIRoute):
             declared = declared_length(request)
             if declared is not None and declared > cap:
                 raise body_too_large(cap, what, declared=declared)
-            # A second Request over the SAME scope, with the capped receive
-            # underneath it. Scope-backed state (`request.state`, the
-            # rate-limit decision the blanket middleware reads back) is
-            # shared, because `HTTPConnection.state` wraps `scope["state"]`
-            # rather than copying it. The send half is omitted: Starlette
-            # only uses it for HTTP/2 push promises, which nothing here
-            # issues.
+            # A second Request over the same scope, with the capped receive underneath it.
+            # `request.state` is shared, because `HTTPConnection.state` wraps `scope["state"]`;
+            # the send half is omitted, since Starlette uses it only for HTTP/2 push promises.
             capped = Request(request.scope,
                              capped_receive(request.receive, cap, what=what))
             try:
                 return await original(capped)
             except HTTPException as exc:
-                # FastAPI's request handler wraps ANY exception raised while
-                # it reads the body -- and the multipart parser reads through
-                # the capped receive -- into `HTTPException(400, "There was
-                # an error parsing the body")`, chaining the original as the
-                # cause. Left alone, the 413 with the cap in it became a 400
-                # with FastAPI's message and the cap nowhere in it, which is
-                # a refusal reported as the wrong thing. Measured 2026-09-09
-                # on the chunked path; the declared-length path never enters
-                # the parser and was unaffected. Only a Problem is unwrapped:
-                # nothing else raises one from under the parser.
+                # FastAPI wraps any exception raised while it reads the body into
+                # `HTTPException(400, "There was an error parsing the body")`, chaining the
+                # original, so the 413 with the cap in it is unwrapped here. Only a Problem is
+                # unwrapped: nothing else raises one from under the parser.
                 if isinstance(exc.__cause__, Problem):
                     raise exc.__cause__ from None
                 raise

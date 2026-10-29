@@ -1,9 +1,7 @@
-"""The readiness row outbound_lookup_providers (F15.2, 2026-09-24): the
-host switch as read, and every enabled provider's key, route, rotation
-date and adapter.
+"""The readiness row outbound_lookup_providers: the host switch as read, and every enabled provider's key,
+route, rotation date and adapter.
 
-Routes are fakes; nothing reaches a provider. **The email prefix is
-`rdprov-`.** Env-gated on DATABASE_URL.
+Routes are fakes; nothing reaches a provider. **The email prefix is `rdprov-`.** Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

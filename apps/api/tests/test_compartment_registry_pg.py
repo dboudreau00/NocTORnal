@@ -1,31 +1,21 @@
 """The compartment registry (migration 0057) and the write sites it gates.
 
-`iam.app_user.compartments` and `core.case.compartments` were free-text
-arrays validated by nothing, and the user-side array had no product write
-path at all: a compartment was granted with `psql`, and a typo in it was
-silent no-access -- the analyst simply stopped seeing the case, and no
-listing, gate or log said why (docs/16's lesson, cited in `iam_admin.py`'s
-role allowlist since 2026-07-30 and never applied to compartments).
+`iam.compartment` is the closed vocabulary for `iam.app_user.compartments` and `core.case.compartments`.
+Without it a typo is silent no-access: the analyst simply stops seeing the case, and no listing, gate
+or log says why (docs/16's lesson). The tests read BOTH sides of that contract wherever it crosses a
+file:
 
-`iam.compartment` is now the closed vocabulary. The tests that carry this
-file read BOTH sides of that contract wherever it crosses a file:
+- the SERVICE refusal (`CaseError` naming the key) and the ROUTER's 400 for the same request, so the
+  wire cannot drift from the reason;
+- the MIGRATION's own backfill SQL, imported from the version file and run against a seeded row, so
+  "the backfill registered the pre-existing values" is proved rather than assumed on a database that
+  happens to already contain them;
+- the one place a compartment could be smuggled past the gate, a case edit, checked on the router body
+  AND the service signature, so adding the field to either half without the other fails here.
 
-- the SERVICE refusal (`CaseError` naming the key) and the ROUTER's 400
-  for the same request, so the wire cannot drift from the reason;
-- the MIGRATION's own backfill SQL, imported from the version file and
-  run against a seeded row, so "the backfill registered the pre-existing
-  values" is proved rather than assumed on a database that happens to
-  already contain them;
-- the one place a compartment could be smuggled past the gate -- a case
-  edit -- checked on the router body AND the service signature, so adding
-  the field to either half without the other fails here.
-
-Since 2026-09-09 (migration 0059) the arrays THEMSELVES are bound to the
-registry, so the raw `UPDATE` this file's fixtures use is no longer the
-ungated out-of-band path it was first described as: a key is registered
-before it is written, and the two tests that need an unregistered value
-in an array seed it behind the trigger (`_pre_0059`). The binding has its
-own file, `test_compartment_binding_pg.py`.
+Migration 0059 binds the arrays THEMSELVES to the registry, so a key is registered before it is
+written, and the two tests that need an unregistered value in an array seed it behind the trigger
+(`_pre_0059`). The binding has its own file, `test_compartment_binding_pg.py`.
 
 Env-gated on DATABASE_URL. Email prefix `cmp-`; registry keys `ALPHA-T6-`.
 """
@@ -96,10 +86,8 @@ def _user(conn, *global_roles, clearance="AMBER", compartments=()):
     uid = store.create_user(email, "Cmp", PASSWORD)
     secret = totp.generate_secret()
     store.enroll_totp(uid, secret)
-    # Direct SQL, as every fixture in this suite does. Until 2026-09-09
-    # this was the out-of-band path the registry did not gate; migration
-    # 0059 bound the column, so the keys are registered first. A test that
-    # needs an UNREGISTERED value in the array seeds it via `_pre_0059`.
+    # Direct SQL, as every fixture in this suite does. Migration 0059 binds the column, so the keys are
+    # registered first. A test that needs an UNREGISTERED value in the array seeds it via `_pre_0059`.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -115,29 +103,21 @@ def _user(conn, *global_roles, clearance="AMBER", compartments=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against. Unbound (no
+    address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
     is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. TOTP codes
+    are single-use, so two sign-ins for one account inside one 30-second step would fail on the code,
+    not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -172,18 +152,12 @@ def _admin_svc(conn):
 # --- the case write site --------------------------------------------------
 
 def test_a_case_cannot_enter_a_compartment_until_it_is_registered(conn, client):
-    """Before registration: refused, and the refusal NAMES the key, on the
-    service and on the wire. After POST /compartments: the same request
-    succeeds.
+    """Before registration: refused, and the refusal NAMES the key, on the service and on the wire.
+    After POST /compartments: the same request succeeds.
 
-    Until 2026-09-09 the owner was read into the key OUT OF BAND first (a
-    raw UPDATE), "so the only thing standing between the two outcomes is
-    the registry". Migration 0059 bound that raw UPDATE to the registry
-    too, so an out-of-band read-in to an unregistered key no longer
-    exists to build on. The owner is read in through the product AFTER
-    the key is registered, which is the order the binding now enforces
-    on every writer; the registry check in `cases.py` runs before the
-    holds-the-key check, so the refusal is still about registration."""
+    The owner is read into the key through the product AFTER the key is registered, the order the
+    binding enforces on every writer; the registry check in `cases.py` runs before the holds-the-key
+    check, so the refusal is still about registration."""
     from noctornal_api.cases import CaseError
     key = _key()
     owner_id, owner_email, owner_secret = _user(conn, "CASE_OWNER")
@@ -246,21 +220,15 @@ def test_registering_the_same_key_twice_is_a_refusal_not_a_relabel(conn):
 
 
 def test_the_listing_shows_only_the_callers_own_read_ins(conn, client):
-    """The access decision on `GET /compartments`, which had no test at all
-    until 2026-09-02 -- the one thing in this surface nobody had pinned.
+    """The access decision on `GET /compartments`: the caller sees only their own read-ins.
 
-    Until then the endpoint was gated on `current_user` alone and returned
-    the WHOLE registry, with each key's administrator-written label, to
-    every authenticated account. In this system the key IS the
-    need-to-know lock: 0057 calls compartments "need-to-know locks" and
-    `cases.py` refuses an unregistered key because "a key is something
-    typed into a warrant schedule". Handing an analyst with zero read-ins
-    the full codeword vocabulary told them which operations exist, which
-    is the fact the compartment was created to withhold.
+    The key IS the need-to-know lock: 0057 calls compartments "need-to-know locks" and `cases.py`
+    refuses an unregistered key because "a key is something typed into a warrant schedule". Returning
+    the WHOLE registry, with each key's administrator-written label, to an analyst with zero read-ins
+    would tell them which operations exist, which is the fact the compartment withholds.
 
-    Three parties, one URL, and the response says which answer it is --
-    because a listing that silently narrows is a correct answer to a
-    different question, and the client cannot tell.
+    Three parties, one URL, and the response says which answer it is, because a listing that silently
+    narrows is a correct answer to a different question and the client cannot tell.
     """
     held, unheld = _key(), _key()
     admin_id, admin_email, admin_secret = _user(conn, "SYS_ADMIN")
@@ -305,11 +273,10 @@ def test_the_listing_shows_only_the_callers_own_read_ins(conn, client):
 # --- the user write site --------------------------------------------------
 
 def test_set_compartments_refuses_a_typo_and_a_stranding_removal(conn, client):
-    """The two refusals that make the user-side write path safe to expose:
-    an unknown key is named and refused (the typo that used to be silent
-    no-access), and a compartment an OWNED case requires cannot be taken
-    away -- the mirror of the clearance-lowering refusal, for the same
-    reason: an owner who cannot read their own case has no route back."""
+    """The two refusals that make the user-side write path safe to expose: an unknown key is named and
+    refused (a typo is otherwise silent no-access), and a compartment an OWNED case requires cannot be
+    taken away, the mirror of the clearance-lowering refusal, for the same reason: an owner who cannot
+    read their own case has no route back."""
     from noctornal_api.iam_admin import AdminError
     key = _key()
     admin_id, admin_email, admin_secret = _user(conn, "SYS_ADMIN")
@@ -372,22 +339,17 @@ def test_set_compartments_refuses_a_typo_and_a_stranding_removal(conn, client):
 
 
 def test_narrowing_a_read_in_reports_the_assignments_it_strands(conn):
-    """The gap between what `set_compartments`' refusal covers and what its
-    reasoning claimed, closed on 2026-09-02 by reporting rather than by
-    refusing more.
+    """Narrowing a read-in reports the assignments it strands rather than refusing.
 
-    The refusal covers OWNER and DEPUTY, because those have no route back:
-    an owner locked out of their own case cannot transfer it. An ASSIGNEE
-    does have one, so refusing there would mean an administrator cannot
-    narrow anyone's read-ins until every case they are on is unpicked --
-    and a control nobody can use is not a control. But losing a case you
-    are assigned to is still silent no-access, so the act is recorded
-    instead of prevented.
+    The refusal covers OWNER and DEPUTY, because those have no route back: an owner locked out of their
+    own case cannot transfer it. An ASSIGNEE does have one, so refusing there would mean an
+    administrator cannot narrow anyone's read-ins until every case they are on is unpicked, and a
+    control nobody can use is not a control. But losing a case you are assigned to is still silent
+    no-access, so the act is recorded instead of prevented.
 
-    Both halves, because the audit row is a CLAIM about access: the
-    detail names the case, and `list_for_user` -- the listing that must
-    return exactly what the five-part gate allows -- agrees that the
-    analyst can no longer see it.
+    Both halves, because the audit row is a CLAIM about access: the detail names the case, and
+    `list_for_user`, the listing that must return exactly what the five-part gate allows, agrees that
+    the analyst can no longer see it.
     """
     from noctornal_api.cases import CaseService
     from noctornal_api.iam_admin import AdminError
@@ -471,13 +433,11 @@ def _backfill_sql() -> str:
 def _pre_0059(tx) -> None:
     """Put the transaction in the state a 0057 upgrade actually finds.
 
-    The two migration tests below seed an UNREGISTERED value into the
-    arrays to prove what 0057's backfill and refusal do with it. Since
-    2026-09-09 migration 0059 binds both arrays to the registry, so at
-    head the seed itself is refused. `DISABLE TRIGGER USER` is the suite's
-    idiom for stepping behind a trigger (`test_audit_verify_pg.py`); it is
-    transactional, so the rollback that ends each test re-enables the
-    binding, and it is a no-op on a database that has not reached 0059.
+    The two migration tests below seed an UNREGISTERED value into the arrays to prove what 0057's
+    backfill and refusal do with it. At head, migration 0059 binds both arrays to the registry, so the
+    seed itself is refused. `DISABLE TRIGGER USER` is the suite's idiom for stepping behind a trigger
+    (`test_audit_verify_pg.py`); it is transactional, so the rollback that ends each test re-enables
+    the binding, and it is a no-op on a database that has not reached 0059.
     """
     tx.execute("ALTER TABLE iam.app_user DISABLE TRIGGER USER")
     tx.execute('ALTER TABLE core."case" DISABLE TRIGGER USER')
@@ -529,23 +489,20 @@ def test_the_backfill_registers_every_value_already_in_either_array(conn):
 
 
 def test_a_legacy_value_the_format_cannot_hold_stops_the_upgrade_with_the_fix(conn):
-    """0057 hard-fails on a value it cannot register, so the refusal has to
-    be an instruction rather than a wall -- and the instruction has to run.
+    """0057 hard-fails on a value it cannot register, so the refusal has to be an instruction rather
+    than a wall, and the instruction has to run.
 
-    Three halves of one contract, and the third is the one that was
-    missing until 2026-09-02. `test_notifications_pg.py` wrote the
-    compartment `'A'` into `iam.app_user.compartments`; a run interrupted
-    before its teardown leaves that behind, and the next `alembic upgrade`
-    on that database stops at 0057 forever. The migration's docstring now
-    says the refusal is a documented pre-upgrade cleanup step, so this
-    pins that the cleanup exists, names the value, and WORKS:
+    A run interrupted before its teardown can leave a value such as `'A'` in
+    `iam.app_user.compartments`, and the next `alembic upgrade` on that database stops at 0057. The
+    migration's docstring documents the refusal as a pre-upgrade cleanup step, so this pins that the
+    cleanup exists, names the value, and WORKS:
 
-    - the schema genuinely cannot hold the value (so skipping it, rather
-      than refusing, would strand every case filed under it);
+    - the schema genuinely cannot hold the value (so skipping it, rather than refusing, would strand
+      every case filed under it);
     - `UNREGISTRABLE_SQL` finds it in either array;
-    - the SQL `refusal_message` prints is executable, touches BOTH arrays,
-      and leaves `UNREGISTRABLE_SQL` empty -- i.e. the operator who does
-      what the error says can then complete the upgrade.
+    - the SQL `refusal_message` prints is executable, touches BOTH arrays, and leaves
+      `UNREGISTRABLE_SQL` empty, i.e. the operator who does what the error says can then complete the
+      upgrade.
     """
     import psycopg
 
@@ -604,11 +561,10 @@ def test_a_legacy_value_the_format_cannot_hold_stops_the_upgrade_with_the_fix(co
             'SELECT compartments FROM core."case" WHERE owner_user_id = %s',
             (uid,)).fetchone()[0] == [good]
 
-        # An apostrophe is one of the ways to fail the key format, so a
-        # value containing one is exactly the kind this code is printed
-        # for. Python's repr() would quote it with DOUBLE quotes, which
-        # Postgres reads as an identifier -- the refusal would hand the
-        # operator a statement that fails with "column does not exist".
+        # An apostrophe is one of the ways to fail the key format, so a value containing one is exactly
+        # the kind this code is printed for. Python's repr() would quote it with DOUBLE quotes, which
+        # Postgres reads as an identifier, and the refusal would hand the operator a statement that
+        # fails with "column does not exist".
         quoted = "OP'X"
         tx.execute(
             "UPDATE iam.app_user SET compartments = %s WHERE id = %s",

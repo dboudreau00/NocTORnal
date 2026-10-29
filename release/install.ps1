@@ -72,11 +72,11 @@ param(
     [switch] $Demo,
     [switch] $NoDemo,
     [switch] $Open,
-    # 2026-09-24: the optional extras, installed only when asked for
-    # by name, and then a failure stops the install.
+    # The optional extras: installed only when asked for by name, and then a failure stops the
+    # install.
     [switch] $WithTelegram,
     [switch] $WithYara,
-    # docs/17 F52 and the limiter's Redis ACL (2026-10-02).
+    # Bring infra/production's secrets files to this release's layout, then exit.
     [switch] $ProductionSecrets,
     [string] $ProductionDir = ''
 )
@@ -88,20 +88,8 @@ if ($Demo -and $NoDemo) {
     exit 2
 }
 
-# THE PROJECT ROOT IS THE PARENT OF THIS DIRECTORY. Nothing else.
-#
-# This used to probe four candidates, the last of which was the HARDCODED
-# sibling folder name "NocTORnal - Social Network Analysis software"
-# (release finding R1). That resolved on exactly one machine -- the one it
-# was written on -- and produced "the application source could not be
-# found" everywhere else, with a suggestion ("put it next to the
-# application source directory") that silently failed for any other folder
-# name.
-#
-# The package is now self-contained: `release/` sits inside the project
-# tree, so its parent IS the project. One rule, no search, no dependence
-# on what any adjacent directory happens to be called or whether it
-# exists at all.
+# The project root is the parent of this directory and nothing else: release/ sits inside the
+# project tree, so there is no search and no dependence on what a neighbouring folder is called.
 $ReleaseDir = $PSScriptRoot
 $RepoRoot   = $null
 $candidate  = Split-Path -Parent $ReleaseDir
@@ -110,19 +98,10 @@ if ($candidate -and (Test-Path (Join-Path $candidate 'alembic.ini'))) {
 }
 
 function Invoke-Capture {
-    # R5 (2026-07-26). Runs a native command and returns its exit code plus
-    # combined output, WITHOUT tripping over PowerShell 5.1.
-    #
-    # With $ErrorActionPreference = 'Stop', redirecting a native command's
-    # stderr (`*> $null` or `2>$null`) throws RemoteException the moment
-    # that command writes anything to stderr. `docker info` writes to
-    # stderr exactly when the engine is down -- so this script used to
-    # crash with a raw .NET exception in the precise case its friendly
-    # "start Docker Desktop" message exists for.
-    #
-    # PS 5.1 is the default shell on Windows and `#Requires -Version 5`
-    # blesses it. launch.ps1 documents this hazard and carries this fix;
-    # install.ps1, the script a NEW user meets first, did not.
+    # Runs a native command and returns its exit code and combined output. Under PowerShell 5.1
+    # with $ErrorActionPreference = 'Stop', redirecting a native command's stderr throws
+    # RemoteException as soon as the command writes there, and `docker info` writes to stderr
+    # exactly when the engine is down, the case the "start Docker Desktop" message is for.
     param([Parameter(Mandatory)][string] $Exe, [string[]] $Arguments = @())
     $saved = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -210,17 +189,13 @@ function Test-AnswerYes {
     return ($text -eq '' -or $text -match '^[Yy]')
 }
 
-# Whether this host already holds the production stack's database volume,
-# asked of Docker: exists, new or unknown. Compose labels every volume it makes
-# with the key the compose file gives it (com.docker.compose.volume), so the
-# volume is found by that label and not by the name <project>_<key> spelt out
-# here, which was right for the project name the README starts it under and
-# wrong for any other given with -p (docs/17 "the volume name"). The documented
-# name is asked as well, for a volume made by hand under it. "new" needs an
-# engine that answered and listed nothing; anything else is "unknown", and the
-# helper then asks the operator to choose the owner's password instead of
-# generating one for a database initdb may already have fixed for good.
-# install.sh's production_database_state is the same question.
+# Whether this host already holds the production stack's database volume, asked of Docker:
+# exists, new or unknown. Compose labels each volume with its compose key
+# (com.docker.compose.volume), so the volume is found by that label whatever project name `-p`
+# gave it, and the documented name is asked as well, for a volume made by hand. "new" needs an
+# engine that answered and listed nothing; anything else is "unknown", and the helper then asks
+# the operator to choose the owner's password instead of generating one for a database initdb
+# may already have fixed for good. install.sh's production_database_state asks the same.
 function Get-ProductionDatabaseState {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return 'unknown' }
     if ((Invoke-Capture 'docker' @('info')).Code -ne 0) { return 'unknown' }
@@ -267,14 +242,12 @@ function Invoke-Live {
     finally { $ErrorActionPreference = $saved }
 }
 
-# .env.local is read as DATA, never run: one line, one NAME=value, and a name
-# that changes how programs start is left out and named (2026-10-03). The same list is in
-# scripts/_env.py, release/install.sh,
-# scripts/launch.sh, scripts/launch.ps1 and scripts/open-ui.ps1, and a test
-# holds them to each other. The file's value wins over the environment, as it
-# does in install.sh: this installer migrates and seeds whatever the file
-# names, and an exported DATABASE_URL pointing somewhere else must not receive
-# them. -contains and -like are case-insensitive, as Windows names are.
+# .env.local is read as data, never run: one NAME=value a line, and a name that changes how
+# programs start is left out and named. The same list is in scripts/_env.py, release/install.sh,
+# scripts/launch.sh, scripts/launch.ps1 and scripts/open-ui.ps1, and a test holds them to each
+# other. The file's value wins over the environment, as in install.sh: this installer migrates
+# and seeds whatever the file names, and an exported DATABASE_URL pointing elsewhere must not
+# receive them. -contains and -like are case-insensitive, as Windows names are.
 function Import-EnvLocal {
     param([string] $Path)
     $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4', 'PSMODULEPATH')
@@ -304,11 +277,9 @@ function Import-EnvLocal {
 Write-Host ''
 Write-Host '  NocTORnal - Beta Install' -ForegroundColor White
 Write-Host '  -------------------------' -ForegroundColor DarkGray
-# Five, L1 to L5, as the root README's table has them, and a heading that
-# exists there. The banner said four and pointed at a "LEGAL STATUS"
-# section only release/README.md has. It names the README at the project
-# root in full because release/README.md is the one beside this script
-# and has no such heading (Alpha 6 pre-release check, 2026-09-23).
+# Five items, L1 to L5, as the root README's table has them, under a heading that exists there.
+# The banner names the README at the project root in full: release/README.md sits beside this
+# script and has no such heading.
 Write-Host '  Beta software. Not audited. Five legal decisions (L1 to L5)' -ForegroundColor Yellow
 Write-Host '  gate any use against real material: see "Five blocking items"' -ForegroundColor Yellow
 Write-Host '  in the README.md at the project root. Installing is fine;' -ForegroundColor Yellow
@@ -335,22 +306,19 @@ installers only, with no application source in it.
 }
 
 # ---------------------------------------------------------------------------
-# -ProductionSecrets (docs/17 F52 and the limiter's Redis ACL, 2026-10-02)
+# -ProductionSecrets
 #
-# A different job from everything below: it touches the production
-# deployment's secrets files and nothing else, then exits. The work is
-# scripts/production_secrets.py, the one implementation install.sh calls
-# too, on any Python 3.8 or later with the standard library alone. It
-# prints names, never a value, and backs up every file before it changes
-# it.
+# A separate job: it touches the production deployment's secrets files and nothing else, then
+# exits. The work is scripts/production_secrets.py, the one implementation install.sh calls too,
+# on any Python 3.8 or later with the standard library alone. It prints names, never a value,
+# and backs up every file before it changes it.
 #
-# Mode 600 means nothing on Windows, where chmod only toggles read-only, so
-# each secrets file and backup is then given an ACL naming this user alone,
-# with inheritance cut: the same "readable by its owner and nobody else".
+# Mode 600 means nothing on Windows, where chmod only toggles read-only, so each secrets file and
+# backup gets an ACL naming this user alone, with inheritance cut.
 #
-# An owner password may be generated only for a database volume initdb has
-# not run on, because initdb fixes it for good: Docker is asked, and only
-# "no such volume" from an engine that answers counts.
+# An owner password may be generated only for a database volume initdb has not run on, because
+# initdb fixes it for good: Docker is asked, and only "no such volume" from an engine that
+# answers counts.
 # ---------------------------------------------------------------------------
 if ($ProductionSecrets) {
     $target = if ($ProductionDir) { $ProductionDir } else { Join-Path $RepoRoot 'infra\production' }
@@ -421,9 +389,9 @@ $python = $null
 foreach ($name in @('python', 'python3', 'py')) {
     $cmd = Get-Command $name -ErrorAction SilentlyContinue
     if (-not $cmd) { continue }
-    # R5: via Invoke-Capture. On a fresh Windows box the Microsoft Store
-    # `python` alias fires first and writes to stderr, which under
-    # EAP=Stop killed this loop before python3/py were ever tried.
+    # Through Invoke-Capture: on a fresh Windows box the Microsoft Store `python` alias answers
+    # first and writes to stderr, which under EAP=Stop would end this loop before python3 or py
+    # is tried.
     $probe = Invoke-Capture $cmd.Source @('-c', "import sys; print('%d.%d.%d' % sys.version_info[:3])")
     # Trim: Invoke-Capture pipes through Out-String, which appends a
     # trailing newline, and the line below interpolates $raw mid-string, so
@@ -462,8 +430,6 @@ https://www.docker.com/products/docker-desktop/ or:
     winget install Docker.DockerDesktop
 '@
 }
-# R5: this line was `& docker info *> $null`, which THREW instead of
-# setting an exit code when the engine was down.
 if ((Invoke-Capture 'docker' @('info')).Code -ne 0) {
     Stop-With 'Docker is installed but the engine is not running.' @'
 Start Docker Desktop and wait for it to report "Engine running", then run
@@ -471,11 +437,8 @@ this installer again. On a cold start that takes a minute or two.
 '@
 }
 
-# R16 (2026-07-26): install.sh checks `docker compose version` and this
-# did not, so a CLI-only Docker or a podman alias passed both checks here
-# and failed later at `compose up` with no remedy text. Docker Desktop
-# bundles Compose, so the population hitting this is small, but the
-# failure it produces is opaque, and the check is one line.
+# A CLI-only Docker or a podman alias passes the checks above and would fail later at
+# `compose up` with no remedy text, so Compose v2 is checked here, as install.sh does.
 if ((Invoke-Capture 'docker' @('compose', 'version')).Code -ne 0) {
     Stop-With 'Docker Compose v2 is not available.' @'
 Install Docker Desktop, which includes Compose, then run this installer again.
@@ -531,8 +494,6 @@ if (-not $running) {
 Write-Host ''
 Write-Detail 'All good. Next it will:'
 Write-Detail '  build a private Python environment in the .venv folder'
-# On a re-run or an update the file is already there; step 3 never replaces
-# its keys, as install.sh says too (Beta 1 clean machine, 2026-10-07).
 if (Test-Path -LiteralPath (Join-Path $RepoRoot '.env.local')) {
     Write-Detail '  keep your .env.local as it is (its keys are never replaced)'
 } else {
@@ -553,11 +514,8 @@ $VenvPip = Join-Path $Venv 'Scripts\pip.exe'
 if ((Test-Path $VenvPython) -and (Test-Path $VenvPip)) {
     Write-Good '.venv already exists'
 } else {
-    # An interpreter and no pip is the wreckage of an interrupted run, not
-    # an environment. Testing only for python.exe meant the next run said
-    # '.venv already exists' and then died with 'No module named pip',
-    # which names neither the cause nor the fix, on every attempt after.
-    # Found on Linux (release finding R26); the same shape is here.
+    # An interpreter and no pip is the wreckage of an interrupted run, not an environment;
+    # kept, every later run would end in 'No module named pip'.
     if (Test-Path $VenvPython) {
         Write-Note 'a previous run left a half-built .venv (no pip); rebuilding it'
         Remove-Item -Recurse -Force $Venv
@@ -574,12 +532,9 @@ if ((Test-Path $VenvPython) -and (Test-Path $VenvPip)) {
 }
 
 Write-Detail 'installing dependencies (a few minutes the first time)'
-# Every install below is held to constraints.txt, the exact versions the
-# release's suite passed on (sec-pin-dependencies, 2026-09-23). Without it
-# each `>=` in the pyproject files resolved to whatever was newest that day,
-# and the clean VM of the Alpha 6 check ran a newer stack than the one
-# tested. Checked for here, so a missing file is named as that and not as
-# "dependency installation failed" with pip's error scrolled past.
+# Every install below is held to constraints.txt, the exact versions the release's suite passed
+# on; without it each `>=` in the pyproject files resolves to whatever is newest that day.
+# Checked here, so a missing file is named as that and not as a failed dependency install.
 $Constraints = Join-Path $RepoRoot 'constraints.txt'
 if (-not (Test-Path -LiteralPath $Constraints)) {
     Stop-With "constraints.txt is missing from $RepoRoot." @'
@@ -636,17 +591,13 @@ readiness register then shows what the missing extra leaves out.
 # ---------------------------------------------------------------------------
 # 4. Secrets
 # ---------------------------------------------------------------------------
-# Nothing in this system has a default secret. A missing value produces a
-# deliberate refusal, never an insecure fallback -- so these are generated
-# here, once, and left alone on every subsequent run.
+# Nothing in this system has a default secret: a missing value is refused, never filled with an
+# insecure fallback. So these are generated here, once, and left alone on every later run.
 
-# The key store is private to this user from the first byte (infra-9,
-# 2026-10-03). On Windows a new file inherits its folder's ACL, which is
-# every account that can read the project directory, and nothing restricted
-# it afterwards. The file is created empty, restricted, and only then
-# written, so the keys never exist in a file others can read. Not fatal when
-# icacls refuses (a FAT volume, say): the installer says so and goes on,
-# because a stopped install would leave no key store at all.
+# The key store is private to this user from the first byte. On Windows a new file inherits its
+# folder's ACL, which is every account that can read the project directory, so the file is
+# created empty, restricted, and only then written. Not fatal when icacls refuses (a FAT volume,
+# say): the installer says so and goes on, because a stopped install would leave no key store.
 function Protect-EnvLocal {
     param([string] $Path)
     if ($env:OS -ne 'Windows_NT') { return }
@@ -664,9 +615,8 @@ Write-Step 'Creating your secret keys'
 $EnvLocal = Join-Path $RepoRoot '.env.local'
 if (Test-Path $EnvLocal) {
     Write-Good '.env.local already exists - left untouched'
-    # A collector process (2026-10-02): a file written before the persona
-    # key existed gains it, appended, with the inline mode this install
-    # runs in. Nothing already in the file is changed.
+    # A file written before the persona key existed gains it, appended, with the inline mode
+    # this install runs in. Nothing already in the file is changed.
     $envText = Get-Content -LiteralPath $EnvLocal -Raw
     if ($envText -notmatch '(?m)^NOCTORNAL_PERSONA_KEK=') {
         $pkek = & $VenvPython -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
@@ -681,20 +631,10 @@ if (Test-Path $EnvLocal) {
         Write-Good 'added the persona key to .env.local'
     }
 } else {
-    # The output of these is CHECKED before anything is written.
-    #
-    # It used to be taken on trust. If the subprocess failed -- a broken
-    # venv, a missing DLL, an interpreter that dies on import -- PowerShell
-    # left the variable empty, the file was written with
-    # `NOCTORNAL_TOTP_KEK=` and the installer announced "wrote .env.local
-    # with fresh random keys". That claim was false.
-    #
-    # And the failure LATCHES. Every later run takes the
-    # `Test-Path $EnvLocal` branch and reports ".env.local already exists -
-    # left untouched", so a recipient whose first run half-failed is
-    # permanently installed with an empty key and is told twice that it
-    # worked. Refusing before the write leaves no file, so re-running is
-    # the fix.
+    # The output of these is checked before anything is written. A failed subprocess leaves its
+    # variable empty, and a file written with an empty key would stay, since every later run
+    # takes the "already exists" branch above. Refusing before the write leaves no file, so a
+    # re-run is the fix.
     $kek    = & $VenvPython -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kek)) {
         Stop-With 'Could not generate the TOTP key-encryption key.' `
@@ -710,8 +650,7 @@ if (Test-Path $EnvLocal) {
         Stop-With "The generated TOTP key is $kekBytes bytes, not 32." `
             'Report this with the line above, then run this installer again. Nothing was written. It is a defect in the installer or a damaged Python.'
     }
-    # The persona key (A collector process, 2026-10-02), checked as the
-    # TOTP key is: the persona ring refuses anything but 32 bytes.
+    # The persona key, checked as the TOTP key is: the persona ring refuses anything but 32 bytes.
     $pkek = & $VenvPython -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
     $pkekBytes = 0
     try { $pkekBytes = [Convert]::FromBase64String($pkek).Length } catch { $pkekBytes = 0 }
@@ -724,27 +663,14 @@ if (Test-Path $EnvLocal) {
         Stop-With 'Could not generate the ingest pepper.' `
             'Run this installer again. Nothing was written, so that is safe. The Python in the virtual environment produced nothing.'
     }
-    # R9 (2026-07-26): the SERVICE CONFIG is persisted too, not just the
-    # secrets. It used to be exported into the installer's own shell and
-    # lost the moment that shell exited, so every documented "run this in
-    # a second terminal" command -- create-user, demo-case, the TOTP
-    # bypass -- failed for a fresh recipient with a DATABASE_URL error.
-    # bootstrap.py now reads this file (see _load_env_local), so writing
-    # it here is what makes those commands work at all.
-    #
-    # R11: the three SMTP values are here so the advertised Mailpit demo
-    # actually captures mail. The default SMTP_PORT in transports.py is
-    # 587 and Mailpit listens on 1025, and plaintext needs asking for.
-    #
-    # 127.0.0.1, not localhost, in every address below. The dev stack
-    # publishes its ports on 127.0.0.1 only, so nothing answers on ::1,
-    # and Windows by default resolves localhost to ::1 first: each new
-    # connection then waited about two seconds for the refused attempt
-    # before trying IPv4 (Alpha 6 pre-release check, 2026-09-23). The
-    # header names everything the two secrets protect, from
-    # security/sealed.py's SEALED_COLUMNS and ingest.py's HMAC; it named
-    # only authenticators and ingest keys.
-    # Create it empty and restrict it BEFORE the keys are written.
+    # The service configuration is written too, not just the secrets: every script reads this
+    # file (scripts/_env.py), so the documented second-terminal commands work in a fresh shell.
+    # The SMTP values point the Mailpit demo at port 1025 (transports.py defaults to 587) and
+    # allow plaintext, which has to be asked for. Every address is 127.0.0.1, not localhost: the
+    # dev stack publishes on 127.0.0.1 only, and Windows tries ::1 first and waits about two
+    # seconds for each refusal. The header names everything each key protects
+    # (security/sealed.py's SEALED_COLUMNS and ingest.py's HMAC).
+    # Create it empty and restrict it before the keys are written.
     New-Item -ItemType File -Path $EnvLocal -Force | Out-Null
     Protect-EnvLocal -Path $EnvLocal
     @(
@@ -816,19 +742,9 @@ if (Test-Path $EnvLocal) {
         'SMTP_HOST=127.0.0.1',
         'SMTP_PORT=1025',
         'SMTP_ALLOW_PLAINTEXT=1'
-    # ASCII, NOT `-Encoding UTF8`.
-    #
-    # PowerShell 5.1's UTF8 encoder writes a BYTE ORDER MARK. install.sh
-    # used to source this file (`set -a; . "$ENV_LOCAL"`), where bash does
-    # not strip a BOM, so line 1 became the token $'ï»¿#' and the shell
-    # reported "command not found" for it and for the next word on that
-    # line; it reads the file as data now and drops a BOM itself
-    # (infra-9, 2026-10-03). bootstrap.py's own loader survived it only
-    # because line 1 happens to be a comment -- had a KEY been first, that
-    # key would have been silently mis-named.
-    #
-    # Every byte written here is ASCII (base64 secrets, a URL, a port), so
-    # this loses nothing and cannot introduce a BOM.
+    # ASCII, not `-Encoding UTF8`: PowerShell 5.1's UTF8 encoder writes a byte order mark, which
+    # a reader that does not strip it takes as part of the first key's name. Every byte here is
+    # ASCII (base64 secrets, a URL, a port), so nothing is lost.
     ) | Set-Content -LiteralPath $EnvLocal -Encoding ascii
     Write-Good 'wrote .env.local with fresh random keys'
     Write-Note 'Back this file up. Without it every user must re-enrol their'
@@ -952,11 +868,9 @@ deletes all local case data):
 Write-Good 'database is up to date'
 
 # ---------------------------------------------------------------------------
-# Step 6: the first account. The password and the QR code are printed once by
-# bootstrap.py, so when a person is at the keyboard the installer WAITS here
-# until they say they have saved them, and the API starts only after that.
-# It used to hand off to launch.ps1, whose server log scrolled them off the
-# screen within seconds (release finding R8).
+# Step 6: the first account. bootstrap.py prints the password and the QR code once, so when a
+# person is at the keyboard the installer waits here until they say they have saved them, and
+# the API starts only after that, where its log cannot scroll them away.
 # ---------------------------------------------------------------------------
 
 Write-Step 'Creating your account'
@@ -1036,9 +950,9 @@ if ($Demo) { $demoMode = 'yes' } elseif ($NoDemo) { $demoMode = 'no' }
 $demoDecision = Get-DemoDecision -Mode $demoMode -Interactive $script:Interactive -Fresh $accountCreated
 $demoLoaded = $false
 $demoOwner = $adminEmail
-# Already there from an earlier run: said so, and neither loaded again nor
-# offered "later" on the card, as install.sh does (Beta 1 clean machine,
-# 2026-10-07). An answer that cannot be read changes nothing.
+# A demo case already there from an earlier run is reported, and neither loaded again nor
+# offered for later on the closing card, as in install.sh. An answer that cannot be read
+# changes nothing.
 $presentCode = 'import sys, noctornal_api.db as d; print(int(d.connect().execute(''select exists (select 1 from core.case where code = %s)'', (sys.argv[1],)).fetchone()[0]))'
 $present = Invoke-Capture $VenvPython @('-c', $presentCode, $demoCode)
 if ($present.Code -eq 0 -and $present.Text.Trim() -eq '1') { $demoDecision = 'present'; $demoLoaded = $true }
@@ -1077,14 +991,10 @@ elseif ($demoMode -eq 'no') { Write-Detail 'Skipped, because -NoDemo was given.'
 else { Write-Detail 'Skipped. The closing card says how to load it later.' }
 
 # ---------------------------------------------------------------------------
-# Step 8: start the API, and say what to do next.
-#
-# The port was checked in step 1, so a re-run while the API is already up said
-# what was wrong before anything was built. The Security Officer count is read,
-# not assumed, so a re-run on a stack that has one says nothing about it; a
-# count that cannot be read prints the advice anyway, because it costs less
-# than a blocked collection nobody can explain (Alpha 6 pre-release check,
-# 2026-09-23). -1 means the count could not be read.
+# Step 8: start the API, and say what to do next. The Security Officer count is read, not
+# assumed, so a re-run on a stack that has one says nothing about it; a count that cannot be
+# read (-1) prints the advice anyway, which costs less than a blocked collection nobody can
+# explain.
 # ---------------------------------------------------------------------------
 
 Write-Step 'Starting the API'
@@ -1137,11 +1047,9 @@ if ($officers -le 0) {
     Write-Host '  Nobody holds the Security Officer role yet, so collection runs and break-glass' -ForegroundColor Yellow
     Write-Host '  are refused. That does not matter for the demo. To fix it, give the role to a' -ForegroundColor Yellow
     Write-Host '  second person, not to your own account (release\INSTALL.md, "After installing"):' -ForegroundColor Yellow
-    # security.officer@, not officer@: officer@example.org is the account
-    # seed_readme_showcase.py creates, so after the README recipe this
-    # command exited 1 with "already exists", and run first it would have
-    # made the seeder adopt the real officer (Alpha 6 pre-release check,
-    # 2026-09-23).
+    # security.officer@, not officer@: seed_readme_showcase.py creates officer@example.org, so
+    # after the README recipe that address already exists, and before it the seeder would adopt
+    # the real officer.
     Write-Host '      .venv\Scripts\python scripts\bootstrap.py create-user --email security.officer@example.org --name "Officer Name" --roles SECURITY_OFFICER'
 }
 Write-Host ''

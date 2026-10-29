@@ -1,16 +1,12 @@
-"""The sign-in form and the session state, as the bounded parser reads them
-for the member adapters (the authenticated forum path, 2026-10-02).
+"""The sign-in form and the session state, as the bounded parser reads them for the member adapters.
 
-Hostile input throughout: a sign-in page is served by the board under
-investigation. No page text ever comes back from these readers, only
-field names, a form action, a token and a verdict; a form inside a pop-up
-is not the sign-in form; thousands of hidden fields are capped; an
-unprintable value is dropped; a form that posts by GET or to another site
-is reported so the adapter can refuse it; a CAPTCHA, a second factor, a
-page that wants JavaScript and a forced change are each told apart.
+Hostile input throughout: a sign-in page is served by the board under investigation. No page text ever
+comes back from these readers, only field names, a form action, a token and a verdict; a form inside a
+pop-up is not the sign-in form; thousands of hidden fields are capped; an unprintable value is dropped; a
+form that posts by GET or to another site is reported so the adapter can refuse it; a CAPTCHA, a second
+factor, a page that wants JavaScript and a forced change are each told apart.
 
-Pure: no database, no network; the pages are the saved fixtures and
-strings built here.
+Pure: no database, no network; the pages are the saved fixtures and strings built here.
 """
 from __future__ import annotations
 
@@ -227,7 +223,7 @@ def test_the_sign_in_and_sign_out_addresses_follow_the_install_path():
 
 
 # ---------------------------------------------------------------------------
-# A poster's words are not the board's word (2026-10-03)
+# A poster's words are not the board's word
 # ---------------------------------------------------------------------------
 
 XF_MEMBER = fh.page("xenforo/thread_page1.html").replace(

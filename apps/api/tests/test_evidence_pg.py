@@ -1,6 +1,5 @@
-"""Evidence: WORM ingest, hashing, chain of custody, linking (docs/09
-Phase 1). Env-gated on DATABASE_URL and MINIO_ENDPOINT — needs the compose
-stack (Postgres + MinIO with the object-locked evidence bucket) up.
+"""Evidence: WORM ingest, hashing, chain of custody, linking (docs/09). Env-gated on DATABASE_URL and
+MINIO_ENDPOINT: needs the compose stack (Postgres + MinIO with the object-locked evidence bucket) up.
 """
 from __future__ import annotations
 
@@ -22,20 +21,14 @@ def conn():
     from noctornal_api.db import connect
     c = connect()
     yield c
-    # Custody rows are NEVER deleted here and the chain trigger is never
-    # stood down. Until 2026-09-02 this teardown did both, and the other
-    # evidence-writing suites copied the idiom from here. It was harmless
-    # only by accident: a suite's rows were always the newest in the ledger
-    # when its own teardown ran, so each deletion took the chain's tail and
-    # no link broke -- and `custody_verify.py` cannot see a tail go. Any
-    # interleaving (a pinned row from another suite, a parallel worker)
-    # turns the same delete into a LINK break on a ledger that exists to be
-    # produced in court. So the rows stay, and everything they point at
-    # stays with them (every FK involved is NO ACTION): the exhibit, its
-    # case, and each human named on the custody row (actor_id), the exhibit
-    # (acquired_by) or the case (owner, deputy). The residue is keyed on
-    # this suite's uuid-random email prefix and case code, so it cannot
-    # collide with a later run. audit.event is left alone, as before.
+    # Custody rows are NEVER deleted here and the chain trigger is never stood down. A suite's rows are only
+    # the newest in the ledger by accident, and any interleaving (a pinned row from another suite, a parallel
+    # worker) would turn a delete into a LINK break on a ledger that exists to be produced in court;
+    # `custody_verify.py` cannot see a tail go. So the rows stay, and everything they point at stays with
+    # them (every FK involved is NO ACTION): the exhibit, its case, and each human named on the custody row
+    # (actor_id), the exhibit (acquired_by) or the case (owner, deputy). The residue is keyed on this
+    # suite's uuid-random email prefix and case code, so it cannot collide with a later run. audit.event is
+    # left alone.
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'ev-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
@@ -110,12 +103,10 @@ def test_ingest_hashes_and_stores_and_records_custody(conn, case, svc):
 
 
 def test_a_fresh_acquisition_records_its_read_back_as_a_verified_hash(conn, case, svc):
-    """ux07 custody-failed-hash-shown-as-not-checked (2026-09-22). Ingest
-    reads the stored object back and compares digests BEFORE it writes the
-    ACQUIRED row, and then wrote that row with hash_verified NULL, which
-    the custody view showed as "hash not checked" on every clean exhibit.
-    A re-acquisition of bytes already held stores nothing and reads
-    nothing back, so it rightly attests nothing."""
+    """Ingest reads the stored object back and compares digests BEFORE it writes the ACQUIRED row, so that
+    row carries hash_verified true; NULL would show as "hash not checked" on every clean exhibit. A
+    re-acquisition of bytes already held stores nothing and reads nothing back, so it rightly attests
+    nothing."""
     case_id, uid = case
     data = b"read-back-" + uuid4().hex.encode()
     res = _ingest(svc, case_id, uid, data)
@@ -150,9 +141,8 @@ def test_integrity_verification_detects_hash_mismatch(conn, case, svc):
     and records hash_verified=false — the tamper alarm."""
     case_id, uid = case
     res = _ingest(svc, case_id, uid, b"will-corrupt-" + uuid4().hex.encode())
-    # Since 0140 the anchors are fixed for every role, so the tamper is an
-    # owner's who disables the guard by name (evidence-integrity-anchors-
-    # mutable, 2026-10-03); verification must still catch it.
+    # The anchors are fixed for every role (0140), so the tamper is an owner's who disables the guard by
+    # name; verification must still catch it.
     with conn.transaction():
         conn.execute("ALTER TABLE core.evidence DISABLE TRIGGER evidence_anchors_fixed")
         conn.execute("UPDATE core.evidence SET sha256 = %s WHERE id = %s",
@@ -175,12 +165,9 @@ def test_dual_hash_blake3_stored_and_checked(conn, case, svc):
 
 
 def test_read_path_detects_object_tampering(conn, case, svc):
-    """The real gap the review found: a swapped object VERSION must not be
-    served with a clean custody entry. Since 2026-10-03 (evidence-integrity-
-    anchors-mutable) the exhibit reads the version it was lodged as, so a
-    version written on the key afterwards is never served at all; the
-    legacy path, a row with no recorded version, still recomputes and fails
-    closed (test_g44_evidence_ingest_pg.py)."""
+    """A swapped object VERSION must not be served with a clean custody entry. The exhibit reads the version
+    it was lodged as, so a version written on the key afterwards is never served at all; the legacy path, a
+    row with no recorded version, still recomputes and fails closed."""
     case_id, uid = case
     import io
     data = b"pristine-" + uuid4().hex.encode()

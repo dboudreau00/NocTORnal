@@ -1,16 +1,12 @@
-"""A forum persona's stop is signed out by the collector, the one process
-that opens the sealed session (the authenticated forum path merged with the
-persona vault split, decision 174, 2026-10-03). DATABASE_URL-gated.
+"""A forum persona's stop is signed out by the collector, the one process that opens the sealed session
+(the persona vault split, docs/00 decision 174). DATABASE_URL-gated.
 
-test_forum_member.py holds the stop in development's inline mode, where the
-API runs the act itself. These tests turn the inline mode OFF, as
-production is: the persona's stop route queues a `FORUM_SIGN_OUT` act and
-waits a bounded time, the collector's `persona_acts.drain` runs it (the
-session is opened, and the board signed out of, in the collector's thread
-and never the request's), and the stop clears the sealed session whatever
-happened. With no collector running the act is cancelled, the stop goes on,
-the sealed session is cleared by the stop alone, and the answer says the
-board's own sign-out was not reached.
+test_forum_member.py holds the stop in development's inline mode, where the API runs the act itself. These
+tests turn the inline mode OFF, as production is: the persona's stop route queues a `FORUM_SIGN_OUT` act
+and waits a bounded time, the collector's `persona_acts.drain` runs it (the session is opened, and the
+board signed out of, in the collector's thread and never the request's), and the stop clears the sealed
+session whatever happened. With no collector running the act is cancelled, the stop goes on, the sealed
+session is cleared by the stop alone, and the answer says the board's own sign-out was not reached.
 """
 from __future__ import annotations
 
@@ -122,11 +118,9 @@ def test_the_collector_signs_the_persona_out_and_the_request_never_opens_the_ses
 
 def test_a_red_readiness_register_does_not_hold_back_the_sign_out_of_a_stop(
         conn, stub, monkeypatch):
-    """A stop is always allowed (F38) and its route asks no readiness, so
-    the sign-out it queues is not refused by the collector for a blocking
-    check that turned red either (2026-10-07): a burnt
-    persona's board session must not stay open because, say, the security
-    officer's account was deactivated."""
+    """A stop is always allowed and its route asks no readiness, so the sign-out it queues is not refused
+    by the collector for a blocking check that turned red either: a burnt persona's board session must not
+    stay open because, say, the security officer's account was deactivated."""
     from noctornal_api import persona_acts
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.http.routers import collection as router

@@ -1,18 +1,15 @@
-"""Row-level security on the Lab (S1, 2026-09-25).
+"""Row-level security on the Lab.
 
-0121 puts samples and everything hanging off them, and the YARA rule sets,
-under policy. Run as the request role, bound by a real session's proof,
-with the fixtures seeded as the owner:
+0121 puts samples and everything hanging off them, and the YARA rule sets, under policy. Run as the
+request role, bound by a real session's proof, with the fixtures seeded as the owner:
 
-- a sample is visible at its own labels composed with its case's, against
-  the reader's CASE-LESS ceiling, with no case assignment (the Lab is
-  global under sample.read); its static runs follow it; unbound sees
+- a sample is visible at its own labels composed with its case's, against the reader's CASE-LESS ceiling,
+  with no case assignment (the Lab is global under sample.read); its static runs follow it; unbound sees
   nothing; nothing calls a row-security helper per row;
-- the work that must see every sample still does: a duplicate of a sample
-  the submitter may not see is refused and not stored twice, the Security
-  Officer's label-free record lists and reviews a match above the officer,
-  and a lookup of a hash held only by a never-screened sample the caller
-  cannot see is refused;
+- the work that must see every sample still does: a duplicate of a sample the submitter may not see is
+  refused and not stored twice, the Security Officer's label-free record lists and reviews a match above
+  the officer, and a lookup of a hash held only by a never-screened sample the caller cannot see is
+  refused.
 
 Gated like the other row-security tests. Account prefix `rlslab-`.
 """

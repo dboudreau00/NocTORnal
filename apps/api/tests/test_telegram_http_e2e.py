@@ -1,11 +1,9 @@
-"""Telegram chats and personas over HTTP, with a fake transport and no
-network (roadmap F5.2 and F5.3, 2026-09-24).
+"""Telegram chats and personas over HTTP, with a fake transport and no network.
 
-Looking a chat up as a persona; the answers that must not tell a hidden
-source from a missing one; the step-up on every binding change; the fixed
-answer of each act's outcome; the membership acts that never join; the
-readiness gate; and the Telegram lines in the collection routes (personas,
-due, documents) and in the authority views. DATABASE_URL-gated.
+Looking a chat up as a persona; the answers that must not tell a hidden source from a missing one; the
+step-up on every binding change; the fixed answer of each act's outcome; the membership acts that never
+join; the readiness gate; and the Telegram lines in the collection routes (personas, due, documents) and
+in the authority views. DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -370,11 +368,10 @@ def test_marking_without_a_member_authority_keeps_the_mark_and_answers_409(conn,
 
 
 def test_a_mark_refused_for_a_busy_persona_marks_nothing_and_its_retry_does(conn, api, world):
-    """docs/17, "a member mark's requeue": the mark was committed before the
-    persona's lock was taken, so a busy persona refused the act with the chat
-    already marked. The collector requeues a busy act, and the retry met a
-    member chat and answered that it was already read as one. The lock is
-    taken first now: busy means nothing was done."""
+    """docs/17, "a member mark's requeue": the persona's lock is taken before the mark is committed, so a
+    busy persona refuses the act with nothing marked. The collector requeues a busy act, and the retry
+    marks the chat, rather than meeting a member chat and answering that it is already read as one. Busy
+    means nothing was done."""
     from noctornal_api.collection import _PERSONA_LOCK, CollectionBusy, RssAdapter
     from noctornal_api.db import connect
     from noctornal_api.telegram import TelegramAdapter
@@ -637,7 +634,7 @@ def test_marking_a_member_chat_needs_a_fresh_second_factor(conn, api, world):
                         (ch["source"],)).fetchone()[0] == "PUBLIC_READ"
 
 
-# --- F43: a chat filed under a compartment (2026-10-03) ----
+# --- a chat filed under a compartment ----
 
 def test_a_chat_filed_under_a_compartment_is_its_holders_to_create_act_on_and_stop(
         conn, api, world):

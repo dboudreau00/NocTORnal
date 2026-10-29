@@ -1,13 +1,10 @@
-"""The console's half of the persona act queue (A collector process,
-2026-10-02).
+"""The console's half of the persona act queue.
 
-Pure: no database. A persona act's route answers 202 with the act while the
-collector has not run it; `actCall` follows it to the outcome, so every
-call site gets the body or the route's own refusal as before, and an act
-that outlasts the console's patience is answered as queued, never as a
-failure. The Feeds pane lists the caller's acts with a Cancel on a pending
-one. The functions run under Node over the collection foundation's stub
-DOM.
+Pure: no database. A persona act's route answers 202 with the act while the collector has not run it;
+`actCall` follows it to the outcome, so every call site gets the body or the route's own refusal, and an act
+that outlasts the console's patience is answered as queued, never as a failure. The Feeds pane lists the
+caller's acts with a Cancel on a pending one. The functions run under Node over the collection foundation's
+stub DOM.
 """
 from __future__ import annotations
 
@@ -115,9 +112,8 @@ def test_an_act_row_says_what_and_how_it_ended_and_a_pending_one_can_be_cancelle
 
 
 def test_the_acts_help_text_names_the_operators_time_limit():
-    """An act not started in time is not run, and the time is the
-    operator's to set (NOCTORNAL_ACT_TTL_SECONDS, one minute to an hour):
-    the help text must not promise a flat fifteen (2026-10-03)."""
+    """An act not started in time is not run, and the time is the operator's to set
+    (NOCTORNAL_ACT_TTL_SECONDS, one minute to an hour): the help text must not promise a flat fifteen."""
     html = re.sub(r"\s+", " ", _html())
     block = html[html.index("Persona acts</h2>"):][:900]
     assert "fifteen minutes, unless your operator set another limit" in block

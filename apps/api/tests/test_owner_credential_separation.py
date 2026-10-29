@@ -1,20 +1,16 @@
-"""The schema owner's credential reaches no runtime service (docs/17 F52,
-2026-10-02).
+"""The schema owner's credential reaches no runtime service (docs/17).
 
-The owner `noctornal` is the Postgres image's bootstrap superuser: row-level
-security does not bind it, and it can switch off the append-only triggers.
-Its password (POSTGRES_PASSWORD) and DSN (NOCTORNAL_MIGRATION_DATABASE_URL)
-sat in infra/production/secrets.env, which every application service and
-caddy read. Held here:
+The owner `noctornal` is the Postgres image's bootstrap superuser: row-level security does not bind it, and
+it can switch off the append-only triggers. Its password (POSTGRES_PASSWORD) and DSN
+(NOCTORNAL_MIGRATION_DATABASE_URL) must not sit in infra/production/secrets.env, which every application
+service and caddy read. Held here:
 
-* the production compose file gives the owner's password to postgres alone
-  (postgres-init.env) and its DSN to the migrate job alone (migrate.env),
-  and the migrate job reads nothing else;
-* the templates put each where it now lives and nowhere else;
+* the production compose file gives the owner's password to postgres alone (postgres-init.env) and its DSN
+  to the migrate job alone (migrate.env), and the migrate job reads nothing else;
+* the templates put each where it lives and nowhere else;
 * the API refuses to start holding either, by name and never by value;
-* the migration job refuses without its DSN, naming the installer step,
-  and refuses a published owner password, which the API used to refuse
-  while it could see it;
+* the migration job refuses without its DSN, naming the installer step, and refuses a published owner
+  password, which the API cannot see;
 * no secrets file, nor a backup of one, reaches the image or git.
 
 Pure: no database, no Docker.
@@ -81,17 +77,14 @@ def test_every_other_application_service_keeps_secrets_env(services):
 
 
 def test_every_runtime_service_holds_the_owner_variables_blank(services):
-    """Enforced, not conventional (review of 2026-10-02): in a mixed layout,
-    migrate.env in place and the owner's line still or again in
-    secrets.env, cron and embed-pass started holding the owner's password
-    and DSN, since only the API refused them. `environment:` wins over
-    env_file, so every service but the two that need one of them holds
-    both as empty strings, which every reader counts as unset."""
+    """Enforced, not conventional: in a mixed layout, migrate.env in place and the owner's line still or
+    again in secrets.env, cron and embed-pass would hold the owner's password and DSN, since only the API
+    refused them. `environment:` wins over env_file, so every service but the two that need one of them
+    holds both as empty strings, which every reader counts as unset."""
     readers_of_the_owner = {"postgres", "migrate"}
     assert readers_of_the_owner < set(services)
-    # The isolated analysis worker (F42) reads no env file at all and holds no
-    # variable but its own three, so there is nothing to blank, and it refuses
-    # to start holding any other (test_analysis_worker_compose.py).
+    # The isolated analysis worker reads no env file at all and holds no variable but its own three, so
+    # there is nothing to blank, and it refuses to start holding any other (test_analysis_worker_compose.py).
     no_env_file = {"analysis-worker"}
     assert not any(_env_files(services[name]) for name in no_env_file)
     for name, svc in services.items():
@@ -107,10 +100,8 @@ def test_every_runtime_service_holds_the_owner_variables_blank(services):
 
 
 def test_the_owner_variables_are_blanked_where_a_secrets_file_reaches():
-    """The services above are every service compose runs: a new one that
-    reads secrets.env without the anchor fails the test above, and the
-    anchor is one declaration, not twelve copies (the collector, A collector
-    process, 2026-10-02, is the twelfth)."""
+    """The services above are every service compose runs: a new one that reads secrets.env without the
+    anchor fails the test above, and the anchor is one declaration, not a copy per service."""
     text = (PROD / "compose.yml").read_text(encoding="utf-8")
     anchor = text[text.index("x-no-owner-credential: &no-owner-credential\n"):]
     anchor = anchor[:anchor.index("\n\n")]
@@ -168,9 +159,8 @@ def _gitignored(path: str) -> bool:
 @pytest.mark.parametrize("name", [
     "secrets.env", "postgres-init.env", "migrate.env",
     "secrets.env.backup-20261002T120000Z",
-    # The helper's temporary file, which holds a whole new secrets file for
-    # the instant before the rename and survives a kill or a power cut
-    # (2026-10-03: it was ignored by nothing).
+    # The helper's temporary file holds a whole new secrets file for the instant before the rename and
+    # survives a kill or a power cut, so git must ignore it.
     ".secrets.env.tmp-4242", ".postgres-init.env.tmp-17", ".migrate.env.tmp-9",
 ])
 def test_the_helpers_files_and_its_temporaries_are_ignored_by_git(name):
@@ -185,10 +175,8 @@ def test_the_gitignore_reader_is_not_vacuous():
 
 
 def test_no_upgrade_note_copies_a_template_over_an_existing_postgres_init_env():
-    """Since F52 postgres-init.env holds the schema owner's password, so a
-    note that copies its template unconditionally puts a placeholder over
-    it for an operator who has already run the secrets step (2026-10-03:
-    release/egress-upgrade/README.md still did)."""
+    """postgres-init.env holds the schema owner's password, so a note that copies its template
+    unconditionally puts a placeholder over it for an operator who has already run the secrets step."""
     notes = [*ROOT.glob("*.md"), *(ROOT / "release").rglob("*.md"),
              *(ROOT / "infra").rglob("*.md"), *(ROOT / "docs").glob("*.md")]
     assert any(n.name == "README.md" and n.parent.name == "egress-upgrade" for n in notes)
@@ -221,9 +209,9 @@ def _dockerignored(path: str) -> bool:
     "migrate.env.backup-20261002T120000Z-2", ".secrets.env.tmp-4242",
 ])
 def test_no_secrets_file_or_backup_reaches_the_image(name):
-    """Until F52 only secrets.env was excluded, so postgres-init.env and the
-    egress files were baked into the image every runtime container runs,
-    and migrate.env would have been: the owner's DSN on the API's own disk."""
+    """Every secrets file and backup is excluded from the image, not only secrets.env: otherwise
+    postgres-init.env and the egress files are baked into the image every runtime container runs, and
+    migrate.env would put the owner's DSN on the API's own disk."""
     assert _dockerignored(f"infra/production/{name}"), name
 
 

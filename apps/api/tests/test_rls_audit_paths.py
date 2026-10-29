@@ -1,21 +1,17 @@
-"""Every reader of the audit log says what answers it (F51, 2026-10-02).
+"""Every reader of the audit log says what answers it.
 
-Static: no database. 0168 puts `audit.event` under row-level security: a
-request reads a row only in a case it may read, a case-less row it wrote,
-every row under a global `audit.read`, or a case-less `ingest` row under a
-global `ingest.manage`; work that must see the whole log runs on a system
-connection or reads a definer. A reader nobody classified would fail
-closed and silently: a two-person rule that permits on zero, a queue that
-forgets its triage, a card that says screening never ran. So every SQL
-statement in the application that reads the log is listed here by the
-function (or module constant) that holds it, with its treatment, and the
-test fails BY NAME on one that is not, which is what a merge of new code on
-top of 0168 relies on.
+Static: no database. 0168 puts `audit.event` under row-level security: a request reads a row only in a
+case it may read, a case-less row it wrote, every row under a global `audit.read`, or a case-less `ingest`
+row under a global `ingest.manage`; work that must see the whole log runs on a system connection or reads
+a definer. A reader nobody classified would fail closed and silently: a two-person rule that permits on
+zero, a queue that forgets its triage, a card that says screening never ran. So every SQL statement in the
+application that reads the log is listed here by the function (or module constant) that holds it, with its
+treatment, and the test fails BY NAME on one that is not.
 
 Scripts are not listed: each runs as the system role
 (`test_rls_system_paths.test_no_script_connects_as_anything_but_the_system_role`).
-The database's own readers (the chain trigger, the countersign rule, the
-screening fact) are held to SECURITY DEFINER by `test_rls_audit_event_pg.py`.
+The database's own readers (the chain trigger, the countersign rule, the screening fact) are held to
+SECURITY DEFINER by `test_rls_audit_event_pg.py`.
 """
 from __future__ import annotations
 
@@ -27,23 +23,19 @@ ROOT = Path(__file__).resolve().parents[3]
 SRC = ROOT / "apps" / "api" / "src" / "noctornal_api"
 SCRIPTS = ROOT / "scripts"
 
-#: A statement that reads the log: SQL (a SELECT, in any case) naming it in
-#: a FROM or a JOIN. Prose that mentions the table is not a reader, and
-#: docstrings are prose: they are skipped (`_statements`). Case-insensitive
-#: since 2026-10-03: the first draft matched an upper-case
-#: SELECT only, so `select ... from audit.event` passed unclassified.
+#: A statement that reads the log: SQL (a SELECT, in any case) naming it in a FROM or a JOIN. Prose that
+#: mentions the table is not a reader, and docstrings are prose: they are skipped (`_statements`).
 _READS = re.compile(r"(?is)\b(?:from|join)\s+audit\.event\b")
 _SQL = re.compile(r"(?i)\bselect\b")
 _APPENDS = re.compile(r"(?is)\binsert\s+into\s+audit\.event\b")
 
 #: The treatments, each checked below:
-#: - CASE: the statement is held to one case (`case_id = %s`) the route has
-#:   gated, so the policy's case term answers it;
+#: - CASE: the statement is held to one case (`case_id = %s`) the route has gated, so the policy's case
+#:   term answers it;
 #: - AUDIT_READ: the route requires `audit.read` globally (the officer);
-#: - INGEST: a record's own ingest rows: on a case, under the case term (an
-#:   attached record's quarantine-era state is carried onto the case,
-#:   `IngestService._carry_from_quarantine`); in quarantine, under the
-#:   `ingest.manage` term, which every quarantine reader requires;
+#: - INGEST: a record's own ingest rows: on a case, under the case term (an attached record's
+#:   quarantine-era state is carried onto the case, `IngestService._carry_from_quarantine`); in
+#:   quarantine, under the `ingest.manage` term, which every quarantine reader requires;
 #: - SYSTEM:<purpose>: runs on a system connection for that purpose.
 _READERS: dict[tuple[str, str], str] = {
     ("audit_verify.py", "verify_chain"): "SYSTEM:AUDIT_VERIFY",
@@ -174,9 +166,8 @@ def _audit_alias(text: str) -> str | None:
 
 
 def test_a_case_reader_is_held_to_one_case():
-    """The predicate is on the log's own case column, by the alias the
-    statement gives it: an unrelated `case_id = %s` elsewhere in the text
-    (another table's) does not hold a reader to a case (2026-10-03)."""
+    """The predicate is on the log's own case column, by the alias the statement gives it: an unrelated
+    `case_id = %s` elsewhere in the text (another table's) does not hold a reader to a case."""
     for (rel, scope), treatment in _READERS.items():
         if treatment != "CASE":
             continue

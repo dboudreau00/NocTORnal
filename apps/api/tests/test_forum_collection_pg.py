@@ -1,15 +1,11 @@
-"""The XenForo and MyBB adapters through run_once (F3 and F4,
-2026-09-24).
+"""The XenForo and MyBB adapters through run_once.
 
-Each test polls a source made of saved fixture pages through the
-collection foundation: the refusals before any request, the authority and
-exit recorded on the run, posts stored with namespaced ids, their quotes
-and signatures cut out and kept beside them, edits versioned, deletions
-judged between survivors only, the MyBB times under a declared zone, drift
-and login walls and challenges told apart, the per-forum lock, the cursor,
-the member profiles and the retention purge. DATABASE_URL-gated; no test
-contacts a forum (fixtures through an injected fetcher, and the socket
-guard refuses anything but loopback).
+Each test polls a source made of saved fixture pages through the collection foundation: the refusals
+before any request, the authority and exit recorded on the run, posts stored with namespaced ids, their
+quotes and signatures cut out and kept beside them, edits versioned, deletions judged between survivors
+only, the MyBB times under a declared zone, drift and login walls and challenges told apart, the per-forum
+lock, the cursor, the member profiles and the retention purge. DATABASE_URL-gated; no test contacts a forum
+(fixtures through an injected fetcher, and the socket guard refuses anything but loopback).
 """
 from __future__ import annotations
 
@@ -436,8 +432,8 @@ def test_a_board_is_walked_most_recently_active_thread_first(conn):
     site = fh.xf_thread_site(**{fh.XF_BOARD: "xenforo/board.html"})
     result = _svc(conn, site).run_once(w["source"], actor_id=None)
     assert result.status == "OK", result.warnings
-    # The board, then thread 1234 (active 2026-09-10) page 1 and its newest
-    # page; the budget ends before 1235 and the sticky rules thread.
+    # The board, then thread 1234 page 1 and its newest page; the budget ends before 1235 and the sticky
+    # rules thread.
     assert site.urls() == [fh.XF_BOARD, fh.XF_THREAD, f"{fh.XF_THREAD}page-3"]
     assert "wtb-drops-eu" not in " ".join(site.urls())
 

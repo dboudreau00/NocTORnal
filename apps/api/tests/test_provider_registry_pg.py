@@ -1,10 +1,7 @@
-"""The lookup provider registry (F15.2, 2026-09-24):
-nothing seeded, the constraints the database holds, the anchor source that
-nothing polls, the exposure rules, the route a provider leaves by, and the
-administrator routes.
+"""The lookup provider registry: nothing seeded, the constraints the database holds, the anchor source
+that nothing polls, the exposure rules, the route a provider leaves by, and the administrator routes.
 
-Routes are fakes; nothing reaches a provider. **The email prefix is
-`pvreg-`.** Env-gated on DATABASE_URL.
+Routes are fakes; nothing reaches a provider. **The email prefix is `pvreg-`.** Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

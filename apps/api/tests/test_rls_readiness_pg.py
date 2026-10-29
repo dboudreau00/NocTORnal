@@ -1,10 +1,9 @@
-"""The readiness row for row-level security (S1, 2026-09-25).
+"""The readiness row for row-level security.
 
-Red on the owner's connection (every development database and the main
-suite, for app_db_role_not_owner's reason), green only when all four facts
-hold: the registry's tables are under policy, this connection is filtered,
-the IAM plane is read-only to it, and a system connection opens that owns
-nothing. A database with no policies at all is red, not vacuously green.
+Red on the owner's connection (every development database and the main suite, for
+app_db_role_not_owner's reason), green only when all four facts hold: the registry's tables are under
+policy, this connection is filtered, the IAM plane is read-only to it, and a system connection opens that
+owns nothing. A database with no policies at all is red, not vacuously green.
 """
 from __future__ import annotations
 

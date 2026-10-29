@@ -1,25 +1,15 @@
-"""Waiting on the database server's own clock (docs/17, test isolation, Beta
-1.1). Not a test module: the suites import it.
+"""Waiting on the database server's own clock (docs/17, test isolation). Not a test module.
 
-Several suites assert an order that the server's timestamps give: a claim
-older than the one recorded after it, a ledger row newer than another, an
-authority confirmed after the route last changed. Each holds whenever the
-server's clock only moves forward, and on a host where something steps it,
-the suite fails with nothing wrong. The development machine's WSL2 VM is
-such a host: Hyper-V time sync sets the VM's clock to the Windows host's every
-five seconds and systemd-timesyncd sets it back to NTP time as soon as an NTP
-exchange has finished (a tenth to a third of a second later; the host's own
-clock is out by some seconds, Windows Time being stopped), so for that long in
-every five every row is stamped five or six seconds AHEAD of the rows written
-just before and just after it. A test that writes two rows a few
-milliseconds apart finds them in the wrong order about one run in fifty,
-alone as well as in the suite.
+Several suites assert an order that the server's timestamps give: a claim older than the one recorded
+after it, a ledger row newer than another, an authority confirmed after the route last changed. Each
+holds whenever the server's clock only moves forward. On a host where something steps the clock (the
+development machine's WSL2 VM, where Hyper-V time sync and systemd-timesyncd fight over it), rows are
+stamped five or six seconds ahead of the rows written just before and after, and two rows written
+milliseconds apart come out in the wrong order about one run in fifty.
 
-`wait_until_after` makes the order a precondition: the test that depends on
-one write being stamped later than another waits, before it makes the
-second, until the clock reads later than the first stamp OUTSIDE a step. On a
-host whose clock agrees with the database's (every CI runner, and any machine
-without that fault) it returns at once.
+`wait_until_after` makes the order a precondition: before making the second write, the test waits
+until the clock reads later than the first stamp outside a step. On a host whose clock agrees with the
+database's (every CI runner) it returns at once.
 """
 from __future__ import annotations
 

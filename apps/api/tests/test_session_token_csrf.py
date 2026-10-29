@@ -1,13 +1,11 @@
 """`deps.session_token`'s CSRF double-submit, without a database.
 
-The comparison is constant-time and total (2026-09-09): `hmac.compare_digest`
-the way `security/totp.py` compares a code, over bytes -- so a header the
-caller filled with non-ASCII text is the same 403 as any other mismatch and
-not a TypeError, which would have been a client-triggerable 500 on every
-cookie-authenticated write.
+The comparison is constant-time and total: `hmac.compare_digest` the way `security/totp.py` compares a
+code, over bytes, so a header the caller filled with non-ASCII text is the same 403 as any other mismatch
+and not a TypeError, which would be a client-triggerable 500 on every cookie-authenticated write.
 
-The request is a Starlette `Request` built from raw ASGI headers, which is
-the decoding path a real request takes; `session_token` reads no database.
+The request is a Starlette `Request` built from raw ASGI headers, which is the decoding path a real
+request takes; `session_token` reads no database.
 """
 from __future__ import annotations
 
@@ -45,8 +43,7 @@ def _token(method: str, *, csrf_cookie: str, header: bytes | None) -> str:
 
 
 def test_the_double_submit_compares_in_constant_time():
-    """The source, read: the comparison inside `session_token` is
-    `hmac.compare_digest`, and the `!=` it replaced is gone."""
+    """The source, read: the comparison inside `session_token` is `hmac.compare_digest`, not `!=`."""
     src = (SRC / "http" / "deps.py").read_text(encoding="utf-8")
     body = src[src.index("def session_token("):src.index("def current_user(")]
     assert "hmac.compare_digest(" in body

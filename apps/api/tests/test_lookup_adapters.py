@@ -1,9 +1,7 @@
-"""The lookup provider adapters (F15.1, 2026-09-24):
-pure protocol classes that build a request for one selector and read the
+"""The lookup provider adapters: pure protocol classes that build a request for one selector and read the
 answer, with no network, no key storage and no database.
 
-Pure: fixture bodies are wrapped in Fetched. Nothing reaches VirusTotal,
-Shodan or a MISP.
+Pure: fixture bodies are wrapped in Fetched. Nothing reaches VirusTotal, Shodan or a MISP.
 """
 from __future__ import annotations
 

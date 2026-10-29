@@ -1,108 +1,11 @@
-"""Phase 4 over HTTP: sources, polls, persona health and egress separation.
+"""Collection over HTTP: sources, polls, persona health and egress separation.
 
-## Nothing here loops
-
-`due_sources` reports what is ready; `run_once` polls exactly one source
-once. There is deliberately no "start collecting" endpoint and no
-scheduler behind these routes.
-
-That seam is decisions 30 and 46, and the reasoning in `collection.py` is
-worth repeating because an interface is exactly where it gets eroded: a
-collector that runs itself on a timer nobody watches is how a persona gets
-burnt at 3am. A scheduler is a legitimate thing to build -- it is on the
-roadmap -- but it belongs in a worker whose failure is visible, not behind
-a button that starts something nobody is watching.
-
-## Invariant 7 has no endpoint
-
-`collection_account.secret_*` is decrypted only inside the collection
-worker. There is **no route that returns a persona secret**, and
-`PersonaVault` has no method that could serve one -- `use()` hands the
-plaintext to a callback and never returns it. `collection_account.reveal`
-exists as a permission for a break-glass path that is deliberately not
-wired to HTTP.
-
-What IS exposed is persona *health*: whether a persona is usable, when it
-was last used, and why it was suspended. An operator who cannot see that a
-persona is burnt will keep using it.
-
-## docs/16 L3 is unresolved and this router says so
-
-Every response that could lead to a persona touching a forum carries the
-notice. The software will happily drive an account into a site; whether
-you may is not a software question, and in several jurisdictions accessing
-a system with credentials registered under a false identity engages
-computer-misuse law regardless of intent.
-
-## Every listing is filtered by the caller's own ceiling
-
-`collect.source.classification` defaults to AMBER and can be RED, and
-until 2026-09-02 only the document and watch-hit routes honoured it. The
-older routes -- due, unhealthy, runs, personas, egress -- handed a RED
-source's name, URL, health and run history to any global
-`collection.read` holder, while the posts from that source were correctly
-withheld. The name of a RED source is frequently the finding. So every
-route here that LISTS sources, runs, personas or documents, or answers a
-question about one source, passes `user_ceiling(...)[0].name` to the
-service; the service treats `None` as the worker path with no filter, and
-nothing in this file ever passes `None`.
-
-`/sources/{id}/run` was exempted from that rule for half a day on
-2026-09-02, and this docstring justified the exemption by asserting the
-route "neither returns a source's name or URL". That was false, and it
-was the one sentence a maintainer would have trusted instead of reading
-the route. The poll returns `error`, which is the redacted adapter
-failure, and the SSRF guard writes the HOST into it ("cannot resolve
-{host}", "{host} resolves into private address space", "{host} is a
-cloud metadata endpoint"); `redact` masks credential shapes and leaves
-hostnames alone. The route now resolves the caller's ceiling like every
-other, and a source above it gets the same 404 a nonexistent id gets --
-which closes the existence oracle in the old 400-versus-200 split as
-well, and stops a sub-cleared caller from making the collector touch a
-forum on their say-so.
-
-## The one route that reads the readiness register
-
-`/sources/{id}/run` refuses with 409 while any BLOCKING readiness check
-fails, naming them. It is the only route here that does, because it is
-the only one that puts this software in front of somebody else's system:
-every other route reports on what already happened.
-
-The four (readiness.BLOCKING_CHECKS) are the ones an operator must
-settle before real material arrives -- no prohibited-content policy and
-no named person to escalate to, retention periods still on their seeded
-placeholders, no security officer to review a break-glass or read the
-audit trail, no sample origin so nothing collected can be retrieved.
-Running a covert poll against a real target on a deployment in that
-state is not a configuration mistake that can be tidied up afterwards;
-the material is in the building and the decisions were never taken.
-
-Until 2026-09-10 the register was a pane and nothing more: every one of
-those four could be red for a month and this route would poll happily,
-because the only consequence of a failed check was a row nobody had to
-open. `blocking_failures` runs only the four, so a poll does not wait on
-a Redis PING or a MinIO round trip to find out whether it may proceed.
-
-The gate is not this route's alone, and it must not become so.
-`scripts/collection_poll.py` -- the cron in infra/production/compose.yml,
-which polls every due source every five minutes with nobody reading the
-output -- asks the same question once per pass and refuses the whole pass
-in the same words. A gate on the attended path only would stop the
-analyst who pressed a button and wave the unattended runner through,
-which is the collection nobody is watching.
-
-`/personas/{id}/status` was the last route here that took no ceiling,
-and it was a WRITE: an AMBER holder of `collection_account.manage` could
-burn, lock or clear the cooldown on a persona whose source the listing
-hid from them, by id. The previous version of this paragraph recorded
-that the route was "not an existence oracle" only because
-`PersonaVault.set_status` ran a bare UPDATE and answered 200 whether or
-not it matched -- a write that did not happen, reported as one that did
--- and deferred both defects to a later decision. Closed 2026-09-09: the
-route resolves the caller's ceiling like every other, the service gates
-the UPDATE on the source's label and checks that it matched, and an
-unknown id and an over-ceiling one get the same 404 `/sources/{id}/run`
-gives. No route in this file takes no ceiling any more.
+Nothing here loops: `run_once` polls one source once and no route starts a scheduler (decisions
+30 and 46). No route returns a persona secret (invariant 7). Every route passes the caller's
+ceiling (`user_ceiling(...)[0].name`) to the service, never None (the unfiltered worker path):
+listings filter by it, and one source above it gets the 404 of a missing id. `/sources/{id}/run`
+refuses with 409 while a BLOCKING readiness check fails, as `scripts/collection_poll.py` does per
+pass, and responses that could lead a persona to a forum carry the docs/16 L3 notice.
 """
 from __future__ import annotations
 
@@ -140,8 +43,8 @@ from noctornal_api.collection_authority import (
     AuthorityError,
     source_ceiling,
 )
-from noctornal_api import forum_adapters  # F3 and F4 (2026-09-24)
-from noctornal_api import telegram_service  # F5.2 and F5.3
+from noctornal_api import forum_adapters
+from noctornal_api import telegram_service
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -160,19 +63,13 @@ from noctornal_api.stores import PgAccessResolver
 
 router = APIRouter(prefix="/collection", tags=["collection"])
 
-#: A source's and a persona's administration writes on a system connection
-#: (0179, Beta 1.1): the request role may only read the collection plane, so
-#: a statement injected into a request cannot add or rebind a source, or
-#: create or restore a persona, past these gates and their audit rows.
+#: A source's and a persona's administration writes on a system connection (0179): the request
+#: role may only read the collection plane, so a statement injected into a request cannot add or
+#: rebind a source, or create or restore a persona, past these gates and their audit rows.
 _CONFIG = system_conn(SystemPurpose.CONFIGURATION)
 
-#: Repeated on every route that can put a persona in front of a site. The
-#: legal-review item by its register number, not a design document's path
-#: (ux19-copy developer-speak-in-copy, 2026-09-23). Rewritten 2026-09-24
-#: (docs/00 decision 69): the old wording said the software "records the distinction"
-#: between passive and active collection, and nothing did; it now refuses
-#: every forum and Telegram read no confirmed authority covers, and has no
-#: active scope because nothing in it engages.
+#: Repeated on every route that can put a persona in front of a site, naming the legal-review item
+#: by its register number (docs/00 decision 69).
 L3_NOTICE = (
     "Legal review item L3 is still open: authority to read a forum or a "
     "chat, publicly or as a member, is decided per jurisdiction. This "
@@ -184,9 +81,8 @@ L3_NOTICE = (
 
 
 def get_adapters() -> dict[str, Adapter]:
-    """THE adapter registry for the routes (2026-09-24): an HTTP test
-    registers a stub adapter through app.dependency_overrides instead of
-    patching the module."""
+    """The adapter registry for the routes, so an HTTP test can register a stub adapter through
+    app.dependency_overrides instead of patching the module."""
     return default_adapters()
 
 
@@ -206,9 +102,8 @@ def _holds(conn: psycopg.Connection, user: CurrentUser, permission: str) -> bool
 
 
 def refuse_unready(conn: psycopg.Connection) -> None:
-    """409 while any BLOCKING readiness check fails, naming them: one
-    sentence for the run route and the attended persona acts, never a copy
-    (2026-09-24)."""
+    """409 while any BLOCKING readiness check fails, naming them: one sentence for the run route
+    and the attended persona acts, never a copy."""
     unsettled = blocking_failures(conn)
     if unsettled:
         raise Problem(
@@ -230,21 +125,18 @@ def due_sources(
 ) -> dict:
     """What is ready to poll. Reports; does not act.
 
-    A newly-added source is due immediately rather than after a full
-    interval -- that was a real defect, and a source that sits idle on its
-    first day looks broken to whoever just configured it.
-
-    Filtered by the caller's own ceiling. A source above it is not "due"
-    to this caller; its name and URL are what its label protects.
+    A new source is due at once, not after a full interval, or it looks broken to whoever just
+    added it. Filtered by the caller's own ceiling: a source's name and URL are what its label
+    protects.
     """
     clearance, keys = user_ceiling(conn, user.user_id)
     svc = CollectionService(conn, adapters)
     due = svc.due_sources(clearance=clearance.name, compartments=keys)
-    # 2026-09-24: what waits on a person, by reason. A held source is
-    # not polled, not rescheduled and not a failure.
+    # What waits on a person, by reason. A held source is not polled, not rescheduled and not a
+    # failure.
     held = [{**h, "id": str(h["id"])}
             for h in svc.held_sources(clearance=clearance.name, compartments=keys)]
-    # F5.3 (2026-09-24). A due Telegram chat names its chat and exit.
+    # A due Telegram chat names its chat and exit.
     due = telegram_service.attach_due_facts(conn, due)
     return {"due": [{**d, "id": str(d["id"])} for d in due],
             "count": len(due),
@@ -271,18 +163,12 @@ _BLOCKING_WORDS = {
 
 
 def _run_readiness(conn: psycopg.Connection, user: CurrentUser) -> dict:
-    """Whether THIS caller's Poll now would be refused, and why, before
-    they press it (ux12-feeds:poll-now-one-click-and-blocked, 2026-09-23).
+    """Whether this caller's Poll now would be refused, and why, before they press it.
 
-    The pane offered an enabled Poll now on every due source while the
-    route refused every poll with a 409 naming the blocking checks, and to
-    anyone without `collection.run`, which is every role but COLLECTOR,
-    with a 403. The analyst learnt either from an error banner after the
-    click. `allowed` is the verb, asked of the gate without writing an
-    AUTHZ_DENIED row (a question on a listing is not an attempt); the
-    blocking checks are named only to a caller who holds it, because they
-    are the refusal that caller would get, and nobody else is refused for
-    them. The poll route still decides: this is the button's state.
+    `allowed` is `collection.run`, asked of the gate without writing an AUTHZ_DENIED row (a
+    question on a listing is not an attempt). The blocking checks are named only to a caller who
+    holds it, as they are the refusal that caller would get. The poll route still decides; this
+    is the button's state.
     """
     try:
         ctx = PgAccessResolver(conn).resolve_global(
@@ -308,21 +194,14 @@ def unhealthy(
 ) -> dict:
     """Sources whose parser has stopped matching.
 
-    This is the endpoint that makes silent failure loud. A parser that
-    stopped matching is usually the site changing its markup, and it fails
-    by returning zero items rather than by raising -- so without somebody
-    watching this list, a feed goes quiet and the case simply stops
-    growing.
-
-    `never_polled` is reported separately rather than mixed in. A source
-    that has never run is not broken, and listing it here alongside a
-    parser that genuinely stopped matching pads the alert with non-alerts
-    — which is how a list that exists to be watched stops being watched.
+    A parser fails by returning zero items rather than raising, usually because the site changed
+    its markup, so this list is how a quiet feed gets noticed. `never_polled` is reported apart: a
+    source that has never run is not broken, and mixing it in pads the alert.
     """
     clearance, held = user_ceiling(conn, user.user_id)
     svc = CollectionService(conn)
-    # The reader's compartments too (2026-10-03):
-    # these two lists named a compartmented source to a reader without the key.
+    # The reader's compartments too, or these lists would name a compartmented source to a reader
+    # without the key.
     rows = svc.unhealthy_sources(clearance=clearance.name, compartments=held)
     never = svc.never_polled_sources(clearance=clearance.name,
                                      compartments=held)
@@ -346,59 +225,22 @@ def run_once(
     conn: psycopg.Connection = Depends(get_conn),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
-    """Poll ONE source, ONCE.
+    """Poll one source, once.
 
-    Every outcome becomes a `collection_run` row including the failures,
-    because parser health is only knowable if failures are recorded as
-    carefully as successes. Metered under `capture` because it is the same
-    shape of work -- one call that stores rows at machine rate -- and a
-    loop floods `collect.document` and the watch-hit queue rather than the
-    server. Until 2026-09-02 this docstring said each poll "can raise a
-    proposal per new item"; it cannot. A poll writes documents and watch
-    hits and never touches `collect.proposal` -- the `Adapter` docstring in
-    collection.py says where items actually go and why the proposal wiring
-    is deliberately not made.
-
-    404 for a source above the caller's ceiling, and for one that does not
-    exist, indistinguishably. This route was exempted from the ceiling
-    pass earlier on 2026-09-02 on the reasoning that a poll returns no
-    name or URL; `error` below is the redacted adapter failure, and the
-    SSRF guard names the HOST in it, so the exemption was disclosing
-    exactly what the label protects. The 400-versus-200 split was an
-    existence oracle on top of it, and the poll itself ran against a
-    source the caller was not cleared to know about.
-
-    409 while any BLOCKING readiness check fails, before anything else is
-    read or written. See "The one route that reads the readiness
-    register" above for which four and why; the refusal names them and
-    sends the caller to `GET /admin/readiness` for the evidence and the
-    action behind each, because a refusal an operator cannot act on is
-    just an outage.
-
-    409 also for a persona that is not usable, and for a source another
-    runner is already polling -- all three are "you are allowed, this
-    cannot run right now", and the detail says which. Only the last is
-    worth retrying immediately.
+    Every outcome, failures included, becomes a `collection_run` row, and the poll writes documents
+    and watch hits, never `collect.proposal`. Metered under `capture`. 404 for a source above the
+    caller's ceiling, as for a missing one, since the SSRF guard names the host in `error`. 409
+    while a BLOCKING readiness check fails (pointing to `GET /admin/readiness`), for an unusable
+    persona, and for a source another runner is polling; only the last is worth retrying at once.
     """
-    # BEFORE the ceiling lookup on purpose: this is a fact about the
-    # deployment and not about the caller or the source, so resolving a
-    # clearance first would spend a query to answer a question that
-    # cannot change the outcome. It is not an oracle either -- the caller
-    # already holds global `collection.run`, and the answer is the same
-    # for every source id including ones that do not exist.
-    #
-    # 409 is also what an unusable persona and an already-running poll get
-    # below. All three are "you are allowed, something else is not ready";
-    # the detail says which, and naming the failing checks is what makes
-    # this one distinguishable to a caller who is not reading this file.
+    # Before the ceiling lookup: a fact about the deployment, not the caller or the source, and the
+    # same answer for every source id, so it is no oracle to a holder of global `collection.run`.
     refuse_unready(conn)
     clearance, held = user_ceiling(conn, user.user_id)
-    # A collector process (2026-10-02): a source a persona reads is polled
-    # by the collector, the one process holding the persona key, so this
-    # route queues it as a persona act and answers with its outcome (or
-    # 202 while it is queued). A feed no persona reads polls here, as
-    # before. A source above the caller, or filed under a compartment they
-    # do not hold (F43), is the same 404 either way.
+    # A source a persona reads is polled by the collector, the one process holding the persona key,
+    # so this route queues it as a persona act and answers with its outcome (or 202 while queued).
+    # A feed no persona reads polls here. A source above the caller, or under a compartment they do
+    # not hold, is the same 404 either way.
     persona_read = _persona_read_label(conn, source_id, clearance.name, adapters,
                                        held)
     if persona_read is not None:
@@ -408,12 +250,10 @@ def run_once(
             classification=persona_read, adapters=adapters, factory=None,
             params={"persona_id": body.persona_id, "watch_id": body.watch_id})
     try:
-        # The poll on a system connection (S1, 2026-09-25), as the cron's
-        # is: a new item dedupes against every stored version of it and
-        # is matched against every case's watches, and a manual run that
-        # saw only its caller's documents would store duplicates and miss
-        # hits. The caller's ceiling still decides whether the source may
-        # be run at all (run_once's 404 below), exactly as before.
+        # The poll runs on a system connection, as the cron's does: a new item dedupes against
+        # every stored version and is matched against every case's watches, which a run seeing only
+        # its caller's documents would get wrong. The caller's ceiling still decides whether the
+        # source may be run at all (run_once's 404 below).
         with system_connection(SystemPurpose.COLLECTION, reuse=conn) as sconn:
             result = CollectionService(sconn, adapters).run_once(
                 source_id, actor_id=user.user_id, persona_id=body.persona_id,
@@ -443,32 +283,19 @@ def _persona_read_label(conn: psycopg.Connection, source_id: UUID,
 
 
 def run_problem(exc: CollectionError) -> Problem:
-    """The run route's answer for a refused or failed poll: one mapping for
-    the poll run here and the one the collector runs (2026-10-02). The
-    order is the old `except` chain's: a subclass before its parent."""
+    """The run route's answer for a refused or failed poll, whether it ran here or in the
+    collector. A subclass is tested before its parent."""
     if isinstance(exc, (SourceRefused, PersonaResting, AuthorityError)):
-        # Before the CollectionError fallback, as CollectionBusy is: each is
-        # "you are allowed, this cannot run", and nothing was done. A
-        # refused source is configuration, a resting persona is outside its
-        # hours, and the confirmer is refused as the runner before any run
-        # row; 400 "Invalid request" would tell the caller to fix a request
-        # with nothing wrong in it.
+        # Before the CollectionError fallback, as CollectionBusy is: each means "you are allowed,
+        # this cannot run", and nothing was done, so 409 rather than a 400 that blames the request.
         return Problem(409, "Conflict", safe_detail(exc))
     if isinstance(exc, PersonaUnavailable):
         # 409 rather than 403: the caller is allowed, the persona is not
         # usable: suspended, burnt, or cooling down.
         return Problem(409, "Conflict", safe_detail(exc))
     if isinstance(exc, CollectionBusy):
-        # Before the CollectionError fallback and it must stay there:
-        # CollectionBusy is a subclass, so until 2026-09-10 it was caught
-        # below and answered 400 "Invalid request", for a request that was
-        # entirely valid and did nothing at all. The case that produces it
-        # is the ordinary one the lock exists for and `run_once`'s docstring
-        # names: an analyst double-clicking Run, or this pane overlapping
-        # the scheduled poll in scripts/collection_poll.py. 409 says the
-        # true thing, which is that the poll is already happening; 400 told
-        # them to fix a request that had nothing wrong with it, and left
-        # retrying (the correct response) looking like the wrong one.
+        # Before the CollectionError fallback, which would catch this subclass as a 400: the poll
+        # is already running (a double-click, or the scheduled poll), and retrying is right.
         return Problem(409, "Conflict", safe_detail(exc))
     if isinstance(exc, CollectionNotFound):
         return Problem(404, "Not found", safe_detail(exc))
@@ -483,16 +310,14 @@ def run_body(result) -> dict:
         "items_new": result.items_new,
         "watch_hits": result.watch_hits,
         "error": result.error,
-        # 2026-09-24: BLOCKED and RATE_LIMITED are not failures, and
-        # a note (a walk that stopped at its budget) is not a warning.
+        # BLOCKED and RATE_LIMITED are not failures, and a note (a walk that stopped at its budget)
+        # is not a warning.
         "status": result.status,
         "blocked_reason": result.blocked_reason,
         "items_deleted": result.items_deleted,
         "notes": result.notes,
-        # What the run could not do while otherwise succeeding. A watch
-        # whose regex will not compile matches nothing for ever, and until
-        # 2026-08-07 that was swallowed: the run reported OK and the watch
-        # looked like one that simply had not fired.
+        # What the run could not do while otherwise succeeding: a watch whose regex does not
+        # compile matches nothing, and would otherwise look like one that has not fired.
         "warnings": result.warnings,
         "notice": L3_NOTICE,
     }
@@ -504,26 +329,15 @@ def personas(
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Persona HEALTH. Never a secret.
+    """Persona health: whether each persona is usable and why not. Never a secret (invariant 7).
 
-    Invariant 7: credentials never leave the vault. There is no route
-    that returns `secret_*`, and `PersonaVault.use()` hands the plaintext
-    to a callback rather than returning it, so no caller here could serve
-    one even by mistake.
-
-    What an operator needs instead is whether a persona is usable and why
-    not -- a burnt persona that still looks available is one somebody will
-    keep using.
-
-    Each row names the persona's SOURCE, so the list is filtered by the
-    caller's ceiling against the source's label (`PersonaVault.personas`
-    says how, and why a source-less persona is always shown).
+    Each row names the persona's source, so the list is filtered by the caller's ceiling against
+    the source's label (`PersonaVault.personas` says how).
     """
     clearance, held = user_ceiling(conn, user.user_id)
     personas = PersonaVault(conn).personas(clearance=clearance.name,
                                            compartments=held)
-    # F5.2 (2026-09-24). A Telegram persona row carries its enrolment,
-    # hold and chat count; never a secret column.
+    # A Telegram persona row carries its enrolment, hold and chat count; never a secret column.
     personas = telegram_service.attach_persona_facts(
         conn, personas, clearance.name, held)
     return {
@@ -546,20 +360,14 @@ _STOPS = ("LOCKED", "BURNED")
 
 def _sign_out_forum(conn: psycopg.Connection, persona_id: UUID, user: CurrentUser,
                     clearance: str, held, adapters: dict) -> str | None:
-    """Sign a forum persona out of its boards before it is stopped; None
-    for any other persona and for one that holds no session, else a sentence
-    on what was and was not reached.
+    """Sign a forum persona out of its boards before it is stopped; None for any other persona and
+    for one with no session, else a sentence on what was and was not reached.
 
-    The board's own sign-out needs the sealed session, which only the
-    collector can open (the persona vault split, decision 174, merged with
-    the authenticated forum path 2026-10-03), so this asks the collector
-    for it as a persona act, a STOP (`FORUM_SIGN_OUT`), and waits for it a
-    bounded time, as every act route does. Development's inline mode runs it
-    here, where the API holds the persona key. It is the courtesy and may
-    not be reached: whatever happens the stop goes on, and `PersonaVault`
-    clears the sealed session in the same call, so an act the collector
-    starts later finds nothing to sign out of. Never raises into the stop: a
-    persona the caller cannot see is left for `set_status` to answer 404."""
+    Only the collector can open the sealed session (decision 174), so this asks it for a STOP act
+    (`FORUM_SIGN_OUT`) and waits a bounded time; development's inline mode runs it here. A courtesy
+    that may not be reached: the stop goes on regardless and `PersonaVault` clears the sealed
+    session in the same call. Never raises into the stop; a persona the caller cannot see is left
+    for `set_status` to answer 404."""
     from noctornal_api import persona_acts
 
     row = conn.execute(
@@ -614,29 +422,17 @@ def set_persona_status(
     sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
-    """Suspend or restore a persona, with a reason.
+    """Suspend or restore a persona, with the reason a later operator reads before reusing it.
 
-    The reason is what a later operator reads when deciding whether the
-    persona is safe to use again. "Burnt" and "cooling down after a rate
-    limit" are the same status to a scheduler and completely different
-    facts to a human.
-
-    404 for a persona whose source is above the caller's ceiling, and for
-    one that does not exist, indistinguishably -- the same answer
-    `/sources/{id}/run` gives, for the same reason. Until 2026-09-09 this
-    route passed no ceiling and the service checked nothing: an AMBER
-    caller could burn a persona on a RED source the persona list hid from
-    them, and an unknown id got a 200 for a write that never happened.
+    404 for a persona whose source is above the caller's ceiling, as for a missing one, so an
+    over-ceiling caller cannot change a persona the list hides from them.
     """
     clearance, held = user_ceiling(conn, user.user_id)
     cooldown = (timedelta(hours=body.cooldown_hours)
                 if body.cooldown_hours else None)
-    # A STOP of a forum persona signs it out of its boards first, through
-    # its own route in a stop context, run by the collector as a persona act
-    # (2026-10-03; the vault split). The sign-out is the
-    # courtesy and may not be reached; the clearing of what this product
-    # holds sealed is the guarantee, and `PersonaVault` makes it on every
-    # stop whatever happens here.
+    # A STOP of a forum persona signs it out of its boards first, as a persona act the collector
+    # runs. The sign-out is a courtesy that may not be reached; the guarantee is `PersonaVault`
+    # clearing what this product holds sealed, on every stop.
     signed_out = (_sign_out_forum(conn, persona_id, user, clearance.name, held,
                                   adapters)
                   if body.status in _STOPS else None)
@@ -652,8 +448,8 @@ def set_persona_status(
     answer = {"persona_id": str(persona_id), "status": body.status}
     if signed_out:
         answer["forum_sign_out"] = signed_out
-    # 2026-09-24: HEALTHY under a platform's hold or lock changes the
-    # person's status only, and the answer says the persona stays paused.
+    # HEALTHY under a platform's hold or lock changes the person's status only, and the answer says
+    # the persona stays paused.
     if written.get("notice"):
         answer["notice"] = written["notice"]
     return answer
@@ -667,17 +463,9 @@ def egress_separation(
 ) -> dict:
     """Personas that would share an egress path against one source.
 
-    Two personas reaching the same forum from one address is the cheapest
-    correlation an adversary gets, and it is invisible from inside a
-    single persona's own view -- which is why this is a question you have
-    to ask deliberately rather than something the system warns about
-    while you work.
-
-    404 for a source above the caller's ceiling, and for one that does
-    not exist, indistinguishably: the notice below says an empty result
-    means no shared egress was found, so answering an AMBER caller with
-    `[]` about a RED source would report "clean" about a forum they are
-    not cleared to know exists.
+    Two personas reaching one forum from one address is the cheapest correlation an observer gets,
+    and invisible from inside either persona. 404 for a source above the caller's ceiling, as for a
+    missing one, since an empty answer would report "clean" about a forum they may not know exists.
     """
     clearance, held = user_ceiling(conn, user.user_id)
     try:
@@ -701,13 +489,8 @@ def runs(
 ) -> dict:
     """Recent polls, successes and failures alike.
 
-    The failures are the point. A run that fetched 200 items and parsed
-    zero is a broken parser, and it is indistinguishable from a quiet feed
-    unless the run is recorded either way.
-
-    Filtered by the caller's ceiling against the SOURCE's label. This was
-    a raw SELECT on `collection_run` with no join, so it could not have
-    filtered even if asked: the label lives on the source.
+    A run that fetched 200 items and parsed none is a broken parser, which only a recorded run
+    tells apart from a quiet feed. Filtered by the caller's ceiling against the source's label.
     """
     clearance, held = user_ceiling(conn, user.user_id)
     rows = CollectionService(conn).runs(
@@ -720,14 +503,8 @@ def runs(
 
 
 # ---------------------------------------------------------------------------
-# The read path — what the collector actually collected
+# The read path: what the collector collected
 # ---------------------------------------------------------------------------
-#
-# Until 2026-08-10 the only observable trace of a poll was three integers
-# on a run card: items_seen, items_new, watch_hits. A watch could fire four
-# hundred times and the analyst saw the number 400 and could not open one
-# of them. `collect.document` and `collect.watch_hit` were written by the
-# collector and read by nothing.
 
 @router.get("/documents", response_model=dict)
 def documents(
@@ -739,25 +516,18 @@ def documents(
 ) -> dict:
     """Collected documents, newest first.
 
-    NOT case-scoped: `collect.document` has no `case_id` because a
-    document hangs off a SOURCE, and one forum post is evidence in
-    however many cases cite it. Gated on the global `collection.read` and
-    filtered by classification — which defaults to AMBER and can be
-    higher, so this filter is doing real work rather than being defensive
-    habit.
+    Not case-scoped: a document hangs off a source and may be evidence in many cases. Gated on the
+    global `collection.read` and filtered by classification, which defaults to AMBER.
     """
-    # The reader's compartments too (L1, 2026-09-24): a capture
-    # into a compartmented case is stored under the case's keys.
+    # The reader's compartments too: a capture into a compartmented case is stored under its keys.
     clearance, held = user_ceiling(conn, user.user_id)
-    # Document holds (docs/00 decision 74, 2026-09-24). The caller holds
-    # collection.read already (the gate above); placing a document hold
-    # needs retention.manage as well, and only such a caller reads a hold's
-    # reason (2026-09-25).
+    # Document holds (docs/00 decision 74): placing one needs retention.manage as well as the
+    # collection.read above, and only such a caller reads a hold's reason.
     can_hold = _holds(conn, user, "retention.manage")
     docs = CollectionService(conn).documents(
         clearance=clearance.name, compartments=held, source_id=source_id,
         triage_state=triage_state, limit=limit, with_hold_reason=can_hold)
-    # F5.3 (2026-09-24). A Telegram document carries its capture record.
+    # A Telegram document carries its capture record.
     docs = telegram_service.attach_message_meta(conn, docs)
     return {"documents": docs, "count": len(docs),
             "can_hold": can_hold,
@@ -766,12 +536,10 @@ def documents(
                      "rather than returned with an empty body.")}
 
 
-# F3 and F4 (2026-09-24). What a forum post or member
-# carries beside its text (the signature, the posts it quotes, its
-# reactions; a member's profile), read under the document's label, its
-# source's label and its compartments, exactly as the list reads the
-# document. A document the caller may not see, or one with no forum
-# details, is the same 404 a random id gets.
+# What a forum post or member carries beside its text (the signature, the posts it quotes, its
+# reactions; a member's profile), read under the document's and its source's labels and its
+# compartments, as the list reads the document. A document the caller may not see, or one with no
+# forum details, is the same 404 a random id gets.
 @router.get("/documents/{document_id}/forum", response_model=dict)
 def forum_details(
     document_id: UUID,
@@ -799,15 +567,9 @@ def triage_document(
 ) -> dict:
     """Move a document between the four triage states the pane filters on.
 
-    Gated exactly as reading documents is -- global `collection.read`,
-    and the document's own classification against the caller's ceiling
-    inside the service's UPDATE -- because triage is the reader's verb:
-    the analyst working the Collected list is the one who decides a post
-    is noise or worth a look. NOT case-scoped, for the reason `documents`
-    gives: a document hangs off a source, not a case.
-
-    A state outside the four is a 400 carrying the list; a document the
-    caller cannot see is a 404, the same 404 a random UUID gets.
+    Gated as reading documents is, because triage is the reader's verb: global `collection.read`,
+    and the document's classification against the caller's ceiling inside the service's UPDATE.
+    A state outside the four is a 400 with the list; a document the caller cannot see is a 404.
     """
     clearance, held = user_ceiling(conn, user.user_id)
     try:
@@ -834,12 +596,9 @@ def watch_hits(
 ) -> dict:
     """What the watches on this case matched.
 
-    Case-scoped, because `collect.watch` carries `case_id` even though the
-    document it matched does not.
-
-    Suppressed hits are INCLUDED, carrying their reason. Hiding them would
-    make a watch that is drowning in one recurring thread look like a
-    watch that is quiet, and those need opposite responses.
+    Case-scoped, because `collect.watch` carries `case_id` though the document does not.
+    Suppressed hits are included with their reason, or a watch drowning in one recurring thread
+    would look like a quiet one.
     """
     clearance, held = user_ceiling(conn, user.user_id)
     hits = CollectionService(conn).watch_hits(
@@ -879,11 +638,8 @@ def acknowledge_watch_hit(
 
 
 class SuppressBody(BaseModel):
-    #: No `min_length` here on purpose. The floor is the service's
-    #: (`MIN_SUPPRESS_REASON_LENGTH`), so every caller -- this route, a
-    #: script, a future digest job -- meets the same rule, and a short
-    #: reason is a 400 carrying the service's words rather than a 422
-    #: from a validator that restates them.
+    #: No `min_length` here: the floor is the service's (`MIN_SUPPRESS_REASON_LENGTH`), so every
+    #: caller meets the same rule and a short reason is a 400 in the service's words, not a 422.
     reason: str
 
 
@@ -932,28 +688,18 @@ def unsuppress_watch_hit(
 
 
 # ---------------------------------------------------------------------------
-# Watches (F53, 2026-10-08)
+# Watches
 # ---------------------------------------------------------------------------
 #
-# Only a seeding script wrote a watch until now. A watch is a standing
-# tasking: the terms it names are what the case's collection looks for, and
-# the terms are the case's content. So the list is read behind
-# `collection.read` on the case, like the hits it produces; and a watch is
-# made behind TWO gates, because it needs two things: the verb (the global
-# `watch.manage`, which only the collection manager's role holds, as
-# `source.manage` is) and the case (the five-part gate on this case, which
-# also refuses a closed one). Either alone is the wrong door: the verb
-# without the case would let a collection manager task a case they are not
-# on (row-level security would refuse the write, but the refusal belongs
-# here), and the case without the verb would let any analyst point the
-# collector at a source.
+# A watch is a standing tasking whose terms are the case's content, so the list is read behind
+# `collection.read` on the case. Making one takes two gates: the global `watch.manage`, held only
+# by the collection manager's role, and the five-part gate on this case, which refuses a closed
+# one. The verb alone would let a manager task a case they are not on; the case alone would let
+# any analyst point the collector at a source.
 
 class WatchCreate(BaseModel):
-    #: No length or range constraints here, on purpose, as `SuppressBody`
-    #: says of its reason: the floors and ceilings are the service's
-    #: (`WATCH_*` in collection.py), so every caller meets one rule and a
-    #: refusal is a 400 carrying its words rather than a 422 from a
-    #: validator that restates them.
+    #: No length or range constraints here, as in `SuppressBody`: the limits are the service's
+    #: (`WATCH_*` in collection.py), so every caller meets one rule and a refusal is a 400.
     source_id: UUID
     name: str
     target_kind: str
@@ -1039,13 +785,11 @@ def create_watch(
 
 
 # ---------------------------------------------------------------------------
-# Sources, personas and bindings (the collection foundation, 2026-09-24)
+# Sources, personas and bindings
 # ---------------------------------------------------------------------------
 #
-# Until now no route created a source or a persona: only SQL, the seeders and
-# the tests did. The console can now add a source, create a persona with NO
-# credential (an operator enrols it on the server), say who reads a source
-# and through which exit, and deactivate one, each gated, rate limited under
+# Add a source, create a persona with no credential (an operator enrols it on the server), say who
+# reads a source and through which exit, and deactivate one: each gated, rate limited under
 # `collection.config` and audited.
 
 def _adapter_rows(adapters: dict) -> list[dict]:
@@ -1081,9 +825,8 @@ def list_sources(
             "kinds": list(SOURCE_KINDS),
             "can_manage": manage,
             "can_bind": manage and _holds(conn, user, "collection_account.manage"),
-            # F3 and F4 (2026-09-24). A forum read leaves from this
-            # server's own address (development, no proxy, the override
-            # set): the Poll now confirmation says so.
+            # A forum read leaves from this server's own address (development, no proxy, the
+            # override set): the Poll now confirmation says so.
             "forum_reads_direct": forum_adapters.reads_direct(),
             "notice": L3_NOTICE}
 
@@ -1101,8 +844,8 @@ class SourceCreate(BaseModel):
     parser_config: dict = Field(default_factory=dict)
     collection_account_id: UUID | None = None
     egress_profile_id: UUID | None = None
-    #: F43 (2026-10-02): the compartments the source and everything it
-    #: collects are filed under; the creator must hold each.
+    #: The compartments the source and everything it collects are filed under; the creator must
+    #: hold each.
     compartments: list[str] = Field(default_factory=list, max_length=32)
 
 
@@ -1151,9 +894,8 @@ class ReasonBody(BaseModel):
 def _set_active(source_id: UUID, body: ReasonBody, user: CurrentUser,
                 conn: psycopg.Connection, active: bool,
                 sconn: psycopg.Connection) -> dict:
-    # The holder's own compartments (2026-10-03): this
-    # passed none, so the key holder who created a compartmented source met
-    # a 404 on the one control that stops it.
+    # The holder's own compartments, or the key holder who created a compartmented source would
+    # meet a 404 on the one control that stops it.
     clearance, held = user_ceiling(conn, user.user_id)
     try:
         return CollectionService(sconn).set_source_active(

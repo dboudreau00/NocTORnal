@@ -1,43 +1,31 @@
-"""Body caps over HTTP: a body one byte over the cap is refused with 413
-BEFORE it is read, on both write paths (2026-09-09).
+"""Body caps over HTTP: a body one byte over the cap is refused with 413 before it is read, on both
+write paths.
 
-The Alpha 4 review named two unbounded body reads:
+- `POST /cases/{id}/evidence` must not `await file.read()` without a cap: a caller could hand the API
+  gigabytes, and the bytes would be locked in the evidence bucket under a COMPLIANCE retention that no
+  credential can shorten.
+- `POST /ingest` must not accumulate the whole body before checking the key's `max_bytes_per_request`,
+  or the cap is useless against the thing a cap is for.
+- `POST /samples` and `POST /cases/{id}/deception/emails` must not rely on a chunked read alone, which
+  stops at the cap only after FastAPI's multipart parser has spooled the whole body to a temporary
+  file. They opt into `BodyCappedRoute` like evidence.
 
-- `POST /cases/{id}/evidence` did `await file.read()` with no cap. A caller
-  could hand the API gigabytes; nothing refused; the bytes were locked in
-  the evidence bucket under a COMPLIANCE retention that no credential can
-  shorten.
-- `POST /ingest` did `await request.body()` and checked the key's
-  `max_bytes_per_request` AFTER the whole body had been accumulated. The
-  cap existed and was useless against the thing a cap is for.
-- `POST /samples` and `POST /cases/{id}/deception/emails` (added here
-  2026-09-09) each read the upload in chunks and stopped at their cap --
-  AFTER FastAPI's multipart parser had spooled the whole body to a
-  temporary file. Memory was bounded; the bytes had all arrived. Both
-  now opt into `BodyCappedRoute` like evidence.
+This file drives the app as raw ASGI rather than through TestClient. Starlette's TestClient calls
+`request.read()` on the httpx request before the app sees a byte, so every body it sends arrives in
+one message and the app cannot be told apart from one that buffers everything first. Here the body
+comes from a generator that raises if the app asks for the byte past the cap, so a route that reads to
+the end dies on that AssertionError instead of seeing a 413.
 
-**Why this file drives the app as raw ASGI rather than through TestClient.**
-Starlette's TestClient calls `request.read()` on the httpx request before
-the app sees a byte, so every body it sends arrives in one message and the
-app cannot be told apart from one that buffers everything first. Here the
-body comes from a generator that RAISES if the app asks for the byte past
-the cap. Before the fix both routes asked -- `file.read()` and
-`request.body()` read to the end -- and these tests died on that
-AssertionError instead of seeing a 413. After it, the 413 arrives first
-and the generator is never asked again.
+Two refusal paths are proven for each route, because they are different code: a body whose
+`Content-Length` declares more than the cap is refused before any byte is read, and a body with no
+declared length (chunked) is refused on the chunk that crosses the cap. A body exactly at the cap is
+the positive control: it proves the cap is not off by one in the other direction and that the parser
+still reads through the capped receive.
 
-Two refusal paths are proven for each route, because they are different
-code: a body whose `Content-Length` declares more than the cap is refused
-before ANY byte is read, and a body with no declared length (chunked) is
-refused on the chunk that crosses the cap. A body exactly AT the cap is
-the positive control: it proves the cap is not off by one in the other
-direction and that the parser still reads through the capped receive.
+The email prefix is `bcap-` and must stay unique.
 
-**The email prefix is `bcap-` and must stay unique.**
-
-Env-gated on DATABASE_URL and MINIO_ENDPOINT: the positive controls write a
-real exhibit and a real raw batch, and the refusals look in the bucket to
-prove nothing was written.
+Env-gated on DATABASE_URL and MINIO_ENDPOINT: the positive controls write a real exhibit and a real
+raw batch, and the refusals look in the bucket to prove nothing was written.
 """
 from __future__ import annotations
 
@@ -111,9 +99,8 @@ def conn():
         c.execute(f"DELETE FROM core.evidence_link WHERE evidence_id IN {esub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
                   f"AND id NOT IN {pinned_evidence}")
-        # That sample's triage run is a queue entry, not a ledger: left
-        # QUEUED it went stale over a long run and failed the readiness
-        # tests that read the whole queue (2026-10-07).
+        # That sample's triage run is a queue entry, not a ledger: left QUEUED it goes stale over a
+        # long run and fails the readiness tests that read the whole queue.
         c.execute(f"DELETE FROM lab.static_run WHERE status = 'QUEUED' AND "
                   f"sample_id IN (SELECT id FROM lab.sample WHERE submitted_by IN {sub})")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
@@ -143,11 +130,8 @@ def client(app):
 
 @pytest.fixture
 def evidence_cap(monkeypatch):
-    # `raising=False` so that against a router with NO cap constant -- the
-    # state before 2026-09-09 -- the test reaches the generator's tripwire
-    # and fails on behaviour, not on the fixture. Measured: without it the
-    # pre-change run errored here with an AttributeError, which proves
-    # nothing about the route.
+    # `raising=False` so that against a router with no cap constant the test reaches the generator's
+    # tripwire and fails on behaviour, not with an AttributeError from the fixture.
     monkeypatch.setattr(
         "noctornal_api.http.routers.evidence.MAX_EVIDENCE_BYTES", EVIDENCE_CAP,
         raising=False)
@@ -191,29 +175,20 @@ def _make_user(conn, *, global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING`
+    refuses; it is off in these tests. It is not `POST /auth/login`, which answers 204 and leaves the
+    token only in `__Host-session`; nothing in this file is about the sign-in path. TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step would fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -236,12 +211,11 @@ def _create_case(client, token) -> str:
 class _Body:
     """The request body as ASGI messages, with a tripwire past the cap.
 
-    `cap=None` is a complete body: chunks, a terminator, then disconnects
-    for anything that polls afterwards. With a cap, the chunks stop at the
-    byte that crosses it -- every message says `more_body`, so a reader
-    that wants the end has to ask again, and asking again is the failure
-    this file exists to catch. `refuse_any_read` is the tripwire for the
-    declared-length path, where the correct behaviour is to read nothing.
+    `cap=None` is a complete body: chunks, a terminator, then disconnects for anything that polls
+    afterwards. With a cap, the chunks stop at the byte that crosses it. Every message says
+    `more_body`, so a reader that wants the end has to ask again, and asking again is the failure this
+    file exists to catch. `refuse_any_read` is the tripwire for the declared-length path, where the
+    correct behaviour is to read nothing.
     """
 
     def __init__(self, body: bytes, *, cap: int | None, chunk: int = 4096,
@@ -343,13 +317,8 @@ def _evidence_objects(case_id: str) -> list[str]:
 
 def test_an_evidence_body_one_byte_over_the_cap_is_refused_before_it_is_read(
         conn, app, client, evidence_cap):
-    """Both refusal paths, and nothing written on either.
-
-    Before 2026-09-09 this test failed inside the body generator: the
-    multipart parser read to the end of the upload, the handler did
-    `await file.read()`, and the object was put in the bucket under a
-    COMPLIANCE lock before anything asked how big it was.
-    """
+    """Both refusal paths, and nothing written on either: the handler must not read the upload to the
+    end and put the object in the bucket under a COMPLIANCE lock before anything asks how big it is."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
     case_id = _create_case(client, token)
@@ -416,12 +385,10 @@ def test_each_upload_route_and_the_cap_helper_are_actually_connected(
         module, path, constant, word):
     """Reads both sides of the contract that crosses two files.
 
-    `body_cap` in http/limits.py leaves a marker; `BodyCappedRoute` reads
-    it; each upload router has to opt into BOTH -- the decorator on the
-    endpoint and `route_class=` on the router -- or the cap is a docstring.
-    The generator tests catch a disconnection too, but they need the
-    stack up; this one runs anywhere and names which half went missing.
-    Evidence opted in first; samples and deception followed on 2026-09-09.
+    `body_cap` in http/limits.py leaves a marker; `BodyCappedRoute` reads it; each upload router has to
+    opt into both (the decorator on the endpoint and `route_class=` on the router) or the cap is a
+    docstring. The generator tests catch a disconnection too, but they need the stack up; this one runs
+    anywhere and names which half went missing.
     """
     import importlib
 
@@ -477,10 +444,9 @@ def _issue_key(conn, owner, *, cap: int) -> tuple[str, str]:
 
 def test_an_ingest_body_one_byte_over_the_keys_cap_is_refused_before_it_is_read(
         conn, app):
-    """Before 2026-09-09 `submit` did `await request.body()` and only then
-    handed the bytes to `accept()`, whose length check refused with a 400.
-    The refusal was real and arrived after the buffering it was meant to
-    prevent; this test died in the generator."""
+    """`submit` must refuse before buffering: reading the body and only then handing it to
+    `accept()`, whose length check refuses with a 400, is a real refusal that arrives after the
+    buffering it was meant to prevent."""
     owner, _e, _s = _make_user(conn, global_roles=("SYS_ADMIN",))
     key_row_id, secret = _issue_key(conn, owner, cap=INGEST_CAP)
     body = (b'{"note": "' + b"x" * INGEST_CAP + b'"}')[:INGEST_CAP + 1]
@@ -537,11 +503,9 @@ def test_an_ingest_body_at_the_keys_cap_is_accepted(conn, app):
 
 
 def test_the_ingest_docstring_and_the_schema_agree_on_the_default_cap(conn):
-    """The `submit` docstring says the key cap defaults to 32 MiB. That
-    number lives in migration 0033 as the column default, and a docstring
-    that quotes a number the schema no longer holds is exactly the defect
-    this pass is answering. Read from the live schema, not the migration
-    file, because the schema is what runs."""
+    """The `submit` docstring says the key cap defaults to 32 MiB. That number lives in migration 0033
+    as the column default, and a docstring that quotes a number the schema no longer holds is a defect.
+    Read from the live schema, not the migration file, because the schema is what runs."""
     default = conn.execute(
         """SELECT column_default FROM information_schema.columns
             WHERE table_schema = 'ingest' AND table_name = 'api_key'
@@ -562,11 +526,9 @@ def _sample_rows(conn, submitter) -> int:
 
 def test_a_sample_body_one_byte_over_the_cap_is_refused_before_it_is_read(
         conn, app, client, sample_cap):
-    """Until 2026-09-09 the samples router read the upload in one-megabyte
-    chunks and stopped at the cap -- after FastAPI's multipart parser had
-    spooled the whole body to a temporary file. The chunked read bounded
-    this process's memory; the bytes had all arrived. Before the change
-    this test died in the generator, exactly as the evidence one did."""
+    """The samples router must refuse before the multipart parser spools the whole body to a temporary
+    file: a chunked read that stops at the cap bounds this process's memory, but the bytes have all
+    arrived."""
     uid, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
     body, content_type = _multipart_of_total(sample_cap + 1)

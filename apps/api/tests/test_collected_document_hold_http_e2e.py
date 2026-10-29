@@ -1,10 +1,8 @@
-"""The document-level legal hold over HTTP (2026-09-24; docs/00
-decision 74).
+"""The document-level legal hold over HTTP (docs/00 decision 74).
 
-POST /retention/documents/{id}/legal-hold holds every version of a
-collected document, needs retention.manage AND collection.read, a reason
-either way, and answers a document the caller may not see with the 404 a
-random id gets. DATABASE_URL-gated.
+POST /retention/documents/{id}/legal-hold holds every version of a collected document, needs
+retention.manage AND collection.read, a reason either way, and answers a document the caller may not
+see with the 404 a random id gets. DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -36,9 +34,8 @@ def conn():
 
 
 class _Api:
-    """A test client whose rate limiter is replaced before every call: the
-    hold route is metered under retention.destroy (a burst of 3), and a
-    test that places and lifts is not a test of the meter."""
+    """A test client whose rate limiter is replaced before every call: the hold route is metered under
+    retention.destroy (a burst of 3), and a test that places and lifts is not a test of the meter."""
 
     def __init__(self):
         self.client, self.app = h.client()
@@ -160,9 +157,8 @@ def test_the_listing_shows_the_hold_and_whether_the_caller_may_hold(conn, api):
     theirs = api.get(f"/api/v1/collection/documents?source_id={source}",
                      headers=analyst).json()
     assert theirs["can_hold"] is False
-    # The free-text reason can name the matter the hold serves: a reader
-    # who neither places nor lifts holds sees that there is one, not why
-    # (2026-09-25).
+    # The free-text reason can name the matter the hold serves: a reader who neither places nor lifts
+    # holds sees that there is one, not why.
     seen = next(d for d in theirs["documents"] if d["id"] == str(doc))
     assert seen["legal_hold"] is True and seen["legal_hold_reason"] is None
 

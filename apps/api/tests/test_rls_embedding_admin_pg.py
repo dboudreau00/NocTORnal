@@ -1,18 +1,15 @@
-"""The embedding index administration sees every item (S1, 2026-09-25).
+"""The embedding index administration sees every item.
 
-Registering an index queues every document, exhibit and claim; activating
-one first sweeps the queue of entries whose item is gone, by an anti-join.
-Both used to run on the administrator's request connection. Under row-level
-security an administrator on no case sees no exhibit and no claim, so a
-registration queued none of them, and an activation's sweep read every
-exhibit and claim of every case as gone and deleted their queue entries.
-Each test below runs the route in production's shape
-(NOCTORNAL_TEST_ASSUME_ROLE: the request connection is the request role,
-bound, and the system connection the system role) and fails on the
+Registering an index queues every document, exhibit and claim; activating one first sweeps the queue of
+entries whose item is gone, by an anti-join. Both must run on the system connection: under row-level
+security an administrator on no case sees no exhibit and no claim, so a registration would queue none of
+them, and an activation's sweep would read every exhibit and claim of every case as gone and delete their
+queue entries. Each test below runs the route in production's shape (NOCTORNAL_TEST_ASSUME_ROLE: the
+request connection is the request role, bound, and the system connection the system role) and fails on a
 request-connection version.
 
-Gated like the other row-security tests. Account prefix `rlsemb-`; the
-similarity state is reset before and after, as the embeddings suites do.
+Gated like the other row-security tests. Account prefix `rlsemb-`; the similarity state is reset before
+and after, as the embeddings suites do.
 """
 from __future__ import annotations
 

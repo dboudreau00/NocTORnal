@@ -1,20 +1,17 @@
-"""Turning a case's merge requirement off takes a second Lead investigator,
-bound to the switch as it stands (F9b, 2026-09-24; migration
-case_merge_relax_two_people).
+"""Turning a case's merge requirement off takes a second Lead investigator, bound to the switch as it
+stands (migration case_merge_relax_two_people).
 
-The switch (`core.case.dual_control_merge`, 0028) was one signature in both
-directions. Now the database refuses true to false unless a
-`case.policy.relax` approval for this case and this epoch of the switch was
-consumed in the same transaction, and the epoch moves by one with every
-change of the switch, so an approval cannot be banked across an off and on
-again. Turning it on stays one signature.
+The switch (`core.case.dual_control_merge`, 0028) must not be one signature in both directions. The
+database refuses true to false unless a `case.policy.relax` approval for this case and this epoch of
+the switch was consumed in the same transaction, and the epoch moves by one with every change of the
+switch, so an approval cannot be banked across an off and on again. Turning it on stays one
+signature.
 
-Database tests run on the autocommit fixture, inside rolled-back
-transactions where a change succeeds, and with two real transactions where
-the point is "consumed EARLIER". HTTP tests drive `PUT /cases/{id}/policy`
-and the case approvals routes. The one test that needs node.merge ALWAYS
-sets it with the owner-level helper of the policy file and restores it in
-a `finally`. Email prefix `cmr-`. Env-gated on DATABASE_URL.
+Database tests run on the autocommit fixture, inside rolled-back transactions where a change
+succeeds, and with two real transactions where the point is "consumed earlier". HTTP tests drive
+`PUT /cases/{id}/policy` and the case approvals routes. The one test that needs node.merge always sets
+it with the owner-level helper of the policy file and restores it in a `finally`. Email prefix `cmr-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -101,14 +98,12 @@ def _on(conn, case_id) -> None:
 def season(conn, case_id, *users, days=8) -> None:
     """Age each user's assignment on the case past the seasoning window.
 
-    F39 (2026-10-02): the second person on a case's merge switch must have
-    held `case.update` on the case for the window (7 days), read from the
-    assignment's `granted_at`. Every test in this file that has a deputy
-    approve a relax used to rely on a deputy assigned a moment ago, which is
-    exactly the account the rule now refuses, so each of them ages the
-    deputy first, by hand, as the owner-level fixture connection may. A
-    request role cannot do this: its writes to the IAM plane go through the
-    API's own verbs, which set `granted_at = now()`."""
+    The second person on a case's merge switch must have held `case.update` on the case for the window
+    (7 days), read from the assignment's `granted_at`. A deputy assigned a moment ago is exactly the
+    account the rule refuses, so each test that has a deputy approve a relax ages the deputy first, by
+    hand, as the owner-level fixture connection may. A request role cannot do this: its writes to the
+    IAM plane go through the API's own verbs, which set `granted_at = now()`.
+    """
     conn.execute(
         "UPDATE iam.case_assignment SET granted_at = now() - make_interval("
         "days => %s) WHERE case_id = %s AND user_id = ANY(%s)",
@@ -205,9 +200,8 @@ def test_an_approval_consumed_in_an_earlier_transaction_does_not_relax(conn):
 
 
 def test_a_relax_approval_banked_across_an_off_on_cycle_is_refused(conn):
-    """An A-B-A for the switch: R1 approved and kept, its
-    twin R2 applied, the switch turned on again, and R1 spent last. The
-    epoch refuses it: it was raised for a state of the switch that is gone."""
+    """An A-B-A for the switch: R1 approved and kept, its twin R2 applied, the switch turned on again,
+    and R1 spent last. The epoch refuses it: it was raised for a state of the switch that is gone."""
     lead, deputy = user(conn, "CASE_OWNER"), user(conn)
     case_id = _case(conn, lead, deputy)
     _on(conn, case_id)
@@ -302,7 +296,7 @@ def test_turning_merge_control_off_takes_a_second_lead(conn, client):
     assert raised.status_code == 201, raised.text
     assert raised.json()["approvers_notified"] == 1
     rid = raised.json()["id"]
-    season(conn, case_id, deputy_id)    # F39: the deputy is not new to the case
+    season(conn, case_id, deputy_id)    # the deputy is not new to the case
     decided = client.post(f"{API}/cases/{case_id}/approvals/{rid}/decide",
                           headers=deputy, json={"approve": True})
     assert decided.status_code == 200, decided.text
@@ -454,7 +448,7 @@ def test_a_relax_approval_does_not_consume_in_another_case(conn, client):
         _on(conn, case_id)
     raised = _raise_relax(client, lead, case_a, _switch(conn, case_a)[1])
     rid = raised.json()["id"]
-    season(conn, case_a, deputy_id)     # F39: the deputy is not new to case A
+    season(conn, case_a, deputy_id)     # the deputy is not new to case A
     assert client.post(f"{API}/cases/{case_a}/approvals/{rid}/decide",
                        headers=deputy, json={"approve": True}).status_code == 200
     r = _put(client, lead, case_b, dual_control_merge=False,
@@ -483,9 +477,8 @@ def test_the_policy_read_says_the_mode_and_who_could_approve(conn, client):
                         (case_id, user_id, role_key, granted_by)
                     VALUES (%s, %s, 'CASE_OWNER', %s), (%s, %s, 'ANALYST', %s)""",
                  (case_id, low_id, lead_id, case_id, analyst_id, lead_id))
-    # F39 (2026-10-02): relax_signers counts only colleagues who have held
-    # the permission for the window; this test is about who counts by role
-    # and labels, so every candidate is aged past it. The seasoning itself is
+    # relax_signers counts only colleagues who have held the permission for the window; this test is
+    # about who counts by role and labels, so every candidate is aged past it. The seasoning itself is
     # test_relax_seasoning_pg.py's.
     season(conn, case_id, deputy_id, low_id, analyst_id)
     got = client.get(f"{API}/cases/{case_id}/policy",

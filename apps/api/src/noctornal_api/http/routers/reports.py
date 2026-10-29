@@ -1,54 +1,12 @@
-"""Report generation and release (Phase 6, docs/08).
+"""Report generation and release (docs/08).
 
-Two endpoints and one distinction between them, which is the whole design:
-
-- **`POST /report`** builds a document at a target classification. Nothing
-  above that level is read at any point -- the redaction is structural (see
-  `reports.py`), so it cannot be defeated by a name in a rationale field.
-  Gated on `report.generate`, which is not step-up: producing a redacted
-  summary for a colleague is ordinary work.
-
-- **`POST /report/release`** is the one that hands it to somebody. It calls
-  the egress gate with the DOCUMENT's classification, which is the point of
-  building at a lower level: an AMBER_STRICT case can produce a GREEN report
-  and the GREEN report may leave when the case never could. Gated on
-  `report.export`, which IS step-up, and audited as an export.
-
-Building and releasing are separate because an analyst should be able to see
-exactly what would leave before anything does. A single endpoint that builds
-and sends is a single click between a case file and an inbox.
-
-## A file to save comes out of the release
-
-ux15-report:report-download-bypasses-egress (2026-09-22). `POST /report`
-also answered `fmt=markdown` with the finished file as an attachment,
-under `report.generate` alone: no step-up, no egress check, audited only
-as REPORT_GENERATED. The console's "Download markdown" button called it,
-so a RED document, which invariant 8 says never leaves "webhooks and
-export alike", went to disk one click after Prepare. And when an analyst
-did ask the gate, the release rebuilt with hypotheses ON whatever the
-preview had said, so the verdict could be about a different document from
-the file saved.
-
-So the markdown now comes from `/release` alone: the gate judges the
-document with the same `include_hypotheses` and `preset` the preview used,
-and the answer carries the cleared bytes and a filename. Both endpoints
-return `content_digest`, so the console can refuse to save a cleared
-document that is not the one the analyst previewed. `fmt=markdown` on the
-build endpoint is refused with a pointer to the release, rather than
-silently answered as JSON: a client that asked for a file must learn that
-the file now has a gate in front of it.
-
-What this does NOT claim. The build response still carries the same
-markdown as `document`, so the preview can show the analyst the exact text
-before anything is judged. A script holding `report.generate` can
-therefore write that text to disk without asking the gate. That is not new
-exposure (the JSON has always carried the same content as structured data,
-and the preview exists to be read), but it means the gate is a recorded
-decision on the console's only path to a file, not a wall around the
-content. The release's copy differs from the build's in one line: its
-"Generated" time is the moment it was cleared. `content_digest` leaves that
-line out, which is why a matching digest means the same document.
+`POST /report` builds a document at a target classification under `report.generate`, not step-up;
+nothing above that level is read, so the redaction is structural. `POST /report/release` judges it
+at the document's own classification under step-up `report.export`, audited as an export, so an
+AMBER_STRICT case can release a GREEN report, and it alone answers with a file, built as the
+preview was. Both return `content_digest`, which leaves out the "Generated" line, so the console
+saves only the document previewed. The build still carries the markdown for the preview, so the
+gate is a recorded decision on the console's only path to a file, not a wall around the content.
 """
 from __future__ import annotations
 
@@ -98,35 +56,12 @@ _TLP = frozenset(TLP_NAMES)
 
 def _target_within_ceiling(conn: psycopg.Connection, user: CurrentUser,
                            target_tlp: str) -> str:
-    """The classification a report may be BUILT at, for this caller.
+    """The classification a report may be built at: the target, clamped to the caller's clearance.
 
-    ## CR1 (CRITICAL, 2026-07-26) — this used to be the caller's string
-
-    `target_tlp` arrived from the query string, was checked against the
-    name set, and was then handed to `ReportBuilder` verbatim. The builder
-    passes it to `GraphService(clearance=...)` and binds evidence on
-    `classification <= target`, so a HIGHER target strictly WIDENS what
-    comes back. Nothing clamped it.
-
-    `require("report.generate")` gates the caller against the CASE's label,
-    and a RED element may legitimately live in an AMBER case. So an AMBER
-    analyst — properly assigned, properly permissioned — could call
-    `?target_tlp=RED` and receive the RED nodes' labels, types and
-    attributes plus the RED exhibits' titles and hashes, in a document
-    stamped `X-TLP: RED`. The build endpoint returns the report directly;
-    the egress gate only runs on `/release`, so nothing downstream caught
-    it either.
-
-    Both call sites already read `user_ceiling(...)` and used only `[1]`,
-    the compartments. Index `[0]` — the clearance — was computed and
-    discarded. That is the shape this codebase keeps finding in itself: a
-    defence written, present in the call, and never actually consulted.
-
-    Clamping rather than rejecting is deliberate. Asking for a report "at
-    RED" when you hold AMBER is an ordinary mistake, and the useful answer
-    is the AMBER report you were entitled to, with the marking that matches
-    what is actually in it. A 400 would tell an under-cleared caller that
-    the higher tier exists and is worth asking for.
+    The builder reads everything at or below the target, and the case gate checks only the case's
+    label, which a RED element in an AMBER case is above, so an unclamped target would widen what
+    comes back. Clamping rather than refusing is deliberate: the caller gets the report they were
+    entitled to, marked for what is in it, and a 400 would tell them the higher tier exists.
     """
     ceiling, _ = user_ceiling(conn, user.user_id)
     try:
@@ -149,13 +84,9 @@ def build(
 ) -> dict:
     """Prepare a report. Builds only; releases nothing.
 
-    Rate-limited on the analytics budget because it materialises a
-    projection and, with hypotheses on, scores a matrix -- the same class of
-    work, and there is no reason to give it a second, separate allowance.
-
-    The JSON carries the markdown the document would be (`document`) and
-    its `content_digest`, so the console's preview is the document rather
-    than a second rendering of it that can drift.
+    Rate-limited on the analytics budget: it materialises a projection and, with hypotheses on,
+    scores a matrix. The JSON carries the document's markdown and its `content_digest`, so the
+    console's preview is the document rather than a second rendering that can drift.
     """
     if fmt == "markdown":
         # Checked before anything is read or audited: nothing is built.
@@ -170,9 +101,7 @@ def build(
         raise Problem(400, "Invalid request",
                       f"target_tlp must be one of {', '.join(sorted(_TLP))}")
     _known_preset(preset)
-    # CR1: clamped to the caller's own clearance BEFORE the builder sees
-    # it. `target_tlp` used to travel from the query string to
-    # `GraphService(clearance=...)` untouched.
+    # Clamped to the caller's own clearance before the builder sees it.
     effective_tlp = _target_within_ceiling(conn, user, target_tlp)
     try:
         report = ReportBuilder(conn).build(
@@ -229,13 +158,13 @@ def _stricter(typed: str | None, configured: str | None) -> str | None:
 
 def _release_ceiling(conn: psycopg.Connection, destination: Destination,
                      typed: str | None) -> str | None:
-    """The ceiling a release is judged against: the one the caller typed and
-    the one the deployment configured for that destination, whichever is
-    lower (2026-10-08). The drain judges every delivery against the
-    configured one (`transports.configured_ceiling`, and for Jira
-    `jira.configured_ceiling`: the destination's own ceiling under the host
-    cap), and a release judged on the typed one alone allowed a document the
-    drain then refused. Export has no destination to configure."""
+    """The ceiling a release is judged against: the lower of the one the caller typed and the one
+    the deployment configured for that destination.
+
+    The drain judges every delivery against the configured one (`transports.configured_ceiling`,
+    and for Jira `jira.configured_ceiling`, the destination's own ceiling under the host cap), so a
+    release judged on the typed one alone could pass a document the drain then refuses. Export has
+    no destination to configure."""
     if destination is Destination.SMTP:
         configured = transports.configured_ceiling(transports.SMTP)
     elif destination is Destination.WEBHOOK:
@@ -270,18 +199,15 @@ class ReleaseBody(BaseModel):
     destination: str
     destination_ceiling: str | None = None
     recipient_note: str | None = None
-    # The preview's own parameters. The release used to rebuild with the
-    # builder's defaults, so a preview prepared with hypotheses OFF was
-    # cleared as a document with them ON (ux15-report, 2026-09-22).
+    # The preview's own parameters, so the release clears the document that was previewed.
     include_hypotheses: bool = True
     preset: str = "all"
 
 
 _EXPORT = "report.export"
 
-#: Where `/release` judges a document going (evidence-report-release-in-app,
-#: 2026-10-03): the destinations outside the platform that a person sends a
-#: finished document to. In order, as the console offers them.
+#: Where `/release` judges a document going: the destinations outside the platform that a person
+#: sends a finished document to, in the order the console offers them.
 RELEASE_DESTINATIONS: tuple[Destination, ...] = (
     Destination.EXPORT, Destination.SMTP, Destination.JIRA, Destination.WEBHOOK)
 
@@ -297,28 +223,13 @@ def _require_export(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> CurrentUser:
-    """`require("report.export")`, except that a sign-in which is the ONLY
-    thing missing is told so.
+    """`require("report.export")`, but a stale sign-in that is the only failed check is told so.
 
-    `report.export` is a step-up permission, and `authorize_object` answers
-    every failed check, a stale sign-in included, with "missing permission
-    report.export on this case". A Lead investigator fifteen minutes into a
-    session read that they lacked the permission they hold, and the console
-    showed it as an egress refusal with no way to sign in again in place
-    (final review C15, 2026-09-23).
-
-    The first fix ran `require_step_up` ahead of the permission gate. That
-    gave the right sentence and lost the audit row's case: a stale
-    session's denied export was recorded with no case and no permission,
-    and an unassigned caller probing a case's export left nothing against
-    the case at all (final review C15 follow-up, 2026-09-23). So this is
-    the one five-part decision `authorize_object` makes, and only its
-    wording changes, only when step-up freshness is the sole failed check.
-    That can only happen to a caller assigned to the case, who already
-    knows it exists, so the sentence reveals nothing. Every other outcome,
-    the 404 for an unassigned caller and "missing permission" for a role
-    that a sign-in would not fix, is still `authorize_object`'s own, with
-    its own audit row.
+    `authorize_object` answers every failed check, a stale sign-in included, with "missing
+    permission report.export on this case". This makes the same five-part decision, so the audit
+    row keeps its case (running `require_step_up` first would lose it), and changes only the
+    wording when step-up freshness is the sole failed check. That can only happen to a caller
+    assigned to the case, who knows it exists, so the sentence reveals nothing.
     """
     eff_cls, eff_comp = effective_labels(conn, case_id)
     decision = evaluate(PgAccessResolver(conn).resolve(
@@ -346,19 +257,13 @@ def release(
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Check whether the built document may go to a destination, and record
-    the decision either way.
+    """Check whether the built document may go to a destination; record the verdict either way.
 
-    The gate is called with the DOCUMENT's classification, never the case's.
-    A refusal is audited as loudly as a permission: "we tried to send this
-    and the platform stopped us" is exactly the event a later review wants
-    to find, and an unrecorded refusal is indistinguishable from nobody
-    having tried.
-
-    Three different 403s can come back, and the console tells them apart:
-    "Egress refused" is the gate's verdict on the document; a detail asking
-    to re-authenticate is a sign-in that has gone stale and is all that is
-    missing; anything else is the caller's role or labels on the case.
+    The gate is called with the document's classification, never the case's. A refusal is audited
+    like a permission, since an unrecorded refusal is indistinguishable from nobody having tried.
+    Three 403s come back: "Egress refused" is the gate's verdict on the document, a detail asking
+    to re-authenticate is a stale sign-in and nothing else, and anything else is the caller's role
+    or labels on the case.
     """
     if body.target_tlp not in _TLP:
         raise Problem(400, "Invalid request", "unknown target_tlp")
@@ -368,13 +273,9 @@ def release(
     except ValueError:
         destination = None
     if destination not in RELEASE_DESTINATIONS:
-        # evidence-report-release-in-app (2026-10-03): the caller chose the
-        # destination from every member, and the gate allows anything to
-        # `in_app`, so a TLP:RED document came back `allowed: true` with a
-        # filename and a REPORT_RELEASED SUCCESS row: the one recorded
-        # decision said a RED report was released. A release is the gated
-        # way OUT, so only a destination outside the platform is judged;
-        # nothing is built or audited for any other.
+        # A release is the gated way out, so only a destination outside the platform is judged:
+        # the gate allows anything to `in_app`, which would record a RED report as released.
+        # Nothing is built or audited for any other.
         raise Problem(400, "Invalid request",
                       f"a report is released to one of "
                       f"{', '.join(d.value for d in RELEASE_DESTINATIONS)}; "
@@ -399,19 +300,15 @@ def release(
     _audit(conn, case_id, user.user_id,
            "REPORT_RELEASED" if decision.allowed else "REPORT_RELEASE_REFUSED",
            {# CR1 follow-up: the EFFECTIVE value, plus what was asked for.
-        # This audited body.target_tlp, so an AMBER analyst posting
-        # target_tlp=RED left a permanent append-only record saying a
-        # RED document had crossed the boundary -- on the one action
-        # that actually crosses it. The build path was fixed and this
-        # one was missed.
+        # The requested value alone would leave an append-only record of a RED document released
+        # whenever an AMBER caller asked for RED.
         "target_tlp": effective_tlp,
         "target_tlp_requested": body.target_tlp, "destination": destination.value,
             # The ceiling the document was judged against, which is the lower
             # of the one typed and the one configured for the destination.
             "destination_ceiling": ceiling,
             "reason": decision.reason, "note": body.recipient_note,
-            # WHICH document was judged, so the record can be matched to
-            # the file that left (ux15-report, 2026-09-22).
+            # Which document was judged, so the record can be matched to the file that left.
             "content_digest": digest, "preset": body.preset,
             "include_hypotheses": body.include_hypotheses},
            outcome="SUCCESS" if decision.allowed else "DENIED")

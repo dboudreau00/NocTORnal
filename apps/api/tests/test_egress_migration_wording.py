@@ -1,11 +1,8 @@
-"""What an operator reads when 0085 or 0086 refuses (S2, the egress proxy,
-2026-09-25).
+"""What an operator reads when 0085 or 0086 refuses.
 
-Their refusals once said "% egress profile(s)" and "% row(s)": a bracketed
-plural in text an operator reads, which this product never ships. Each count
-is now written out so it agrees with its noun ("one row", "3 rows"). Pure:
-reads the migration files; the downgrade refusals themselves are exercised
-against the database in test_egress_config_pg.py and
+Each count is written out so it agrees with its noun ("one row", "3 rows"), never a bracketed plural such
+as "row(s)", which this product does not ship. Pure: reads the migration files; the downgrade refusals
+themselves are exercised against the database in test_egress_config_pg.py and
 test_egress_connection_ledger_pg.py.
 """
 from __future__ import annotations

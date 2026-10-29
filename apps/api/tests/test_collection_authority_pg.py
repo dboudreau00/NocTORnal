@@ -1,12 +1,10 @@
-"""The two-person collection authority (docs/00 decision 69, 2026-09-24).
+"""The two-person collection authority (docs/00 decision 69).
 
-Recorded by one person and confirmed, with each source under it, by
-another; never deleted or rewritten; labelled at least as high as every
-source it covers and only ever rising; covering a source only while it is
-read through the binding and at the address the confirmer was shown. The
-guards forbid DELETE, so authority rows and the sources they name are left
-by the teardown (deactivated): the append-only-ledger trap. DATABASE_URL-
-gated.
+Recorded by one person and confirmed, with each source under it, by another; never deleted or
+rewritten; labelled at least as high as every source it covers and only ever rising; covering a source
+only while it is read through the binding and at the address the confirmer was shown. The guards forbid
+DELETE, so authority rows and the sources they name are left by the teardown (deactivated): the
+append-only-ledger trap. DATABASE_URL-gated.
 """
 from __future__ import annotations
 

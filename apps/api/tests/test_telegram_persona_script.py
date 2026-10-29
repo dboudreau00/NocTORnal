@@ -1,7 +1,5 @@
-"""scripts/telegram_persona.py: the operator signs in, and enrols, imports
-and logs out a Telegram persona's session through the persona gate, with a
-fake transport and no network (roadmap F5.2, 2026-09-24).
-DATABASE_URL-gated.
+"""scripts/telegram_persona.py: the operator signs in, and enrols, imports and logs out a Telegram
+persona's session through the persona gate, with a fake transport and no network. DATABASE_URL-gated.
 """
 from __future__ import annotations
 

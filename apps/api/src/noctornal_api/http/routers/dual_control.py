@@ -1,15 +1,9 @@
-"""The deployment's two-person policy over HTTP (F9, 2026-09-24): read
-it, propose a change, apply a countersigned one.
+"""The deployment's two-person policy over HTTP: read, propose a change, apply a countersigned one.
 
-Countersigning is not here: it is a decision on a deployment-wide approval
-request, made through `/approvals/{id}/decide` like every other, so the
-signer's permission, the step-up and the person-level refusals live in one
-place (`routers/approvals.py`, `ApprovalService.decide`).
-
-Both reads are open to either side (`dual_control.manage` or
-`dual_control.countersign`, both step-up). Proposing and applying are the
-administrator's (`dual_control.manage`); a Security officer holding
-`dual_control.countersign` reads the screen and signs, and never proposes.
+Countersigning is a decision on a deployment-wide approval request, made through
+`/approvals/{id}/decide`, so its checks live in one place (`ApprovalService.decide`). Reads are
+open to either side (`dual_control.manage` or `dual_control.countersign`, both step-up);
+proposing and applying are `dual_control.manage`'s, and a countersigner never proposes.
 """
 from __future__ import annotations
 
@@ -91,8 +85,7 @@ def overview(
     body["you"] = {
         "user_id": str(user.user_id),
         "may_propose": MANAGE in mine,
-        # An account holding both is one person, so it never countersigns
-        # a change (2026-09-24).
+        # An account holding both is one person, so it never countersigns a change.
         "may_countersign": COUNTERSIGN in mine and MANAGE not in mine,
         "countersign_block": _jsonable(block),
     }
@@ -144,10 +137,9 @@ def apply(
     """Put a countersigned change in force. Only its proposer may, once:
     applying spends the countersignature (approvals.py: consuming is the
     requester's job)."""
-    # Applying writes the IAM plane (the policy ledger, and through it
-    # the operations and separated duties), which the request role may only
-    # read (0109, S1 2026-09-25). The ledger binds the approval's consume to
-    # the same transaction, so all of it runs on one system connection.
+    # Applying writes the IAM plane (the policy ledger, and through it the operations and separated
+    # duties), which the request role may only read (0109). The ledger binds the approval's consume
+    # to the same transaction, so all of it runs on one system connection.
     with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
         svc = DualControlPolicyService(sconn)
         try:

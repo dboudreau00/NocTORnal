@@ -1,12 +1,10 @@
-"""RunContext through the REAL collection.fetch_response (2026-09-24),
-because the context tests must not all run on a stub fetcher.
+"""RunContext through the REAL collection.fetch_response, because the context tests must not all run
+on a stub fetcher.
 
-A loopback stand-in server answers a reserved name, the resolver is told
-that name is the loopback address, and the classifier is told that
-address is public, the seam test_collection_ssrf_rebinding.py uses. So
-the pinned client really resolves, dials, reads under the one Deadline,
-and hands back its Fetched, and RunContext's rules are held against it.
-Pure: no database, no network beyond loopback.
+A loopback stand-in server answers a reserved name, the resolver is told that name is the loopback
+address, and the classifier is told that address is public, the seam test_collection_ssrf_rebinding.py
+uses. So the pinned client really resolves, dials, reads under the one Deadline, and hands back its
+Fetched, and RunContext's rules are held against it. Pure: no database, no network beyond loopback.
 """
 from __future__ import annotations
 

@@ -1,12 +1,9 @@
-"""What a similarity answer costs to explain (F6.3, embeddings,
-2026-09-25).
+"""What a similarity answer costs to explain (embeddings).
 
-About 64 ms of shared-terms work per hit was measured at the 8,000 and
-20,000 character caps, spent on every candidate including those
-the bands then dropped: about 13 s of CPU for one request of 200 hits. The
-query side is now worked out once per request, every written word is
-normalised once per process, and similar wording stops at the first hit
-under the floor (hits come nearest first).
+About 64 ms of shared-terms work per hit at the 8,000 and 20,000 character caps, spent on every candidate
+including those the bands then drop, would be about 13 s of CPU for one request of 200 hits. So the query
+side is worked out once per request, every written word is normalised once per process, and similar
+wording stops at the first hit under the floor (hits come nearest first).
 
 Pure: no database.
 """

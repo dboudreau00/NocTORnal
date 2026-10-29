@@ -1,11 +1,8 @@
-"""The Jira pass (F7, 2026-09-24), against a fake
-Jira injected through transports.dispatch_due(jira_client=...): one issue
-per work item, one post per event, look-before-repost after an attempt of
-unknown outcome, the gate, the holds, the withdrawals and the per-pass
-bounds.
+"""The Jira pass, against a fake Jira injected through transports.dispatch_due(jira_client=...): one issue
+per work item, one post per event, look-before-repost after an attempt of unknown outcome, the gate, the
+holds, the withdrawals and the per-pass bounds.
 
-Nothing reaches Atlassian. **The email prefix is `njira-` and must stay
-unique.** Env-gated on DATABASE_URL.
+Nothing reaches Atlassian. The email prefix is `njira-` and must stay unique. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -388,9 +385,8 @@ def test_amber_strict_sends_nothing_to_jira_not_even_a_stub(conn):
 
 
 def test_a_case_raised_after_queueing_sends_nothing(conn):
-    """2026-10-07: the pass judged the labels the notification was
-    raised with, so a case raised to RED while the row waited went to Jira
-    marked AMBER. The case's labels are composed in at the drain."""
+    """The case's labels are composed in at the drain: a case raised to RED while the row waited must not go
+    to Jira marked AMBER."""
     world = _world(conn)
     fake = FakeJira()
     (n,) = _raise(conn, world, classification="AMBER")
@@ -403,9 +399,9 @@ def test_a_case_raised_after_queueing_sends_nothing(conn):
 
 
 def test_an_exhibit_raised_after_queueing_sends_nothing(conn):
-    """docs/17, "a notice raised after it was queued": the case's labels were
-    composed at the drain and the exhibit's were not, so a notice about an
-    exhibit raised while its row waited went to Jira under its old label."""
+    """An exhibit's labels are composed in at the drain as the case's are: a notice about an exhibit raised
+    while its row waited must not go to Jira under its old label (docs/17, "a notice raised after it was
+    queued")."""
     import rls_support
     from noctornal_api.notifications import NotificationService
     world = _world(conn)
@@ -744,11 +740,9 @@ def test_the_app_role_cannot_delete_a_jira_link(conn):
 
 # --- reconciliation after an uncertain create -------------------------------------
 #
-# A create whose answer never came leaves the link CREATING. If the row that
-# would come back to it is then withdrawn (a veto, a routing change), no
-# delivery ever searches for the issue, so the pass does it itself after the
-# settle window, records the key, and closes the link when the case is kept
-# out (2026-09-25).
+# A create whose answer never came leaves the link CREATING. If the row that would come back to it is then
+# withdrawn (a veto, a routing change), no delivery ever searches for the issue, so the pass does it itself
+# after the settle window, records the key, and closes the link when the case is kept out.
 
 def _uncertain_create(conn, world, fake, **raise_kw):
     from noctornal_api.jira import JiraHttpError
@@ -891,8 +885,8 @@ def test_a_jira_pass_that_fails_outside_any_row_still_lets_the_producers_run(
 
 
 def test_the_issue_count_on_the_case_counts_only_what_the_reader_is_cleared_for(conn):
-    """A reader below a link's marking is not told that it exists
-    (2026-09-25: the count was every link on the case)."""
+    """A reader below a link's marking is not told that it exists: the count covers only the links the
+    reader is cleared for."""
     from noctornal_api import jira
     world = _world(conn)
     _raise(conn, world, classification="AMBER")

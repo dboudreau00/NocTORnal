@@ -1,4 +1,4 @@
-"""Administration, Egress in the console (S2, the egress proxy, 2026-09-24).
+"""Administration, Egress in the console (the egress proxy).
 
 Static, in the test_ui_invariants.py style: the markup, the functions and
 the CSS read as text, no browser."""

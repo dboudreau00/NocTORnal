@@ -1,16 +1,11 @@
-"""egress-rss-floor (review of 2026-10-03).
+"""The egress floor applies to RSS and WEB feeds too.
 
-Invariant 8: AMBER_STRICT and RED never leave the boundary, and decision
-103 says reading a source is itself a crossing. The floor
-(`can_egress(..., COLLECTION_TARGET)`) was applied only to adapters that
-enforce collection authority, so an RSS or WEB feed labelled RED or
-AMBER_STRICT was fetched from this deployment's own address on every poll
-interval, by the cron, with no human act. The proxy compared the label only
-with the passive default's ceiling, which `adopt` proposed as the highest
-feed label, and readiness then reported the route as covering the feed.
-
-Fails on dc28ffa: the outbound client is reached for a RED feed, `adopt`
-proposes a RED ceiling and readiness is green.
+Invariant 8: AMBER_STRICT and RED never leave the boundary, and decision 103 says reading a source is
+itself a crossing. The floor (`can_egress(..., COLLECTION_TARGET)`) applies to every adapter, not only
+those that enforce collection authority; otherwise an RSS or WEB feed labelled RED or AMBER_STRICT would be
+fetched from this deployment's own address on every poll interval, by the cron, with no human act. The
+proxy compares the label with more than the passive default's ceiling, `adopt` does not propose the
+highest feed label as a ceiling, and readiness does not report the route as covering the feed.
 
 DATABASE_URL-gated; prefix `r46f-`.
 """
@@ -48,8 +43,8 @@ def conn(monkeypatch):
 
 @pytest.fixture
 def outbound(monkeypatch):
-    """The outbound client, replaced by a recorder that raises before any
-    socket is opened: nothing leaves this host."""
+    """The outbound client, replaced by a recorder that raises before any socket is opened: nothing leaves
+    this host."""
     calls = []
 
     def recorder(url, *, route, **kw):

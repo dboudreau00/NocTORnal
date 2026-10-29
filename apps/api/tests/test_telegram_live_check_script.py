@@ -1,6 +1,5 @@
-"""scripts/telegram_live_check.py: the Telegram end-to-end check, run here
-as `--help` and as the self-check against the database with the Telegram
-suite's fakes and no network (docs/17 F31, 2026-10-02).
+"""scripts/telegram_live_check.py: the Telegram end-to-end check, run here as `--help` and as the
+self-check against the database with the Telegram suite's fakes and no network (docs/17 F31).
 
 DATABASE_URL-gated. Account, persona and source prefix `test-tglc-`.
 """
@@ -198,9 +197,8 @@ def test_a_failing_poll_fails_the_check_and_still_logs_out(conn):
 
 
 def test_an_unattended_exception_prints_its_class_and_never_its_text():
-    """2026-10-03: the module promises never a library's
-    text, and the redactor masks neither a bare phone number nor an address
-    with a user name."""
+    """The module never prints a library's text, and the redactor masks neither a bare phone number nor
+    an address with a user name."""
     module = _script()
     for text in ("The phone number +15551234567 is invalid",
                  "socks5://u~r:pw@127.0.0.1:1080 refused"):

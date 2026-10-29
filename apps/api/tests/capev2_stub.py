@@ -1,13 +1,10 @@
-"""A local stand-in for a CAPEv2 web service, for the sandbox suites (F14,
-2026-09-24). Not a test module.
+"""A local stand-in for a CAPEv2 web service, for the sandbox suites. Not a test module.
 
-No test contacts a real sandbox. This serves the few apiv2 endpoints the
-client uses, and the web interface's analysis page, over TLS with a
-throwaway CA written to the test's tmp_path (passed as
-NOCTORNAL_SANDBOX_CA_FILE), on 127.0.0.1, reached through egress.route_for
-with the development route whose declared rule names 127.0.0.1:<port>.
-Every request is recorded, so a test can assert what left and in what
-order; `on_post` runs INSIDE the upload's handler, before any answer, so a
+No test contacts a real sandbox. This serves the few apiv2 endpoints the client uses, and the web
+interface's analysis page, over TLS with a throwaway CA written to the test's tmp_path (passed as
+NOCTORNAL_SANDBOX_CA_FILE), on 127.0.0.1, reached through egress.route_for with the development
+route whose declared rule names 127.0.0.1:<port>. Every request is recorded, so a test can assert
+what left and in what order; `on_post` runs inside the upload's handler, before any answer, so a
 test can prove what the database held at the moment the bytes arrived.
 """
 from __future__ import annotations

@@ -1,13 +1,12 @@
 """The admin surface and the first-run door, over HTTP.
 
-The service tests (`test_iam_admin_pg.py`) carry the refusal logic; these
-carry the WIRE: that the routes exist, that `user.manage` actually gates
-them, that an unauthenticated caller gets 401 and an analyst 403, that the
-one-time credentials arrive with their warning, and that a deactivated
-account genuinely cannot sign in afterwards.
+The service tests (`test_iam_admin_pg.py`) carry the refusal logic; these carry the wire: that the
+routes exist, that `user.manage` actually gates them, that an unauthenticated caller gets 401 and an
+analyst 403, that the one-time credentials arrive with their warning, and that a deactivated account
+cannot sign in afterwards.
 
-Email prefix `ahe-`, unique to this file, same teardown discipline as the
-other e2e suites. Env-gated on DATABASE_URL.
+Email prefix `ahe-`, unique to this file, same teardown discipline as the other e2e suites.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -69,32 +68,21 @@ def _make_user(conn, *, global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. This is how the ADMINISTRATOR
-    driving the panel gets a session, and none of that is about signing
-    in, so it takes the short honest route rather than driving a login
-    and unpicking a Set-Cookie header for a value it would hand straight
-    back as a Bearer. It also drops the constraint the login helper
-    carried: TOTP codes are single-use, so two sign-ins for one account
-    inside one 30-second step failed on the code, not on the thing under
-    test. The one sign-in this file genuinely needs -- proving that an
-    account provisioned through the panel can actually get in -- is still
-    a real `POST /auth/login`, below.
+    Unbound (no address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING`
+    refuses; it is off in these tests. It is not `POST /auth/login`, which answers 204 and leaves the
+    token only in `__Host-session`, and TOTP codes are single-use, so two sign-ins for one account
+    inside one 30-second step would fail on the code. The one sign-in this file needs for real, proving
+    that an account provisioned through the panel can get in, is a real `POST /auth/login` below.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -113,24 +101,12 @@ def test_setup_status_answers_without_auth(client):
 
 
 def test_the_first_run_door_opens_once_and_then_never_again(conn, client):
-    """One test, two branches, NO skip — and the skip is the point.
+    """One test, two branches, no skip.
 
-    This was a pair: one test skipped when the deployment was empty, its
-    twin skipped when it was populated. The conditions are exact
-    complements of one boolean, so exactly one of them skipped on EVERY
-    run, and CI fails the build on any skip at all
-    (`.github/workflows/ci.yml`, "No tests were skipped") — printing
-    "The Postgres or MinIO leg is not running."
-
-    That is this codebase's own signature defect wearing a test's
-    clothes: a failure reported as the wrong thing. A developer would
-    have debugged service containers that were working perfectly. Worse,
-    the obvious fix — loosening the gate — would restore the 100+ silent
-    skips the gate exists to catch.
-
-    Branching also makes CI test MORE than the pair did: on a fresh
-    database it now exercises the open door AND the refusal, by using the
-    door and then trying it again.
+    CI fails the build on any skip ("No tests were skipped"), and a pair of tests whose conditions are
+    exact complements of one boolean would skip one of them on every run. Branching also tests more:
+    on a fresh database it exercises the open door and then the refusal, by using the door and trying
+    it again.
     """
     from noctornal_api.iam_admin import needs_setup
 
@@ -208,17 +184,13 @@ def test_an_admin_can_provision_and_manage_an_analyst(conn, client):
     assert r.status_code == 200
     assert r.json()["totp_secret"] != created["totp_secret"]
 
-    # The created analyst can actually sign in with the re-enrolled secret.
-    # 204 and the cookie pair since 2026-09-10, so the proof that the
-    # provisioned credentials work is the SESSION COOKIE and not a body
-    # this response no longer has -- asserted here rather than left as a
-    # bare status, because a 204 is also what a handler that authenticated
-    # nobody would return if the cookie were ever dropped.
+    # The created analyst can sign in with the re-enrolled secret. Login answers 204 and sets the
+    # cookie pair, so the proof is the session cookie: a bare 204 is also what a handler that
+    # authenticated nobody would return.
     #
-    # The issued password is the administrator's as much as the account's,
-    # so its first use asks for a new one and opens nothing (final review
-    # c8, 2026-09-24); the sign-in that carries the new password is the one
-    # that proves the provisioned credentials work.
+    # The issued password is the administrator's as much as the account's, so its first use asks for
+    # a new one and opens nothing; the sign-in that carries the new password is the one that proves
+    # the provisioned credentials work.
     from noctornal_api.http.deps import SESSION_COOKIE
     from noctornal_api.security import totp as totp_mod
     secret = client.post(base + "/totp", headers=_auth(token)).json()["totp_secret"]

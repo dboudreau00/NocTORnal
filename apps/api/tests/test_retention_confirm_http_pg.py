@@ -1,22 +1,17 @@
 """Confirming a retention rule, over HTTP, with and without step-up.
 
-`RetentionService.confirm_rule` and `POST /retention/rules/{category}` have
-existed since Phase 6, and the service had a test; the endpoint had none.
-That left the step-up requirement -- `retention.manage` is flagged
-`requires_step_up` in the seed and `require_global` is what honours the
-flag -- as a claim made by two files that had never been run against each
-other. A permission marked step-up in the database and a gate that forgot
-to read the column would each look right on their own, which is this
-codebase's "two internally consistent halves that are wrong together".
+`RetentionService.confirm_rule` and `POST /retention/rules/{category}` are covered at the service and at
+the endpoint. The step-up requirement (`retention.manage` is flagged `requires_step_up` in the seed and
+`require_global` is what honours the flag) is a claim made by two files, and a permission marked step-up in
+the database and a gate that forgot to read the column would each look right on their own: two internally
+consistent halves that are wrong together.
 
-So this file confirms a rule through the router with a freshly
-re-authenticated session and reads `confirmed_by`/`confirmed_at` back off
-the row; then ages the session's second factor past `STEP_UP_FRESHNESS`
-and proves the same request is refused and the row untouched.
+So this file confirms a rule through the router with a freshly re-authenticated session and reads
+`confirmed_by`/`confirmed_at` back off the row; then ages the session's second factor past
+`STEP_UP_FRESHNESS` and proves the same request is refused and the row untouched.
 
-Categories are `TEST_HTTP_*` and rules are global, so teardown removes
-them; the governance suites already delete `TEST%` for the same reason.
-Email prefix `rc-`, unique to this file. Env-gated on DATABASE_URL.
+Categories are `TEST_HTTP_*` and rules are global, so teardown removes them; the governance suites already
+delete `TEST%` for the same reason. Email prefix `rc-`, unique to this file. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -81,29 +76,21 @@ def _make_user(conn, *, global_roles=("SYS_ADMIN",)):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked up
+    by email, then `SessionService` against the same store the API validates against. Unbound (no address,
+    no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it is off in
+    these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`: nothing in
+    this file is about the sign-in path. It also avoids the login helper's constraint that TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused by
+    # every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token

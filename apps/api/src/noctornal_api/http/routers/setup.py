@@ -1,27 +1,12 @@
 """First-run setup: the one door that exists only while the house is empty.
 
-A fresh install used to require shelling into the server, exporting
-`DATABASE_URL` and the TOTP KEK, and running `bootstrap.py create-user` —
-before anyone could so much as sign in. This router replaces that first
-hurdle and ONLY that hurdle: `POST /setup/first-admin` works exactly while
-`iam.app_user` has zero rows, and answers 409 forever after.
-
-## Why this is safe to leave unauthenticated
-
-- The gate is the emptiness of the user table itself, checked under an
-  advisory lock in the same transaction as the insert — two concurrent
-  first-runs cannot both win, and the loser gets the 409.
-- It counts EVERY row, active or not. A deployment with one deactivated
-  account is locked out, not fresh; re-opening this door for it would let
-  anyone on the network become its administrator. That state is repaired
-  from the database shell, deliberately.
-- Rate-limited with the login limiter: the status probe is cheap but not
-  free, and the create endpoint is a password generator.
-
-The first account gets SYS_ADMIN (someone must manage users),
-SECURITY_OFFICER (break-glass refuses to grant until one exists), and
-CASE_OWNER + ANALYST (a fresh single-operator install IS the operator).
-Credentials are returned once and are not retrievable afterwards.
+`POST /setup/first-admin` works exactly while `iam.app_user` has no rows, active or not, and
+answers 409 for ever after; production also needs the setup token (`http/setup_token.py`). The
+emptiness check runs under an advisory lock in the insert's transaction, so two first-runs cannot
+both win. A deployment whose accounts are all deactivated is locked out, not fresh, and is
+repaired from the database shell: reopening the door would hand it to anyone on the network. Both
+routes use the login limiter. The first account gets SYS_ADMIN, SECURITY_OFFICER (break-glass
+grants nothing until one exists), CASE_OWNER and ANALYST; its credentials are returned once.
 """
 from __future__ import annotations
 
@@ -44,7 +29,7 @@ router = APIRouter(prefix="/setup", tags=["setup"])
 
 
 class FirstAdminBody(BaseModel):
-    # Bounded (http_ui-005, 2026-10-03): unauthenticated input.
+    # Bounded: unauthenticated input.
     email: str = Field(min_length=3, max_length=254)
     display_name: str = Field(min_length=1, max_length=200)
 
@@ -52,24 +37,20 @@ class FirstAdminBody(BaseModel):
 @router.get("/status", response_model=dict,
             dependencies=[Depends(rate_limit("auth.login"))])
 def status(conn: psycopg.Connection = Depends(get_conn)) -> dict:
-    """Whether the first-run door can be used, and whether it needs a
-    token. Whether accounts EXIST is not a secret (the sign-in page's
-    existence says as much) and nothing else leaks.
+    """Whether the first-run door can be used, and whether it needs a token. Whether accounts
+    exist is not a secret (the sign-in page says as much), and nothing else leaks.
 
-    `needs_setup` is true only while the door can actually be used
-    (http_ui-010 and infra-3, 2026-10-03): a production deployment with no
-    setup token configured has no web first-run (`http/setup_token.py`), so
-    it never invites the card. `setup_token_required` tells the card to ask
-    for the token."""
+    `needs_setup` is true only while the door can be used: a production deployment with no setup
+    token has no web first-run (`http/setup_token.py`), so it never invites the card.
+    `setup_token_required` tells the card to ask for the token."""
     return {"needs_setup": needs_setup(conn) and not door_closed(),
             "setup_token_required": token_required()}
 
 
 @router.post("/first-admin", response_model=dict, status_code=201,
-             # The token (http_ui-010 and infra-3, 2026-10-03), after the
-             # meters so a guessed token is counted and, as for a password,
-             # refused once the failure meter is spent, and before the body
-             # is validated so a caller without it learns nothing from a 422.
+             # The token after the meters, so a guessed token is counted and, as for a password,
+             # refused once the failure meter is spent, and before the body is validated, so a
+             # caller without it learns nothing from a 422.
              dependencies=[Depends(rate_limit("auth.login")),
                            Depends(rate_limit_peek("auth.login_failed")),
                            Depends(require_setup_door)])
@@ -78,8 +59,8 @@ def first_admin(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        # Creating an account is an IAM write, which the request role
-        # may only read (0109, S1 2026-09-25): on a system connection.
+        # Creating an account is an IAM write, which the request role may only read (migration
+        # 0109), so it runs on a system connection.
         with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
             creds = create_first_admin(sconn, email=body.email,
                                        display_name=body.display_name)
@@ -91,9 +72,7 @@ def first_admin(
         "password": creds.password,
         "totp_secret": creds.totp_secret,
         "otpauth_uri": creds.otpauth_uri,
-        # "then sign in below" was true of a sign-in form this card hid
-        # until its button was pressed (firstrun-oneclick-wipe,
-        # 2026-09-22). The console now signs in on the card itself.
+        # The console signs in on the card itself.
         "notice": ("Shown once and not recoverable. Put the secret in your "
                    "authenticator and keep the password safe, then sign in "
                    "with both on this page. They stay here until that "

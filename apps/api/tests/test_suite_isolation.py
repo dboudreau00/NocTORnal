@@ -1,13 +1,11 @@
-"""docs/17, "Tests and code structure", test isolation (Beta 1.1).
+"""docs/17, "Tests and code structure", test isolation.
 
-Some tests skipped or failed depending on rows other suites leave, and CI's
-no-skip gate turns the skips into failures. Five suites now run in ONE
-transaction that is rolled back (`rolled_back.py`), hide what the database
-already holds that their checks count, and so need no skip; a sixth stopped
-guessing how long a lock wait takes and asks `pg_stat_activity`.
+Tests that skip or fail depending on rows other suites leave turn into failures under CI's no-skip gate.
+Five suites run in ONE transaction that is rolled back (`rolled_back.py`), hide what the database already
+holds that their checks count, and so need no skip; a sixth asks `pg_stat_activity` how long a lock wait
+takes instead of guessing.
 
-The suites themselves are the fix, and each was run over a database with the
-leftovers it used to skip for. What these hold is that the fix stays:
+What these hold is that the isolation stays:
 
 - the helper rolls back, and says so when a test commits;
 - the named suites carry no skip of their own and run in the helper;
@@ -30,8 +28,8 @@ NAMED = {
     "test_telegram_readiness_pg.py": "rolled_back",
     "test_screening_readiness_pg.py": "rolled_back",
     "test_review46_screening_window_pg.py": "rolled_back",
-    "test_ledger_anchor_g49_pg.py": "empty_ledgers",
-    "test_ledger_anchor_script_g49_pg.py": "empty_ledgers",
+    "test_ledger_anchor_pg.py": "empty_ledgers",
+    "test_ledger_anchor_script_pg.py": "empty_ledgers",
 }
 
 needs_db = pytest.mark.skipif(not os.environ.get("DATABASE_URL"),

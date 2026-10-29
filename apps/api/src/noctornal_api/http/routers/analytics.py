@@ -1,19 +1,12 @@
-"""Phase 3 analytics endpoints: the SNA suite, key player, role analysis
-(CONCOR, and regular roles by REGE since 2026-10-02), and per-node metric
-history.
+"""Analytics endpoints: the SNA suite, key player, role analysis (CONCOR, and regular roles by
+REGE), and per-node metric history.
 
-Everything is computed against a named projection and every response
-carries the parameters that produced it, because a metric without its
-projection is not reproducible (docs/03). Gated on `analytics.run`, the
-same permission Phase 2's local metrics use.
-
-The projection is ONE dependency, `analysis_projection`, shared by every
-analysis route since 2026-09-24 (L3): five routes had repeated five query
-parameters each and checked only the preset, so `/latest` with an unknown
-confidence floor answered 404 from a name lookup that could never match.
-It now answers 400 before any lookup, like every other route, and the
-projection options (the accepted-ties scope, L3; venues projected to
-entities, F2) are added in one place.
+Everything is computed against a named projection and every response carries the parameters
+that produced it, because a metric without its projection is not reproducible (docs/03). Gated
+on `analytics.run`, as the local metrics are. The projection is one dependency,
+`analysis_projection`, shared by every analysis route, so every route validates it before any
+lookup (an unknown value is a 400) and its options (the accepted-ties scope, venues projected
+to entities) are added in one place.
 """
 from __future__ import annotations
 
@@ -56,8 +49,8 @@ from noctornal_api.rege import (
 
 router = APIRouter(prefix="/cases/{case_id}/analytics", tags=["analytics"])
 
-#: How REGE counts a tie (2026-10-02), from the module's own list: an
-#: unknown value is FastAPI's 422, as a CONCOR depth out of range is.
+#: How REGE counts a tie, from the module's own list: an unknown value is FastAPI's 422, as a
+#: CONCOR depth out of range is.
 _REGE_WEIGHTING = "^(" + "|".join(WEIGHTINGS) + ")$"
 
 # The per-node metrics that can be charted over time. Constrained to a
@@ -70,9 +63,8 @@ _HISTORY_METRICS = frozenset({
 
 def _svc(conn: psycopg.Connection, user: CurrentUser,
          case_id: UUID) -> AnalyticsRunService:
-    # One case's projection, so a break-glass grant scoped to it counts, as
-    # it does for the graph it is computed from (ux15, 2026-09-23). A run
-    # computed at the raised level is stored under that level's
+    # One case's projection, so a break-glass grant scoped to it counts, as it does for the graph
+    # it is computed from. A run computed at the raised level is stored under that level's
     # `visibility_clearance` and served to nobody below it.
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return AnalyticsRunService(conn, clearance=clearance.name,
@@ -122,12 +114,11 @@ def _one_mode_meter(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> None:
-    """Charge a one-mode read where the transform is paid (F2, 2026-09-24).
+    """Charge a one-mode read where the transform is paid.
 
-    Beside each route's own meter, and only when a venue family is listed,
-    so a plain read is charged exactly as before. FastAPI solves
-    `analysis_projection` once per request, so this reads the same
-    Projection the handler gets."""
+    Beside each route's own meter, and only when a venue family is listed; a plain read pays
+    only its route's meter. FastAPI solves `analysis_projection` once per request, so this reads
+    the same Projection the handler gets."""
     if p.one_mode.enabled():
         enforce(request, response, "analytics.one_mode", f"u:{user.user_id}",
                 conn=conn, actor_id=user.user_id)
@@ -182,11 +173,10 @@ def suite(
         p, params, force=force).as_response())
 
 
-# The reads below compute nothing and write nothing, but each one PROJECTS
-# the caller's graph to compare hashes, which is the work `GET /graph` does
-# on every sociogram refresh. So they share that route's meter,
-# `graph.view`, rather than the analytics meters that ration igraph runs
-# (2026-09-23), plus `analytics.one_mode` when venues are projected.
+# The reads below compute nothing and write nothing, but each projects the caller's graph to
+# compare hashes, the work `GET /graph` does on every sociogram refresh, so they share its meter,
+# `graph.view`, rather than the analytics meters that ration igraph runs, plus
+# `analytics.one_mode` when venues are projected.
 @router.get("/latest", response_model=dict,
             dependencies=[Depends(rate_limit("graph.view")),
                           Depends(_one_mode_meter)])
@@ -198,22 +188,12 @@ def latest(
     user: CurrentUser = Depends(require("analytics.run")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The most recent completed suite run for this projection, in the
-    suite endpoint's shape plus `computed_at`; 404 when there is none.
+    """The most recent completed suite run for this projection, in the suite endpoint's shape
+    plus `computed_at`; 404 when there is none.
 
-    What the pane shows on opening. Takes the same projection parameters
-    as the suite -- with the same defaults -- because they are what name
-    the projection row: a `latest` that could only say `preset` would
-    never find a run made with a non-default confidence floor.
-
-    `current` is a checked verdict since 2026-09-23: true when the
-    caller's graph, projected now, hashes as it did when the run was
-    computed, false when it has moved. Until then this endpoint never
-    compared hashes and answered `current: null`, so the pane could only
-    say "not recomputed" and an analyst had to spend a metered run to find
-    out whether the numbers still held. `cached: true` says only that the
-    bytes came out of `analytics.metric_run`; `computed_at` says WHEN the
-    run happened, `current` says WHETHER it still describes the graph.
+    Takes the suite's projection parameters, with its defaults, because they name the projection
+    row. `current` is true when the caller's graph, projected now, hashes as it did when the run
+    was computed; `cached` says only that the bytes came from `analytics.metric_run`.
     """
     params = _params(decay_half_life_months, leiden_resolution)
     found = _answer(lambda: _svc(conn, user, case_id).latest(p, params))
@@ -264,12 +244,9 @@ def run_current(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """Whether one stored run still describes the caller's graph:
-    `{run_id, algorithm, computed_at, current}`. The projection parameters
-    are the ones the run was computed under; a run of another projection
-    is a 422, and a run the caller cannot see is a 404.
-
-    The pane asked this after the graph under it changed; it now asks
-    `/currency` once for every card. This stays for API callers."""
+    `{run_id, algorithm, computed_at, current}`. The projection parameters are the ones the run
+    was computed under; a run of another projection is a 422, and a run the caller cannot see is
+    a 404. The console asks `/currency` for every card at once; this is for API callers."""
     params = _params(decay_half_life_months, leiden_resolution)
     found = _answer(lambda: _svc(conn, user, case_id).currency(p, params, run_id),
                     cannot="Cannot compare")
@@ -293,12 +270,10 @@ def currency(
     user: CurrentUser = Depends(require("analytics.run")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Whether each of up to four stored runs still describes the caller's
-    graph, with ONE projection of it (F2, 2026-09-24): `{runs: [...]}` in
-    the order asked. A run of another projection answers `current: null`
-    with `reason: "other_projection"`, one the caller cannot see
-    `reason: "not_found"`. What the Analysis pane asks after every graph
-    refresh, instead of one request per card."""
+    """Whether each of up to four stored runs still describes the caller's graph, with one
+    projection of it: `{runs: [...]}` in the order asked. A run of another projection answers
+    `current: null` with `reason: "other_projection"`, one the caller cannot see
+    `reason: "not_found"`. The Analysis pane asks this after every graph refresh."""
     params = _params(decay_half_life_months, leiden_resolution)
     return _answer(lambda: _svc(conn, user, case_id).currency_many(p, params, run_id),
                    cannot="Cannot compare")
@@ -343,11 +318,10 @@ def concor(
     user: CurrentUser = Depends(require("analytics.run")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Role analysis: CONCOR positions, entities with the same pattern of
-    ties to the same others (F1, 2026-09-24). Cached on the graph hash,
-    the depth and every tie's direction, on its own meter. The decay and
-    Leiden parameters name the same projection row as the key player's, so
-    stored lookups line up; neither moves a position."""
+    """Role analysis: CONCOR positions, entities with the same pattern of ties to the same
+    others. Cached on the graph hash, the depth and every tie's direction, on its own meter. The
+    decay and Leiden parameters name the same projection row as the key player's, so stored
+    lookups line up; neither moves a position."""
     params = _params(decay_half_life_months, 1.0)
     return _answer(lambda: _svc(conn, user, case_id).concor(
         p, params, depth=depth, force=force).as_response())
@@ -394,12 +368,10 @@ def rege(
     user: CurrentUser = Depends(require("analytics.run")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Regular roles by REGE (ROADMAP-REMAINING phase 3, 2026-10-02):
-    entities with the same kinds of ties to the same kinds of others, cut
-    into at most `roles` roles. CONCOR's pattern: cached on the graph hash,
-    the roles, the weighting and every tie's direction, on its own meter.
-    The decay parameter names the same projection row as CONCOR's and moves
-    no role."""
+    """Regular roles by REGE: entities with the same kinds of ties to the same kinds of others,
+    cut into at most `roles` roles. As CONCOR, cached on the graph hash, the roles, the weighting
+    and every tie's direction, on its own meter; the decay parameter names the same projection
+    row as CONCOR's and moves no role."""
     params = _params(decay_half_life_months, 1.0)
     return _answer(lambda: _svc(conn, user, case_id).rege(
         p, params, roles=roles, weighting=weighting, force=force).as_response())

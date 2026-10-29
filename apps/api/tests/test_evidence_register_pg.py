@@ -1,27 +1,19 @@
-"""The exhibit register and what it answers (ux07-evidence, 2026-09-23).
+"""The exhibit register and what it answers.
 
-Eight findings of the 2026-09-22 review lived in the Evidence pane, and
-five of them could not be fixed in the console because the list it read
-(`GET /evidence-list?limit=200`) did not carry the facts:
+The Evidence pane reads a list (`GET /evidence-list`) that must carry the facts the console states:
 
-- worm-chip-outlives-lock: the storage lock's end date, and whether it
-  has passed.
-- no-forward-trace-from-exhibit: what rests on an exhibit, counted by the
-  rule the canvas marks "evidenced" by.
-- upload-drops-provenance: when and under what authority the material was
-  obtained, apart from when the server received it.
-- verify-writes-custody-silently: the last check, kept on the card.
-- evidence-list-silently-capped: how many exhibits there are, a page at a
-  time, and every one of them in the pickers' index.
+- the storage lock's end date, and whether it has passed;
+- what rests on an exhibit, counted by the rule the canvas marks "evidenced" by;
+- when and under what authority the material was obtained, apart from when the server received it;
+- the last verification, kept on the card;
+- how many exhibits there are, a page at a time, and every one of them in the pickers' index.
 
-Plus custody-rows-not-court-legible (a row's own detail, defanged) and,
-found while fixing no-exhibit-export-control, the API origin serving
-attacker-authored markup that docs/19 says it never serves.
+Also held: a custody row's own detail (defanged), and that the API origin never serves attacker-authored
+markup (docs/19).
 
-Everything is created inside one transaction that is rolled back, the
-idiom `test_custody_actor_name_pg.py` uses, so nothing is committed and no
-teardown is needed. No MinIO: exhibits are inserted as rows, and the one
-test that ingests through the object store is gated on MINIO_ENDPOINT.
+Everything is created inside one transaction that is rolled back, the idiom `test_custody_actor_name_pg.py`
+uses, so nothing is committed and no teardown is needed. No MinIO: exhibits are inserted as rows, and the
+one test that ingests through the object store is gated on MINIO_ENDPOINT.
 """
 from __future__ import annotations
 
@@ -246,10 +238,9 @@ def test_backs_counts_both_routes_and_only_what_the_canvas_draws(conn, world):
 
 
 def test_a_purged_exhibit_backs_nothing_as_the_canvas_draws_it(conn, world):
-    """The projection's rule has a purge leg (`evidenced_sql`: purged_at IS
-    NULL). The register missed it, so a purged exhibit's card said "Backs 1
-    entity" while the canvas drew that entity hollow, and the "backs
-    nothing" count left it out (verifier, 2026-09-23)."""
+    """The projection's rule has a purge leg (`evidenced_sql`: purged_at IS NULL) and the register applies
+    it: a purged exhibit's card must not say "Backs 1 entity" while the canvas draws that entity hollow, and
+    the "backs nothing" count includes it."""
     from noctornal_api.http.routers import evidence as route
     from noctornal_api.projections import evidenced_sql
     case_id, uid, n1, _n2, edge = world
@@ -278,10 +269,8 @@ def _at(y, m, d, hh=0, mm=0, ss=0):
 
 
 def test_the_lock_date_travels_and_says_when_it_has_passed(conn, world):
-    """An exhibit lodged before the lock's instant was recorded carries
-    only the day, and its lock is not counted on from the start of that
-    day: the store's lock ends part way through it (verifier, 2026-09-23:
-    "held through its last day" was the overstatement)."""
+    """An exhibit lodged before the lock's instant was recorded carries only the day, and its lock is not
+    counted on from the start of that day: the store's lock ends part way through it."""
     case_id, uid, *_ = world
     _exhibit(conn, case_id, uid, title="old.png", retention_until=date(2026, 1, 5))
     _exhibit(conn, case_id, uid, title="new.png", retention_until=date(2027, 9, 17))
@@ -299,8 +288,8 @@ def test_the_lock_date_travels_and_says_when_it_has_passed(conn, world):
 
 
 def test_a_recorded_lock_instant_is_the_one_the_store_holds_to(conn, world):
-    """Since 2026-09-23 the ACQUIRED row carries the lock's exact end; the
-    register reads the lock as held until that instant and no longer."""
+    """The ACQUIRED row carries the lock's exact end; the register reads the lock as held until that
+    instant and no longer."""
     from noctornal_api.evidence import EvidenceService
     case_id, uid, *_ = world
     ev = _exhibit(conn, case_id, uid, title="timed.png", retention_until=date(2027, 9, 24))
@@ -330,10 +319,9 @@ def test_a_lock_instant_that_is_not_this_lock_falls_back_to_the_day():
 
 
 def test_the_policy_names_the_lock_period_and_that_an_extension_lengthens_it():
-    """x-lock-extension (2026-09-24): the lock runs to the case's retention
-    date from lodging and an extension lengthens it, so the policy no
-    longer says the lock ignores that date. The verifier's round: it names
-    the horizon a lock is set within, and that nobody can shorten one."""
+    """The lock runs to the case's retention date from lodging and an extension lengthens it, so the policy
+    does not say the lock ignores that date. It names the horizon a lock is set within, and that nobody can
+    shorten one."""
     from noctornal_api.evidence import DEFAULT_RETENTION, LOCK_HORIZON
     from noctornal_api.http.routers.evidence import size_policy
     out = size_policy(uuid4(), user=None)
@@ -396,11 +384,9 @@ def test_the_register_shows_stated_provenance_defanged(conn, world):
 
 
 def test_an_exhibit_lodged_before_the_flag_keeps_its_stated_time(conn, world):
-    """The `acquired_at_stated` flag exists on ACQUIRED rows written since
-    2026-09-23. An earlier exhibit ingested with a real acquisition time
-    (the README showcase seeds them thirty days back) has none, and read
-    "acquired at lodging, no earlier time stated", hiding the time its
-    record holds (verifier, 2026-09-23)."""
+    """The `acquired_at_stated` flag exists only on newer ACQUIRED rows. An earlier exhibit ingested with a
+    real acquisition time (the README showcase seeds them thirty days back) has none, and must not read
+    "acquired at lodging, no earlier time stated", which would hide the time its record holds."""
     from noctornal_api.evidence import EvidenceService
     case_id, uid, *_ = world
     svc = EvidenceService(conn, storage=None)
@@ -468,9 +454,8 @@ def test_the_custody_route_returns_the_row_detail_defanged(conn, world):
 # --- hostile markup is not served from the application origin ---------
 
 def test_attacker_markup_is_refused_on_content_and_export_and_audited(conn, world, monkeypatch):
-    """docs/19 section 1.1: "The API origin never serves those bytes." Both
-    routes served them until 2026-09-23. The refusal comes after the gate
-    and before the store is touched (storage=None would raise)."""
+    """docs/19 section 1.1: "The API origin never serves those bytes." The refusal comes after the gate and
+    before the store is touched (storage=None would raise)."""
     from noctornal_api.evidence import EvidenceService
     from noctornal_api.http.errors import Problem
     from noctornal_api.http.routers import evidence as route
@@ -544,8 +529,7 @@ def test_ingest_records_the_stated_time_and_authority(conn, world):
     [acquired] = svc.custody_log(res.evidence_id)
     assert acquired.detail["authority_ref"] == "PO-2026-114"
     assert acquired.detail["acquired_at_stated"] is True
-    # The lock's exact end, the instant handed to the store, and the one
-    # the register holds the chip to (worm-chip-outlives-lock, verifier).
+    # The lock's exact end, the instant handed to the store, and the one the register holds the chip to.
     ends = datetime.fromisoformat(acquired.detail["lock_ends_at"])
     [row] = _page(conn, case_id)["items"]
     assert row.lock_ends_at == ends and row.lock_until == ends.date()

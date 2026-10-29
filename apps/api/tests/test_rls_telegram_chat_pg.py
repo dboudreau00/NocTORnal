@@ -1,31 +1,26 @@
-"""Row-level security on which Telegram chat a source is (F51, 2026-10-02).
+"""Row-level security on which Telegram chat a source is.
 
-0129 puts `collect.telegram_chat` under a policy that carries its source's
-label inline (CUSTOM_SOURCE_CHILD): the source itself is exempt, because
-the egress proxy reads it. Each test runs the policy, a service or a route
-as the request role, bound by a real session's proof, or as the system
-role, with the fixtures seeded as the owner (rls_support); the routes run
-in production's shape (NOCTORNAL_TEST_ASSUME_ROLE):
+0129 puts `collect.telegram_chat` under a policy that carries its source's label inline
+(CUSTOM_SOURCE_CHILD): the source itself is exempt, because the egress proxy reads it. Each test runs the
+policy, a service or a route as the request role, bound by a real session's proof, or as the system role,
+with the fixtures seeded as the owner (rls_support); the routes run in production's shape
+(NOCTORNAL_TEST_ASSUME_ROLE):
 
-- a chat is held to its source's label at the case-less ceiling: a grant
-  scoped to a case never raises it, a global one does; an unbound
-  connection sees and writes nothing; the request role writes no chat
+- a chat is held to its source's label at the case-less ceiling: a grant scoped to a case never raises
+  it, a global one does; an unbound connection sees and writes nothing; the request role writes no chat
   under a source above its user;
-- the duplicate-key side channel stays closed: a chat already added under
-  a source above the adder answers exactly as an unresolvable reference,
-  and so does one added between the check and the insert;
-- what each caller could do before still works: adding a chat, naming a
-  visible duplicate, the chat listing, the due list's chat line, a manual
-  run, the confirmer's view of a target's chat, and each attended act;
-- an act whose chat went above its caller during the act is refused as
-  for a missing chat and records nothing, half a change included;
-- the poll's reads and writes of a chat above every user (refusal, plan,
-  the deletion mark, what a session learnt, a migration, a lost
-  membership) run as the system role;
+- the duplicate-key side channel stays closed: a chat already added under a source above the adder
+  answers exactly as an unresolvable reference, and so does one added between the check and the insert;
+- what each caller could do before still works: adding a chat, naming a visible duplicate, the chat
+  listing, the due list's chat line, a manual run, the confirmer's view of a target's chat, and each
+  attended act;
+- an act whose chat went above its caller during the act is refused as for a missing chat and records
+  nothing, half a change included;
+- the poll's reads and writes of a chat above every user (refusal, plan, the deletion mark, what a
+  session learnt, a migration, a lost membership) run as the system role;
 - the policy is initplans only, never a per-row definer call.
 
-Gated like the other row-security tests. Account, persona and source
-prefix `rlstg-`.
+Gated like the other row-security tests. Account, persona and source prefix `rlstg-`.
 """
 from __future__ import annotations
 
@@ -309,9 +304,8 @@ def test_a_chat_already_added_above_the_adder_answers_like_an_unresolvable_one(o
 
 def test_a_chat_added_between_the_check_and_the_insert_answers_the_same(
         owner, api, monkeypatch):
-    """The check sees nothing, another manager's chat lands, and the INSERT
-    meets the unique durable id: answered by the same check, never as a
-    duplicate-key error (a 500 until 2026-10-02)."""
+    """The check sees nothing, another manager's chat lands, and the INSERT meets the unique durable id:
+    answered by the same check, never as a duplicate-key error."""
     from noctornal_api import telegram_service
 
     w = _world(owner)
@@ -603,7 +597,7 @@ def test_the_poll_reads_and_writes_a_chat_above_every_user_as_the_system_role(
 
 
 # ---------------------------------------------------------------------------
-# The source's compartments (docs/17 F43, 0164, 2026-10-02)
+# The source's compartments (0164)
 # ---------------------------------------------------------------------------
 
 def test_a_chat_under_a_compartmented_source_is_hidden_from_a_reader_who_lacks_the_key(owner):

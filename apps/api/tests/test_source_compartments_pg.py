@@ -1,17 +1,13 @@
-"""Compartments on a collection source (docs/17 F43, docs/00 decision 78's
-open half, 2026-10-02; Alembic 0163).
+"""Compartments on a collection source (docs/17 F43, docs/00 decision 78; Alembic 0163).
 
-- a source is filed under compartments its creator holds, and only those;
-  an unregistered key is refused by the binding;
-- every document the source collects inherits them, and the document
-  readers hold them to the reader's (test_document_reads_check_compartments
-  holds every reader statically; this is the live half);
-- a source under a compartment the reader lacks is absent from the listing,
-  the due list, the runs, a run's detail and a manual poll, and from the
-  authority service's targets, and a reader who gave no compartments sees
-  no compartmented source at all (fail closed);
-- the route takes the compartments on creation and refuses a key the
-  caller does not hold.
+- a source is filed under compartments its creator holds, and only those; an unregistered key is refused
+  by the binding;
+- every document the source collects inherits them, and the document readers hold them to the reader's
+  (test_document_reads_check_compartments holds every reader statically; this is the live half);
+- a source under a compartment the reader lacks is absent from the listing, the due list, the runs, a
+  run's detail and a manual poll, and from the authority service's targets, and a reader who gave no
+  compartments sees no compartmented source at all (fail closed);
+- the route takes the compartments on creation and refuses a key the caller does not hold.
 
 DATABASE_URL-gated. Account and source prefix `test-srcc-`.
 """

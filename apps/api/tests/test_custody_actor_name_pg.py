@@ -1,15 +1,12 @@
-"""The custody log names a person (README screenshot review, 2026-09-23).
+"""The custody log names a person.
 
-The Evidence pane's custody log is the answer to "who touched this
-exhibit, and when", and it answered the first half with an eight-hex id:
-"ACQUIRED 2026-09-23 15:28 UTC, actor fcfd6f27". `custody_log` now joins
-the account and returns its display name beside the id, which stays.
+The Evidence pane's custody log answers "who touched this exhibit, and when". `custody_log` joins the
+account and returns its display name beside the id, which stays.
 
-Everything is created inside a transaction that is rolled back, the idiom
-`test_custody_verify_pg.py` uses for the same ledger: custody rows cannot
-be deleted (the triggers block it), so nothing is committed and no
-teardown is needed. Inserted directly rather than through
-`EvidenceService.ingest`, so no MinIO is involved.
+Everything is created inside a transaction that is rolled back, the idiom `test_custody_verify_pg.py`
+uses for the same ledger: custody rows cannot be deleted (the triggers block it), so nothing is
+committed and no teardown is needed. Inserted directly rather than through `EvidenceService.ingest`, so
+no MinIO is involved.
 """
 from __future__ import annotations
 

@@ -1,7 +1,6 @@
-"""The console half of the seasoning rule on a case's merge switch (F39,
-2026-10-02): what the switch says while nobody qualifies yet, what an
-unseasoned colleague is told before they press Approve, and what the
-Two-person controls screen shows for the operation.
+"""The console half of the seasoning rule on a case's merge switch: what the switch says while nobody
+qualifies yet, what an unseasoned colleague is told before they press Approve, and what the Two-person
+controls screen shows for the operation.
 
 Pure: no database. The functions run under Node over the stub DOM of
 test_ui_dual_control.py and are judged by what they draw. The server half,

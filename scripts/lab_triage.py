@@ -1,55 +1,29 @@
-"""Drain the static-triage queue once. This is the Lab's cron entry (F11
-and F12, 2026-09-24).
+"""Drain the static-triage queue once: the Lab's cron entry.
 
-There is no worker process in this build (decision 30), and static
-triage parses hostile bytes, which cannot happen inside an upload
-request. `lab_triage.run_due` is written as a function you CALL, and this
-is the honest caller: one process, one connection, one pass, an exit
-code. One pass sweeps runs and compile jobs whose process stopped,
-compiles the queued YARA rule set versions for THIS host, then runs up to
-20 queued runs, starting none after 90 seconds.
+Static triage parses hostile bytes, which cannot happen inside an upload request, and there is no
+job worker (decision 30), so this script is the caller of `lab_triage.run_due`. A pass sweeps runs
+and compile jobs whose process stopped, compiles the queued YARA rule set versions for this host,
+then runs up to 20 queued runs, starting none after 90 seconds.
 
     python scripts/lab_triage.py              one pass (the cron entry)
     python scripts/lab_triage.py --backfill   queue every held sample never triaged
     python scripts/lab_triage.py status       how many runs wait, and since when
 
-Run it in a loop of its own, not inside the loop that drains
-notifications: a pass finishes the run it started, and one run can take
-each of its child processes' full time limit, so sharing that loop would
-hold the notification drain back. The production compose file gives it
-a service of its own (the lab-triage service). `--budget SECONDS` makes a
-pass start a compile or a run only when its worst case still fits, for a
-deployment that must share a loop anyway.
-
-Cron, every five minutes, from the install directory:
+Give it a loop of its own (the lab-triage compose service): one run can take each of its child
+processes' full time limit and would hold the notification drain back. `--budget SECONDS` starts a
+compile or run only when its worst case still fits, for a loop that must be shared. Cron, every
+five minutes, from the install directory:
 
     */5 * * * *  cd /opt/noctornal && apps/api/.venv/bin/python \\
                  scripts/lab_triage.py >> /var/log/noctornal/lab_triage.log 2>&1
 
-Windows Task Scheduler: the same command, from the same directory, with
-the venv's python.exe. `.env.local` at the project root is loaded as every
-other script here loads it; an exported DATABASE_URL still wins.
-
-Prints the counters on one line (queued, done, failed, skipped,
-abandoned, left, compiled, compile_failed) and exits 1 when a run FAILED
-or a compile failed for good in this pass. While no prohibited-content
-policy is declared it says so and exits 1 having touched nothing (docs/16
-L1), as an unusable setting does: the queue is not drained, and an alert
-watching the exit code should hear it. When the
-isolated analysis worker does not answer, or a production deployment
-configures none, it says so and exits 1 having touched nothing (docs/17
-F42): that is a fault, and the queue waits for it. When the worker fails
-during the pass, the pass stops, prints `interrupted=1` and exits 1; the
-run or compile it was on goes back to the queue with no attempt spent. Under
-NOCTORNAL_ENV=production an environment this job will not run on exits 2
-(`config.JOB_REFUSAL_EXIT`, the code every job gives that refusal, so an alert
-can tell a job that would not start from a pass that failed), one line per
-problem on stderr led by `lab_triage: refusing to run:`, naming variables and
-never a value.
-
-`--backfill` decrypts every held sample in the passes that follow. That is
-the operator's decision, never a migration's, and it is recorded as
-theirs: an audit row naming the command and this host's user.
+Prints the counters on one line. Exits 1 when a run or compile failed for good, when no
+prohibited-content policy is declared (docs/16 L1), or when the isolated analysis worker does not
+answer or production configures none; those last two touch nothing. A worker that fails mid-pass
+stops it with `interrupted=1` and exit 1, and its run or compile goes back to the queue with no
+attempt spent. Exits 2 (`config.JOB_REFUSAL_EXIT`) when the production environment is refused.
+`--backfill` decrypts every held sample in the passes that follow: the operator's decision, never
+a migration's, recorded as an audit row naming the command and this host's user.
 """
 from __future__ import annotations
 
@@ -88,15 +62,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="start a compile or run only if its worst case fits")
     args = parser.parse_args(argv)
 
-    # First, before anything is connected to: the API's whole production list,
-    # through the one helper every job calls (config.py). It was
-    # `enforce_environment()`, whose RuntimeError made a refusal exit 1 with a
-    # traceback; 2 is what every other job gives, and 1 here means a pass ran
-    # and failed (2026-10-07).
+    # First, before anything is connected to: the API's whole production list, through the helper
+    # every job calls. A refusal exits 2, because 1 means a pass ran and failed.
     from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
-    # outbound=False: this loop sends nothing out and compose gives it no
-    # egress proxy, so lookups or a sandbox switched on in secrets.env, which
-    # it reads, are not its refusal (2026-10-07).
+    # outbound=False: this loop sends nothing out and compose gives it no egress proxy, so lookups
+    # or a sandbox switched on in secrets.env, which it reads, are not its refusal.
     refusals = refuse_unsafe_job_environment("lab_triage", whole_environment=True,
                                              outbound=False)
     if refusals:
@@ -108,11 +78,8 @@ def main(argv: list[str] | None = None) -> int:
 
     declared, detail = policy_declared()
     if not declared:
-        # Exit 1, as an unusable setting and a silent worker are: the queue
-        # was not drained, and a pass that did nothing is not a pass that
-        # succeeded. It was 0 as "the deployment's state, not this pass's
-        # failure", which an alert watching the exit code could not tell from
-        # a drained queue (2026-10-08).
+        # Exit 1, as for an unusable setting or a silent worker: an undrained queue is not a pass
+        # that succeeded, and an alert on the exit code must be able to tell the two apart.
         print(f"refused: {detail}")
         return 1
     settings, problem = lab_triage.analysis_settings()
@@ -120,9 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"refused: {problem}")
         return 1
     if args.command == "run" and not args.backfill:
-        # F42 (2026-10-02): no isolated worker answering, or production
-        # with none configured, is a fault an operator must see, so exit 1
-        # before a connection is opened; the queue is left as it was.
+        # No isolated worker answering, or production with none configured, is a fault an operator
+        # must see: exit 1 before a connection is opened, leaving the queue as it was.
         from noctornal_api import analysis_runner
         refusal = analysis_runner.unavailable()
         if refusal:
@@ -149,8 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
     print(" ".join(f"{key}={value}" for key, value in counters.items()))
-    # interrupted (F42 review, 2026-10-02): the worker failed mid-pass, a
-    # fault an operator must see, as the refusal before a pass is.
+    # interrupted: the worker failed mid-pass, a fault an operator must see, like a refusal.
     return 1 if (counters.get("failed", 0) or counters.get("compile_failed", 0)
                  or counters.get("interrupted", 0)) else 0
 

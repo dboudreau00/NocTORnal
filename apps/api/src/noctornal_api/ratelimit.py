@@ -1,72 +1,32 @@
-"""Rate limiting: the GCRA decision, the limit catalogue, and one explicit
-answer to the question a rate limiter usually gets wrong.
+"""Rate limiting: the GCRA decision, the limit catalogue, and the fail-open policy per limit class.
 
-Pure by construction. Nothing in this module opens a socket, reads a
-database or looks at the wall clock -- the decision is a function of
-(now, theoretical arrival time, limit), so it can be tested against
-hand-computed values the same way `analytics.py` is. The Redis half lives
-in `ratelimit_redis.py`; the HTTP half in `http/limits.py`.
+Pure by construction: nothing here opens a socket, reads a database or looks at the wall clock, so
+the decision is a function of (now, theoretical arrival time, limit) and can be tested against
+hand-computed values. The Redis half lives in `ratelimit_redis.py`; the HTTP half in
+`http/limits.py`.
 
-## Why GCRA and not a counter
+GCRA stores ONE number per subject (a fixed-window counter lets 200 requests through across a window
+boundary; a sliding-window log's memory scales with the attack) and yields a smooth rate and an
+exact `Retry-After`. A denied request does not advance the meter, so hammering a limit does not
+extend your own penalty and an attacker cannot lock a subject out for longer than the limit allows.
 
-A fixed-window counter ("100 per minute") lets 200 requests through across
-a window boundary, which on the analytics path means 200 igraph runs in two
-seconds. A sliding-window log is exact but stores one entry per request,
-so the memory cost of limiting an attacker scales with the attack. GCRA
-(the leaky bucket as a meter) stores ONE number per subject -- the
-theoretical arrival time -- and yields both a smooth sustained rate and an
-exact `Retry-After` from it. It also has the property that matters under
-attack: **a denied request does not advance the meter**, so hammering a
-limit does not extend your own penalty, and an attacker cannot lock a
-subject out for longer than the limit itself allows.
+What happens when Redis is down is a per-limit field, `OnBackendFailure`. DENY covers the
+cost-bearing and security-sensitive limits (login, analytics, export, capture, merge): a limiter
+that fails open is an availability-triggered bypass, unlimited password guessing and CPU burn for
+anyone who can knock the backend over. ALLOW covers the blanket per-credential ceiling on every
+request: denying it would turn a Redis restart into a total outage. Both branches log; a fail-open
+degradation is announced, never silent.
 
-## The fail-open question, answered per class
+Subject keys carry an IP or a session token, so both are SHA-256'd before they reach Redis. That is
+obfuscation, not anonymisation: the IPv4 space is 2^32, so a hashed address is reversible by anyone
+motivated. It stops casual disclosure (a `KEYS *` dump, a memory snapshot), not a determined
+analyst.
 
-"What happens when Redis is down" is the real design question and it does
-not have one answer, so this module makes it a per-limit field rather than
-a global constant.
-
-- `OnBackendFailure.DENY` -- the cost-bearing and security-sensitive
-  limits (login, analytics, export, capture, merge). A limiter that fails
-  open is an availability-triggered bypass: knock the backend over, or
-  simply wait for a restart, and you get unlimited password guessing and
-  unlimited CPU burn. Everything else in this codebase fails closed --
-  access resolution, the evidence hash re-verify, the ingest key scope
-  check -- and a limiter that does not is the odd one out.
-- `OnBackendFailure.ALLOW` -- the blanket per-credential ceiling that the
-  middleware applies to every request. Denying that one would turn a Redis
-  restart into a total outage of an investigation tool, which is a worse
-  failure than the one it prevents.
-
-So a backend outage degrades the expensive features and leaves the case
-file readable. Both branches log; a fail-open degradation is announced,
-never silent (invariant 12's spirit: nothing is dropped quietly).
-
-## Keys are hashed, and that is obfuscation, not anonymisation
-
-A subject key carries an IP or a session token. Neither should sit in
-plaintext in a cache that is not the system of record, so both are
-SHA-256'd -- the same treatment `audit.event.ip_hash` gives an address.
-Be honest about what that buys: the IPv4 space is 2^32, so a hash of an
-address is reversible by anyone motivated. It stops casual disclosure
-(a `KEYS *` dump, a memory snapshot), not a determined analyst.
-
-## A note on the Redis eviction policy
-
-Every key written here carries a TTL. Under an evicting `maxmemory-policy`
-(`allkeys-*` or `volatile-*`), memory pressure deletes rate-limit state,
-and an evicted meter is a reset meter. That is acceptable for a cache and
-not for a security control sharing an instance with one. The policy is set
-per Redis instance, not per database, so a limiter that shares an instance
-with a cache shares its eviction too: give the limiter an instance of its
-own, running `noeviction`.
-
-The bundled `infra/docker-compose.yml` runs `noeviction`, and the limiter
-is its only user; until the Alpha 6 pre-release check (2026-09-23) it ran
-`allkeys-lru`. The policy is a deployment decision the code cannot make,
-so the code reports it instead:
-`http/limits.py` warns at startup, and the readiness register's
-`redis_limiter_store` row fails, whenever the limiter's Redis evicts.
+Every key carries a TTL, and under an evicting `maxmemory-policy` an evicted meter is a reset meter.
+The limiter needs a Redis instance of its own running `noeviction`: the bundled
+`infra/docker-compose.yml` runs `noeviction`. The code cannot make that deployment decision, so
+`http/limits.py` warns at startup and the readiness register's `redis_limiter_store` row fails
+whenever the limiter's Redis evicts.
 """
 from __future__ import annotations
 
@@ -203,15 +163,12 @@ def gcra(*, now_us: int, tat_us: int | None, emission_us: int,
          tolerance_us: int) -> tuple[RawDecision, int | None]:
     """The whole algorithm, as a pure function.
 
-    Returns the decision and the new theoretical arrival time to store --
-    or None when nothing should be written, which is the case on every
-    denial. That "no write on denial" is not an optimisation: it is what
-    stops a caller who ignores `Retry-After` from pushing their own
-    recovery time out indefinitely, and what stops a third party who can
+    Returns the decision and the new theoretical arrival time to store, or None when nothing should
+    be written, which is every denial. "No write on denial" is what stops a caller who ignores
+    `Retry-After` from pushing their own recovery time out indefinitely, and a third party who can
     forge the subject from doing it to someone else.
 
-    `tat_us` is None for a subject with no meter yet, which is treated as
-    a meter that emptied at `now_us`.
+    `tat_us` is None for a subject with no meter yet, treated as a meter that emptied at `now_us`.
     """
     tat = now_us if tat_us is None or tat_us < now_us else tat_us
     new_tat = tat + emission_us
@@ -275,18 +232,12 @@ class Backend(Protocol):
 
 
 class InProcessBackend:
-    """A backend with no Redis, for single-process development and for the
-    unit tests.
+    """A backend with no Redis, for single-process development and the unit tests.
 
-    It is genuinely correct for one process and genuinely wrong for many:
-    N uvicorn workers enforce N times the configured rate. `http/limits.py`
-    logs that loudly at startup rather than letting a deployment discover
-    it from an incident.
-
-    The clock is `time.monotonic`, not `time.time`. The development host
-    this was built on has an unsynchronised clock (docs/15), and a wall
-    clock that steps backwards would hand out free capacity while it
-    caught up.
+    Correct for one process and wrong for many: N uvicorn workers enforce N times the configured
+    rate, which `http/limits.py` logs at startup. The clock is `time.monotonic`, not `time.time`: a
+    wall clock that steps backwards would hand out free capacity while it caught up (the development
+    host's clock is unsynchronised, docs/15).
     """
 
     def __init__(self, *, now=None, max_keys: int = IN_PROCESS_MAX_KEYS):
@@ -365,22 +316,15 @@ def hashed(value: str) -> str:
 def ip_subject(address: str | None) -> str:
     """The subject for an IP-scoped limit.
 
-    IPv6 is collapsed to its /64. A residential IPv6 allocation is a /64 at
-    minimum and frequently a /56, so limiting a single /128 limits one
-    address out of eighteen quintillion the same host already owns -- an
-    IP-scoped limit on IPv6 addresses is not a limit at all.
+    IPv6 is collapsed to its /64: a residential allocation is a /64 at minimum and often a /56, so
+    limiting a single /128 limits one address out of eighteen quintillion the same host already
+    owns. An address that will not parse is bucketed under a single fixed key rather than trusted as
+    distinct, so a malformed value cannot mint unlimited subjects.
 
-    An address that will not parse is bucketed under a single fixed key
-    rather than trusted as distinct, so a malformed value cannot mint
-    unlimited subjects.
-
-    **IPv4-mapped addresses are unmapped FIRST**, and getting this wrong is
-    not theoretical: a dual-stack listener reports every IPv4 peer as
-    `::ffff:a.b.c.d`, every one of which has the same /64 (`::/64`). Without
-    the unmapping below, every IPv4 client on such a deployment -- which is
-    the default for uvicorn bound to `::` -- would share ONE login bucket,
-    and the first person to mistype their password would lock out the
-    internet. Found by adversarial review, not by a test.
+    **IPv4-mapped addresses are unmapped FIRST.** A dual-stack listener (the default for uvicorn
+    bound to `::`) reports every IPv4 peer as `::ffff:a.b.c.d`, all in the same /64 (`::/64`), so
+    without the unmapping every IPv4 client would share ONE login bucket and the first person to
+    mistype a password would lock out the internet.
     """
     if not address:
         return "ip:unknown"
@@ -398,53 +342,28 @@ def ip_subject(address: str | None) -> str:
     return "ip4:" + hashed(str(parsed))
 
 
-# ---------------------------------------------------------------------------
-# The catalogue. One table, so "what are the limits" is answerable by
-# reading a file rather than grepping decorators.
+# The catalogue. One table, so "what are the limits" is answerable by reading a file rather than
+# grepping decorators.
 #
-# The numbers are set for an analyst working hard, not for an analyst
-# working normally: a limit that a busy hour trips is a limit that gets
-# raised in an incident, and a limit raised in an incident is never
-# lowered again. Each is roughly an order of magnitude above observed
-# legitimate use and roughly two below what the endpoint costs to serve.
-# ---------------------------------------------------------------------------
+# The numbers are set for an analyst working hard, not for an analyst working normally: a limit that
+# a busy hour trips is a limit that gets raised in an incident, and a limit raised in an incident is
+# never lowered again. Each is roughly an order of magnitude above observed legitimate use and
+# roughly two below what the endpoint costs to serve.
 
 LIMITS: dict[str, Limit] = {
     # Login is metered twice, and the split is the whole point.
     #
-    # An IP-scoped limit on login ATTEMPTS cannot be tight, because the
-    # customer for this product is an organisation behind one egress
-    # address. A police unit of two hundred people signing on at 09:00 is
-    # two hundred logins from a single IP inside ten minutes; a limit tuned
-    # to stop password spraying would take that unit offline every Monday,
-    # and a limit that does that gets raised in an incident and never
-    # lowered again. So the attempt limit is generous -- it exists to cap
-    # one source's CPU draw on a deliberately expensive Argon2id verify,
-    # not to stop guessing.
+    # The ATTEMPT meter is generous: the customer is an organisation behind one egress address (two
+    # hundred people signing on at 09:00 is two hundred logins from one IP), so it only caps one
+    # source's CPU draw on the deliberately expensive Argon2id verify. Its burst is small because
+    # the failure meter is PEEKED before the verify and consumed after it, so a simultaneous burst
+    # all reads an un-advanced meter: one burst buys at most 20 guesses.
     #
-    # What stops guessing is the SECOND meter, which counts FAILURES.
-    # Successful sign-ons never touch it, so a whole building can log in
-    # behind one address without moving it at all, while a sprayer -- whose
-    # traffic is nothing but failures -- exhausts it in seconds. That
-    # asymmetry is what makes an IP-scoped login control compatible with
-    # NAT.
-    #
-    # Neither is email-scoped. An email-keyed limit is a remotely
-    # triggerable lockout of a named analyst, since anyone can send that
-    # address -- the same defect class a previous review found in the DB
-    # lockout and fixed by making it decay. Targeted guessing against one
-    # account is that lockout's job.
-    #
-    # Honest about the gap: both are per-source, so a botnet spreading one
-    # guess per address per hour moves neither meter. Nothing here fixes
-    # that; the account lockout and password strength do.
-    # The burst is deliberately much smaller than the quota, and that is
-    # the mitigation for a race adversarial review found: the failure meter
-    # is PEEKED before the Argon2id verify and consumed after it, so a
-    # simultaneous burst all read an un-advanced meter and all proceed. The
-    # number of guesses one burst buys is therefore bounded by THIS burst,
-    # not by the failure meter's. 20 concurrent verifies is comfortable for
-    # a shift starting at 09:00 and is not a useful guessing window.
+    # What stops guessing is the FAILURE meter. Successful sign-ons never touch it, so a whole
+    # building can log in behind one address, while a sprayer, whose traffic is all failures,
+    # exhausts it in seconds. Neither meter is email-scoped, which would be a remotely triggerable
+    # lockout of a named analyst; both are per-source, so a botnet spreading one guess per address
+    # per hour moves neither, and the account lockout and password strength cover that.
     "auth.login": Limit(
         "auth.login", quota=120, per_seconds=60, scope=Scope.IP, burst=20,
         on_backend_failure=OnBackendFailure.DENY, audit_every_seconds=60,
@@ -459,22 +378,14 @@ LIMITS: dict[str, Limit] = {
         "auth.recovery_codes", quota=5, per_seconds=3600, scope=Scope.USER,
         burst=3, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # An administrator minting somebody ELSE's credentials: provisioning an
-    # account, or re-enrolling a colleague's authenticator. Both answer
-    # with a one-time password or secret, so a loop is still worth
-    # braking, and both are step-up gated behind `user.manage` already.
+    # An administrator minting somebody ELSE's credentials: provisioning an account, or re-enrolling
+    # a colleague's authenticator. Both answer with a one-time password or secret, so a loop is
+    # worth braking (both are step-up gated behind `user.manage` already).
     #
-    # Its own meter, not `auth.recovery_codes`, which both routes shared
-    # until 2026-09-23 (final review U18). That bucket is sized for one
-    # person reissuing their OWN codes, three at once, and the console now
-    # spends one of the three issuing the first administrator's codes at
-    # their first sign-in. The operator of a fresh install could then add
-    # two colleagues before a 429, and one more every twelve minutes, on
-    # the very step first run sends them to next. A refused request still
-    # spends from a meter (the limit runs before the gate's step-up check,
-    # on purpose, see http/limits.py), so every stale-session click also
-    # took away a chance to reissue their own codes. The numbers are set
-    # for standing up a unit in one sitting: twenty at once, then one a
+    # Its own meter, not `auth.recovery_codes`, which is sized for one person reissuing their OWN
+    # codes and is partly spent by the first administrator's codes at first sign-in. A refused
+    # request still spends from a meter (the limit runs before the gate's step-up check, on purpose,
+    # see http/limits.py). Set for standing up a unit in one sitting: twenty at once, then one a
     # minute.
     "admin.credentials": Limit(
         "admin.credentials", quota=60, per_seconds=3600, scope=Scope.USER,
@@ -528,25 +439,15 @@ LIMITS: dict[str, Limit] = {
     ),
     # The blanket ceiling is TWO limits, and it has to be.
     #
-    # `request` is keyed on the presented credential, which needs no
-    # database lookup and fairly subdivides a shared address between the
-    # analysts behind it. On its own it is not a ceiling at all: adversarial
-    # review demonstrated that a caller sending a fresh random
-    # `Authorization: Bearer <hex>` on every request mints a fresh meter
-    # every time and is never limited -- and, worse, that presenting a
-    # garbage token was CHEAPER than presenting none, because the bearer
-    # branch suppressed the address fallback. Sending one extra header made
-    # a caller strictly less limited. The control inverted.
+    # `request` is keyed on the presented credential, which needs no database lookup and fairly
+    # subdivides a shared address between the analysts behind it. Alone it is not a ceiling: a fresh
+    # random bearer token on every request mints a fresh meter every time, and a garbage token would
+    # be cheaper than none. `request.source` is keyed on the peer address, which a caller cannot
+    # mint, so a rotating token can only SUBDIVIDE a source's budget and never escape it. Both are
+    # checked; the tighter one binds. Its quota is generous because the customer is a whole unit
+    # behind one egress address.
     #
-    # `request.source` is the fix. It is keyed on the peer address, which a
-    # caller cannot mint, so a rotating token can only SUBDIVIDE a source's
-    # budget and never escape it. Both are checked; the tighter one binds.
-    # Its quota is generous because the customer is a whole unit behind one
-    # egress address -- it exists to bound an unauthenticated flood, not to
-    # ration normal work.
-    #
-    # Both ALLOW on backend failure: see the module docstring. Denying the
-    # blanket ceiling would turn a Redis restart into a total outage.
+    # Both ALLOW on backend failure (see the module docstring).
     "request": Limit(
         "request", quota=600, per_seconds=60, scope=Scope.CREDENTIAL, burst=200,
         on_backend_failure=OnBackendFailure.ALLOW, audit_every_seconds=600,
@@ -561,38 +462,24 @@ LIMITS: dict[str, Limit] = {
         "graph.view", quota=240, per_seconds=60, scope=Scope.USER, burst=80,
         on_backend_failure=OnBackendFailure.DENY,
     ),
-    # `/graph/metrics`: degree, weighted degree, clustering and k-core over
-    # one projection, which the console fetches with every projection it
-    # draws. It was metered under `analytics.suite` (decision 45, item 6:
-    # "two doors onto one cost"), and ordinary navigation spent that budget
-    # in about ten control changes or one short timeline scrub: Node size
-    # disabled itself, every node changed size, and the Analysis pane's Run
-    # was refused as well (ux03 metrics-rate-limit-degrades-view,
-    # 2026-09-23). The premise did not hold. The suite runs igraph
-    # centralities (betweenness, communities, key players) over the
-    # projection; these four local counts cost about what drawing the
-    # projection costs, one `project()` and a pass over each neighbourhood,
-    # so they are metered like the projection they describe, on their own
-    # budget, still per analyst and still failing closed. The console
-    # caches each answer per projection and graph state and fetches them on
-    # scrubber release rather than at every pause of a drag.
+    # `/graph/metrics`: degree, weighted degree, clustering and k-core over one projection, which
+    # the console fetches with every projection it draws. Its own budget, not `analytics.suite`'s:
+    # these four local counts cost about what drawing the projection costs, whereas the suite runs
+    # igraph centralities, so navigation must not spend the suite's budget. Still per analyst and
+    # failing closed. The console caches each answer per projection and graph state and fetches on
+    # scrubber release, not at every pause of a drag.
     "graph.metrics": Limit(
         "graph.metrics", quota=120, per_seconds=60, scope=Scope.USER, burst=40,
         on_backend_failure=OnBackendFailure.DENY,
     ),
-    # Destruction. The tightest quota here, and deliberately so.
+    # Destruction. The tightest quota here, and deliberately so: a purge is irreversible, so the
+    # attack is a script looping over cases, not volume. Ten an hour is more than any real retention
+    # run needs. Fails CLOSED: if the meter is unavailable, not destroying things is the safe
+    # direction.
     #
-    # A purge is irreversible, so a real run meters tightly: the attack is
-    # not volume, it is a script looping over cases. Ten an hour is more than
-    # any real retention run needs and far fewer than a loop wants. Fails
-    # CLOSED -- if the meter is unavailable, not destroying things is the
-    # safe direction.
-    #
-    # One meter per act (2026-10-08). A lift, a dry run and a real purge
-    # shared this one, so a lead who previewed a case twice and lifted a hold
-    # waited about six minutes before the purge they came to run, and a
-    # request refused for a stale sign-in spent from it too. Each act has its
-    # own, and the routes spend only after the gate has let the request in.
+    # One meter per act, so a lead who previewed a case twice and lifted a hold is not made to wait
+    # before the purge they came to run. The routes spend only after the gate has let the request
+    # in.
     "retention.destroy": Limit(
         "retention.destroy", quota=10, per_seconds=3600, scope=Scope.USER,
         burst=3, on_backend_failure=OnBackendFailure.DENY,
@@ -613,120 +500,78 @@ LIMITS: dict[str, Limit] = {
         "retention.dry_run", quota=30, per_seconds=300, scope=Scope.USER,
         burst=10, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # The ingest 202 endpoint, and the ONE limit in this catalogue that
-    # cannot be USER-scoped.
+    # The ingest 202 endpoint, and the ONE limit in this catalogue that cannot be USER-scoped: its
+    # caller presents an ingest API key, not a session, so a `Scope.USER` limit would reject every
+    # legitimate submission with "invalid or expired session".
     #
-    # Its caller presents an ingest API key, not a session, so a
-    # `Scope.USER` limit would resolve `current_user` and reject every
-    # legitimate submission with "invalid or expired session" -- which is
-    # exactly what happened when it was first wired to `evidence.ingest`.
-    #
-    # CREDENTIAL scope is safe HERE, unlike for the blanket ceiling that
-    # adversarial review broke. There the subject was client-chosen and a
-    # rotating token minted a fresh bucket per request. An ingest key
-    # cannot be rotated by its holder: they have the one key they were
-    # issued, and an unauthenticated caller sending fresh garbage keys is
-    # refused at 401 before doing work and is bounded by the
-    # address-scoped `request.source` ceiling regardless.
+    # CREDENTIAL scope is safe HERE, unlike for the blanket ceiling: an ingest key cannot be rotated
+    # by its holder, and an unauthenticated caller sending fresh garbage keys is refused at 401
+    # before doing work and bounded by the address-scoped `request.source` ceiling regardless.
     "ingest.submit": Limit(
         "ingest.submit", quota=600, per_seconds=3600, scope=Scope.CREDENTIAL,
         burst=120, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # PGP verification SPAWNS A SUBPROCESS, twice, with a 20-second timeout
-    # each. It is the only route in this system that forks, which makes an
-    # unmetered loop of it a trivial way to exhaust process slots and file
-    # handles -- far cheaper for the caller than for the server, which is
-    # the definition of the thing a limit is for. The quota is deliberately
-    # low: verifying a signature is a deliberate analyst action on a
-    # specific claim, not something anything iterates over.
+    # PGP verification SPAWNS A SUBPROCESS, twice, with a 20-second timeout each. It is the only
+    # route that forks, so an unmetered loop would exhaust process slots and file handles far more
+    # cheaply for the caller than for the server. The quota is low: verifying a signature is a
+    # deliberate analyst action on a specific claim, not something anything iterates over.
     "comms.verify": Limit(
         "comms.verify", quota=60, per_seconds=3600, scope=Scope.USER, burst=10,
         on_backend_failure=OnBackendFailure.DENY,
     ),
-    # The sample-origin download, and the only limit here that meters a
-    # route reachable with NO credential at all once it is deployed.
+    # The sample-origin download, the only limit here that meters a route reachable with NO
+    # credential at all once it is deployed.
     #
-    # Since 0061 the credential on that route may be a one-shot ticket in
-    # the request BODY, so the sample process cannot tell an authorised
-    # caller from a stranger until it has looked one up -- and every
-    # look-up that failed appended a row to `audit.event`, which is
-    # append-only, hash-chained and serialised by an advisory lock. Anyone
-    # who could reach the sample origin could therefore grow a table
-    # nothing can delete from, one `ticket=x` at a time. A ticket matching
-    # no row is a sampled warning rather than a row now (`samples.py`),
-    # and this limit is the other half of the fix: the refusals that DO
-    # still audit each name a real minted ticket, so replaying one spent
-    # ticket in a loop would otherwise write one undeletable row per
-    # attempt.
+    # The credential may be a one-shot ticket in the request BODY, so the sample process cannot tell
+    # an authorised caller from a stranger until it has looked one up. A ticket matching no row is a
+    # sampled warning rather than an `audit.event` row (`samples.py`), since that table is
+    # append-only, hash-chained and serialised by an advisory lock. This limit is the other half:
+    # the refusals that DO still audit each name a real minted ticket, so replaying one spent ticket
+    # in a loop would write an undeletable row per attempt.
     #
-    # Keyed on the peer address because that is the only subject that
-    # exists before a ticket has been validated. A body-borne credential
-    # cannot be the key for `credential_subject`'s reason -- a caller who
-    # mints their own subject is subdivided by a limit, never bounded by
-    # one.
-    #
-    # 120 per five minutes, 30 at once. The burst is the shape of real
-    # use: an analyst pulling the samples for one intrusion clicks through
-    # a handful in a few seconds. The sustained rate -- one every 2.5
-    # seconds from a WHOLE egress address, since a customer is a unit
-    # behind one -- is an order of magnitude above any lab's real download
-    # rate and far below what the route costs to serve, because
-    # `SampleService.download` reads the object whole, XORs it byte by
-    # byte in Python, re-hashes it and ZIPs it.
-    #
-    # DENY on backend failure, with the other security-sensitive limits:
-    # an unmetered sample origin is the audit-write amplifier above, and
-    # the cost of failing closed is an analyst waiting for a download.
-    # `audit_every_seconds` is left at its default and is inert here --
-    # the dependency in `routers/samples.py` deliberately passes no
+    # Keyed on the peer address, the only subject that exists before a ticket is validated (a
+    # body-borne credential cannot be the key, for `credential_subject`'s reason). 120 per five
+    # minutes, 30 at once: an analyst pulling the samples for one intrusion clicks through a handful
+    # in a few seconds, and the sustained rate from a WHOLE egress address is far above any lab's
+    # real rate and far below what the route costs to serve (`SampleService.download` reads the
+    # object whole, XORs it in Python, re-hashes it and ZIPs it). DENY on backend failure.
+    # `audit_every_seconds` is inert here: the dependency in `routers/samples.py` passes no
     # connection, so a denial on this route is logged and never written.
     "sample.download": Limit(
         "sample.download", quota=120, per_seconds=300, scope=Scope.IP,
         burst=30, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F2 (2026-09-24). A read with venues projected to entities
-    # re-projects AND transforms: up to about 0.6 s of CPU and 52 MB at
-    # affiliation.MAX_DERIVED_TIES on the measuring host, where a plain read
-    # costs what GET /graph costs. So every one-mode analysis route spends
-    # this BESIDE its own meter (a plain read is charged exactly as before),
-    # and it fails closed with the other cost-bearing limits. Opening the
-    # pane with venues projected spends up to three (the stored suite, key
-    # player and roles); the pane checks currency with one batched call and
-    # at most once in 30 seconds while venues are projected, so background
-    # checks cannot empty the budget an explicit Run needs.
+    # A read with venues projected to entities re-projects AND transforms: up to about 0.6 s of CPU
+    # and 52 MB at affiliation.MAX_DERIVED_TIES, where a plain read costs what GET /graph costs.
+    # Every one-mode analysis route spends this BESIDE its own meter, and it fails closed with the
+    # other cost-bearing limits. Opening the pane with venues projected spends up to three; the pane
+    # checks currency with one batched call and at most once in 30 seconds, so background checks
+    # cannot empty the budget an explicit Run needs.
     "analytics.one_mode": Limit(
         "analytics.one_mode", quota=60, per_seconds=300, scope=Scope.USER,
         burst=20, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F1 (2026-09-24). CONCOR positions: 0.6 to 0.7 s typical at 1,000
-    # entities with ties on the first measuring host, 1.7 s worst with
-    # every split at the 50-round cap, 120 MB; the build host measured 1.1
-    # to 1.2 s and a 154 MB peak at 1,000 with memory tracing on. BLAS is
-    # capped to one thread per process (blockmodel.py). Its own bucket,
-    # like key player, so the Roles card cannot spend the suite's.
+    # CONCOR positions: 0.6 to 0.7 s typical at 1,000 entities with ties, 1.7 s worst with every
+    # split at the 50-round cap, 120 MB (1.1 to 1.2 s and a 154 MB peak with memory tracing on).
+    # BLAS is capped to one thread per process (blockmodel.py). Its own bucket, like key player, so
+    # the Roles card cannot spend the suite's.
     "analytics.concor": Limit(
         "analytics.concor", quota=10, per_seconds=300, scope=Scope.USER,
         burst=4, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # REGE, ROADMAP-REMAINING phase 3 (2026-10-02). Regular roles: about 2 s
-    # of CPU for the dearest view its caps admit (1,000 entities, 2,500 tied
-    # pairs, 5,000 tie directions) on the build host with every core busy, 0.3 to 1.5 s
-    # for a view counted as present (rege.py's REGE_MAX_PAIRS has the
-    # measurements; the first calibration said 2.1 s for a view that took 7.5
-    # to 8.3). At this quota one user can queue about 21 s
-    # of CPU on the one API process in five minutes, 8 s of it in a burst of
-    # four. CONCOR's numbers and its own bucket, so the second role card
-    # cannot spend the first's, and closed when the backend cannot count.
+    # REGE (regular roles): about 2 s of CPU for the dearest view its caps admit (1,000 entities,
+    # 2,500 tied pairs, 5,000 tie directions), 0.3 to 1.5 s for a view counted as present (rege.py's
+    # REGE_MAX_PAIRS has the measurements). At this quota one user can queue about 21 s of CPU on
+    # the one API process in five minutes. CONCOR's numbers and its own bucket, closed when the
+    # backend cannot count.
     "analytics.rege": Limit(
         "analytics.rege", quota=10, per_seconds=300, scope=Scope.USER,
         burst=4, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F11 and F12, 2026-09-24. Running static triage on demand
-    # decrypts a live sample and starts child processes, so it is a
-    # deliberate act on one sample, not something to loop. Similarity
-    # scores candidates in Python and a value search is a probe of what the
-    # lab holds, so it is tighter than search. Rule set writes are rare
-    # governance acts; the file view decompresses stored rule source.
+    # Running static triage on demand decrypts a live sample and starts child processes, so it is a
+    # deliberate act on one sample, not something to loop. Similarity scores candidates in Python
+    # and a value search is a probe of what the lab holds, so it is tighter than search. Rule set
+    # writes are rare governance acts; the file view decompresses stored rule source.
     "sample.triage": Limit(
         "sample.triage", quota=12, per_seconds=300, scope=Scope.USER,
         burst=4, on_backend_failure=OnBackendFailure.DENY,
@@ -743,44 +588,38 @@ LIMITS: dict[str, Limit] = {
         "yara.source", quota=60, per_seconds=300, scope=Scope.USER,
         burst=10, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # The collection foundation (2026-09-24). Creating a source, a persona
-    # or a binding: configuration of what the collector reads and as whom, set
-    # for standing a unit's collection up in one sitting, and closed when
-    # the backend cannot count.
+    # The collection foundation. Creating a source, a persona or a binding: configuration of what
+    # the collector reads and as whom, set for standing a unit's collection up in one sitting, and
+    # closed when the backend cannot count.
     "collection.config": Limit(
         "collection.config", quota=60, per_seconds=3600, scope=Scope.USER,
         burst=20, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # Collection authorities (docs/00 decision 69, 2026-09-24). Recording,
-    # extending, confirming and stopping a collection authority: each is a
-    # two-person act an officer reads.
+    # Collection authorities (docs/00 decision 69). Recording, extending, confirming and stopping a
+    # collection authority: each is a two-person act an officer reads.
     "collection.authority": Limit(
         "collection.authority", quota=30, per_seconds=3600, scope=Scope.USER,
         burst=10, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # S2, the egress proxy (2026-09-24). Every write to the egress
-    # configuration and the dry-run check. Configuration is where a boundary
-    # is quietly widened, and each write is step-up and audited; an
-    # administrator setting up routes makes tens of changes, never hundreds.
-    # DENY on backend failure with the other security-sensitive limits.
+    # The egress proxy. Every write to the egress configuration and the dry-run check. Configuration
+    # is where a boundary is quietly widened, and each write is step-up and audited; an
+    # administrator setting up routes makes tens of changes, never hundreds. DENY on backend failure
+    # with the other security-sensitive limits.
     "admin.egress": Limit(
         "admin.egress", quota=60, per_seconds=3600, scope=Scope.USER,
         burst=20, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # Comms F10c (2026-09-24). A Web Key Directory lookup request and
-    # its approval: each approval sends a request outside this deployment,
-    # so the meter fails closed, and twenty an hour is far above any
+    # A Web Key Directory lookup request and its approval: each approval sends a request outside
+    # this deployment, so the meter fails closed, and twenty an hour is far above any
     # investigation's need.
     "comms.key.lookup": Limit(
         "comms.key.lookup", quota=20, per_seconds=3600, scope=Scope.USER,
         burst=5, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F6.3 (embeddings, 2026-09-24). Every MEANING send the API makes
-    # (a free-text query in any column, and embedding a stored item on
-    # demand for a /similar call) spends one, BESIDE the 'search' meter every
-    # similarity route spends: a similarity crawl walking the corpus outward
-    # from one seed is a search exfiltration that also discloses to the
-    # model endpoint. Fails closed.
+    # Every MEANING send the API makes (a free-text query in any column, and embedding a stored item
+    # on demand for a /similar call) spends one, BESIDE the 'search' meter every similarity route
+    # spends: a similarity crawl walking the corpus outward from one seed is a search exfiltration
+    # that also discloses to the model endpoint. Fails closed.
     "search.meaning": Limit(
         "search.meaning", quota=60, per_seconds=60, scope=Scope.USER, burst=20,
         on_backend_failure=OnBackendFailure.DENY,
@@ -791,36 +630,33 @@ LIMITS: dict[str, Limit] = {
         "embedding.pass", quota=30, per_seconds=3600, scope=Scope.USER, burst=5,
         on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F8 and F7 (2026-09-24). Requeue, Drain now and every Jira or
-    # provider configuration write: each can send real mail or real case
-    # material out, so they fail closed.
+    # Requeue, Drain now and every Jira or provider configuration write: each can send real mail or
+    # real case material out, so they fail closed.
     "integration.write": Limit(
         "integration.write", quota=60, per_seconds=3600, scope=Scope.USER,
         burst=20, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F7 Test and the F15.3 provider test reach a live third party.
+    # The integration test and the provider test reach a live third party.
     "integration.test": Limit(
         "integration.test", quota=20, per_seconds=3600, scope=Scope.USER,
         burst=5, on_backend_failure=OnBackendFailure.DENY,
         audit_every_seconds=60,
     ),
-    # F15.3 (2026-09-24). A lookup, a sign-off and a batch commit each
-    # may send a case selector to a provider.
+    # A lookup, a sign-off and a batch commit each may send a case selector to a provider.
     "lookup.request": Limit(
         "lookup.request", quota=120, per_seconds=3600, scope=Scope.USER,
         burst=20, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F15.4. A plan resolves up to 501 subjects and runs every gate on
-    # each without sending, so it is metered as the read it is.
+    # A plan resolves up to 501 subjects and runs every gate on each without sending, so it is
+    # metered as the read it is.
     "lookup.plan": Limit(
         "lookup.plan", quota=30, per_seconds=3600, scope=Scope.USER,
         burst=10, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F13 and F14, 2026-09-24. A list import parses, copies and indexes
-    # a file and then screens every held sample; a pass started from the
-    # console runs up to 20 seconds of database work. Both are rare
-    # governance acts. A detonation request, sign-off or cancel decides
-    # whether a live sample leaves for a sandbox, so it is never looped.
+    # A list import parses, copies and indexes a file and then screens every held sample; a pass
+    # started from the console runs up to 20 seconds of database work. Both are rare governance
+    # acts. A detonation request, sign-off or cancel decides whether a live sample leaves for a
+    # sandbox, so it is never looped.
     "screening.import": Limit(
         "screening.import", quota=10, per_seconds=3600, scope=Scope.USER,
         burst=3, on_backend_failure=OnBackendFailure.DENY,
@@ -833,11 +669,9 @@ LIMITS: dict[str, Limit] = {
         "sample.detonate", quota=20, per_seconds=3600, scope=Scope.USER,
         burst=5, on_backend_failure=OnBackendFailure.DENY,
     ),
-    # F5.2 and F5.3 (telegram, 2026-09-24). Every attended act a
-    # persona performs on Telegram (looking a chat up, joining, checking
-    # membership, rebinding): each is seen by Telegram as that account, and
-    # a burst of them is what its anti-abuse systems ban. Stopping a chat
-    # carries none of this: stopping is always allowed.
+    # Every attended act a persona performs on Telegram (looking a chat up, joining, checking
+    # membership, rebinding): each is seen by Telegram as that account, and a burst of them is what
+    # its anti-abuse systems ban. Stopping a chat carries none of this: stopping is always allowed.
     "collection.persona_act": Limit(
         "collection.persona_act", quota=20, per_seconds=3600, scope=Scope.USER,
         burst=5, on_backend_failure=OnBackendFailure.DENY,
@@ -907,25 +741,18 @@ class RateLimiter:
     def should_audit(self, name: str, subject: str) -> bool:
         """True at most once per `audit_every_seconds` for this subject.
 
-        `audit.event` is append-only and hash-chained, and the chain
-        trigger takes an advisory lock so rows serialise. Auditing every
-        denial would therefore let a caller who is ALREADY being throttled
-        convert their rejected requests into unbounded, serialised,
-        undeletable writes -- a rate limiter that hands an attacker a
-        better denial of service than the one it blocks. One row per
-        window records the campaign; the count is in the access log.
+        `audit.event` is append-only and hash-chained, and the chain trigger takes an advisory lock
+        so rows serialise. Auditing every denial would let a caller who is ALREADY being throttled
+        convert their rejected requests into unbounded, serialised, undeletable writes: a rate
+        limiter that hands an attacker a better denial of service than the one it blocks. One row
+        per window records the campaign; the count is in the access log.
 
-        An unreachable backend means DO NOT audit, not "audit everything".
-
-        That looks backwards for a moment and is not. The backend being
-        unreachable is the SAME condition that makes every DENY-policy limit
-        refuse every request -- so a throttle that failed open would, during
-        an outage, turn each of those refusals into a serialised,
-        undeletable append-only write. The outage would author the exact
-        flood the throttle exists to prevent. The outage itself is already
-        logged loudly by `check()`, so nothing goes unrecorded; what is lost
-        is one audit row per subject, during a window in which the audit log
-        is the thing under threat.
+        An unreachable backend means DO NOT audit, not "audit everything". The backend being
+        unreachable is the SAME condition that makes every DENY-policy limit refuse every request,
+        so a throttle that failed open would turn each of those refusals into a serialised,
+        undeletable write: the outage would author the exact flood the throttle exists to prevent.
+        The outage is already logged loudly by `check()`, so what is lost is one audit row per
+        subject, during a window in which the audit log is the thing under threat.
         """
         limit = self.limit(name)
         try:

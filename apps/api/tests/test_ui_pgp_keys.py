@@ -1,4 +1,4 @@
-"""The case key registry in the console (F10b, comms, 2026-09-24).
+"""The case key registry in the console (comms).
 
 User IDs are attacker text: they reach the page through visibleText and
 textContent only. Fingerprints are drawn in groups of four; times through

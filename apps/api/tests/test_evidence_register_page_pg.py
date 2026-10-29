@@ -1,26 +1,22 @@
-"""docs/17, "the register grows with the case" (Beta 1.1).
+"""docs/17, "the register grows with the case".
 
-The register counted what EVERY exhibit of the case backs (its "backs
-nothing" figure was `count(*) FILTER (WHERE backs = 0)` over the case's
-exhibits, each with two counting subqueries), so a page cost more as the case
-grew: 2.4 s at 15,000 exhibits, and 5.7 s measured here on 15,300. What an
-exhibit backs, as numbers, is counted for the rows of the PAGE now; the
-case-wide figure and the "backs nothing" filter ask each exhibit only whether
-it backs anything, which stops at the first live attachment.
+What an exhibit backs, as numbers, is counted only for the rows of the PAGE; the case-wide figure and the
+"backs nothing" filter ask each exhibit only whether it backs anything, which stops at the first live
+attachment. Counting what EVERY exhibit of the case backs (`count(*) FILTER (WHERE backs = 0)` over all
+exhibits, each with two counting subqueries) makes a page cost more as the case grows.
 
-The page must say the same things it said. The existing register tests hold
-that (`test_evidence_register_pg.py`); these hold the cost:
+The page must say the same things regardless. The register tests hold that (`test_evidence_register_pg.py`);
+these hold the cost:
 
-- an exhibit with many attachments that is not on the page is not counted: the
-  request reads a bounded number of entities however many it carries;
+- an exhibit with many attachments that is not on the page is not counted: the request reads a bounded
+  number of entities however many it carries;
 - on the page that shows it, its counts are exact.
 
-The work is counted, not timed: index scans on `core.node` in this
-transaction (`pg_stat_xact_user_tables`), with hash and merge joins and
-sequential scans off so every lookup of an attached entity is one index scan.
+The work is counted, not timed: index scans on `core.node` in this transaction
+(`pg_stat_xact_user_tables`), with hash and merge joins and sequential scans off so every lookup of an
+attached entity is one index scan.
 
-Everything is created inside one transaction that is rolled back. Env-gated
-on DATABASE_URL.
+Everything is created inside one transaction that is rolled back. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

@@ -1,11 +1,9 @@
-"""Legal hold and the purge for Telegram documents (roadmap F5.3,
-2026-09-24; docs/00 decision 74).
+"""Legal hold and the purge for Telegram documents (docs/00 decision 74).
 
-The hold itself is the collection foundation's (proven there across
-every citation path); these are the Telegram-named cases: a Telegram
-document cited in a held case survives the deployment-wide purge with its
-capture record, and an uncited expired one goes with the identities its
-capture record held. DATABASE_URL-gated.
+The hold itself is the collection foundation's (proven there across every citation path); these are the
+Telegram-named cases: a Telegram document cited in a held case survives the deployment-wide purge with its
+capture record, and an uncited expired one goes with the identities its capture record held.
+DATABASE_URL-gated.
 """
 from __future__ import annotations
 

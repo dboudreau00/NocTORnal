@@ -1,19 +1,12 @@
-"""N2 (2026-09-02): three registered notification kinds had no producer.
+"""Three registered notification kinds must have a producer.
 
-`notifications.KINDS` registered EVIDENCE_INTEGRITY_ALARM at URGENT -- one
-of two priority-1 kinds in the system -- and nothing raised it. The string
-existed in `evidence.py` only as an AUDIT action on the incidental read
-path, and the explicit POST /verify path wrote a HASH_VERIFIED custody row
-and nothing else on a mismatch. PROPOSAL_QUEUED had a wording function
-(`notify_events.proposals_queued`) that no router called. CASE_REVIEW_DUE
-had a description and nothing behind it.
+A kind in the preferences panel that can never fire is a promise the system makes to the analyst and does
+not keep. These tests hold each of the three to a producer: EVIDENCE_INTEGRITY_ALARM (a priority-1 kind,
+raised on a mismatch from both the incidental read path and the explicit POST /verify path),
+PROPOSAL_QUEUED (`notify_events.proposals_queued`) and CASE_REVIEW_DUE.
 
-A kind in the preferences panel that can never fire is a promise the
-system makes to the analyst and does not keep. These tests hold each of
-the three to a producer.
-
-**The email prefix is `nprod-` and must stay unique.** Document titles
-are `nprod-` too, for the capture leg's cleanup.
+The email prefix is `nprod-` and must stay unique. Document titles are `nprod-` too, for the capture leg's
+cleanup.
 
 Env-gated on DATABASE_URL; the evidence legs also need MINIO_ENDPOINT.
 """
@@ -57,14 +50,9 @@ def conn():
     ours = (f"(SELECT id FROM notify.notification "
             f"  WHERE recipient_id IN {sub} OR actor_id IN {sub})")
     with c.transaction():
-        # The officer copies FIRST, and before the originals they point at.
-        # `escalation_to_officer` is case-less and goes to a real
-        # SECURITY_OFFICER of this database, so neither clause below
-        # reaches it: the integrity-alarm test's escalations outlived the
-        # suite. Harmless while `dispatch_due` sent what it raised in the
-        # same pass; once the producers moved below the drain loop
-        # (2026-09-02) the leftovers stayed PENDING and URGENT and the next
-        # suite's drain sent them first. See the same note in
+        # The officer copies first, and before the originals they point at. `escalation_to_officer` is
+        # case-less and goes to a real SECURITY_OFFICER of this database, so neither clause below reaches it;
+        # leftovers stay PENDING and URGENT and the next suite's drain sends them first. See the same note in
         # test_notify_escalation_pg.py.
         esc = (f"(SELECT id FROM notify.notification WHERE kind = 'ESCALATION' "
                f"   AND object_type = 'notification' AND object_id IN {ours})")
@@ -126,29 +114,18 @@ def _make_user(conn, *, clearance="AMBER", global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted as `scripts/bootstrap.py session` does: the account by email, then
+    `SessionService` against the store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent); only `NOCTORNAL_SESSION_STRICT_BINDING` refuses that, and it is off
+    here. It skips `POST /auth/login`, which answers 204 with the token only in `__Host-session`, and
+    TOTP codes are single-use within a 30-second step.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as the real mint sites pass: step-up gated routes refuse a session without it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -193,12 +170,9 @@ def _owner_case_and_tampered_exhibit(conn, client):
         data={"title": "ransom note screenshot", "acquisition_method": "MANUAL_UPLOAD"})
     assert up.status_code == 201, up.text
     ev_id = up.json()["evidence_id"]
-    # Doctor the recorded hash: the bytes in WORM storage cannot be changed,
-    # which is the point of WORM, so the mismatch is manufactured on the
-    # other side of the comparison.
-    # Since 0140 the anchors are fixed for every role, so this is an owner's
-    # tamper with the guard disabled by name (evidence-integrity-anchors-
-    # mutable, 2026-10-03).
+    # Doctor the recorded hash: the bytes in WORM storage cannot be changed, so the mismatch is manufactured
+    # on the other side of the comparison. The anchors are fixed for every role (0140), so this is an owner's
+    # tamper with the guard disabled by name.
     with conn.transaction():
         conn.execute("ALTER TABLE core.evidence DISABLE TRIGGER evidence_anchors_fixed")
         conn.execute("UPDATE core.evidence SET sha256 = %s WHERE id = %s",
@@ -259,28 +233,19 @@ def test_a_mismatch_found_on_read_raises_the_alarm_too(conn, client):
 def test_re_reading_a_tampered_exhibit_does_not_mint_another_alarm(conn, client):
     """The read path is not an outbound-email amplifier.
 
-    Before 2026-09-02 `evidence_integrity_alarm` was a bare
-    `notify_case_owner` with no dedupe, no idempotence key and no throttle,
-    fired from BOTH detection sites -- `_fetch_verified` (every read) and
-    `verify_integrity` (every explicit verify). Neither
-    `GET /cases/{id}/evidence/{id}/content` nor `POST /{id}/verify` carries
-    a `rate_limit` dependency, and `notify.notification` has no unique
-    constraint. So any caller holding `evidence.read` on a case with one
-    corrupt exhibit minted one priority-1 notification and one PENDING SMTP
-    delivery to the case owner PER REQUEST -- on a path that had previously
-    written only a cheap internal audit row. Suppression 1 was no defence:
-    the owner is the recipient and the looper is anybody else.
+    `evidence_integrity_alarm` is deduplicated across both detection sites, `_fetch_verified` (every read)
+    and `verify_integrity` (every explicit verify). Neither `GET /cases/{id}/evidence/{id}/content` nor
+    `POST /{id}/verify` carries a `rate_limit` dependency, and `notify.notification` has no unique
+    constraint, so without dedupe any caller holding `evidence.read` on a case with one corrupt exhibit would
+    mint one priority-1 notification and one PENDING SMTP delivery to the case owner per request.
 
-    The second half is why this is more than volume. Because the owner IS
-    the recipient, `notifications.escalate_unacknowledged` skips
-    `escalation_to_owner` and fans EVERY one of those alarms out to EVERY
-    active SECURITY_OFFICER, repeating each drain until each is
-    acknowledged individually -- so the party with the motive to bury the
-    tamper alarm could drown it in copies of itself.
+    It is more than volume. Because the owner is the recipient, `notifications.escalate_unacknowledged`
+    skips `escalation_to_owner` and fans every alarm out to every active SECURITY_OFFICER, repeating each
+    drain until each is acknowledged individually, so the party with the motive to bury the tamper alarm
+    could drown it in copies of itself.
 
-    This test therefore reads both sides: three detections through
-    `evidence.py` must leave ONE alarm in `notify_events.py`, and therefore
-    ONE fan-out through `notifications.py`, not three.
+    This test reads both sides: three detections through `evidence.py` must leave one alarm in
+    `notify_events.py`, and so one fan-out through `notifications.py`, not three.
     """
     from noctornal_api.evidence import EvidenceService, EvidenceStorage, IntegrityError
     from noctornal_api.notifications import NotificationService, escalate_unacknowledged
@@ -366,8 +331,8 @@ def test_a_capture_that_queues_proposals_tells_the_owner(conn, client):
 @pytest.mark.parametrize("count, noun, verb", [(1, "proposal", "is"),
                                                (3, "proposals", "are")])
 def test_the_queued_notice_agrees_in_number(conn, client, count, noun, verb):
-    """README screenshot set review, 2026-09-23: the text is stored and read
-    verbatim, and the inbox printed "3 proposal(s) were raised"."""
+    """The text is stored and read verbatim, so the notice must agree in number itself (a plural noun with a
+    singular count reads wrong)."""
     from noctornal_api import notify_events
 
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
@@ -383,23 +348,16 @@ def test_the_queued_notice_agrees_in_number(conn, client, count, noun, verb):
 
 
 def test_a_capture_notification_failure_is_null_not_false(conn, client, monkeypatch):
-    """The document and the proposals committed before the notify write;
-    a 500 here would tell the analyst the capture failed, and they would
-    paste it again.
+    """The document and the proposals committed before the notify write; a 500 here would tell the analyst
+    the capture failed, and they would paste it again.
 
-    And the failure is reported as `null`, NOT `false`. Until 2026-09-02
-    the except path returned False -- the same value the endpoint uses for
-    "there were no proposals" and "the owner is the person who pasted it"
-    -- so a broken notifier and a deliberate suppression read identically
-    to every caller. `NotificationService.notify` returns None for
-    suppressed precisely to keep "we decided not to" apart from "we tried
-    and could not"; conflating them one file downstream is this codebase's
-    signature defect, a failure reported as the wrong thing rather than as
-    a crash.
+    A notify failure is reported as `null`, not `false`. `false` is what the endpoint uses for "there were
+    no proposals" and "the owner is the person who pasted it", so a broken notifier and a deliberate
+    suppression would read identically to every caller. `NotificationService.notify` returns None for
+    suppressed to keep "we decided not to" apart from "we tried and could not".
 
-    `test_a_capture_that_queues_proposals_tells_the_owner` pins the True
-    end of the same field; False remains what `proposals_queued` returns
-    when it deliberately said nothing.
+    `test_a_capture_that_queues_proposals_tells_the_owner` pins the True end of the same field; False
+    remains what `proposals_queued` returns when it deliberately said nothing.
     """
     from noctornal_api import notify_events
 

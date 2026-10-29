@@ -1,16 +1,10 @@
-"""Administration, Egress: where anything may leave this deployment
-(S2, 2026-09-24; docs/00 decision 68).
+"""Administration, Egress: where anything may leave this deployment (docs/00 decision 68).
 
-Reads (the overview, the connection log, its verification and the dry-run
-check) need egress.log.read, held by SYS_ADMIN and SECURITY_OFFICER; the
-log and the overview are filtered by the caller's own clearance. Every
-write needs egress.manage, a step-up permission held by SYS_ADMIN, and is
-metered by admin.egress. The service (egress_admin.py) audits each one.
-
-An exit's host, port, user name and password arrive in one request body,
-are sealed for the egress proxy, and appear in no response, no audit
-detail and no log line. A 422 names the field and never echoes the value
-(http/app.py's validation handler).
+Reads need egress.log.read (SYS_ADMIN, SECURITY_OFFICER) and are filtered by the caller's own
+clearance. Every write needs the step-up egress.manage (SYS_ADMIN), is metered by admin.egress and
+is audited by egress_admin.py. An exit's host, port, user name and password are sealed for the
+egress proxy and appear in no response, audit detail or log line; a 422 names the field and never
+echoes the value.
 """
 from __future__ import annotations
 
@@ -42,10 +36,9 @@ router = APIRouter(prefix="/admin/egress", tags=["admin"])
 MANAGE = "egress.manage"
 READ = "egress.log.read"
 _WRITE = [Depends(rate_limit("admin.egress"))]
-#: Every write lands on a system connection (0179, Beta 1.1): the egress
-#: tables are read-only to the request role, so a statement injected into
-#: a request cannot add a route or widen a profile without this gate, its
-#: step-up and the service's audit row.
+#: Every write lands on a system connection (0179): the egress tables are read-only to the request
+#: role, so a statement injected into a request cannot add a route or widen a profile without this
+#: gate, its step-up and the service's audit row.
 _CONFIG = system_conn(SystemPurpose.CONFIGURATION)
 
 

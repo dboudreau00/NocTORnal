@@ -1,11 +1,9 @@
-"""The route provider behind egress.route_for (S2, 2026-09-24; docs/20
-sections 6.2 and 7).
+"""The route provider behind egress.route_for (docs/20 sections 6.2 and 7).
 
-Every decision-table cell that involves the provider, with real rows:
-development DIRECT under a profile's policy, under the declared rules where
-no administrator route exists and under the built-in passive policy where
-no passive default does; PROXY with the token and the same policy the proxy
-builds; production without a proxy refused. Env-gated on DATABASE_URL.
+Every decision-table cell that involves the provider, with real rows: development DIRECT under a profile's
+policy, under the declared rules where no administrator route exists and under the built-in passive policy
+where no passive default does; PROXY with the token and the same policy the proxy builds; production
+without a proxy refused. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

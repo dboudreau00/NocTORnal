@@ -1,7 +1,6 @@
-"""The five-part access check — the single gate every endpoint calls.
+"""The five-part access check: the single gate every endpoint calls.
 
-docs/05: authorisation is RBAC for verbs, ABAC for rows, and access is
-granted iff ALL FIVE hold:
+docs/05: authorisation is RBAC for verbs, ABAC for rows, and access is granted iff all five hold:
 
     role grants the permission                     (verb)
   ∧ user is assigned to the case, unexpired        (relationship)
@@ -9,14 +8,12 @@ granted iff ALL FIVE hold:
   ∧ object.compartments ⊆ user.compartments        (need to know)
   ∧ session MFA fresh if the permission needs it    (assurance)
 
-Scattering these across endpoints is how access bugs ship, so there is
-exactly one evaluator. It is a pure function of a resolved AccessContext
-(facts fetched by the caller / resolver), which makes it exhaustively
-testable — including the invariant that removing ANY one of the five
-checks changes a decision.
+Scattering these across endpoints is how access bugs ship, so there is exactly one evaluator. It is a pure
+function of a resolved AccessContext (facts fetched by the caller or resolver), which makes it exhaustively
+testable, including the invariant that removing any one of the five checks changes a decision.
 
-All five are evaluated with no short-circuit, so the audit trail can see
-every reason a request failed, and `Decision.failed_checks` names them.
+All five are evaluated with no short-circuit, so the audit trail sees every reason a request failed, and
+`Decision.failed_checks` names them.
 """
 from __future__ import annotations
 

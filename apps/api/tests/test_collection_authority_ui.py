@@ -1,10 +1,8 @@
-"""The collection authorities on the Oversight view, as the console ships
-them (2026-09-24; docs/00 decision 69).
+"""The collection authorities on the Oversight view, as the console ships them (docs/00 decision 69).
 
-Pure: no database. A security officer confirms, as the second person, each
-authority a collection manager recorded and each source under it; the
-section is built in JS and mounted on the deployment view only. The server
-half is test_collection_authority_http_e2e.py.
+Pure: no database. A security officer confirms, as the second person, each authority a collection
+manager recorded and each source under it; the section is built in JS and mounted on the deployment
+view only. The server half is test_collection_authority_http_e2e.py.
 """
 from __future__ import annotations
 

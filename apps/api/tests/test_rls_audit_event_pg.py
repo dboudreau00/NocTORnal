@@ -1,32 +1,26 @@
-"""Row-level security on the audit log (F51, 2026-10-02).
+"""Row-level security on the audit log.
 
-0168 puts `audit.event` under a policy of its own (CUSTOM_AUDIT): a request
-reads a row in a case it may read, a case-less row it wrote, every row
-under a global `audit.read`, or a case-less `ingest` row under a global
-`ingest.manage`, and appends any row but a state-bearing one naming a case
-it may not read (0176, test_rls_audit_append_pg.py). Each test runs the policy, a reader
-or a route as the request role, bound by a real session's proof, or as the
-system role, with the fixtures seeded as the owner (rls_support); the
+0168 puts `audit.event` under a policy of its own (CUSTOM_AUDIT): a request reads a row in a case it may
+read, a case-less row it wrote, every row under a global `audit.read`, or a case-less `ingest` row under a
+global `ingest.manage`, and appends any row but a state-bearing one naming a case it may not read (0176,
+test_rls_audit_append_pg.py). Each test runs the policy, a reader or a route as the request role, bound by
+a real session's proof, or as the system role, with the fixtures seeded as the owner (rls_support); the
 routes run in production's shape (NOCTORNAL_TEST_ASSUME_ROLE):
 
-- each of the four terms admits what it should and nothing else, and an
-  unbound connection reads nothing;
-- every writer appends, a row it may not read included, and nobody
-  changes one;
-- appends by the owner, the system role, a bound request and an unbound
-  one, interleaved and then all at once, chain to the true tail and
-  verify (0149);
-- the countersigning rule still sees an administrator's reset of the
-  signer's account, which the signer may not read (0166);
-- the break-glass queue reads each grant's invoke row for a reviewer who
-  does not hold audit.read (BREAK_GLASS);
-- the Lab's policy block says when screening last ran to an analyst who
-  may read none of the pass rows (0167);
-- a record attached out of quarantine keeps the triage state and the
-  classifier's category its case's team reads, and the operator's view of
-  it is unchanged;
-- the policy is initplans only, a SELECT and an INSERT policy, and every
-  database function that reads the log runs as the definer.
+- each of the four terms admits what it should and nothing else, and an unbound connection reads nothing;
+- every writer appends, a row it may not read included, and nobody changes one;
+- appends by the owner, the system role, a bound request and an unbound one, interleaved and then all at
+  once, chain to the true tail and verify (0149);
+- the countersigning rule still sees an administrator's reset of the signer's account, which the signer
+  may not read (0166);
+- the break-glass queue reads each grant's invoke row for a reviewer who does not hold audit.read
+  (BREAK_GLASS);
+- the Lab's policy block says when screening last ran to an analyst who may read none of the pass rows
+  (0167);
+- a record attached out of quarantine keeps the triage state and the classifier's category its case's team
+  reads, and the operator's view of it is unchanged;
+- the policy is initplans only, a SELECT and an INSERT policy, and every database function that reads the
+  log runs as the definer.
 
 Gated like the other row-security tests. Account prefix `rlsau-`.
 """
@@ -62,9 +56,8 @@ def owner(monkeypatch):
 
 
 def _drop_reviewer_role(c) -> None:
-    """The custom role the break-glass queue test makes (2026-10-03: it was left behind,
-    holding break_glass.review, on every
-    reused database). The accounts that held it are gone by now."""
+    """The custom role the break-glass queue test makes; it must not outlive the test, since it holds
+    break_glass.review. The accounts that held it are gone by now."""
     c.execute("DELETE FROM iam.user_role WHERE role_key = %s", (REVIEWER_ROLE,))
     c.execute("DELETE FROM iam.role_permission WHERE role_key = %s", (REVIEWER_ROLE,))
     c.execute("DELETE FROM iam.role WHERE key = %s", (REVIEWER_ROLE,))
@@ -256,12 +249,10 @@ def test_the_policy_is_initplans_only_and_reads_and_appends(owner):
         """SELECT cmd, coalesce(with_check, '') FROM pg_policies
             WHERE schemaname = 'audit' AND tablename = 'event'""").fetchall()}
     assert {cmd for cmd, _check in policies} == {"SELECT", "INSERT"}
-    # Every writer appends but a state-bearing row naming a case it may not
-    # read (0176, Beta 1.1; test_rls_audit_append_pg.py proves both halves).
-    # What a request may NAME is not the policy's to say: 0150's trigger pins
-    # it before the policy is checked, and says it once
-    # (`test_ledger_isolation_clock_pg.
-    # test_the_attribution_pin_holds_with_the_insert_policy_in_place`).
+    # Every writer appends but a state-bearing row naming a case it may not read (0176;
+    # test_rls_audit_append_pg.py proves both halves). What a request may NAME is not the policy's to
+    # say: 0150's trigger pins it before the policy is checked
+    # (`test_ledger_isolation_clock_pg.test_the_attribution_pin_holds_with_the_insert_policy_in_place`).
     (check,) = [c for cmd, c in policies if cmd == "INSERT"]
     assert "<> ALL" in check and "iam.rls_cases()" in check, check
     triggers = [r[0] for r in owner.execute(
@@ -335,14 +326,11 @@ def test_interleaved_appends_by_every_role_chain_to_the_true_tail(owner):
 
 
 def test_concurrent_appends_by_every_role_form_one_chain(owner):
-    """The same four writers at once. The chain trigger takes its lock, then
-    draws `seq`, then reads the tail (0149), so the rows form ONE linked list
-    off the old tail: every predecessor a real row, none claimed twice. It
-    failed 9 times in 15 where the draw came first and two writers could take
-    the lock in the opposite order to their seqs (2026-10-03), and
-    is held to 20 passes in 20 runs (`test_ledger_chain_g49_pg.py` holds the
-    same for every role over 20 rounds, and `test_ledger_isolation_clock_pg.py`
-    holds the order itself, without a race)."""
+    """The same four writers at once. The chain trigger takes its lock, then draws `seq`, then reads the
+    tail (0149), so the rows form ONE linked list off the old tail: every predecessor a real row, none
+    claimed twice. Drawing first would let two writers take the lock in the opposite order to their seqs.
+    Held to 20 passes in 20 runs (`test_ledger_chain_pg.py` holds the same for every role over 20
+    rounds, and `test_ledger_isolation_clock_pg.py` holds the order itself, without a race)."""
     import threading
 
     from noctornal_api.audit_verify import verify_chain
@@ -569,7 +557,7 @@ def test_an_attached_record_keeps_its_triage_and_category_for_the_case_team(
 
 
 # ---------------------------------------------------------------------------
-# Records attached BEFORE 0168 (2026-10-03)
+# Records attached before 0168
 # ---------------------------------------------------------------------------
 
 def _migration(prefix: str):
@@ -706,10 +694,9 @@ def test_the_upgrade_carries_the_state_of_records_attached_before_it(owner, clie
 
 
 def test_a_failed_carry_leaves_the_record_in_quarantine(owner, monkeypatch):
-    """The attach, its audit row and the carried state are one transaction
-    (2026-10-03). A carry that fails after the UPDATE used to
-    leave the record attached with no state, and a retry was refused because
-    the record is no longer in quarantine."""
+    """The attach, its audit row and the carried state are one transaction. A carry that fails after the
+    UPDATE must not leave the record attached with no state: a retry would be refused because the record
+    is no longer in quarantine."""
     from noctornal_api.ingest import IngestService
     from noctornal_api.rawstore import InMemoryRawStorage
 
@@ -742,10 +729,8 @@ def test_a_failed_carry_leaves_the_record_in_quarantine(owner, monkeypatch):
 
 
 def test_the_role_the_queue_test_makes_does_not_outlive_it(owner):
-    """Last in the file, after the break-glass queue test and its teardown
-    (2026-10-03: the role it makes was left holding
-    break_glass.review on every reused database). A leftover from an earlier
-    run fails it too."""
+    """Last in the file, after the break-glass queue test and its teardown: the role that test makes must
+    not be left holding break_glass.review. A leftover from an earlier run fails it too."""
     assert s.count(owner, "SELECT count(*) FROM iam.role_permission "
                           "WHERE role_key = %s", (REVIEWER_ROLE,)) == 0
     assert s.count(owner, "SELECT count(*) FROM iam.role WHERE key = %s",

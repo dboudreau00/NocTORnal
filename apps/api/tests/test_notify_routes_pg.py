@@ -1,13 +1,10 @@
-"""Email and webhooks on their integration routes (docs/00 decision 68, F8,
-2026-09-24): SMTP dials through pinned_http.open_connection on the route
-"smtp", the webhook posts through pinned_http.fetch_response on the route
-"webhook" and follows no redirect, a missing or refusing route HOLDS
-deliveries rather than failing them, and production refuses http:// at
-boot and at send time.
+"""Email and webhooks on their integration routes (docs/00 decision 68): SMTP dials through
+pinned_http.open_connection on the route "smtp", the webhook posts through pinned_http.fetch_response on the
+route "webhook" and follows no redirect, a missing or refusing route holds deliveries rather than failing
+them, and production refuses http:// at boot and at send time.
 
-Nothing here reaches a real relay or hook: open_connection and
-fetch_response are replaced by recorders. **The email prefix is `nroute-`.**
-Env-gated on DATABASE_URL.
+Nothing here reaches a real relay or hook: open_connection and fetch_response are replaced by recorders.
+The email prefix is `nroute-`. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

@@ -1,16 +1,10 @@
-"""The persona key ring: the one key that opens a collection persona's
-credential, and in production only the collector holds it (ROADMAP-REMAINING
-"A collector process", 2026-10-02).
+"""The persona key ring: the one key that opens a collection persona's credential, and in production only
+the collector holds it.
 
-Until 2026-10-02 a persona credential was sealed under NOCTORNAL_TOTP_KEK,
-the ring that also seals every TOTP secret, victim credential, sample data
-key and integration credential, so every process holding that ring (the
-API, the cron loop, the Lab workers) could open every persona. Decision 30
-deferred a collector process "behind L3 and a queue nothing has needed";
-the owner reversed that on 2026-10-02. A persona credential now seals under
-a key of its own, held by the collector service alone: the API holds no
-persona key, so no code path in it can open a persona credential, however
-it is written.
+A persona credential seals under a key of its own, held by the collector service alone, not under
+NOCTORNAL_TOTP_KEK (the ring that also seals every TOTP secret, victim credential, sample data key and
+integration credential). The API holds no persona key, so no code path in it can open a persona
+credential, however it is written. This is the collector process of decision 30.
 
 ## The ring
 
@@ -23,22 +17,18 @@ The same shape as `envelope`'s, under its own names:
     NOCTORNAL_PERSONA_KEK_RETIRED   "id=base64,...": keys that may still
                                     OPEN and never seal.
 
-The ids begin "persona:" so that a row says which ring sealed it. A persona
-credential recorded under any other id (`env:v1`, a NULL id, any TOTP ring
-id) was sealed before the split, and this module refuses it by name:
-`scripts/rewrap_secrets.py --persona --apply`, run where both keys are
-held, moves it here. Nothing on a request path opens the TOTP ring for a
-persona.
+The ids begin "persona:" so that a row says which ring sealed it. A persona credential recorded under any
+other id (`env:v1`, a NULL id, any TOTP ring id) is sealed under the TOTP ring, and this module refuses it
+by name: `scripts/rewrap_secrets.py --persona --apply`, run where both keys are held, moves it here.
+Nothing on a request path opens the TOTP ring for a persona.
 
 ## Who may hold it
 
-In production, the collector: the process the compose file marks with
-NOCTORNAL_COLLECTOR=1 (the collector service alone). `_load_kek` refuses
-anywhere else, so a key that reached another process by mistake still
-opens nothing there, and `config.verify_environment` refuses that process's
-start first. In development any process may hold it, which is what the
-inline mode (NOCTORNAL_COLLECTOR_INLINE, persona_acts.py) runs on. Nothing
-here ever prints key material.
+In production, the collector: the process the compose file marks with NOCTORNAL_COLLECTOR=1 (the collector
+service alone). `_load_kek` refuses anywhere else, so a key that reached another process by mistake still
+opens nothing there, and `config.verify_environment` refuses that process's start first. In development any
+process may hold it, which is what the inline mode (NOCTORNAL_COLLECTOR_INLINE, persona_acts.py) runs on.
+Nothing here ever prints key material.
 """
 from __future__ import annotations
 
@@ -88,8 +78,7 @@ class PersonaKeyUnavailable(envelope.KeyUnavailable):
 
 
 class SealedBeforeSplit(PersonaKeyUnavailable):
-    """A persona credential still recorded under a TOTP ring id: sealed
-    before 2026-10-02. Refused by name, with the fix."""
+    """A persona credential still recorded under a TOTP ring id. Refused by name, with the fix."""
 
     def __init__(self, key_id: str | None):
         shown = key_id or envelope.DEFAULT_KEY_ID
@@ -132,8 +121,7 @@ def is_persona_key_id(key_id: str | None) -> bool:
 
 
 def _guard() -> None:
-    """In production the key is opened by the collector alone, whatever
-    else the process holds (decided 2026-10-02)."""
+    """In production the key is opened by the collector alone, whatever else the process holds."""
     if _production(os.environ) and not is_collector():
         raise PersonaKeyError(
             f"in production a persona credential is opened by the collector "
@@ -239,11 +227,10 @@ def decrypt(blob: bytes, *, key_id: str | None) -> str:
 
 
 def refusal_sentence(exc: BaseException, key_id: str | None) -> str:
-    """One sentence for a persona credential that would not open: what
-    happened, and the way out, never a byte of it (2026-10-03:
-    a key that changed under its id surfaced as a generic 500 and a class
-    name in a log). Called with a member of `UNOPENABLE` or a
-    `PersonaKeyError`."""
+    """One sentence for a persona credential that would not open: what happened, and the way out, never a
+    byte of it.
+
+    Called with a member of `UNOPENABLE` or a `PersonaKeyError`."""
     if isinstance(exc, InvalidTag):
         return (f"the persona key with id {key_id!r} does not open this "
                 f"persona's credential: the key changed and the id did not "

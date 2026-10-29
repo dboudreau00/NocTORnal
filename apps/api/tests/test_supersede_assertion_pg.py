@@ -1,34 +1,28 @@
-"""Giving a claim that never had an observation date one, by supersession
-(docs/00 open question 11, settled by the owner 2026-10-02; migration 0131).
+"""Giving a claim that never had an observation date one, by supersession (docs/00 open question 11;
+migration 0131).
 
-Claims accepted from Triage before Alpha 6 carry no `observed_at`. Writing a
-date onto a recorded claim rewrites it, which invariant 5 forbids, and the
-owner decided it is NOT amended. The way a claim gains a date is the
-supersession the model already had: the old claim is superseded, never
-overwritten, by a new claim carrying the date and the analyst's rationale.
-Until this file's subject the model had half of it: `superseded_at` and
-`superseded_by` were honoured by every reader and written by nothing in the
-product, and a new claim could not say what it replaced.
+Claims accepted from Triage in older releases carry no `observed_at`. Writing a date onto a recorded claim
+rewrites it, which invariant 5 forbids, so the claim is NOT amended. The way a claim gains a date is
+supersession: the old claim is superseded, never overwritten, by a new claim carrying the date and the
+analyst's rationale (`superseded_at` and `superseded_by` are honoured by every reader, and a new claim
+says what it replaced).
 
-What these tests hold, end to end for the legacy estate of
-test_legacy_records_pg.py (a NODE, an EDGE and an ATTRIBUTE claim accepted
-from Triage and stripped of their dates, as Alpha 5.2 wrote them):
+What these tests hold, end to end for the legacy estate of test_legacy_records_pg.py (a NODE, an EDGE and
+an ATTRIBUTE claim accepted from Triage and stripped of their dates):
 
-- the OLD row is untouched in every column but the two supersession stamps,
-  and those are stamped once, from NULL;
-- the NEW row cites it (`supersedes_id`), carries the date and the reason,
-  and is the old claim in every other column;
-- the legacy listing and the readiness count drop the claim, the element
-  keeps a live claim at the same grade, and the audit trail records it;
-- the route is gated on both verbs it uses, against the element's labels,
-  and refuses a claim that is dated, withdrawn, replaced, in another case or
-  in a closed case;
-- the database itself refuses a replacement across cases, across elements,
-  of a withdrawn claim, of itself, or twice.
+- the OLD row is untouched in every column but the two supersession stamps, and those are stamped once,
+  from NULL;
+- the NEW row cites it (`supersedes_id`), carries the date and the reason, and is the old claim in every
+  other column;
+- the legacy listing and the readiness count drop the claim, the element keeps a live claim at the same
+  grade, and the audit trail records it;
+- the route is gated on both verbs it uses, against the element's labels, and refuses a claim that is
+  dated, withdrawn, replaced, in another case or in a closed case;
+- the database itself refuses a replacement across cases, across elements, of a withdrawn claim, of
+  itself, or twice.
 
-The fixture, the estate builder and the `lgr-` prefix are
-test_legacy_records_pg.py's, so its teardown removes everything here.
-Env-gated on DATABASE_URL.
+The fixture, the estate builder and the `lgr-` prefix are test_legacy_records_pg.py's, so its teardown
+removes everything here. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -134,16 +128,15 @@ def _undated_ids(conn, e) -> set:
 @pytest.mark.parametrize("kind", ["node", "edge", "attr"])
 def test_invariant_5_dating_a_legacy_claim_supersedes_it_and_rewrites_nothing(
         conn, kind):
-    """CONVENTIONS invariant 5: the old row's two stamps are written once, from
-    NULL, and every other column is as it was. Columns come from the row as
-    the catalogue holds it, so one added later is held to the same rule."""
+    """CONVENTIONS invariant 5: the old row's two stamps are written once, from NULL, and every other
+    column is as it was. Columns come from the row as the catalogue holds it, so one added later is held
+    to the same rule."""
     e = _estate(conn)
     analyst = _user(conn)
     before = _row(conn, e["claims"][kind])
     assert before["observed_at"] is None and before["superseded_at"] is None
     new_id = _supersede(conn, e, kind, by=analyst)
     after = _row(conn, e["claims"][kind])
-    # The old row: every column as it was, but the two stamps.
     assert _unstamped(after) == _unstamped(before)
     assert after["observed_at"] is None, "the date is not written onto it"
     assert after["superseded_at"] is not None
@@ -474,7 +467,7 @@ def test_the_route_is_gated_on_both_verbs_and_the_elements_labels(conn, client):
             basis="DIRECT_OBSERVATION", created_by=e["owner"]))
     for claim in (red_claim, undated):
         r = _post(client, session(conn, junior), e["case"], claim)
-        # The missing claim's own 404 (beta review http_ui-016, 2026-10-03).
+        # The missing claim's own 404.
         assert r.status_code == 404, r.text
         assert r.json()["detail"] == "no such assertion in this case"
         assert _row(conn, claim)["superseded_at"] is None
@@ -538,7 +531,7 @@ def test_a_closed_case_takes_no_dating(conn, client):
 
 
 def test_the_listing_script_and_the_register_say_how_a_claim_gets_its_date(conn):
-    """The wording that used to say the fill waits on an owner decision."""
+    """The listing script and the register say how a claim gets its date."""
     from noctornal_api import readiness
     from legacy_records_script import main
     e = _estate(conn)

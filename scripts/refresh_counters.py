@@ -1,42 +1,19 @@
 """Rewrite the counters the live documents quote, from the tree.
 
-## Why this exists
-
-Every counter in this tree has been wrong at least once: `1206 passing`,
-`1269 tests`, `52 revisions`, `Alembic head 0052`, three different
-completion percentages. Each was true the day it was typed and copied
-forward by hand until it was not, and each was found by a reader rather
-than by CI.
-
-`test_doc_invariants.py` started checking them on 2026-09-09, with a
-five per cent tolerance on the test total, because a hand-maintained
-number cannot track a tree that gains tests every commit. Five per cent
-of sixteen hundred is eighty tests of drift, and the very release that
-added the check shipped a README claiming 1627 on a tree of 1639. A
-tolerance band is a place for the defect to live.
-
-So the numbers are GENERATED. This script rewrites them, the test asserts
-that running it changes nothing, and the tolerance is zero. It is the
-same arrangement as `db/schema.sql` and `scripts/dump_schema.py`: the
-file is checked in, a tool regenerates it, and CI fails on a diff.
+The numbers are generated: this script rewrites them, a test asserts that running it changes
+nothing, and the tolerance is zero, because a hand-kept count drifts. It is the arrangement
+`db/schema.sql` has with `scripts/dump_schema.py`: the file is checked in, a tool regenerates it,
+and CI fails on a diff.
 
     python scripts/refresh_counters.py            # rewrite
     python scripts/refresh_counters.py --check    # report, change nothing
 
-## What counts as a live claim
-
-Only the regions listed in `CHECKED` below, and inside them only the
-shapes in `SUBSTITUTIONS`. `ROADMAP-REMAINING.md` is mostly a stack of
-DATED records ("**State (2026-08-10):** ... 1890 passing"), which are
-history and must never be rewritten, so only the text above its second
-`**State (` heading is live. The changelog is entirely dated records and
-is not read at all.
-
-A number that cannot be derived from the tree does not belong in a live
-document. That is why no counter here is "collected items": it needs a
-pytest collection, so nothing pure can check it, and an unchecked number
-is the thing this file exists to prevent. Per-release totals stay in
-`release/CHANGELOG.md`, where they are dated records of one run.
+Only the regions in `CHECKED` are live, and inside them only the shapes in `SUBSTITUTIONS`.
+`ROADMAP-REMAINING.md` is mostly dated `**State (` records, which must never be rewritten, so only
+the text above its second `**State (` heading is live; the changelog is not read at all. A number
+that cannot be derived from the tree does not belong in a live document, which is why no counter
+here is "collected items": it needs a pytest collection. Per-release totals stay in
+`release/CHANGELOG.md`.
 """
 from __future__ import annotations
 
@@ -132,18 +109,12 @@ SUBSTITUTIONS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # script rewrote that 673 to the current total before anyone read the
     # diff. A generator loose in prose destroys the records it walks past.
     ("tests", re.compile(r"\b(\d{4,5})(?=(?:\s|%20)(?:tests|passing)\b)")),
-    # `Alembic head` followed by whitespace INCLUDING a newline: the roadmap's
-    # live paragraph wraps between the two words, and a lookbehind on a
-    # single space walked past it -- so that one paragraph read 0060 on a
-    # 0061 tree while every other document was held exactly (2026-09-11).
+    # `Alembic head` followed by any whitespace, a newline included: the roadmap's live paragraph
+    # wraps between the two words.
     ("head", re.compile(r"(Alembic head\s+[`*]{0,2})(\d{4})")),
-    # `at revision NNNN` is NOT here for the same reason: ARCHITECTURE
-    # says "surveyed ... at revision 0052; refreshed ... at revision
-    # 0059", and both are dated records of when a section was written.
-    # `0001`-`0061`, and `db/migrations/versions/0001`-`0061`. This was a
-    # fixed-width lookbehind on an EN DASH until 2026-09-15, so it matched
-    # neither form once the dashes went, and it had never matched the
-    # prefixed one: ARCHITECTURE quoted 0059 on a 0061 tree, uncaught.
+    # `at revision NNNN` is not here: ARCHITECTURE's "surveyed ... at revision 0052" lines are dated
+    # records of when a section was written.
+    # A revision range, `0001`-`0061` or `db/migrations/versions/0001`-`0061`, with any dash.
     ("head", re.compile(r"(0001`\s*[-–—]\s*`)(\d{4})")),
     ("revisions", re.compile(
         r"\b(\d{2,3})(?=\s+(?:Alembic\s+)?(?:revisions|migrations)\b)")),
@@ -165,13 +136,8 @@ CHECKED: dict[str, str | None] = {
 def _say(line: str) -> None:
     """Print a line of a document without dying on it.
 
-    The lines this tool echoes are prose it just rewrote, and one of them is
-    inside README.md's directory tree, which is drawn with box characters.
-    On a Windows console stdout is cp1252, so `print` raised
-    UnicodeEncodeError on U+2502 and took the whole refresh down AFTER it
-    had already written three of the five files -- a tool that reports what
-    it did, failing at the reporting step, in a half-applied state. The
-    encoding of a terminal is not a reason to stop.
+    A Windows console's cp1252 cannot encode README.md's box-drawing characters, and failing at the
+    report would leave a refresh half applied. The encoding of a terminal is not a reason to stop.
     """
     encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
     print(line.encode(encoding, "replace").decode(encoding, "replace"))
@@ -231,12 +197,8 @@ def refresh(check: bool = False) -> int:
     total_seen = 0
     for name, marker in CHECKED.items():
         path = ROOT / name
-        # Bytes, decoded: the text exactly as stored, CRLF included, so the
-        # write below can keep each file's line endings. It was
-        # `read_text(encoding="utf-8", newline="")`, and Path.read_text has
-        # no `newline` until Python 3.13, so on 3.12, the documented
-        # minimum, this raised TypeError before reading anything (Alpha 6
-        # pre-release check, 2026-09-23).
+        # Bytes, decoded: the text exactly as stored, CRLF included, so the write below can keep
+        # each file's line endings. Path.read_text has no `newline` before Python 3.13.
         raw = path.read_bytes().decode("utf-8")
         crlf = "\r\n" in raw
         text = raw.replace("\r\n", "\n")

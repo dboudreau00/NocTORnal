@@ -1,17 +1,11 @@
-"""Field-level envelope encryption for secrets at rest: TOTP secrets,
-persona credentials, victim-credential values, per-sample data keys and
-egress endpoints (docs/05).
+"""Field-level envelope encryption for secrets at rest: TOTP secrets, persona credentials,
+victim-credential values, per-sample data keys and egress endpoints (docs/05).
 
-AES-256-GCM. The stored blob is `nonce || ciphertext`, and beside every
-blob the schema keeps a `key_id` naming the key that sealed it. Until
-2026-09-11 that column was written and never read: `decrypt` took a
-`key_id` argument and ignored it, there was exactly one key, and the
-"rotation runbook" in docs/05 described a procedure nothing could run. A
-key that changed under a live database -- rotated on purpose, or a
-secrets file restored from the wrong backup -- surfaced as `InvalidTag`
-out of a login, which the API answered with a 500, while the readiness
-register stayed green because it checked that the key DECODED and not
-that it OPENED anything.
+AES-256-GCM. The stored blob is `nonce || ciphertext`, and beside every blob the schema keeps a `key_id`
+naming the key that sealed it. A key that changes under a live database (rotated on purpose, or a secrets
+file restored from the wrong backup) must surface as a named, per-table readiness failure rather than an
+`InvalidTag` out of a login, so the readiness check verifies that the key opens stored blobs, not merely
+that it decodes.
 
 ## The ring
 
@@ -25,32 +19,25 @@ Three variables, and only the first is required:
                                  may still OPEN blobs and never seal new
                                  ones.
 
-`decrypt` selects the key by the blob's recorded id, so a blob sealed
-under a retired key opens for as long as that key stays in the ring.
-The name `NOCTORNAL_TOTP_KEK` predates the four other columns it now
-seals and is kept because every installer, document and secrets file
-names it.
+`decrypt` selects the key by the blob's recorded id, so a blob sealed under a retired key opens for as
+long as that key stays in the ring. The name `NOCTORNAL_TOTP_KEK` predates the other columns it now seals
+and is kept because every installer, document and secrets file names it.
 
-## Rotation, the runbook that now runs
+## Rotation
 
-1. Generate a new key. Set it as `NOCTORNAL_TOTP_KEK`, give it a NEW id
-   in `NOCTORNAL_TOTP_KEK_ID` (`env:v2`), and move the old key into
-   `NOCTORNAL_TOTP_KEK_RETIRED` under the OLD id (`env:v1=<base64>`).
-2. Restart. Every existing blob still opens (retired key), every new
-   blob is sealed under the new one, and the readiness check
-   `kek_ring_opens_stored_secrets` reports both ids in use.
-3. `python scripts/rewrap_secrets.py --apply` re-seals every blob under
-   the active key: decrypt with the key its id names, encrypt with the
-   active one, one row at a time, with a compare-and-set so a row
+1. Generate a new key. Set it as `NOCTORNAL_TOTP_KEK`, give it a new id in `NOCTORNAL_TOTP_KEK_ID`
+   (`env:v2`), and move the old key into `NOCTORNAL_TOTP_KEK_RETIRED` under the old id
+   (`env:v1=<base64>`).
+2. Restart. Every existing blob still opens (retired key), every new blob is sealed under the new one, and
+   the readiness check `kek_ring_opens_stored_secrets` reports both ids in use.
+3. `python scripts/rewrap_secrets.py --apply` re-seals every blob under the active key: decrypt with the
+   key its id names, encrypt with the active one, one row at a time, with a compare-and-set so a row
    re-enrolled meanwhile is not overwritten.
-4. When the readiness check reports only the active id in use, drop the
-   retired entry.
+4. When the readiness check reports only the active id in use, drop the retired entry.
 
-A key that changed WITHOUT a new id is the failure this module can now
-name: the blob's id says `env:v1`, the ring's `env:v1` is a different
-key, and `can_open` answers "the key with id env:v1 does not open this
-blob" -- which is what the readiness check prints, per table, with a
-row count. Nothing here ever prints key material.
+A key that changed without a new id is the failure this module names: the blob's id says `env:v1`, the
+ring's `env:v1` is a different key, and `can_open` answers "the key with id env:v1 does not open this
+blob", which the readiness check prints per table with a row count. Nothing here ever prints key material.
 """
 from __future__ import annotations
 
@@ -97,31 +84,25 @@ class KeyUnavailable(LookupError):
 class MalformedBlob(ValueError):
     """The bytes are not an envelope at all: too short to hold a nonce.
 
-    The third way a stored secret fails to open, and the one that was
-    missing until 2026-09-16. `decrypt` used to hand a short blob
-    straight to AESGCM, which answered `ValueError: Nonce must be
-    between 8 and 128 bytes` -- outside `UNOPENABLE`, so it escaped every
-    caller that had asked only whether the blob opened. The readiness
-    check died with that sentence instead of naming a table, and
-    `rewrap_secrets.py --apply` aborted mid-pass in the recovery mode
-    that visits every row, which is the one run under pressure after a
-    key restore. Named here so the answer is "this did not open" in the
-    same shape as the other two.
+    The third way a stored secret fails to open. A short blob handed straight to AESGCM raises
+    `ValueError: Nonce must be between 8 and 128 bytes`, outside `UNOPENABLE`, which would escape every
+    caller that only asked whether the blob opened, kill the readiness check instead of naming a table, and
+    abort `rewrap_secrets.py --apply` mid-pass in the recovery mode that visits every row. Named here so
+    the answer is "this did not open" in the same shape as the other two.
     """
 
     def __init__(self, length: int):
         self.length = length
         super().__init__(
-            # Agreed, not a bracketed plural (README screenshot set
-            # review, 2026-09-23); inline because this module imports
-            # nothing of the application's.
+            # Agreed, not a bracketed plural; inline because this module imports nothing of the
+            # application's.
             f"not an envelope: {length} {'byte' if length == 1 else 'bytes'} "
             f"cannot hold a {_NONCE_BYTES}-byte nonce and a tag")
 
 
 #: What a caller catches when a stored secret cannot be opened, whichever
 #: of the three reasons applies. `AuthService.authenticate` turns it into
-#: a refusal a client can act on rather than a 500.
+#: the refusal a wrong password gets rather than a 500.
 UNOPENABLE: tuple[type[Exception], ...] = (
     KeyUnavailable, InvalidTag, MalformedBlob)
 
@@ -229,13 +210,10 @@ def encrypt(plaintext: str) -> tuple[bytes, str]:
 def decrypt(blob: bytes, *, key_id: str | None = None) -> str:
     """Open `blob` with the key its recorded id names.
 
-    Raises `KeyUnavailable` when the ring holds no key of that id,
-    `cryptography.exceptions.InvalidTag` when it holds one that does not
-    open the blob -- a tampered blob, or a key that changed under an id
-    that did not, which is the failure this module exists to name -- and
-    `MalformedBlob` when the bytes are too short to be an envelope.
-    `UNOPENABLE` is the three of them, for a caller that only needs to
-    know the blob did not open.
+    Raises `KeyUnavailable` when the ring holds no key of that id, `cryptography.exceptions.InvalidTag`
+    when it holds one that does not open the blob (a tampered blob, or a key that changed under an id that
+    did not), and `MalformedBlob` when the bytes are too short to be an envelope. `UNOPENABLE` is the
+    three of them, for a caller that only needs to know the blob did not open.
     """
     wanted = key_id or DEFAULT_KEY_ID
     key = ring().get(wanted)
@@ -275,12 +253,11 @@ def rewrap(blob: bytes, *, key_id: str | None) -> tuple[bytes, str]:
 def open_with(blob: bytes, key: bytes) -> str:
     """Open `blob` with an explicit 32-byte key, ignoring ids.
 
-    The legacy path. Before 2026-09-11 every blob was recorded under
-    `env:v1` whatever key sealed it, so a deployment that ever changed its
-    KEK holds rows under two keys and ONE id -- a state no ring can
-    express, because the id is what a ring selects on. `scripts/
-    rewrap_secrets.py --legacy-key-file` uses this to bring such rows home
-    under the active key. Nothing on a request path calls it.
+    The legacy path. Blobs written before key ids were honoured were all recorded under `env:v1` whatever
+    key sealed them, so a deployment that ever changed its KEK holds rows under two keys and one id, a
+    state no ring can express because the id is what a ring selects on. `scripts/rewrap_secrets.py
+    --legacy-key-file` uses this to bring such rows under the active key. Nothing on a request path calls
+    it.
     """
     if len(key) != 32:
         raise ValueError("a key is exactly 32 bytes")

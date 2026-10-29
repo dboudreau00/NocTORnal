@@ -1,19 +1,15 @@
 """The sociogram's metrics call has its own meter.
 
-ux03 metrics-rate-limit-degrades-view (2026-09-23). `/graph/metrics` was
-metered under `analytics.suite`, 30 per five minutes with a burst of 10 per
-analyst, and the console calls it with every projection it draws: case
-open, each preset or confidence change, Include inferred, Reload, and every
-pause of a timeline scrub. About ten control changes spent the budget; Node
-size then disabled itself, every node changed size, the "0% evidenced"
-headline vanished, and the Analysis pane's Run was refused too, because it
-was the same meter.
+`/graph/metrics` is not metered under `analytics.suite` (30 per five minutes with a burst of 10 per
+analyst), because the console calls it with every projection it draws: case open, each preset or confidence
+change, Include inferred, Reload, and every pause of a timeline scrub. About ten control changes would spend
+that budget; Node size would then disable itself, every node would change size, the "0% evidenced" headline
+would vanish, and the Analysis pane's Run would be refused too, because it was the same meter.
 
-The two costs are not the same. The suite runs igraph centralities over the
-projection; these four local counts cost about what drawing the projection
-costs. So they are metered like the projection, on `graph.metrics`, and
-spending one budget leaves the other whole. Env-gated on DATABASE_URL like
-the HTTP e2e suite whose helpers this borrows.
+The two costs are not the same. The suite runs igraph centralities over the projection; these four local
+counts cost about what drawing the projection costs. So they are metered like the projection, on
+`graph.metrics`, and spending one budget leaves the other whole. Env-gated on DATABASE_URL like the HTTP e2e
+suite whose helpers this borrows.
 """
 from __future__ import annotations
 

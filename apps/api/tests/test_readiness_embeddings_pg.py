@@ -1,12 +1,9 @@
-"""The two similarity rows of the readiness register (F6.1 and F6.2,
-2026-09-24).
+"""The two similarity rows of the readiness register.
 
-Neither is blocking; both open Administration, Embeddings. Neither carries
-a count or a proportion: the register is read by administrators who need
-not read collected documents. The meaning row reads the pass's stored
-canary result and sends the canary again only when that is over an hour
-old, never while a blocking check fails and never outside this host
-without AUTHORITY.
+Neither is blocking; both open Administration, Embeddings. Neither carries a count or a proportion: the
+register is read by administrators who need not read collected documents. The meaning row reads the pass's
+stored canary result and sends the canary again only when that is over an hour old, never while a blocking
+check fails and never outside this host without AUTHORITY.
 
 Env-gated on DATABASE_URL. Prefix `erd-`.
 """

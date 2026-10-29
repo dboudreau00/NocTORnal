@@ -1,13 +1,11 @@
-"""An approval request is fixed once raised, decided once, spent once (F9,
-2026-09-24; migration approval_request_frozen).
+"""An approval request is fixed once raised, decided once, spent once (migration
+approval_request_frozen).
 
-`core.approval_request` carried CHECK constraints only, so nothing in the
-database stopped a writer rewriting what a decided request asked for, who
-decided it, or putting a spent approval back. The two-person policy reads
-these rows from a trigger, and a trigger that trusts a row anybody could
-rewrite checks nothing. Each test below writes the row directly, the way
-something going around the service would, and expects the database to
-refuse.
+`core.approval_request` must not rely on CHECK constraints alone: nothing in the database would stop a
+writer rewriting what a decided request asked for, who decided it, or putting a spent approval back.
+The two-person policy reads these rows from a trigger, and a trigger that trusts a row anybody could
+rewrite checks nothing. Each test below writes the row directly, the way something going around the
+service would, and expects the database to refuse.
 
 Email prefix `arf-`, unique to this file. Env-gated on DATABASE_URL.
 """
@@ -155,8 +153,8 @@ def test_a_decision_is_made_once(conn):
 
 
 def test_a_back_dated_decision_is_refused(conn):
-    """The ledger measures the countersigner's window back from
-    `decided_at`, so it must be the database's clock (2026-09-24)."""
+    """The ledger measures the countersigner's window back from `decided_at`, so it must be the
+    database's clock."""
     req, alice, bob, _, _ = _request(conn)
     _refused(conn, """UPDATE core.approval_request
                          SET state = 'APPROVED', decided_by = %s,

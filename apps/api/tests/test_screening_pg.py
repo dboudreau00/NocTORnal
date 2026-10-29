@@ -1,27 +1,22 @@
-"""Prohibited-content screening against the database (F13, 2026-09-24).
+"""Prohibited-content screening against the database.
 
 What these hold, and what each would catch:
 
-- a submission is screened BEFORE the duplicate check and any write: with
-  no list nothing is compared and no result is written; a listed file is
-  never QUARANTINED, is recorded REJECTED and MATCH, and its bytes are
-  preserved (or, under destroy, never stored), with a 451-shaped refusal
-  that names no list;
-- a held sample of any state that matches is isolated in the request and
-  its bytes moved by the worker; a closed case and a legal hold do not stop
-  it; a match is permanent; a newer list rescreens; a failure stays
-  pending and completes on a later pass; an absent object is recorded
-  after two looks and the data key is never touched;
-- waiting detonations are refused and a sent one is named, in a savepoint
-  whose failure never undoes the isolation; a queued static run is never
-  claimed for a match;
-- the alerts are URGENT, GREEN, caseless and content-free, coalesced per
-  recipient per hour, and their failure never undoes the isolation;
-- a matched sample is hidden from every Lab reader and refused by every
-  Lab write; its preservation authorisations are void on every door;
-- lists: both authorities, one transaction, distinct entries, one active
-  copy, retirement deletes nothing, the purge runs in batches and may be
-  asked for later, and the records are append-only.
+- a submission is screened BEFORE the duplicate check and any write: with no list nothing is compared and
+  no result is written; a listed file is never QUARANTINED, is recorded REJECTED and MATCH, and its bytes
+  are preserved (or, under destroy, never stored), with a 451-shaped refusal that names no list;
+- a held sample of any state that matches is isolated in the request and its bytes moved by the worker; a
+  closed case and a legal hold do not stop it; a match is permanent; a newer list rescreens; a failure
+  stays pending and completes on a later pass; an absent object is recorded after two looks and the data
+  key is never touched;
+- waiting detonations are refused and a sent one is named, in a savepoint whose failure never undoes the
+  isolation; a queued static run is never claimed for a match;
+- the alerts are URGENT, GREEN, caseless and content-free, coalesced per recipient per hour, and their
+  failure never undoes the isolation;
+- a matched sample is hidden from every Lab reader and refused by every Lab write; its preservation
+  authorisations are void on every door;
+- lists: both authorities, one transaction, distinct entries, one active copy, retirement deletes nothing,
+  the purge runs in batches and may be asked for later, and the records are append-only.
 
 Email prefix `scr-`. Env-gated on DATABASE_URL.
 """
@@ -920,12 +915,9 @@ def test_the_derived_gaps_follow_the_outcome(conn, store, officer):
         "prohibited_content_perceptual", "prohibited_content_archive_members"]
 
 
-# --- the verifier's points (2026-09-24) ------------------------------------------
-
 def test_a_retirement_or_a_purge_request_never_stands_without_its_audit_row(conn, officer, monkeypatch):
-    """Each is one transaction with its audit row: the router's connection
-    autocommits each statement, so until 2026-09-24 a failed audit insert
-    left a retirement or a purge request nobody could account for."""
+    """Each is one transaction with its audit row: the router's connection autocommits each statement, so
+    a failed audit insert would leave a retirement or a purge request nobody could account for."""
     from noctornal_api import screening
     made = import_list(conn, officer, listed(payload("atomic")))
     real = screening._audit
@@ -956,8 +948,8 @@ def test_a_retirement_or_a_purge_request_never_stands_without_its_audit_row(conn
 
 
 def test_a_bytes_not_found_row_needs_a_review_recorded_after_the_absence(conn, officer, held, monkeypatch):
-    """Only a recorded review ends the question, and a
-    review made before the absence was recorded does not answer it."""
+    """Only a recorded review ends the question, and a review made before the absence was recorded does
+    not answer it."""
     from noctornal_api import screening
     who = _analyst(conn)
     blob = payload("absent-review")

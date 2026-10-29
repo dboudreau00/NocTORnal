@@ -1,5 +1,4 @@
-"""The console half of dating a claim that never had a date, by supersession
-(docs/00 open question 11, settled by the owner 2026-10-02).
+"""The console half of dating a claim that never had a date, by supersession (docs/00 open question 11).
 
 Pure: no database. The functions run under Node over the stub DOM of
 test_ui_dual_control.py, extended with the `remove` a form needs, and are

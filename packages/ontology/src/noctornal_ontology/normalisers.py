@@ -1,15 +1,9 @@
-"""Per-selector normalisers.
+"""Per-selector normalisers: the canonical matching form stored as selector.norm_value.
 
-A normaliser produces the canonical matching form (selector.norm_value):
-two observations of the same real-world identifier must normalise to the
-same string, and two DIFFERENT identifiers must never be made to collide.
-Normalisers are total, best-effort functions str -> str — VALIDATION is a
-separate concern (selector_type.validator_regex); a normaliser never
-raises on weird input, it returns its best canonical attempt.
-norm(norm(x)) == norm(x) is a tested invariant.
-
-Registry keys match selector_type.normaliser in the DB seed exactly;
-tests assert the two sets are identical.
+Two observations of one real-world identifier normalise to the same string, and two different
+identifiers never collide. A normaliser is total: it never raises on odd input and returns its
+best canonical attempt, leaving validation to selector_type.validator_regex. Tests hold that
+norm(norm(x)) == norm(x) and that the registry keys equal selector_type.normaliser in the seed.
 """
 from __future__ import annotations
 
@@ -181,56 +175,21 @@ def mxid_norm(v: str) -> str:
 def telegram_id_norm(v: str) -> str:
     """Telegram numeric IDs, decoded arithmetically and namespaced by type.
 
-    Three Telegram id spaces overlap numerically and must never collide in
-    `norm_value`, because `TELEGRAM_ID` is `is_strong` and a collision
-    therefore raises a MERGE LEAD an analyst is asked to confirm (the
-    automatic merge on a strong match was designed and never built)
-    — where a false merge is worse than a missed one:
+    Three id spaces overlap numerically and must never collide in `norm_value`: TELEGRAM_ID is
+    strong, so a collision raises a merge lead for an analyst, and a false merge is worse than a
+    missed one.
 
         u:<id>   user
         c:<id>   channel / supergroup
         g:<id>   basic group
 
-    ## CR3 (2026-07-26) — the old version string-stripped a leading "100"
-
-    The Bot-API encoding is ARITHMETIC: `chat_id = -(10**12 + channel_id)`.
-    Dropping the characters `100` from the front happens to invert that
-    only when the channel id is exactly ten digits, which is why the one
-    test covering the ten-digit case passed while the function was wrong.
-
-    - A NINE-digit channel id encodes to `-1000123456789`; stripping three
-      characters leaves `0123456789`, with a spurious leading zero that
-      matches nothing.
-    - An ELEVEN-digit id (common since the 64-bit migration) encodes to
-      `-112345678901`, which does not begin `100` after the sign, so the
-      strip never fires and the two observations of one channel never
-      meet.
-    - A ten-digit channel id normalised to bare digits equal to an
-      unrelated USER id — and with a strong selector, that is a channel
-      and a person offered to an analyst as one row to merge.
-
-    Namespacing also removes a whole class of collision the arithmetic
-    alone would not: a user id and a channel id may be the same number and
-    are not the same thing.
-
-    ## A bare positive integer is genuinely ambiguous, and is REFUSED
-
-    In MTProto, user ids and channel ids are separate spaces and both
-    positive, so `1234567890` alone cannot be resolved — it is a user id
-    or a channel id and nothing in the string says which. Until
-    2026-09-11 this function assumed `u:`, on the reasoning that a bare
-    positive in the wild is overwhelmingly a user. On a strong selector
-    that is the wrong trade in the same way the string-strip was: a
-    missed merge is an analyst's afternoon, a false merge is a channel
-    and a person fused into one actor, and "overwhelmingly" is a guess
-    written into a merge lead. So a bare positive now normalises to ''
-    -- nothing durable -- and `refusal()` says why in a sentence a caller
-    may show. A caller that knows the type says so with an explicit
-    `u:`/`c:`/`g:` prefix: a scraper recording an MTProto channel passes
-    `c:1234567890` and meets the Bot-API observation `-1001234567890` on
-    the same `c:` row; an analyst typing a user id passes `u:1234567890`.
-    The Bot-API negative encodings carry their own type and decode as
-    before.
+    The Bot-API channel encoding is arithmetic, `chat_id = -(10**12 + channel_id)`; stripping a
+    leading "100" as text breaks on channel ids that are not ten digits long. A bare positive
+    integer is refused (normalised to ''): in MTProto, user and channel ids are separate positive
+    spaces, so the number alone does not say which, and `refusal()` gives the sentence a caller
+    shows. A caller that knows the type passes a `u:`, `c:` or `g:` prefix, so an MTProto channel
+    recorded as `c:1234567890` meets the Bot-API `-1001234567890`. Bot-API negatives carry their
+    own type.
     """
     s = v.strip()
     for prefix in ("u:", "c:", "g:"):
@@ -242,8 +201,7 @@ def telegram_id_norm(v: str) -> str:
     if not digits_only:
         return ""
     if not negative:
-        # Refused, not guessed (2026-09-11): see the docstring, and
-        # `refusal()` for the sentence a caller shows.
+        # Ambiguous, so refused rather than guessed (see the docstring and `refusal()`).
         return ""
 
     value = int(digits_only)
@@ -362,7 +320,7 @@ def asn_norm(v: str) -> str:
     return str(int(d)) if d else d
 
 
-# --- url_norm's fragment rules (L5, 2026-09-24) ----------------------------
+# --- url_norm's fragment rules ---------------------------------------------
 #
 # A MEGA handle: the file or folder id, never the key after it.
 _MEGA_HANDLE = r"[A-Za-z0-9_-]+"
@@ -391,13 +349,11 @@ _TG_RESOLVE = re.compile(
 def _mega(path: str, frag: str) -> tuple[str, str]:
     """A MEGA link in its current form, and never its key.
 
-    The legacy `#!<handle>!<key>` and `#F!<handle>!<key>` forms and the
-    current `/file/<handle>#<key>` name the same file, so they collide; two
-    different files never do, which the fragment-dropping rule broke
-    (every legacy link was `https://mega.nz/`). Handles are read as a
-    PREFIX, so prose punctuation after a link cannot defeat the rule, and
-    a fragment of a shape this does not know is dropped: MEGA's account
-    routes (confirmation, recovery) carry secrets and name no resource."""
+    The legacy `#!<handle>!<key>` and `#F!<handle>!<key>` forms and the current
+    `/file/<handle>#<key>` name one file and collide; two files never do, where dropping the
+    fragment would make every legacy link `https://mega.nz/`. Handles are read as a prefix, so
+    punctuation after a link cannot defeat the rule. A fragment of a shape this does not know is
+    dropped: MEGA's account routes (confirmation, recovery) carry secrets and name no resource."""
     m = _MEGA_PATH.fullmatch(path)
     if m:
         kind, handle = m.groups()
@@ -450,11 +406,10 @@ def _web_telegram(path: str, frag: str) -> tuple[str, str]:
     secrets there: its login link is `#tgWebAuthToken=<token>&...`, and a
     `tgaddr` can hold a tg://login token or a bot's start parameter. So the
     fragment is kept, as written, only in a shape that names a chat and
-    cannot hold a token (L5, 2026-09-24):
-    `@name`, a numeric peer id with at most two numeric suffixes, the old
-    client's `/im?p=<peer>`, and a `?tgaddr=` whose address is a public
-    tg://resolve. Any other fragment is dropped, which at worst misses a
-    distinction and never puts a token into a norm_value."""
+    cannot hold a token: `@name`, a numeric peer id with at most two numeric
+    suffixes, the old client's `/im?p=<peer>`, and a `?tgaddr=` whose
+    address is a public tg://resolve. Any other fragment is dropped, which
+    at worst misses a distinction and never puts a token into a norm_value."""
     if _TG_CHAT.fullmatch(frag) or _TG_LEGACY_IM.fullmatch(frag):
         return path, frag
     m = _TG_ADDR.fullmatch(frag)
@@ -473,15 +428,11 @@ def _twitter(path: str, frag: str) -> tuple[str, str]:
     return path, ""
 
 
-#: Hosts whose fragment can name the resource, after lowercasing, dropping
-#: one trailing '.' and one leading 'www.': host -> (canonical host or None
-#: to keep the host, rule). A registered host's rule always decides the path
-#: and the fragment. Every other host drops its fragment, as url_norm always
-#: did: a single-page app's route can carry a token or a key (a reset link,
-#: a CryptPad pad, a Send link), and a token in a norm_value is a secret in
-#: a selector label on the graph, in search and in reports. A generic
-#: keep-the-route rule does exactly that, so only routes known to be
-#: identities are kept.
+#: Hosts whose fragment can name the resource, after lowercasing and dropping one trailing '.'
+#: and one leading 'www.': host -> (canonical host, or None to keep it, rule). The rule decides
+#: the path and the fragment. Every other host drops its fragment, because a single-page app's
+#: route can carry a token or a key (a reset link, a CryptPad pad, a Send link), and a token in
+#: a norm_value is a secret in a selector label, in search and in reports.
 _FRAGMENT_HOSTS: dict[str, tuple[str | None, Callable[[str, str], tuple[str, str]]]] = {
     "mega.nz": ("mega.nz", _mega),
     "mega.co.nz": ("mega.nz", _mega),
@@ -510,16 +461,14 @@ def _fragment_rule(host: str):
 #: Query parameter names that carry a credential rather than name a
 #: resource, compared lowercased with everything but letters and digits
 #: removed (`api_key`, `API-Key` and `apiKey` are one name). A name in the
-#: set, or ending in one of the suffixes, is a secret
-#: (graph-url-selector-keeps-credentials, 2026-10-03).
+#: set, or ending in one of the suffixes, is a secret.
 _SECRET_QUERY_KEYS = frozenset({
     "key", "apikey", "pass", "passwd", "password", "pwd", "pw", "secret",
     "token", "auth", "authorization", "sig", "signature", "jwt", "otp",
     "sid", "sessid", "phpsessid", "session", "sessionid", "sessionkey",
     "credential", "credentials", "authkey", "passphrase", "passcode",
     "bearer",
-    # An OAuth authorisation code is a one-time credential
-    # (graph-url-selector-keeps-credentials, 2026-10-03, verify round).
+    # An OAuth authorisation code is a one-time credential.
     "code", "authcode", "oauthcode",
 })
 _SECRET_QUERY_SUFFIXES = ("token", "secret", "password", "passwd", "apikey",
@@ -527,13 +476,11 @@ _SECRET_QUERY_SUFFIXES = ("token", "secret", "password", "passwd", "apikey",
                           "sessionid", "credential")
 _NOT_ALNUM = re.compile(r"[^a-z0-9]")
 #: A URL with a scheme, as it sits in running text. A quote or a closing
-#: bracket does not end it: `'` and `)` are legal in a password, and a
-#: pattern that stopped at one would leave the rest of the password outside
-#: the URL it belongs to (the sentence's own punctuation is given back by
-#: `_URL_TAIL`). The scheme is bounded and possessive so the scan is linear:
-#: an unbounded one is quadratic on a long run of scheme characters with no
-#: `://` after it (40,000 characters of `a-` took seconds), and a capture
-#: may be a million characters long (2026-10-03, verify round).
+#: bracket does not end it: `'` and `)` are legal in a password, and stopping
+#: there would leave the rest of the password outside the URL (`_URL_TAIL`
+#: gives the sentence's own punctuation back). The scheme is bounded and
+#: possessive so the scan stays linear: unbounded, a long run of scheme
+#: characters with no `://` after it is quadratic.
 URL_IN_TEXT = re.compile(r"\b[a-z][a-z0-9+.-]{0,63}+://[^\s<>\"]+", re.I)
 #: What stands in for a removed password, token or key in text a person
 #: reads (a Triage rationale, a raw value).
@@ -586,8 +533,7 @@ def _userinfo_end(authority: str, rest: str) -> int | None:
 def strip_url_userinfo(v: str) -> str:
     """The URL without its userinfo (`user:password@`). A credential is
     never an identifier, and in a norm_value it is a secret in a selector
-    label on the graph (graph-url-selector-keeps-credentials,
-    2026-10-03)."""
+    label on the graph."""
     parts = _split_authority(v)
     if parts is None:
         return v
@@ -608,10 +554,10 @@ _PATH_PARAM = re.compile(r";([^;/=]*)=[^;/]*")
 #: 1 is everything up to the ':'. A login that is not an address is
 #: `_LOGIN_PAIR`'s.
 _LOGIN_TAIL = re.compile(r"(/[^/?#:@]*):[^/?#]*@")
-#: The same layout with a login that is not an address (verification round
-#: three, A7, 2026-10-07: `/login:carol:pw` was kept whole): the final path
-#: segment `name:login:password`, ':' or '|' between the three, matched from
-#: its start. Possessive, so the scan is linear on a path of any length.
+#: The same layout with a login that is not an address, such as
+#: `/login:carol:pw`: the final path segment `name:login:password`, ':' or
+#: '|' between the three, matched from its start. Possessive, so the scan is
+#: linear on a path of any length.
 _LOGIN_PAIR = re.compile(r"[^:|@]*+[:|][^:|@]++[:|]")
 
 
@@ -820,14 +766,14 @@ def redact_url_credentials(text: str, _depth: int = 0) -> str:
 
 
 def credential_spans(text: str) -> list[tuple[int, int]]:
-    """Where, in running text, a URL of ANY scheme holds a credential, as
+    """Where, in running text, a URL of any scheme holds a credential, as
     (start, end) offsets: its userinfo with the '@' that closes it
     (`mysql://root:Secret123@db.example/app` gives `root:Secret123@`), and a
     `:login:password` pair written after its path. The selector extractor
     reads nothing out of these spans: a password is not an identifier, and
-    only http and https links are URL selectors, so the userinfo of an
-    `ftp://`, `smtp://` or `mysql://` link was read as an e-mail address
-    (graph-url-selector-keeps-credentials, 2026-10-03, verify round)."""
+    since only http and https links are URL selectors, the userinfo of an
+    `ftp://`, `smtp://` or `mysql://` link would otherwise read as an e-mail
+    address."""
     spans: list[tuple[int, int]] = []
     for m in URL_IN_TEXT.finditer(text):
         url = m.group(0).rstrip(_URL_TAIL)
@@ -852,44 +798,26 @@ def credential_spans(text: str) -> list[tuple[int, int]]:
 
 
 def url_norm(v: str) -> str:
-    """Lowercase scheme+host, strip the default port; path and query stay
-    byte-exact (they are case- and encoding-sensitive), except that a
-    credential never stays: the userinfo (`user:password@`) is dropped,
-    and so is every query parameter whose name says it carries a password,
-    token, key, signature or session (`_SECRET_QUERY_KEYS`;
-    graph-url-selector-keeps-credentials, 2026-10-03). The same goes for a
-    path parameter of that kind (`;jsessionid=...`), a parameter set off by
-    `;` or with a percent-encoded `=`, a parameter whose value holds a link
-    with a credential of its own, the userinfo of a link written inside the
-    path, and a `:login:password` pair written after the path (the
-    `url:login:password` layout of a stealer log), which ends the link
-    there. Like a dropped
-    fragment, that at worst misses a distinction, and never puts a secret
-    into a selector label. The fragment is dropped unless the host is one
-    whose fragment names the resource (L5, 2026-09-24):
+    """Lowercase scheme and host and strip the default port; the path and
+    query stay byte-exact (they are case- and encoding-sensitive), but a
+    credential never stays. Dropped: the userinfo; every query or path
+    parameter (`;jsessionid=...`) whose name marks a credential
+    (`_SECRET_QUERY_KEYS`), also when set off by `;` or with a
+    percent-encoded `=`; a parameter whose value holds a link with a
+    credential of its own; the userinfo of a link inside the path; and a
+    `:login:password` pair after the path (the stealer-log layout), which
+    ends the link there. At worst that misses a distinction; it never puts a
+    secret into a selector label.
 
-    - MEGA (mega.nz, mega.co.nz, mega.io and their subdomains): the link
-      in its current path form, WITHOUT the decryption key. A legacy
-      `#!<handle>!<key>` link and a current `/file/<handle>#<key>` link to
-      one file collide; two files never do. A key is not identity, and in
-      a norm_value it would be a secret in a selector label.
-    - matrix.to: the user or room, with a `?via=` hint removed and only
-      the escapes that cannot change meaning decoded.
-    - web.telegram.org: the chat (`@name`, a numeric peer id, the old
-      client's `/im?p=` form, a `tgaddr` public resolve), kept as written.
-      Its login token, and any fragment of another shape, is dropped.
-    - twitter.com: the legacy `#!/name` form becomes `/name`.
-
-    Every other fragment (an anchor such as `#post-9`, and any route on an
-    unregistered host) is dropped, as before, so no host outside this list
-    can put a token into a norm_value. The first rule of this module is
-    that two different identifiers never collide; dropping the fragment
-    broke it for every link above, and the registry mends exactly those.
-    norm(norm(x)) == norm(x) holds for every rule, including on hostile
-    input (tested)."""
+    The fragment is dropped (an anchor such as `#post-9`, a single-page
+    app's route) unless the host is in `_FRAGMENT_HOSTS`, where it names the
+    resource and dropping it would make different links collide: MEGA
+    (never its decryption key), matrix.to (without a `?via=` hint),
+    web.telegram.org (never its login token) and twitter.com's legacy
+    `#!/name`. norm(norm(x)) == norm(x) holds for every rule, including on
+    hostile input (tested)."""
     s = _clean_path_part(strip_url_userinfo(v.strip()))
-    # A value that does not parse is returned as written, but never with a
-    # credential in it (2026-10-03, verify round).
+    # A value that does not parse is returned as written, but never with a credential in it.
     try:
         parts = urlsplit(s)
     except ValueError:
@@ -934,21 +862,16 @@ def tox_pubkey(v: str) -> str:
 
 
 def sip_norm(v: str) -> str:
-    """Bare SIP AOR: scheme lowercased, user part kept BYTE-EXACT, host
-    lowercased, and the parameters dropped.
+    """Bare SIP AOR: scheme lowercased, user part kept byte-exact, host
+    lowercased, parameters dropped.
 
-    Two deliberate asymmetries, both from RFC 3261 §19.1.4:
-
-    - The user part is case-SENSITIVE. `sip:Alice@x` and `sip:alice@x`
-      are different AORs, and folding them would merge two subscribers.
-      (Contrast `email_norm`, where the local part is folded because
-      every mailbox provider in practice treats it that way.)
-    - `;user=phone`, `;transport=tls` and friends are transport
-      decisions, not identity — the same AOR observed over UDP and over
-      TLS must collide, so the parameters go.
-
-    A trailing `;tag=` never belongs to an AOR at all; it is dialogue
-    state that only appears if someone pasted a raw From: header.
+    Both asymmetries follow RFC 3261 section 19.1.4. The user part is
+    case-sensitive: `sip:Alice@x` and `sip:alice@x` are different AORs, and
+    folding them would merge two subscribers (`email_norm` folds the local
+    part because mailbox providers do). Parameters such as `;user=phone` and
+    `;transport=tls` are transport decisions, not identity, so the same AOR
+    seen over UDP and over TLS collides. A `;tag=` is dialogue state from a
+    pasted From: header and never part of an AOR.
     """
     s = v.strip()
     if "<" in s and ">" in s:                     # a name-addr: "Bob" <sip:b@x>

@@ -1,63 +1,24 @@
-"""Phase 7 -- co-participation: the bipartite projection docs/03 asked for.
+"""Co-participation: the bipartite projection docs/03 asked for.
 
-docs/10, on why conversations are worth modelling at all:
+Identities participate in conversations (docs/10); this projects that to a one-mode network with
+Newman weighting, dividing by room size, so a 500-member forum does not create a spurious clique
+(docs/03). It is the conversation half of the fix `analytics._mode_warning` records as open.
 
-    CONVERSATION -- a DM thread, MUC room, channel or forum conversation.
-    Bipartite: identities participate in conversations. Projects to a
-    co-participation network, which is often the cleanest social graph you
-    will get.
+It is a projection, not edges in the graph. `projections.PRESETS` excludes co-participation from the
+Communication preset because it is not an observation: two people in the same 40-person channel have
+not been observed communicating, and a stored edge would be indistinguishable from an observed one
+(invariant 4). So this returns a computed network marked `is_inferred`, which a caller may render
+dashed and feed to metrics ONLY by opting in. Nothing here writes `core.edge`.
 
-and docs/03, on how to project one without lying:
-
-    Bipartite projection to one-mode with Newman weighting (dividing by
-    event size), otherwise a 500-member forum creates a spurious clique.
-
-`analytics._mode_warning` already tells an analyst that the Communication
-preset is two-mode and that centrality over it treats a CONVERSATION as
-though it were a person. It records the proper fix as an open item. This
-module is that fix, for the conversation half.
-
-## Why this is a projection and not edges in the graph
-
-`projections.PRESETS` says it in the Communication preset's own
-description: "Co-participation is deliberately excluded: it is a
-projection, not an observation." Two people in the same 40-person channel
-have not been observed communicating. Writing that as a stored edge would
-make it indistinguishable from an observed one after the first person
-forgets, and invariant 4 exists because that distinction has to survive.
-
-So this returns a computed network, marked `is_inferred`, that a caller
-may render dashed and may feed to metrics ONLY by opting in. Nothing here
-writes `core.edge`.
-
-## Newman weighting, and the thing it does not fix
-
-Newman weighting divides each co-participation by (room size - 1), so a
-500-member room contributes 1/499 per pair instead of 1. That fixes the
-INFLUENCE of a big room on the weights.
-
-It does not fix the COMBINATORIAL cost: a 5,000-member channel still
-produces 12.5 million pairs, all of them near-zero and none of them
-interesting. So rooms above `max_room_size` are excluded outright, and
-**the exclusion is reported in the result**. A cap that silently drops
-data is worse than no cap, because the output looks complete.
-
-## Who counts as a participant
-
-Two defaults, both restrictive, both reversible:
-
-- **Unresolved handles are excluded.** `comms.participant` deliberately
-  does not resolve most group members to identities -- doing so would
-  manufacture actors out of a member list. Promoting those handles to
-  vertices here would manufacture them one step later.
-- **Incidental participants are excluded.** docs/08 and docs/16 L4: a
-  third party in a group channel is not a subject. Drawing ties between
-  uninvolved people because they were in a room together is the exact
-  harm `is_incidental` was added to prevent.
-
-Both counts are reported either way, so an analyst can tell a sparse
-network from a filtered one -- which is the same reasoning as
-`projections.withheld` (docs/14 U2).
+Newman weighting divides each co-participation by (room size - 1), so a 500-member room contributes
+1/499 per pair. It does not fix the combinatorial cost (a 5,000-member channel still yields 12.5
+million near-zero pairs), so rooms above `max_room_size` are excluded outright and the exclusion is
+reported in the result: a cap that silently drops data looks complete. Two restrictive defaults,
+both reversible: unresolved handles are excluded (`comms.participant` deliberately does not resolve
+most group members, and promoting them to vertices would manufacture actors) and incidental
+participants are excluded (docs/08, docs/16 L4: a third party in a group channel is not a subject).
+Both counts are reported either way, so an analyst can tell a sparse network from a filtered one, as
+with `projections.withheld` (docs/14 U2).
 """
 from __future__ import annotations
 
@@ -85,9 +46,8 @@ class CoParticipationError(Exception):
 class CoParticipationParams:
     """The parameters that make this number reproducible.
 
-    docs/03: "Show the projection parameters next to the results, always."
-    Every one of these changes every weight, so a result quoted without
-    them is not a finding.
+    docs/03: show the projection parameters next to the results, always. Each changes every weight,
+    so a result quoted without them is not a finding.
     """
 
     case_id: UUID
@@ -233,26 +193,14 @@ class CoParticipationService:
             # tie.
             eligible = sorted(set(eligible))
             size = len(eligible)
-            # THE denominator, and the cap, are properties of the ROOM --
-            # not of how much of it this caller can see.
-            #
-            # Both were computed from `size`, the count remaining after
-            # incidental, unresolved and invisible participants had been
-            # dropped, and `raw_size` was computed and never read. With
-            # the shipped defaults that is catastrophic rather than
-            # approximate: a 500-member channel with two resolved
-            # identities and 498 unresolved handles gave size == 2, so
-            # 1/(size-1) == 1.0 and two people who merely sat in the same
-            # open channel scored EXACTLY as high as a two-party DM -- a
-            # 499x overstatement of the only number this module produces.
-            # The room also escaped the oversize cap for the same reason,
-            # so it never appeared in `oversized` either, and the "a cap
-            # that silently drops data is worse than no cap" guarantee
-            # reported nothing.
-            #
-            # Newman 2001 divides by the size of the GROUP. How many of
-            # its members we resolved is a fact about our coverage, and
-            # coverage must not inflate a tie.
+            # THE denominator, and the cap, are properties of the ROOM, not of how much of it this
+            # caller can see. Computed from `size`, the count left after incidental, unresolved and
+            # invisible participants are dropped, a 500-member channel with two resolved identities
+            # would give size == 2, so 1/(size-1) == 1.0 and two people who sat in the same open
+            # channel would score exactly as high as a two-party DM (a 499x overstatement), and the
+            # room would also escape the oversize cap and never appear in `oversized`. Newman
+            # divides by the size of the GROUP: how many members we resolved is a fact about our
+            # coverage, and coverage must not inflate a tie.
             room_size = room["raw_size"]
             if size < 2:
                 singleton_rooms += 1
@@ -294,9 +242,8 @@ class CoParticipationService:
 
         return {
             "projection": {"case_id": str(p.case_id), **p.describe()},
-            # Only vertices that ended up in a tie. An isolate here would
-            # be an artefact of the filters, not a finding, and it would
-            # sit in the denominator of every density and percentile.
+            # Only vertices that ended up in a tie: an isolate would be an artefact of the filters,
+            # not a finding, and would sit in the denominator of every density and percentile.
             "nodes": [vertices[k] for k in sorted(used)],
             "edges": edges,
             "coverage": {

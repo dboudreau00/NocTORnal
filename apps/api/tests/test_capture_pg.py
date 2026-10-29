@@ -1,9 +1,8 @@
-"""Manual capture end to end (docs/14 C2): text in, proposals out, graph
-untouched until a human says otherwise.
+"""Manual capture end to end (docs/14 C2): text in, proposals out, graph untouched until a human says
+otherwise.
 
-This is the first thing in the codebase that actually WRITES
-`collect.proposal`, so it is also the first real test of invariant 3 with
-a producer on the other end rather than a hand-built row.
+This is the first thing in the codebase that writes `collect.proposal`, so it is also the first real
+test of invariant 3 with a producer on the other end rather than a hand-built row.
 
 Env-gated on DATABASE_URL.
 """
@@ -121,8 +120,8 @@ def test_capture_writes_proposals_and_not_graph_elements(conn, case):
 
 
 def test_the_proposal_rationale_shows_the_surrounding_text(conn, case):
-    """A reviewer deciding whether a handle is real needs to see that it
-    came from a sentence and not a quoted signature block."""
+    """A reviewer deciding whether a handle is real needs to see that it came from a sentence and not
+    a quoted signature block."""
     case_id, _uid = case
     _svc(conn).capture(case_id=case_id, text=SAMPLE, title="cptest-thread")
     rationale = conn.execute(

@@ -1,28 +1,15 @@
-"""Entity merge, and its reversal (docs/01 "Entity resolution", Phase 6).
+"""Entity merge, and its reversal (docs/01 "Entity resolution").
 
-docs/01 opens the section with a warning worth repeating at the top of the
-implementation:
+Merging is the operation most likely to quietly corrupt a case (docs/01): it rewrites who did what, and
+two personas turning out to be one actor is the commonest real correction in this work. So every merge is
+a ledger entry, not a state change. The losing node keeps its row and its history and gains a redirect;
+every edge that moves records where it came from; and `unmerge` restores the original endpoints exactly
+rather than re-deriving them.
 
-    Merging is the operation most likely to quietly corrupt a case.
-
-Two personas turning out to be one actor is the commonest real correction
-in this work, and it is also the commonest way a case quietly becomes
-wrong -- because a merge rewrites who did what, and the analyst who made
-the call is usually not the one who later discovers it was a coincidence
-of nicknames.
-
-So every merge here is a ledger entry, not a state change. The losing node
-keeps its row and its history and gains a redirect; every edge that moves
-records where it came from; and `unmerge` restores the original endpoints
-exactly rather than re-deriving them.
-
-**The rule that is not negotiable: a merge may not cross the
-IDENTITY/PERSON boundary.** Collapsing a handle into a human is
-ATTRIBUTION, which is an assessment carrying a confidence and is reversible
-by design -- that is what `ATTRIBUTED_TO` is for (invariant 2). A merge
-asserts the two records were always the same thing, which for a persona and
-a person is a category error and destroys exactly the gap the whole model
-exists to preserve.
+A merge may not cross the IDENTITY/PERSON boundary. Collapsing a handle into a human is attribution, an
+assessment carrying a confidence and reversible by design (`ATTRIBUTED_TO`, invariant 2). A merge asserts
+the two records were always the same thing, which for a persona and a person is a category error and
+destroys the gap the whole model exists to preserve.
 """
 from __future__ import annotations
 
@@ -48,11 +35,9 @@ class MergeError(Exception):
 
 
 class MergeCollision(MergeError):
-    """The merge would duplicate a live tie both entities hold to one third
-    party. The third party's id is in the message for a merger who may read
-    that entity; `without_third_party` is the same sentence for one who may
-    not (2026-10-03: a refusal named a hidden entity's id and so that two
-    ties to it existed, to a merger who was never shown it)."""
+    """The merge would duplicate a live tie both entities hold to one third party. The third party's id is
+    in the message for a caller who may read that entity; `without_third_party` is the same sentence for
+    one who may not, so a refusal does not name a hidden entity's id or reveal that two ties to it exist."""
 
     def __init__(self, etype: str, third_party: UUID):
         self.etype = etype
@@ -70,12 +55,10 @@ class MergeCollision(MergeError):
 
 
 class MergeBlocked(MergeError):
-    """A later live merge moved some of the same ties, so this one cannot be
-    reversed yet. The later merge's id and the count are in the message for a
-    reader of that merge; `without_blocker` is the sentence for one who is
-    not (verification round three, A5, 2026-10-07: the id of a merge the
-    ledger hides from them, and how many ties it shared, were theirs to
-    read in the refusal)."""
+    """A later live merge moved some of the same ties, so this one cannot be reversed yet. The later
+    merge's id and the count are in the message for a reader of that merge; `without_blocker` is the
+    sentence for one who is not, so the refusal does not disclose the id of a merge the ledger hides from
+    them or how many ties it shared."""
 
     def __init__(self, blocker: UUID, shared: int):
         self.blocker = blocker
@@ -116,7 +99,7 @@ class MergeRecord:
     #: that a relationship survived somewhere else.
     edges_repointed: int = 0
     #: Ties BETWEEN the two entities, soft-deleted by the merge, and
-    #: duplicates it set aside for a merger who could not read them (the
+    #: duplicates it set aside for a caller who could not read them (the
     #: ledger keeps one flag for both). Restored by a reversal, which is why
     #: they are recorded at all.
     edges_self_loop_deleted: int = 0
@@ -137,20 +120,15 @@ class MergeService:
               compartments: frozenset[str] | list[str] = ()) -> MergeRecord:
         """Fold `source` into `target`, reversibly.
 
-        The source keeps its row, its assertions and its history. Its edges
-        are re-pointed at the target, and each move is recorded so the
-        reversal is a restore rather than a reconstruction.
+        The source keeps its row, its assertions and its history. Its edges are re-pointed at the target,
+        and each move is recorded so the reversal is a restore rather than a reconstruction.
 
-        `clearance` and `compartments` are the merger's. A tie of the source
-        that would duplicate one the target already holds to the same third
-        party is refused when the merger may read it (`MergeCollision`,
-        which tells them what to retire). When they may not, a refusal would
-        say that two ties they cannot see exist, where a merge with none is
-        made, so the duplicate is set aside instead: retired and recorded as
-        the merge's own, as a tie between the two entities is, and given
-        back by the reversal (verification round three, A2, 2026-10-07).
-        Without a merger's labels nothing is set aside and the merge is
-        refused, as it was.
+        `clearance` and `compartments` are the caller's. A tie of the source that would duplicate one the
+        target already holds to the same third party is refused when the caller may read it
+        (`MergeCollision`, which tells them what to retire). When they may not, a refusal would say that two
+        ties they cannot see exist, where a merge with none is made, so the duplicate is set aside instead:
+        retired and recorded as the merge's own, as a tie between the two entities is, and given back by the
+        reversal. Without a caller's labels nothing is set aside and the merge is refused.
         """
         if not reason or not reason.strip():
             raise MergeError(
@@ -199,12 +177,9 @@ class MergeService:
                       AND (src_node_id = %s OR dst_node_id = %s)""",
                 (case_id, source_node_id, source_node_id),
             ).fetchall()
-            # Counted apart, because they are different things that happened
-            # to the graph. `moved` used to be one number covering both, so
-            # a merge whose only effect was DELETING the tie between the two
-            # entities reported "re-pointed 1 relationship" to the audit
-            # log, the case owner's notification and the UI banner. That is
-            # a destruction described as a move.
+            # Counted apart, because they are different things that happened to the graph: a merge whose
+            # only effect was deleting the tie between the two entities must not be reported to the audit
+            # log, the case owner's notification and the UI banner as "re-pointed 1 relationship".
             repointed = 0
             self_loops_deleted = 0
             folded = 0
@@ -212,11 +187,9 @@ class MergeService:
                 new_src = target_node_id if esrc == source_node_id else esrc
                 new_dst = target_node_id if edst == source_node_id else edst
                 if new_src == new_dst:
-                    # The tie was BETWEEN the two nodes being merged. It
-                    # would become a self-loop, which core.edge forbids and
-                    # which means nothing anyway -- an actor does not vouch
-                    # for themselves. Record it, then soft-delete it, so the
-                    # reversal can bring it back.
+                    # The tie was between the two nodes being merged. It would become a self-loop, which
+                    # core.edge forbids and which means nothing anyway (an actor does not vouch for
+                    # themselves). Record it, then soft-delete it, so the reversal can bring it back.
                     self._c.execute(
                         """INSERT INTO core.node_merge_edge
                                (merge_id, edge_id, original_src_node_id,
@@ -235,7 +208,7 @@ class MergeService:
                        VALUES (%s, %s, %s, %s)""",
                     (merge_id, edge_id, esrc, edst))
                 try:
-                    # In a savepoint of its own: a duplicate the merger may
+                    # In a savepoint of its own: a duplicate the caller may
                     # not read is set aside below, and the transaction must
                     # still be usable after the refusal to do that.
                     with self._c.transaction():
@@ -246,32 +219,20 @@ class MergeService:
                                 WHERE id = %s""",
                             (new_src, new_dst, now, edge_id))
                 except psycopg.errors.UniqueViolation:
-                    # `edge_uniq_active` refused because BOTH entities
-                    # already hold a live tie of this type, with the same
-                    # `valid_from`, to the same third party -- and two
-                    # personas sharing contacts is the topology that most
-                    # often PROVES they are one actor, so this is not an
-                    # edge case, it is the commonest real merge.
-                    #
-                    # The database is right to refuse; folding one into the
-                    # other would create a duplicate active edge. What was
-                    # wrong is that the bare UPDATE let a UniqueViolation
-                    # reach the catch-all handler, so the flagship operation
-                    # of the product failed as "Internal error: unexpected
-                    # failure (ref ...)" -- unactionable, and indexed as a
-                    # bug in the product rather than a decision for the
-                    # analyst.
-                    # The OTHER end of the tie: it named the survivor for an
-                    # outgoing tie, which is the merge's own target.
+                    # `edge_uniq_active` refused because both entities already hold a live tie of this type,
+                    # with the same `valid_from`, to the same third party. Two personas sharing contacts is
+                    # the topology that most often proves they are one actor, so this is the commonest real
+                    # merge, not an edge case. The database is right to refuse (folding one into the other
+                    # would create a duplicate active edge); the UniqueViolation must not reach the
+                    # catch-all handler, so the analyst gets an actionable decision, not "Internal error".
+                    # `other` below is the other end of the tie, the third party.
                     other = edst if esrc == source_node_id else esrc
                     if clearance is not None and not self._tie_readable(
                             edge_id, other, clearance, compartments):
-                        # The merger cannot read this tie, and so not the one
-                        # it duplicates: both carry the same labels and meet
-                        # the same third party. Refusing would tell them that
-                        # two exist (A2). Retired like a tie between the two
-                        # entities, and recorded the same way, so the
-                        # reversal brings it back whole.
+                        # The caller cannot read this tie, and so not the one it duplicates: both carry the
+                        # same labels and meet the same third party. Refusing would tell them that two
+                        # exist. Retired like a tie between the two entities, and recorded the same way, so
+                        # the reversal brings it back whole.
                         self._c.execute(
                             """UPDATE core.node_merge_edge
                                   SET deleted_by_merge = true
@@ -282,9 +243,8 @@ class MergeService:
                             (now, edge_id))
                         folded += 1
                         continue
-                    # `from None`: an authored sentence, which `safe_detail`
-                    # answers verbatim, not the database's refusal behind it
-                    # (it replaced this one with "that record already exists").
+                    # `from None`: an authored sentence, which `safe_detail` answers verbatim, not the
+                    # database's refusal behind it.
                     raise MergeCollision(etype, other) from None
                 repointed += 1
 
@@ -306,23 +266,23 @@ class MergeService:
                 # that survived the merge somewhere else.
                 "edges_self_loop_deleted": self_loops_deleted,
                 # Duplicates of a tie the target held, set aside because the
-                # merger could not read them (A2); a reversal restores them.
+                # caller could not read them (A2); a reversal restores them.
                 "edges_duplicate_folded": folded,
                 "reason": reason.strip(),
                 "basis_selector_id": str(basis_selector_id)
                 if basis_selector_id else None,
             })
-            # docs/01: "Merges ... generate an audit event AND a case-owner
-            # notification." The audit event has existed since decision 41;
-            # this is the other half, and it is inside the transaction on
-            # purpose -- a merge that succeeded with no notification is a
-            # case owner who never finds out.
+            # docs/01: "Merges ... generate an audit event AND a case-owner notification." The
+            # notification is inside the transaction on purpose: a merge that succeeded with no
+            # notification is a case owner who never finds out.
+            seen_repointed, seen_between, seen_folded = self._counts_for_owner(
+                case_id, merge_id, source_node_id, target_node_id)
             notify_events.merge_performed(
                 self._c, case_id=case_id, merge_id=merge_id,
                 source_label=src["label"], target_label=dst["label"],
-                edges_repointed=repointed,
-                self_loops_deleted=self_loops_deleted,
-                duplicates_folded=folded, reason=reason.strip(),
+                edges_repointed=seen_repointed,
+                self_loops_deleted=seen_between,
+                duplicates_folded=seen_folded, reason=reason.strip(),
                 actor_id=merged_by,
                 # The body names both nodes, so the notification is at least
                 # as classified as the more restricted of them.
@@ -334,35 +294,22 @@ class MergeService:
 
     def unmerge(self, merge_id: UUID, *, reversed_by: UUID,
                 reason: str) -> MergeRecord:
-        """Undo a merge exactly: restore every edge's original endpoints and
-        clear the redirect.
+        """Undo a merge exactly: restore every edge's original endpoints and clear the redirect.
 
-        Reversal is a RESTORE, not a re-derivation. Working out where an
-        edge "should" go after the fact is guesswork, and guesswork is what
-        made the merge wrong in the first place.
+        Reversal is a restore, not a re-derivation: working out where an edge "should" go after the fact is
+        guesswork, and guesswork is what made the merge wrong in the first place.
 
-        ## Reversal is LIFO, and that is now ENFORCED rather than assumed
+        Reversal is LIFO, and that is enforced. A restore writes an edge's recorded originals over wherever
+        that edge is now. If a later merge has since moved the same edge, those originals are stale, and
+        writing them would yank the tie out from under a merge that is still live, leaving the graph
+        asserting a relationship that never existed while the response, the audit row, the owner's
+        notification and the UI banner all say every tie is back at its original endpoints. (0055 closed the
+        `deleted_at` half: reversing an old merge must not resurrect edges an analyst retired in the
+        meantime.)
 
-        A restore writes an edge's recorded originals over wherever that
-        edge is NOW. If a later merge has since moved the same edge, those
-        recorded originals are stale, and writing them yanks the tie out
-        from under a merge that is still live -- leaving the graph
-        asserting a relationship that never existed, while the response,
-        the audit row, the owner's notification and the UI banner all say
-        every tie is back at its original endpoints.
-
-        0055 closed the `deleted_at` half of exactly this: reversing an old
-        merge used to resurrect edges an ANALYST had retired in the
-        meantime. A later MERGE moving the same edge is the same class of
-        "something happened in between" and was still overwritten
-        unconditionally, in both branches.
-
-        So a merge whose edges a later live merge also recorded is refused,
-        naming the merge to reverse first. The check is scoped to the
-        OVERLAPPING edges rather than to merges in general: two unrelated
-        merges in one case do not constrain each other's order, and
-        refusing those would make the panel's Reverse buttons lie in the
-        opposite direction.
+        So a merge whose edges a later live merge also recorded is refused, naming the merge to reverse
+        first. The check is scoped to the overlapping edges rather than to merges in general: two unrelated
+        merges in one case do not constrain each other's order.
         """
         if not reason or not reason.strip():
             raise MergeError("a reversal must say why")
@@ -388,8 +335,6 @@ class MergeService:
             (merge_id, record.merged_at),
         ).fetchone()
         if blocker is not None:
-            # Agreed with the shared count, not a bracketed plural (README
-            # screenshot set review, 2026-09-23).
             raise MergeBlocked(blocker[0], blocker[2])
 
         now = datetime.now(timezone.utc)
@@ -403,34 +348,20 @@ class MergeService:
                     WHERE me.merge_id = %s""",
                 (merge_id,),
             ).fetchall()
-            # graph-unmerge-loses-ties-after-target-retired (2026-10-03): a
-            # tie retired after the merge gets its endpoints back and stays
-            # retired, so it is not counted as restored; the audit row says
-            # how many stayed out of the graph.
+            # A tie retired after the merge gets its endpoints back and stays retired, so it is not counted
+            # as restored; the audit row says how many stayed out of the graph.
             left_retired = 0
             for edge_id, osrc, odst, deleted_by_merge, etype in rows:
-                # Restores the endpoints, and undoes the soft-delete ONLY on
-                # the ties this merge deleted -- the ones that collapsed
-                # into a self-loop.
+                # Restores the endpoints, and undoes the soft-delete only on the ties this merge deleted,
+                # the ones that collapsed into a self-loop. Every edge here was live when the merge ran
+                # (`merge` selects `WHERE deleted_at IS NULL`), so an edge that is deleted now and was not
+                # deleted by the merge was retired afterwards, deliberately, for a reason of its own;
+                # clearing `deleted_at` unconditionally would resurrect it with `deleted_by` still naming
+                # the person who retired it (invariant 5: history is superseded, never overwritten).
                 #
-                # `deleted_at = NULL` used to be unconditional. Every edge
-                # here was live when the merge ran (`merge` selects
-                # `WHERE deleted_at IS NULL`), so an edge that is deleted
-                # NOW and was not deleted by the merge was retired
-                # afterwards, deliberately, for a reason of its own. The
-                # reversal was overwriting that: reversing a month-old
-                # merge put back edges an analyst had retired in the
-                # meantime, silently, leaving `deleted_by` still naming the
-                # person who retired them. Invariant 5 -- history is
-                # superseded, never overwritten -- and a fact in the graph
-                # with no assertion behind it.
-                #
-                # graph-unmerge-500-and-ties-to-merged-nodes (2026-10-03): a
-                # tie recorded after the merge with the same endpoints, type
-                # and validity collides on edge_uniq_active, and the bare
-                # UPDATE let that reach the catch-all as a 500, which merge()
-                # fixed for itself long ago. It is now a MergeError naming
-                # what to retire.
+                # A tie recorded after the merge with the same endpoints, type and validity collides on
+                # edge_uniq_active; that is a MergeError naming what to retire, not a 500 from the
+                # catch-all.
                 try:
                     if deleted_by_merge:
                         self._c.execute(
@@ -469,15 +400,12 @@ class MergeService:
                 "source_node_id": str(record.source_node_id),
                 "target_node_id": str(record.target_node_id),
                 "edges_restored": len(rows) - left_retired,
-                # graph-unmerge-loses-ties-after-target-retired (2026-10-03):
-                # ties given back their endpoints that stay retired, because
-                # someone retired them after the merge.
+                # Ties given back their endpoints that stay retired, because someone retired them after the
+                # merge.
                 "edges_left_retired": left_retired,
-                # Broken out because they are different acts. Repointing is
-                # the reversal doing its job; bringing an edge back from
-                # soft-deletion puts a tie back into the graph, and an
-                # auditor asking "where did this edge come from" needs the
-                # count to lead them here.
+                # Broken out because they are different acts. Repointing is the reversal doing its job;
+                # bringing an edge back from soft-deletion puts a tie back into the graph, and an auditor
+                # asking "where did this edge come from" needs the count to lead them here.
                 "edges_undeleted": sum(1 for r in rows if r[3]),
                 "reason": reason.strip(),
             })
@@ -494,12 +422,11 @@ class MergeService:
         return self.get(merge_id)
 
     def history(self, case_id: UUID, limit: int = 100) -> list[MergeRecord]:
-        """Every merge in the case, reversed ones included. A reversed merge
-        that vanished from the record would hide the fact that somebody once
-        believed these were the same actor.
+        """Every merge in the case, reversed ones included. A reversed merge that vanished from the record
+        would hide the fact that somebody once believed these were the same actor.
 
-        Unfiltered by the reader's labels (2026-10-03): for the system and the
-        suite. A route answers a person with `history_for_reader`."""
+        Unfiltered by the reader's labels: for the system and the suite. A route answers a person with
+        `history_for_reader`."""
         rows = self._c.execute(
             """SELECT m.id, m.case_id, m.source_node_id, m.target_node_id,
                       m.reason, m.merged_at, m.merged_by, m.reversed_at,
@@ -536,16 +463,12 @@ class MergeService:
         ).fetchone()
         return _record(row) if row else None
 
-    # As one reader sees them (beta review, 2026-10-03).
-    #
-    # rls-1, graph-merge-ledger-and-approvals-leak and http_ui-001: the
-    # history served every merge in the case, its two node ids, the free
-    # reason and the reversal's reason, to every case reader, including
-    # merges of entities above them. These two answer only for merges whose
-    # BOTH entities are within `clearance` and `compartments`, and count only
-    # the ties the reader could see on both ends, so a merge's numbers do not
-    # localise a tie to a hidden entity either. History reads its labels,
-    # not liveness: a merged-away or retired entity is still the reader's.
+    # As one reader sees them. The unfiltered history serves every merge in the case, its two node ids,
+    # the free reason and the reversal's reason, so a route would show a case reader merges of entities
+    # above them. These two answer only for merges whose both entities are within `clearance` and
+    # `compartments`, and count only the ties the reader could see on both ends, so a merge's numbers do
+    # not localise a tie to a hidden entity either. History reads its labels, not liveness: a merged-away
+    # or retired entity is still the reader's.
 
     def history_for_reader(self, case_id: UUID, limit: int, *,
                            clearance: str, compartments) -> list[MergeRecord]:
@@ -582,11 +505,10 @@ class MergeService:
 
     # -- internals --------------------------------------------------------
     def _refuse_declassifying(self, src: dict, dst: dict) -> None:
-        """graph-merge-no-element-label-gate (2026-10-03): the survivor keeps
-        its own labels and takes every tie of the merged entity, so merging a
-        RED entity into an AMBER one showed the RED entity's ties, attached to
-        the survivor, to every AMBER reader. A merge is refused unless the
-        survivor is at least as restricted as the entity merged into it."""
+        """The survivor keeps its own labels and takes every tie of the merged entity, so merging a RED
+        entity into an AMBER one would show the RED entity's ties, attached to the survivor, to every AMBER
+        reader. A merge is refused unless the survivor is at least as restricted as the entity merged into
+        it."""
         lower = (tlp_from_name(dst["classification"])
                  < tlp_from_name(src["classification"]))
         if lower or not src["compartments"] <= dst["compartments"]:
@@ -613,6 +535,36 @@ class MergeService:
             {"edge": edge_id, "other": other_id, "clr": clearance,
              "held": sorted(compartments)}).fetchone()
         return bool(row and row[0])
+
+    def _counts_for_owner(self, case_id: UUID, merge_id: UUID, source_id: UUID,
+                          target_id: UUID) -> tuple[int, int, int]:
+        """(re-pointed, between the two, set aside) ties of this merge that the case owner may read: the
+        tie and both its original ends within the owner's clearance and compartments. The notice is
+        labelled at the two entities only, so a count of ties above the owner would tell them those ties
+        exist. With no owner to read them, nothing is counted."""
+        return self._c.execute(
+            """SELECT count(*) FILTER (WHERE NOT e.deleted_by_merge),
+                      count(*) FILTER (WHERE e.deleted_by_merge AND pair.is_pair),
+                      count(*) FILTER (WHERE e.deleted_by_merge AND NOT pair.is_pair)
+                 FROM core.node_merge_edge e
+                 JOIN core.edge x ON x.id = e.edge_id
+                 JOIN core.node a ON a.id = e.original_src_node_id
+                 JOIN core.node b ON b.id = e.original_dst_node_id
+                 JOIN iam.case_facts(%(case)s) f ON true
+                 JOIN iam.app_user u ON u.id = f.owner_user_id
+                 CROSS JOIN LATERAL (SELECT
+                        e.original_src_node_id IN (%(src)s, %(dst)s)
+                        AND e.original_dst_node_id IN (%(src)s, %(dst)s)
+                        AS is_pair) pair
+                WHERE e.merge_id = %(merge)s
+                  AND x.classification <= u.tlp_clearance
+                  AND x.compartments <@ u.compartments
+                  AND a.classification <= u.tlp_clearance
+                  AND a.compartments <@ u.compartments
+                  AND b.classification <= u.tlp_clearance
+                  AND b.compartments <@ u.compartments""",
+            {"case": case_id, "merge": merge_id, "src": source_id,
+             "dst": target_id}).fetchone()
 
     def _node(self, case_id: UUID, node_id: UUID, which: str) -> dict:
         row = self._c.execute(
@@ -660,9 +612,8 @@ class MergeService:
         )
 
 
-#: One merge row as a reader sees it (2026-10-03, see `history_for_reader`).
-#: Both entities within the reader's labels, and each tie count kept to ties
-#: whose own labels and both original endpoints are too. `{where}` is a
+#: One merge row as a reader sees it (see `history_for_reader`). Both entities within the reader's labels,
+#: and each tie count kept to ties whose own labels and both original endpoints are too. `{where}` is a
 #: literal chosen by the caller above, never client input.
 _READER_SQL = """
 SELECT m.id, m.case_id, m.source_node_id, m.target_node_id,
@@ -701,11 +652,9 @@ def _reader_params(key: UUID, clearance: str, compartments,
 
 
 def _restore_collision(etype: str) -> MergeError:
-    """The refusal for a reversal that would duplicate a live tie
-    (graph-unmerge-500-and-ties-to-merged-nodes, 2026-10-03). Names the
-    tie's type and what to do; no id or label of the other tie, which may be
-    one the person reversing cannot see. Built from what was read before the
-    failed statement, because the transaction cannot be read after it."""
+    """The refusal for a reversal that would duplicate a live tie. Names the tie's type and what to do; no
+    id or label of the other tie, which may be one the person reversing cannot see. Built from what was
+    read before the failed statement, because the transaction cannot be read after it."""
     return MergeError(
         f"a live {etype} tie between the same two entities was recorded "
         f"after this merge, so putting the original back would duplicate "

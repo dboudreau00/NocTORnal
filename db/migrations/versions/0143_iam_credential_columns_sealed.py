@@ -49,7 +49,7 @@ depends_on = None
 APP_ROLE = "noctornal_app"
 WORKER_ROLE = "noctornal_worker"
 
-#: Never readable by the request role. `test_g45_session_plane_pg.py` reads
+#: Never readable by the request role. `test_session_plane_pg.py` reads
 #: this and asserts each is refused.
 CREDENTIAL_COLUMNS = ("password_hash", "totp_secret_ciphertext", "totp_key_id",
                       "recovery_codes_hash", "totp_last_counter")

@@ -1,17 +1,14 @@
-"""The two readiness rows for screening and the sandbox (F13 and F14,
-2026-09-24).
+"""The two readiness rows for screening and the sandbox.
 
-prohibited_content_screening: no list passes with the docs/16 C3 caveat;
-lists without the hash-set authority fail; matched bytes still in the
-working store fail; samples behind the newest list fail; a pass names the
-exact-hash limit; the evidence says whether, never how many (the counts
-span every compartment and the row is read by every administrator); the
-policy row carries the screening clause; the preservation bucket is probed
-under destroy while a list is active.
+prohibited_content_screening: no list passes with the docs/16 C3 caveat; lists without the hash-set
+authority fail; matched bytes still in the working store fail; samples behind the newest list fail; a
+pass names the exact-hash limit; the evidence says whether, never how many (the counts span every
+compartment and the row is read by every administrator); the policy row carries the screening clause; the
+preservation bucket is probed under destroy while a list is active.
 
-sandbox_integration, against the stub: off passes; a settings problem
-fails; no route fails; a refused token fails; an open CAPE fails with the
-api.conf and web.conf action; a stale queued row fails; the caveats.
+sandbox_integration, against the stub: off passes; a settings problem fails; no route fails; a refused
+token fails; an open CAPE fails with the api.conf and web.conf action; a stale queued row fails; the
+caveats.
 
 Both rows are appended last and neither is blocking.
 
@@ -134,8 +131,7 @@ def test_the_preservation_bucket_is_probed_under_destroy_while_a_list_is_active(
 
 
 def test_the_rows_are_appended_together_and_not_blocking():
-    """Side by side, after the rows before them (the full order is
-    test_readiness_pg's; 2026-09-25)."""
+    """Side by side, after the rows before them (the full order is test_readiness_pg's)."""
     from noctornal_api import readiness
     names = list(readiness.CHECK_NAMES)
     i = names.index("prohibited_content_screening")
@@ -207,8 +203,6 @@ def test_a_healthy_sandbox_passes_with_its_caveats(conn, cape):
     assert "Nothing has been sent to it yet." in check.caveat
     assert capev2_stub.TOKEN not in check.evidence
 
-
-# --- further points (2026-09-24) --------------------------------------------------
 
 def test_the_screening_evidence_states_the_workers_pass_budget(conn):
     """The worker's pass budget is in the evidence, so an operator can see

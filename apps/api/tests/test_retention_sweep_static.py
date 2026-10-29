@@ -1,19 +1,16 @@
-"""The collected-document sweep's declaration, and what keeps it out of the
-cron loop (docs/17 F30, 2026-10-02).
+"""The collected-document sweep's declaration, and what keeps it out of the cron loop (docs/17 F30).
 
-Pure: no database. Reads the module's refusals, the shipped deployment files
-and the operator documentation.
+Pure: no database. Reads the module's refusals, the shipped deployment files and the operator
+documentation.
 
 What these hold:
 
-- a real run's authority reference is refused when blank, a placeholder, an
-  answer rather than a reference, or too short, and accepted when it is a
-  reference (the L1 pattern: recorded, never verified);
-- nothing the deployment ships runs the sweep: not the production cron loop,
-  not the other loops, not the installers or launchers, not the Dockerfile. It
-  destroys third-party data, and the owner decides who runs it under which
-  authority (docs/16 L4); a loop that runs itself on a timer nobody watches
-  is how data disappears on a Sunday;
+- a real run's authority reference is refused when blank, a placeholder, an answer rather than a
+  reference, or too short, and accepted when it is a reference (the L1 pattern: recorded, never verified);
+- nothing the deployment ships runs the sweep: not the production cron loop, not the other loops, not the
+  installers or launchers, not the Dockerfile. It destroys third-party data, and the owner decides who runs
+  it under which authority (docs/16 L4); a loop that runs itself on a timer nobody watches is how data
+  disappears on a Sunday;
 - the script is a dry run unless it is told otherwise;
 - the operator documentation names the variables and flags the code reads.
 """
@@ -121,9 +118,8 @@ def test_a_refusal_quotes_no_value():
 
 @pytest.mark.parametrize("path", SCHEDULERS, ids=lambda p: p.name)
 def test_nothing_the_deployment_ships_runs_the_sweep(path):
-    """Not the production cron loop, nor the other loops, nor an installer or
-    launcher: the sweep destroys third-party data and an operator runs it
-    (docs/17 F30; docs/00 decision 171)."""
+    """Not the production cron loop, nor the other loops, nor an installer or launcher: the sweep destroys
+    third-party data and an operator runs it (docs/17 F30; docs/00 decision 171)."""
     assert path.exists(), path
     assert "retention_sweep" not in _live_lines(path), (
         f"{path.relative_to(ROOT)} runs the retention sweep. It is operator-run: "
@@ -131,10 +127,8 @@ def test_nothing_the_deployment_ships_runs_the_sweep(path):
 
 
 def test_the_scan_looks_at_the_loop_that_runs_the_other_jobs():
-    """A guard that reads the wrong file passes for ever. The production
-    compose's cron service runs the two drains, and the collector service
-    (A collector process, 2026-10-02) runs the collection poll that used to
-    be the loop's second job, so the file is the one."""
+    """A guard that reads the wrong file passes for ever. The production compose's cron service runs the
+    two drains, and the collector service runs the collection poll, so the file is the one."""
     live = _live_lines(ROOT / "infra" / "production" / "compose.yml")
     for job in ("scripts/notify_drain.py", "scripts/lookup_drain.py",
                 "scripts/collector.py"):

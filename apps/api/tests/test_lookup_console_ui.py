@@ -1,8 +1,6 @@
-"""A case's lookups as the console ships them (F15.3 and F15.4,
-2026-09-24): a lookup names its selector by id and never puts
-a value in a URL, echoes the exposure the analyst read, names who signs a
-vendor lookup off, marks every control that sends as a case write, and
-draws an answer above the reader's clearance as withheld.
+"""A case's lookups as the console ships them: a lookup names its selector by id and never puts a value in
+a URL, echoes the exposure the analyst read, names who signs a vendor lookup off, marks every control that
+sends as a case write, and draws an answer above the reader's clearance as withheld.
 
 Pure: reads the shipped source, as test_ui_invariants.py does.
 """
@@ -79,8 +77,6 @@ def test_the_new_rules_use_theme_tokens_only():
         rule = CSS[start:CSS.index("}", start)]
         assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgb\(|hsl\(", rule), selector
 
-
-# --- console surfaces that were missing until 2026-09-25 -----------------------------
 
 def test_a_lookup_row_and_a_triage_card_can_show_the_stored_answer():
     """The requester of a signed-off lookup (not the signer) had no way to

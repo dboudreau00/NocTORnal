@@ -1,5 +1,4 @@
-"""Migration 0085's egress configuration schema (S2,
-2026-09-24): the CHECKs, the passive default, the reach trigger, the
+"""Migration 0085's egress configuration schema: the CHECKs, the passive default, the reach trigger, the
 binding history and the retirement rules. Env-gated on DATABASE_URL."""
 from __future__ import annotations
 

@@ -1,15 +1,10 @@
-"""Graph read endpoints — listing, detail, and the provenance answer.
+"""Graph read endpoints: listing, detail, and the provenance answer.
 
-Everything here filters by the CALLER's own clearance and compartments, not
-the case's: an element may be classified above its case, so case-level
-authorization alone would disclose labels the caller may not see (the leak
-the HTTP review found in search). Soft-deleted and merged-away nodes are
-excluded.
-
-`GET .../nodes/{id}/assertions` and the edge equivalent are the Phase 1
-bar: every element answers "why do we believe this?" in one request —
-source, Admiralty grading, analyst confidence, rationale, and whether the
-claim has been retracted or superseded.
+Everything here filters by the caller's own clearance and compartments, not the case's: an element
+may be classified above its case, so case-level authorization alone would disclose labels the
+caller may not see. Soft-deleted and merged-away nodes are excluded. The assertion endpoints answer
+"why do we believe this?" in one request: source, Admiralty grading, analyst confidence, rationale,
+and whether the claim is retracted or superseded.
 """
 from __future__ import annotations
 
@@ -58,16 +53,13 @@ class NodeOut(BaseModel):
     label: str
     classification: str
     attrs: dict
-    #: The earliest and latest `observed_at` among the entity's live claims
-    #: (or the stored column, whichever is earlier or later), derived by
-    #: `projections.seen_sql` because nothing writes the columns
-    #: (gap-first-seen, 2026-09-23). None when no live claim says when.
+    #: The earliest and latest `observed_at` among the entity's live claims (or the stored column,
+    #: whichever is earlier or later), derived by `projections.seen_sql` because nothing writes the
+    #: columns. None when no live claim says when.
     first_seen: datetime | None
     last_seen: datetime | None
     created_at: datetime
-    # World-time validity, which the entity form records and the inspector
-    # never showed: an edge printed only its start and a node nothing at
-    # all (ux05-inspector:dates-shift-a-day, 2026-09-22).
+    # World-time validity, as the entity form records it.
     valid_from: datetime | None = None
     valid_to: datetime | None = None
 
@@ -107,11 +99,7 @@ class AssertionOut(BaseModel):
     # with the assertion rather than living only in audit.event.
     retraction_reason: str | None = None
     created_by: str
-    # ux05 assertion-drops-claim-and-source (2026-09-22). "Why is this
-    # believed" needs WHAT was claimed, FROM what and BY whom, and this
-    # model carried none of the three: a label correction rendered as an
-    # ungraded "Direct observation", a triage-accepted attribute showed no
-    # attribute and no value, and the author was an 8-character hash.
+    # What was claimed, from what and by whom: what "why is this believed" needs.
     #: The field a claim is about ('label', 'attrs.role', 'comms.tox'), or
     #: None when the claim is the element itself (a create).
     claim_path: str | None = None
@@ -126,33 +114,25 @@ class AssertionOut(BaseModel):
     #: (`GET /cases/{id}/users` returns display names to case.read) and
     #: as the report's assumption register.
     created_by_name: str | None = None
-    #: The carried exhibit's title, ONLY when the reader may see that
-    #: exhibit: `evidence.read` on the case (what listing exhibits needs)
-    #: AND the exhibit within the reader's clearance and compartments.
-    #: None otherwise, so an exhibit's title never leaves through a claim
-    #: that cites it to someone the exhibit list would refuse.
+    #: The carried exhibit's title, only when the reader may see that exhibit: `evidence.read` on
+    #: the case and the exhibit within the reader's clearance and compartments. None otherwise, so
+    #: a title never leaves through a claim to someone the exhibit list would refuse.
     evidence_title: str | None = None
-    #: The captured document's title ('' when it has none) and its
-    #: collection source's name, under exactly the rule
-    #: `GET /collection/documents` applies: the global `collection.read`,
-    #: the document unpurged, and BOTH the document's and the source's
-    #: labels within the reader's CASE-LESS clearance, which a break-glass
-    #: grant on this case does not raise (final review C11, 2026-09-23;
-    #: `_document_ceiling`), and the document's compartments within the
-    #: reader's own (L1, 2026-09-24). None when any leg fails, so
-    #: the ids above are all such a reader gets, as before 2026-09-22. A
-    #: claim that cites a document names its source only through it.
+    #: The captured document's title ('' when it has none) and its source's name, under the rule
+    #: `GET /collection/documents` applies: global `collection.read`, the document unpurged, the
+    #: document's and source's labels within the reader's case-less clearance (a break-glass grant
+    #: on this case does not raise it, `_document_ceiling`) and its compartments within the
+    #: reader's. None when any leg fails, so such a reader gets only the ids above. A claim names
+    #: its source only through its document.
     document_title: str | None = None
     source_name: str | None = None
     #: True when this assertion records a CORRECTION made through
     #: `PATCH /graph/nodes|edges/{id}` rather than a claim about the world
     #: arriving from a source. See `CORRECTION_FIELDS`.
     is_correction: bool = False
-    #: Supersession (2026-10-02, migration 0131). The claim this one replaces
-    #: (it was recorded to give that claim a date it never had), and the
-    #: claim that replaced this one. Ids only: the other card is one click
-    #: away when the reader may see it, and the other claim is about the same
-    #: entity or tie, so it is no wider a disclosure than this row.
+    #: Supersession (migration 0131): the claim this one replaces (recorded to give that claim a
+    #: date it never had) and the claim that replaced this one. Ids only: the other claim is about
+    #: the same entity or tie, so it is no wider a disclosure than this row.
     supersedes_id: str | None = None
     superseded_by: str | None = None
 
@@ -161,13 +141,10 @@ class AssertionOut(BaseModel):
         return self.retracted_at is None and self.superseded_at is None
 
 
-#: The fields `PATCH /graph/nodes/{id}` and `PATCH /graph/edges/{id}` can
-#: change (routers/graph.py, UpdateNodeBody and UpdateEdgeBody). A
-#: correction's assertion names ONE of them in `claim_path`, or leaves the
-#: path empty and carries several in `claim_value` (`_claim_path` there).
-#: Attribute claims from triage and the contact-block parser use dotted
-#: paths ('attrs.role', 'comms.tox'), so the two cannot be confused.
-#: test_evidenced_pg.py pins this set to the two request bodies.
+#: The fields `PATCH /graph/nodes/{id}` and `PATCH /graph/edges/{id}` can change (UpdateNodeBody
+#: and UpdateEdgeBody in routers/graph.py). A correction names one in `claim_path`, or leaves it
+#: empty and carries several in `claim_value`; attribute claims use dotted paths ('attrs.role'),
+#: so the two cannot be confused. test_evidenced_pg.py pins this set to the two request bodies.
 CORRECTION_FIELDS = frozenset({"label", "attrs", "weight", "confidence",
                                "valid_to"})
 
@@ -207,26 +184,21 @@ class EvidenceBacking(BaseModel):
 class ElementEvidenceOut(EvidenceOut):
     """An exhibit behind one element, and every route by which it is.
 
-    ux05 linked-evidence-vs-evidenced (2026-09-22): this list used to read
-    `core.evidence_link` alone while the canvas counted assertion-carried
-    exhibits alone. It now lists both, from `projections.
-    evidence_backing_sql`, the same attachment rule the canvas mark, the
-    coverage figure and the report use."""
+    Links and assertion-carried exhibits both, from `projections.evidence_backing_sql`: the same
+    attachment rule the canvas mark, the coverage figure and the report use."""
     backing: list[EvidenceBacking]
     purged: bool = False
     #: Whether this exhibit makes the element count as evidenced. False
     #: only when it has been purged; everything else listed here counts.
     counts: bool = True
-    #: The storage lock as the Evidence pane's card states it, so the
-    #: inspector's list can draw the same chip (x-inspector-chips,
-    #: 2026-09-24): it showed a bare "WORM" for ever, the claim the card
-    #: stopped making on 2026-09-23 because the lock lapses. Read the way
-    #: the register reads them (`routers.evidence.lock_state`).
+    #: The storage lock as the Evidence pane's card states it, so the inspector's list draws the
+    #: same chip rather than a bare "WORM": a lock lapses. Read the way the register reads them
+    #: (`routers.evidence.lock_state`).
     lock_until: date | None = None
     lock_ends_at: datetime | None = None
     lock_lapsed: bool = False
-    #: The lock ends before the case's retention date, as the register
-    #: says (`routers.evidence.lock_is_short`; verifier, 2026-09-24).
+    #: The lock ends before the case's retention date, as the register says
+    #: (`routers.evidence.lock_is_short`).
     lock_short_of_case: bool = False
     legal_hold: bool = False
     is_hostile_markup: bool = False
@@ -236,8 +208,7 @@ class ElementEvidenceOut(EvidenceOut):
 # --- helpers ------------------------------------------------------------
 
 def _ceiling(conn: psycopg.Connection, user: CurrentUser, case_id: UUID):
-    # Every route here reads ONE case, so a break-glass grant scoped to it
-    # counts (ux15 breakglass-grant-raises-nothing, 2026-09-23).
+    # Every route here reads one case, so a break-glass grant scoped to it counts.
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return clearance.name, list(compartments)
 
@@ -281,8 +252,7 @@ def list_nodes(
               AND classification <= %s::core.tlp AND compartments <@ %s
               AND (%s::text IS NULL OR node_type = %s)
             ORDER BY created_at DESC LIMIT %s""",
-        # seen_sql's binds first: the reader's ceiling gates the merge tree
-        # its dates are read over (release review c10, 2026-09-24).
+        # seen_sql's binds first: the reader's ceiling gates the merge tree it reads dates over.
         (*seen_params(clearance, compartments),
          case_id, clearance, compartments, node_type, node_type, limit),
     ).fetchall()
@@ -322,9 +292,7 @@ def get_node(
 def node_assertions(
     case_id: UUID, node_id: UUID,
     include_retracted: bool = Query(False),
-    # Paged like every list (http_ui-015, 2026-10-03): a node can gather
-    # any number of claims through ordinary writes, and the inspector
-    # fetched them whole on every selection.
+    # Paged like every list: a node can gather any number of claims through ordinary writes.
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
@@ -348,8 +316,7 @@ def node_assertions(
 @router.get("/nodes/{node_id}/evidence", response_model=list[ElementEvidenceOut])
 def node_evidence(
     case_id: UUID, node_id: UUID,
-    # Paged (http_ui-015, 2026-10-03): the answer, by exhibit, is cut at
-    # `limit`; the scan behind it is the element's own links.
+    # Paged by exhibit at `limit`; the scan behind it is the element's own links.
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("evidence.read")),
@@ -365,7 +332,6 @@ def node_evidence(
 @router.get("/nodes/{node_id}/selectors", response_model=list[dict])
 def node_selectors(
     case_id: UUID, node_id: UUID,
-    # Paged (http_ui-015, 2026-10-03).
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
@@ -374,10 +340,8 @@ def node_selectors(
     clearance, compartments = _ceiling(conn, user, case_id)
     if not _visible_node(conn, case_id, node_id, clearance, compartments):
         raise Problem(404, "Not found", "node does not exist in this case")
-    # first_seen and last_seen travel with the count since ux05-inspector:
-    # first-last-seen-always-dash (2026-09-23): "observed 1 time" came
-    # with no date although core.selector keeps both, so the one place an
-    # actor's activity window IS recorded never reached the inspector.
+    # first_seen and last_seen travel with the count: core.selector is where an actor's activity
+    # window is recorded.
     rows = conn.execute(
         """SELECT selector_type, raw_value, norm_value, observation_cnt,
                   first_seen, last_seen, id
@@ -389,9 +353,8 @@ def node_selectors(
              "observation_cnt": r[3],
              "first_seen": r[4].isoformat() if r[4] else None,
              "last_seen": r[5].isoformat() if r[5] else None,
-             # F15.3 (2026-09-24): the id, so a selector can be looked up;
-             # and the entity, so "Look up all" can plan its selectors
-             # (F15.4, 2026-09-25).
+             # The id, so a selector can be looked up, and the entity, so "Look up all" can plan
+             # its selectors.
              "id": str(r[6]), "node_id": str(node_id)} for r in rows]
 
 
@@ -400,23 +363,19 @@ def node_selectors(
 @router.get("/edges", response_model=list[EdgeOut])
 def list_edges(
     case_id: UUID,
-    # le=2000 is the one deliberate exception to the 1000 cap on this router
-    # (CONVENTIONS.md, http_ui-015, 2026-10-03): the console draws a whole
-    # case from this list and asks for 2000.
+    # le=2000 is the one deliberate exception to the 1000 cap on this router (CONVENTIONS.md): the
+    # console draws a whole case from this list and asks for 2000.
     limit: int = Query(500, ge=1, le=2000),
     include_inferred: bool = Query(True),
     node_id: UUID | None = Query(None),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[EdgeOut]:
-    """Edges with endpoint labels, ready to render. Both endpoints must be
-    visible to the caller, or the edge would betray a hidden node.
+    """Edges with endpoint labels, ready to render. Both endpoints must be visible to the caller,
+    or the edge would betray a hidden node.
 
-    `node_id` narrows the list to the ties AT one entity, either end. The
-    inspector's Relationships section says it lists every tie at the
-    entity, and the case-wide page the console loads stops at 1000, so in
-    a larger case the ties past that page were silently missing from it
-    (the 2026-09-22 verifier, on ux05 parallel-ties-unreachable)."""
+    `node_id` narrows the list to the ties at one entity, either end, so the inspector lists every
+    tie at it even past the page the console loads for the whole case."""
     clearance, compartments = _ceiling(conn, user, case_id)
     rows = conn.execute(
         """SELECT e.id, e.edge_type, e.src_node_id, e.dst_node_id,
@@ -452,7 +411,6 @@ def list_edges(
 def edge_assertions(
     case_id: UUID, edge_id: UUID,
     include_retracted: bool = Query(False),
-    # Paged (http_ui-015, 2026-10-03), as node_assertions.
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
@@ -474,7 +432,6 @@ def edge_assertions(
 @router.get("/edges/{edge_id}/evidence", response_model=list[ElementEvidenceOut])
 def edge_evidence(
     case_id: UUID, edge_id: UUID,
-    # Paged (http_ui-015, 2026-10-03), as node_evidence.
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("evidence.read")),
@@ -523,8 +480,7 @@ def ontology(
         """SELECT key, display_name, category FROM core.node_type
             WHERE is_active ORDER BY sort_order""",
     ).fetchall()
-    # `inverse_name` since ux06-entry:edge-type-note-stale (2026-09-23): the
-    # Link form reads the chosen type back both ways ("A vouched for B",
+    # `inverse_name` lets the Link form read the chosen type back both ways ("A vouched for B",
     # "B was vouched by A") before the analyst commits to a direction.
     edges = conn.execute(
         """SELECT key, display_name, src_node_types, dst_node_types,
@@ -538,10 +494,8 @@ def ontology(
                         "dst": list(r[3]), "default_sign": r[4],
                         "is_social_tie": r[5], "inverse_name": r[6]}
                        for r in edges],
-        # The selector vocabulary, for the Add entity form's selector
-        # picker (ux06-entry:selector-entities-bypass-normalisation,
-        # 2026-09-23). Straight from the ontology package, the one source
-        # of truth the store normalises with.
+        # The selector vocabulary for the Add entity form's picker, straight from the ontology
+        # package the store normalises with.
         "selector_types": [{"key": s.key, "display_name": s.display_name,
                             "is_strong": s.is_strong}
                            for s in SELECTOR_TYPES],
@@ -551,37 +505,26 @@ def ontology(
 # --- shared -------------------------------------------------------------
 
 def _may_name(conn, user: CurrentUser, case_id: UUID) -> dict[str, bool]:
-    """Whether this caller may be told what an assertion's exhibit and
-    captured document are CALLED, by the permission each list demands.
+    """Whether this caller may be told what an assertion's exhibit and captured document are
+    called, by the permission each list demands.
 
-    The assertion endpoints are gated on `case.read`. Listing exhibits
-    needs `evidence.read` and listing collected documents needs the global
-    `collection.read`, so a title returned here under `case.read` alone
-    would reach a role those lists refuse. No shipped role holds case.read
-    without evidence.read today; the gate is here so a custom one cannot
-    (the 2026-09-22 verifier's point on ux05 assertion-drops-claim-and-
-    source)."""
+    The assertion endpoints are gated on `case.read`; listing exhibits needs `evidence.read` and
+    listing documents the global `collection.read`, so a title returned under `case.read` alone
+    would reach a role those lists refuse. No shipped role is such a role; a custom one can be."""
     return {"may_see_exhibits": _allowed_on_case(conn, user, case_id,
                                                  "evidence.read"),
             "may_see_documents": _holds_global(conn, user, "collection.read")}
 
 
 def _document_ceiling(conn, user: CurrentUser) -> tuple[str, list[str]]:
-    """The clearance and compartments a claim's collected document and
-    source are named under: the caller's CASE-LESS ceiling, which only a
-    global break-glass grant raises, and their own compartments (L1,
-    2026-09-24: a capture into a compartmented case carries the case's
-    keys, and a claim citing it names its title only to a holder).
+    """The clearance and compartments a claim's collected document and source are named under:
+    the caller's case-less ceiling, which only a global break-glass grant raises, and their own
+    compartments, since a capture into a compartmented case carries the case's keys.
 
-    `collect.document` and `collect.source` have no `case_id`. They hang
-    off a source that any number of cases cite, so a grant scoped to the
-    case being read must not raise them, exactly as `/collection/documents`,
-    the combined case search and watch hits already refuse to. `_ceiling`
-    passes the case, and until final review C11 (2026-09-23) that raised
-    clearance reached these joins too: a Lead investigator under a RED
-    grant on case A was told a RED document's title and a RED forum's name
-    in the inspector that every collection view still withheld from them,
-    and that case B cites as well."""
+    `collect.document` and `collect.source` have no `case_id` and any number of cases cite them,
+    so a grant scoped to the case being read must not raise them, as `/collection/documents`, the
+    combined case search and watch hits already refuse to. `_ceiling` passes the case, so it is
+    not used for them."""
     clearance, held = user_ceiling(conn, user.user_id)
     return clearance.name, sorted(held)
 
@@ -593,27 +536,19 @@ def _assertions(conn, column: str, element_id: UUID,
                 may_see_exhibits: bool = False,
                 may_see_documents: bool = False,
                 limit: int = 1000, offset: int = 0) -> list[AssertionOut]:
-    # `column` is a literal chosen by the caller (never client input), so
-    # the interpolation cannot be influenced from outside.
-    #
-    # Two ceilings, deliberately. `clearance` is the case-scoped one and
-    # binds only the exhibit leg, which is pinned to this case by
-    # `ev.case_id = a.case_id`. `doc_clearance` is the case-less one and
-    # binds the document and source legs, which belong to no case (see
-    # `_document_ceiling`). Keyword-only with no default, so a new caller
-    # cannot quietly hand the raised ceiling to the deployment-wide rows.
-    # `doc_compartments` likewise (L1, 2026-09-24): the document leg is
-    # also held to the reader's own compartments.
+    # `column` is a literal chosen by the caller, never client input. Two ceilings: `clearance` is
+    # the case-scoped one and binds only the exhibit leg, pinned to this case by
+    # `ev.case_id = a.case_id`; `doc_clearance` and `doc_compartments` are the case-less ones and
+    # bind the document and source legs, which belong to no case (`_document_ceiling`). They are
+    # keyword-only with no default, so a new caller cannot hand the raised ceiling to those rows.
     if column not in ("node_id", "edge_id"):  # not `assert`: stripped under python -O, and this guards SQL text
         raise ValueError("refused identifier outside the allow-list")
-    # Each join carries its permission as a bound boolean AND the READER's
-    # ceiling, so a claim citing an exhibit or a document the reader may
-    # not see returns the ids it always returned and no name. The document
-    # leg is `CollectionService.documents`' rule: unpurged, and both the
-    # document's and its source's labels within the clearance, because a
-    # source's name is how sensitive it is that we read that forum at all.
-    # A claim WITH a document names its source only through that document,
-    # so a withheld document never gets its forum named beside it.
+    # Each join carries its permission as a bound boolean and the reader's ceiling, so a claim
+    # citing an exhibit or document the reader may not see returns its ids and no name. The
+    # document leg is `CollectionService.documents`' rule: unpurged, and the document's and its
+    # source's labels within the clearance, because a source's name says which forum we read. A
+    # claim with a document names its source only through it, so a withheld document never gets
+    # its forum named beside it.
     sql = f"""SELECT a.id, a.basis, a.reliability, a.credibility, a.confidence,
                      a.rationale, a.external_ref, a.evidence_id, a.observed_at,
                      a.recorded_at, a.retracted_at, a.superseded_at,
@@ -649,8 +584,7 @@ def _assertions(conn, column: str, element_id: UUID,
     if not include_retracted:
         sql += " AND a.retracted_at IS NULL AND a.superseded_at IS NULL"
     sql += " ORDER BY a.recorded_at DESC LIMIT %s OFFSET %s"
-    # F43 (2026-10-02): the source's own compartments, on both legs, held
-    # to the reader's as the document's are.
+    # The source's own compartments, on both legs, are held to the reader's as the document's are.
     rows = conn.execute(sql, (
         may_see_exhibits, clearance, compartments,
         may_see_documents, doc_clearance, doc_clearance, doc_compartments,

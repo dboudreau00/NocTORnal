@@ -1,14 +1,13 @@
-"""Fixtures for the row-level security tests (S1, 2026-09-25).
+"""Fixtures for the row-level security tests.
 
-The suite connects as the schema OWNER, which row security never filters.
-These tests reach the runtime roles by SET ROLE from the owner's own
-login, a superuser, so no runtime password ever enters the test
-environment. The owner seeds; a second connection, SET ROLE noctornal_app
-and bound with a real session's proof, is what is under test.
+The suite connects as the schema owner, which row security never filters. These tests reach the
+runtime roles by SET ROLE from the owner's own login, a superuser, so no runtime password ever enters
+the test environment. The owner seeds; a second connection, SET ROLE noctornal_app and bound with a
+real session's proof, is what is under test.
 
-Gated on NOCTORNAL_APP_DB_ROLE (set in CI, where db/init/10-app-role.sh
-creates both runtime roles before `alembic upgrade head`). On a developer
-database, `python scripts/runtime_roles.py ensure` creates them.
+Gated on NOCTORNAL_APP_DB_ROLE (set in CI, where db/init/10-app-role.sh creates both runtime roles
+before `alembic upgrade head`). On a developer database, `python scripts/runtime_roles.py ensure`
+creates them.
 """
 from __future__ import annotations
 
@@ -47,8 +46,7 @@ def register(conn, *keys: str) -> list[str]:
 
 def user(conn, clearance: str = "AMBER", compartments: tuple[str, ...] = (),
          active: bool = True, prefix: str = PREFIX) -> UUID:
-    # `prefix`: each test file names its own accounts, so one file's
-    # teardown never removes another's (S1, 2026-09-25).
+    # `prefix`: each test file names its own accounts, so one file's teardown never removes another's.
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"{prefix}{uuid4().hex[:10]}@noctornal.test", "RLS analyst", "x" * 20)
@@ -196,12 +194,12 @@ def now() -> datetime:
 
 
 def per_row_definer_calls(conn, sql: str, params=None) -> list[str]:
-    """The plan nodes that call a row-security helper (`iam.rls_*`,
-    `iam.case_*`, `iam.element_facts`) other than as an InitPlan, from
-    EXPLAIN (VERBOSE) of `sql` on `conn` (S1, 2026-09-25). An InitPlan runs
-    once per statement; any other node that calls one runs it per row, and
-    a policy's per-row work must stay comparisons, containments and key
-    probes. Empty is the pass."""
+    """The plan nodes that call a row-security helper (`iam.rls_*`, `iam.case_*`, `iam.element_facts`)
+    other than as an InitPlan, from EXPLAIN (VERBOSE) of `sql` on `conn`.
+
+    An InitPlan runs once per statement; any other node that calls one runs it per row, and a policy's
+    per-row work must stay comparisons, containments and key probes. Empty is the pass.
+    """
     import json
     plan = conn.execute("EXPLAIN (VERBOSE, FORMAT JSON) " + sql, params).fetchone()[0]
     if isinstance(plan, str):

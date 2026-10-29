@@ -1,15 +1,12 @@
 """PGP verification against Postgres: what earns a CONFIRMED binding.
 
-`test_pgp.py` covers the verification logic. This covers the consequence:
-a CLAIMED binding becoming CONFIRMED is the only automatic promotion in
-Phase 7, and docs/10 says CONFIRMED is the grade that may carry weight in
-identity resolution. So the tests here are mostly about what does NOT
-earn it.
+`test_pgp.py` covers the verification logic. This covers the consequence: a CLAIMED binding becoming
+CONFIRMED is the only automatic promotion, and docs/10 says CONFIRMED is the grade that may carry weight in
+identity resolution. So the tests here are mostly about what does NOT earn it.
 
-The last two tests go behind the service and write the table directly, to
-show the CHECK constraints refuse the two traps on their own. That
-duplication is deliberate: application checks are exactly the kind that
-survive review and then get refactored away, and a constraint does not.
+The last two tests go behind the service and write the table directly, to show the CHECK constraints
+refuse the two traps on their own. The duplication is deliberate: application checks get refactored away,
+and a constraint does not.
 
 Env-gated on DATABASE_URL.
 """
@@ -51,8 +48,8 @@ def conn():
     from noctornal_api.db import connect
     c = connect()
     yield c
-    # The ledger refuses DELETE since 0089 (F10b, 2026-09-24), so rows are
-    # removed as the owner with its triggers off inside one transaction.
+    # The ledger refuses DELETE, so rows are removed as the owner with its triggers off inside one
+    # transaction.
     from pgp_support import teardown
     teardown(c, "pgp-%@noctornal.test")
     c.close()
@@ -77,15 +74,14 @@ def _case(conn, owner):
 
 @pytest.fixture
 def svc(conn):
-    # Every check now names the reader's ceiling (F10-fix, 2026-09-24): the
-    # wrapper passes RED and no compartments, as these tests always read.
+    # Every check names the reader's ceiling: the wrapper passes RED and no compartments.
     from pgp_support import Svc
     return Svc(conn)
 
 
 def _vendor_block(conn, case_id, actor):
-    """The contact block that ties the vendor's key to the Tox ID: since
-    F10b a binding is confirmed only when a cited block does."""
+    """The contact block that ties the vendor's key to the Tox ID: a binding is confirmed only when a cited
+    block does."""
     from pgp_support import block
     return block(conn, case_id, actor)["id"]
 

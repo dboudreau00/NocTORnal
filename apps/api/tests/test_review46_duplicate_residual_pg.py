@@ -1,10 +1,7 @@
-"""lab-6 (review of 2026-10-03), DOCUMENTED rather than fixed: refused
-against accepted is one bit across a compartment for a submitter who holds
-the file, inherent in content dedupe (docs/17 entry proposed with this
-change). This pins what the residual's entry says still holds, so a later
-change cannot widen it unnoticed: the refusal names no hash and says
-nothing more to a caller who may not see the existing row, and nothing is
-stored in the prober's name.
+"""Content dedupe leaves a documented residual: refused against accepted is one bit across a compartment
+for a submitter who holds the file (docs/17). This pins what the residual's entry says still holds, so a
+later change cannot widen it unnoticed: the refusal names no hash and says nothing more to a caller who may
+not see the existing row, and nothing is stored in the prober's name.
 
 Email prefix `r46d-`. Env-gated on DATABASE_URL.
 """

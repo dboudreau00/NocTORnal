@@ -1,75 +1,35 @@
-"""Where hostile bytes are parsed: a bounded child process on this host,
-or the same bounded child inside the isolated analysis worker (docs/17
-F42, 2026-10-02).
+"""Where hostile bytes are parsed: a bounded child process on this host, or the same bounded child
+inside the isolated analysis worker.
 
-## Why two runners, and one child
+Static triage (`lab_triage`, `lab_static`) and forum parsing (`forum_parse`) read bytes written by
+the people under investigation. A child that starts without the deployment's secrets, bounded by a
+wall clock and, on Linux, rlimits, bounds a parser but does not confine it: it can read
+`/proc/<pid>/environ` of every process of its user and shares the container's network with the
+database. The worker confines it: no secrets, no network, a read-only root, no capabilities, pids
+and memory limits and a user of its own (infra/production/compose.yml, `analysis-worker`).
 
-Static triage (`lab_triage`, every step in `lab_static`) and forum
-parsing (`forum_parse`, one page at a time) read bytes written by the
-people under investigation. Since 2026-09-24 each read happens in a child
-process that starts without the deployment's secrets and is bounded by a
-wall clock and, on Linux, rlimits. That bounds a parser; it does not
-confine one. On Linux the child can read `/proc/<pid>/environ` of every
-process of the same user, which hold every secret in secrets.env, and it
-shares its container's network with the database. The owner decided on
-2026-10-02 to close that with a container of its own: no secrets, no
-network, a read-only root, no capabilities, a pids and memory limit and a
-user of its own (infra/production/compose.yml, `analysis-worker`).
+Two runners, one child. `run_local` is the bounded subprocess; `run_isolated` hands the same
+request to the worker over a Unix socket on a volume only the application containers mount, and
+the worker starts the child with `run_local`, so the parsers, their limits and their failure kinds
+never fork. In the worker the child also runs as a uid of its own, under a task limit
+(analysis_worker says why).
 
-So there are two runners and exactly one child. `run_local` is the
-bounded subprocess this module has always started (development, Windows,
-and a production deployment that says out loud it accepts the residual).
-`run_isolated` hands the same request to the worker over a Unix socket on
-a volume only the application containers mount, and the worker starts
-the child with `run_local`, the same function, so the parsers, their
-limits and their failure kinds never fork into two implementations. (In
-the worker the child also runs as a uid of its own, under a task limit;
-analysis_worker's docstring says why.)
+`runner_choice`: NOCTORNAL_ANALYSIS_SOCKET set means isolated; unset, development runs locally.
+Unset in production is not a fallback: every analysis is refused, nothing is decrypted or parsed,
+and the readiness row `sample_static_analysis` says why, until the socket is set or
+NOCTORNAL_ANALYSIS_LOCAL=1 accepts the local child (reported as not ready). A worker that does not
+answer is refused the same way, never replaced by a local child: a silent fallback would put the
+hostile bytes back beside the secrets on the day the sandbox broke. config.verify_environment
+refuses a socket set and unusable but not an unset one: the runner is a per-process fact, a worker
+can stop after boot, and refusing the whole console over two features would be disproportionate,
+so the refusal is made at the point of use.
 
-## Choosing one (`runner_choice`)
-
-NOCTORNAL_ANALYSIS_SOCKET names the worker's socket: isolated. Unset,
-development runs locally. Unset in PRODUCTION is not a fallback: every
-analysis is refused, nothing is decrypted or parsed, and the readiness
-row `sample_static_analysis` says why, until the socket is set or
-NOCTORNAL_ANALYSIS_LOCAL=1 accepts the local child explicitly (which the
-row then reports as not ready). A worker that does not answer is refused
-the same way and never replaced by a local child: a silent fallback
-would put the hostile bytes back beside the secrets on the day the
-sandbox broke, which is the day nobody is looking.
-
-## Production reports a missing worker; it does not refuse to boot
-
-config.verify_environment refuses a value SET and unusable, as it
-refuses every malformed setting. It does not refuse an UNSET socket, for
-three reasons (decided 2026-10-02). The boot check reads one environment
-and the runner is a per-process fact: secrets.env makes every application
-container production, the sample origin and lab-cron parse nothing and
-are given no socket, and the cron loop's collection poll, which does
-parse, never runs the boot check at all; a boot rule would stop processes
-that never analyse and miss one that does. The worker can also stop after
-everything has booted, so the refusal at the point of use and the
-readiness row are needed regardless, and a boot rule would be a second
-reader of the same fact. And refusing the console, its case work and its
-evidence intake over the sandbox of two features is the disproportionate
-refusal config.py warns teaches operators to switch refusals off;
-refusing exactly those two features, by name, is the proportionate one.
-
-## The wire
-
-One request per connection. Both directions start with a frame: four
-bytes of magic, a big-endian u32 length and that many bytes of JSON, at
-most `FRAME_HEADER_CAP`. A request's frame names its id, its kind, the
-child's wall clock, the output cap and each payload's length, and the
-payloads follow raw; a reply's frame echoes the id and names the outcome
-and the output's length, and the output follows. Every read is capped
-before it is made and bounded by a deadline, an idle limit included, so
-neither side can be held by a slow or lying peer. Nothing the worker says
-is believed beyond its shape: an unknown failure, a wrong id or an output
-longer than was asked for is `worker_bad_answer`.
-
-This is not an outbound connection: a Unix socket on a volume, never an
-address (test_egress_single_exit names this module for that reason).
+The wire: one request per connection, each direction a frame (four bytes of magic, a big-endian u32
+length, that much JSON, at most `FRAME_HEADER_CAP`) followed by raw payloads or output. Every read
+is capped before it is made and bounded by a deadline and an idle limit, and nothing the worker
+says is believed beyond its shape: an unknown failure, a wrong id or an overlong output is
+`worker_bad_answer`. A Unix socket on a volume is not an outbound connection
+(test_egress_single_exit names this module for that reason).
 """
 from __future__ import annotations
 
@@ -205,16 +165,14 @@ class ChildResult:
 CHILD_FAILURE_KINDS = ("start_failed", "timeout", "output_too_large", "crashed")
 #: What the worker may answer instead of running a child.
 WORKER_FAILURE_KINDS = ("worker_refused", "worker_busy")
-#: The runner's own failures: no child ran, or none answered through the
-#: sandbox, so they say nothing about the page or the sample. Every caller
-#: reads them as the sandbox's state: never parser drift, never a crashed
-#: step, never an attempt spent (F42 review, 2026-10-02).
+#: The runner's own failures: no child ran, or none answered through the sandbox, so they say
+#: nothing about the page or the sample. Every caller reads them as the sandbox's state: never
+#: parser drift, never a crashed step, never an attempt spent.
 SANDBOX_FAILURES = ("isolation_refused", "worker_unavailable",
                     "worker_bad_answer", "worker_refused", "worker_busy")
 
 # ---------------------------------------------------------------------------
-# The local child (moved here from lab_triage.run_child, F42 2026-10-02, so
-# the worker runs exactly this)
+# The local child (the worker runs exactly this)
 # ---------------------------------------------------------------------------
 
 STDERR_KEPT = 4 * 1024
@@ -260,17 +218,12 @@ def child_line(header: dict) -> bytes:
     return line
 
 
-#: Run by the child's own uid between the fork and the child's program,
-#: when the worker gives the child a uid of its own (F42 review,
-#: 2026-10-02): a task limit, then the highest OOM score, then the
-#: program. RLIMIT_NPROC counts every process and thread of the REAL uid,
-#: and a slot's uid is that slot's alone, so the count is exactly the
-#: child's; set before the program's first instruction, it binds a child
-#: that never applies limits of its own as well. The OOM score makes the
-#: kernel pick a child, never the worker, when the container's memory
-#: runs out. Never `preexec_fn` (unsafe in a threaded server): a small
-#: program that execs the real one, and a limit it cannot set ends the
-#: run, so a child never starts unbounded.
+#: Run by the child's own uid between the fork and the child's program, when the worker gives the
+#: child a uid of its own: a task limit, then the highest OOM score, then the program.
+#: RLIMIT_NPROC counts every process and thread of the real uid, and a slot's uid is that slot's
+#: alone, so the count is exactly the child's, set before its first instruction. The OOM score
+#: makes the kernel pick a child, never the worker. Never `preexec_fn` (unsafe in a threaded
+#: server): a small program that execs the real one, and a limit it cannot set ends the run.
 _LAUNCHER = (
     "import os, resource, sys\n"
     "n = int(sys.argv[1])\n"
@@ -339,21 +292,13 @@ def run_local(header: dict, payloads: tuple = (), *, wall_s: float,
     `max_tasks` is given. A child that cannot be attended (no thread to
     feed or read it) is killed, never left running.
 
-    What the child leaves running (F42 verify 1, 2026-10-03). A process the
-    child started can keep its stdout, stderr or stdin open after the child
-    has gone, and a pipe held open is a read that never ends. Closing such
-    a pipe from here waits for the lock the blocked read holds, which
-    wedged the worker's slot, and the request with it, for as long as the
-    helper lived. So each thread closes its own pipe when its read or write
-    ends, and nothing here closes a pipe a thread may still be using. Once
-    the child has exited, or been killed at its wall clock, this stops what
-    it left BEFORE it waits on any pipe: the child's whole group (a normal
-    exit used to leave it alone), then `reap`, which the worker uses to
-    empty the slot's uid (every process of it, in any group or session).
-    Only then are the threads joined, and for at most PIPE_GRACE_S: a
-    helper nothing here can stop (one that left the session when there is
-    no uid to purge, or any helper on Windows) is not waited for, and what
-    it writes after this returns is never added to the answer."""
+    A process the child started can hold its pipes open after it has gone, and closing such a pipe
+    from here would wait on the lock a blocked read holds. So each thread closes its own pipe when
+    its read or write ends, and once the child has exited or been killed this stops what it left
+    before it waits on any pipe: the child's whole group, then `reap`, which the worker uses to
+    empty the slot's uid. Only then are the threads joined, for at most PIPE_GRACE_S; a helper
+    nothing here can stop is not waited for, and what it writes after this returns is never added
+    to the answer."""
     line = child_line(header)
     extra: dict = {}
     if os.name == "posix":
@@ -374,10 +319,9 @@ def run_local(header: dict, payloads: tuple = (), *, wall_s: float,
     except OSError:
         log.warning("an analysis child could not be started", exc_info=True)
         return ChildResult(False, failure="start_failed")
-    # One buffer, grown as the child writes: a large output is held once,
-    # not once in parts and again joined (F42 review, 2026-10-02). `lock`
-    # and state["done"] keep a thread that is still blocked after this
-    # function has returned from writing into what it handed back.
+    # One buffer, grown as the child writes, so a large output is held once, not in parts and again
+    # joined. `lock` and state["done"] keep a thread still blocked after this function has returned
+    # from writing into what it handed back.
     out = bytearray()
     state = {"over": False, "done": False}
     err = bytearray()
@@ -453,9 +397,8 @@ def run_local(header: dict, payloads: tuple = (), *, wall_s: float,
             t.start()
             started.append(t)
     except RuntimeError:
-        # No thread to be had (the tasks of this process's container are
-        # spent): a child nobody feeds or reads would run unbounded, so it
-        # is killed and the run is a start failure (F42 review, 2026-10-02).
+        # No thread to be had (the container's tasks are spent): a child nobody feeds or reads
+        # would run unbounded, so it is killed and the run is a start failure.
         log.warning("an analysis child could not be attended, and was stopped")
         kill()
         _wait(proc, 30)
@@ -519,23 +462,17 @@ def run_local(header: dict, payloads: tuple = (), *, wall_s: float,
 WIRE_VERSION = 1
 MAGIC = b"NAW1"
 FRAME_HEADER_CAP = 64 * 1024
-#: The child modules the worker starts, by name. A peer names a kind; it
-#: never names a program.
-#: `lab_archive_child` is archive expansion's (phase 8, merged 2026-10-03):
-#: it reads an archive from stdin and answers its members, with no path
-#: written, under the same limits and failure kinds as the others.
-#: `watch_regex` is a watch's regular expressions, matched against collected
-#: text (watch_regex.py): until 2026-10-07 it was
-#: sent as `lab_static`, which the worker answers `bad_header`, so in
-#: production every pattern was reported failed and none ever matched.
+#: The child modules the worker starts, by name. A peer names a kind; it never names a program.
+#: `lab_archive_child` reads an archive from stdin and answers its members, with no path written,
+#: under the same limits and failure kinds as the others. `watch_regex` matches a watch's regular
+#: expressions against collected text (watch_regex.py); sent as `lab_static` instead, it is
+#: answered `bad_header` and every pattern reads as failed.
 KINDS = ("lab_static", "forum_parse", "lab_archive_child", "watch_regex")
 HELLO = "hello"
 MAX_PAYLOADS = 4
-#: The largest output the worker hands back, whatever a request asks: the
-#: archive child's members (its default 256 MiB of them, and a line of report
-#: for each, `lab_archive.stdout_cap`) are the largest answer any child
-#: gives, above a compiled YARA build (yara_rules). `lab_archive.
-#: archive_settings` refuses a setting that would ask for more, by name.
+#: The largest output the worker hands back, whatever a request asks: the archive child's members
+#: (256 MiB by default, plus a report line each, `lab_archive.stdout_cap`) are the largest answer
+#: any child gives. `lab_archive.archive_settings` refuses a setting that would ask for more.
 MAX_OUTPUT_BYTES = 320 * MIB
 MAX_WALL_S = 3700.0
 CONNECT_TIMEOUT_S = 5.0
@@ -548,12 +485,10 @@ TRANSFER_BASE_S = 30.0
 MIN_RATE = 8 * MIB
 #: How long a request may wait for one of the worker's slots.
 QUEUE_WAIT_S = 30.0
-#: How long `unavailable` waits for the worker's hello (twice this, for
-#: the whole exchange), and how long its verdict is believed. Callers ask
-#: once per forum source in a source list and on every schedule pass, so
-#: a worker that accepts and never answers must cost one wait, not one per
-#: source (F42 review, 2026-10-02). Module attributes so a test can
-#: shrink them.
+#: How long `unavailable` waits for the worker's hello (twice this, for the whole exchange), and
+#: how long its verdict is believed: callers ask once per forum source and on every schedule pass,
+#: so a worker that accepts and never answers must cost one wait, not one per source. Module
+#: attributes so a test can shrink them.
 HELLO_TIMEOUT_S = CONNECT_TIMEOUT_S
 VERDICT_TTL_S = 5.0
 _ID = re.compile(r"[0-9a-f]{32}")
@@ -589,8 +524,7 @@ def recv_exact(sock, n: int, deadline: float, *, idle: bool = True,
     costs what it sent. `idle=False` waits for the bytes until the
     deadline alone: a reply starts only once its child has finished.
     `mutable` hands back the buffer itself rather than a bytes copy of
-    it, so the worker holds a payload once while it arrives, not twice
-    (F42 review, 2026-10-02)."""
+    it, so the worker holds a payload once while it arrives, not twice."""
     buf = bytearray()
     while len(buf) < n:
         sock.settimeout(_remaining(deadline, idle))
@@ -623,14 +557,11 @@ def _no_constant(name: str):
 
 
 def loads_child_json(raw):
-    """JSON a child (or the worker) sent, read the way every parent check of
-    an answer needs it read: a ValueError for anything that is not an answer
-    this process can store. That is a text that is not UTF-8, one nested so
-    deep that the interpreter's decoder gives out (a RecursionError, which is
-    no ValueError and went past the `except ValueError` of three callers),
-    and the constants NaN, Infinity and -Infinity, which Python's decoder
-    accepts and PostgreSQL's jsonb refuses, so one in a stored finding
-    failed its write."""
+    """JSON a child (or the worker) sent, read the way every parent check of an answer needs it
+    read: a ValueError for anything that is not an answer this process can store. That is a text
+    that is not UTF-8, one nested so deep that the decoder raises RecursionError (no ValueError,
+    so callers' `except ValueError` would miss it), and the constants NaN, Infinity and -Infinity,
+    which Python's decoder accepts and PostgreSQL's jsonb refuses."""
     try:
         return json.loads(str(raw, "utf-8") if not isinstance(raw, str) else raw,
                           parse_constant=_no_constant)
@@ -847,15 +778,12 @@ def unavailable(env: Mapping[str, str] | None = None, *, connect=None) -> str | 
     None. Callers ask BEFORE they decrypt a sample or fetch a page, so a
     missing worker costs a pass and never a sample's attempts.
 
-    The worker's answer is remembered for VERDICT_TTL_S, and asked by one
-    caller at a time: the others wait for that answer rather than each
-    asking (F42 review, 2026-10-02). The cost against a worker that accepts
-    and never answers is therefore one wait of at most 2 * HELLO_TIMEOUT_S
-    (10 seconds) per VERDICT_TTL_S window, however many forum sources ask,
-    where it was 10 seconds for every source. A worker that stops inside that
-    window costs the request that finds out, which every caller handles
-    as the sandbox's state (SANDBOX_FAILURES). Readiness and the
-    healthcheck call `hello` and are never answered from memory."""
+    The worker's answer is remembered for VERDICT_TTL_S and asked by one caller at a time, the
+    others waiting for that answer, so a worker that accepts and never answers costs one wait of at
+    most 2 * HELLO_TIMEOUT_S per window, however many forum sources ask. A worker that stops inside
+    the window costs the request that finds out, which every caller handles as the sandbox's state
+    (SANDBOX_FAILURES). Readiness and the healthcheck call `hello` and are never answered from
+    memory."""
     choice = runner_choice(env)
     if choice.mode == "refused":
         return choice.reason
@@ -882,9 +810,8 @@ def unavailable(env: Mapping[str, str] | None = None, *, connect=None) -> str | 
 #: The worker's own settings (read in analysis_worker).
 CONCURRENCY_ENV = "NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY"
 MAX_BYTES_ENV = "NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES"
-#: The worker's own settings, by exact name. Until the F42 review
-#: (2026-10-02) any NOCTORNAL_ANALYSIS_ name passed, so a secret that
-#: happened to carry the prefix would have too.
+#: The worker's own settings, by exact name: a prefix match would let through a secret that
+#: happened to carry the prefix.
 WORKER_OWN_ENV = frozenset({SOCKET_ENV, CONCURRENCY_ENV, MAX_BYTES_ENV})
 #: The only variables the worker's environment may carry: what the base
 #: image and Docker set (GPG_KEY is the python image's release signing key

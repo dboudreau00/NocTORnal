@@ -1,49 +1,36 @@
-"""Session binding (migration 0058) and the custody ledger's missing REVOKEs.
+"""Session binding (migration 0058) and the custody ledger's REVOKEs.
 
-A session token is an opaque bearer credential: whoever presents it IS the
-analyst, from anywhere, on anything, for up to twelve hours. `iam.session`
-was given `ip_hash` and `user_agent` columns in 0012 and nothing ever wrote
-them, so a token lifted from a laptop and replayed from another continent
-left a row indistinguishable from the analyst's own -- there was no fact
-on record to compare the replay against. Until 2026-09-02 a stolen token
-was perfectly portable and perfectly silent.
+A session token is an opaque bearer credential: whoever presents it IS the analyst, from anywhere, on
+anything, for up to twelve hours. Without a recorded fact to compare against, a token lifted from a laptop
+and replayed from another continent leaves a row indistinguishable from the analyst's own.
 
-0058 records where a session was minted (`ip inet`, and the `user_agent`
-column 0012 already had), and `NOCTORNAL_SESSION_STRICT_BINDING` makes
-validation refuse a presentation from anywhere else. Off by default: a
-browser update changes the User-Agent mid-session and a laptop moving
-between networks changes the address, so strict binding is a deliberate
-posture for a deployment that would rather re-authenticate than risk it.
+0058 records where a session was minted (`ip inet`, and the `user_agent` column 0012 added), and
+`NOCTORNAL_SESSION_STRICT_BINDING` makes validation refuse a presentation from anywhere else. Off by
+default: a browser update changes the User-Agent mid-session and a laptop moving between networks changes
+the address, so strict binding is a deliberate posture for a deployment that would rather re-authenticate
+than risk it.
 
 The tests that carry this file:
 
-- RECORDED: login writes both values, and the store reads them back on
-  the same record the validator sees -- the two halves of one contract;
-- OFF: a moved token validates, and leaves no refusal in the audit log,
-  because a control that is off must not be half on;
-- ON: a moved token is refused with 401 problem+json, audited as
-  SESSION_BINDING_REFUSED naming WHICH binding failed, and does not slide
-  the idle window -- a refused replay must not keep the session alive;
-- BOTH SURFACES: the same is true of the WebSocket handshake, which is
-  the application's second session-validation site. It was not until
-  2026-09-02: `live.py` validated with the touching default and never
-  consulted the binding, so a token refused on every HTTP request was
-  accepted on the live case-event stream AND slid the idle window on
-  every reconnect, which meant the bullet above was true only over HTTP
-  while the 0058 docstring and the `iam.session.ip` COMMENT both said
-  "validation". One test now reads both halves of that contract;
-- PRE-BINDING: a session minted before 0058 has no address to compare,
-  and strict mode refuses it rather than waving it through, because
-  "cannot verify" and "verified" are different facts;
-- UNBOUND BY CONSTRUCTION: `scripts/bootstrap.py session` mints from a
-  shell for a browser it has never met and so can pass neither value.
-  Strict mode refuses it, correctly; the audit row carries
-  `unbound: true` so that refusal does not read as a replay, and the
-  command prints the warning before it hands over the URL;
-- THE LEDGER: `core.evidence_custody` carries the same explicit REVOKE as
-  `audit.event` (0013), `core.purge_tombstone` and `lab.sample_access`
-  (0052). Read from both sides: the version file's own statement, and the
-  catalog state it leaves behind.
+- RECORDED: login writes both values, and the store reads them back on the same record the validator
+  sees: the two halves of one contract;
+- OFF: a moved token validates, and leaves no refusal in the audit log, because a control that is off
+  must not be half on;
+- ON: a moved token is refused with 401 problem+json, audited as SESSION_BINDING_REFUSED naming WHICH
+  binding failed, and does not slide the idle window: a refused replay must not keep the session alive;
+- BOTH SURFACES: the same is true of the WebSocket handshake, the application's second session-validation
+  site. `live.py` must consult the binding and validate without touching, or a token refused on every HTTP
+  request would be accepted on the live case-event stream AND slide the idle window on every reconnect.
+  One test reads both halves of that contract;
+- PRE-BINDING: a session minted before 0058 has no address to compare, and strict mode refuses it rather
+  than waving it through, because "cannot verify" and "verified" are different facts;
+- UNBOUND BY CONSTRUCTION: `scripts/bootstrap.py session` mints from a shell for a browser it has never met
+  and so can pass neither value. Strict mode refuses it, correctly; the audit row carries `unbound: true`
+  so that refusal does not read as a replay, and the command prints the warning before it hands over the
+  URL;
+- THE LEDGER: `core.evidence_custody` carries the same explicit REVOKE as `audit.event` (0013),
+  `core.purge_tombstone` and `lab.sample_access` (0052). Read from both sides: the version file's own
+  statement, and the catalog state it leaves behind.
 
 Env-gated on DATABASE_URL. Email prefix `sb-`, unique to this file.
 """
@@ -127,21 +114,16 @@ def _user(conn):
 
 
 def _login(client, email, secret, ua: str) -> str:
-    """A real sign-in, and it has to be: the binding under test is written
-    BY the login handler, which hands `SessionService.create` the address
-    and the User-Agent of THIS request. A session minted from a shell is
-    unbound and would prove nothing here (the test that says so is
-    below).
+    """A real sign-in, and it has to be: the binding under test is written BY the login handler, which
+    hands `SessionService.create` the address and the User-Agent of THIS request. A session minted from a
+    shell is unbound and would prove nothing here (the test that says so is below).
 
-    The token comes off `Set-Cookie` since 2026-09-10, because login
-    answers 204 and there is no body to read it from. It is the same
-    string either way -- `auth._set_session_cookies` puts the RAW session
-    token in `__Host-session` -- so what these tests then replay from
-    another address is exactly what the browser was handed. Read from the
-    header rather than through the client's jar: httpx will not attach a
-    `Secure` cookie over the test client's plain-http base URL, and a
-    lookup that quietly returned nothing would fail as a KeyError here
-    rather than as a session that never existed.
+    The token comes off `Set-Cookie`, because login answers 204 and there is no body to read it from.
+    `auth._set_session_cookies` puts the RAW session token in `__Host-session`, so what these tests replay
+    from another address is exactly what the browser was handed. Read from the header rather than through
+    the client's jar: httpx will not attach a `Secure` cookie over the test client's plain-http base URL,
+    and a lookup that quietly returned nothing would fail as a KeyError here rather than as a session that
+    never existed.
     """
     from noctornal_api.http.deps import SESSION_COOKIE
     from noctornal_api.security import totp
@@ -235,8 +217,8 @@ def test_with_strict_binding_on_a_moved_token_is_refused_and_audited(conn, monke
     r = _me(home, token, AWAY_UA)
     assert r.status_code == 401, r.text
     assert r.headers["content-type"].startswith("application/problem+json")
-    # The wording is the generic one: a token holder must not learn that
-    # the string was a REAL session which merely failed a binding check.
+    # The wording is the generic one: a token holder must not learn that the string was a REAL session
+    # which merely failed a binding check.
     assert "binding" not in r.text.lower()
 
     # Same client software, different address.
@@ -259,22 +241,16 @@ def test_with_strict_binding_on_a_moved_token_is_refused_and_audited(conn, monke
 def test_the_websocket_applies_the_same_binding_as_http(conn, monkeypatch):
     """The contract crosses two files, so this test reads both.
 
-    Until 2026-09-02 `live.py` called `SessionService.validate(token)` with
-    `touch` defaulting to True and never consulted `binding_mismatch`. The
-    consequences were exactly the two this asserts away, and both
-    contradicted what the operator was told: (a) a stolen token refused on
-    every HTTP request was still accepted on the live case-event stream,
-    where `_may_read` re-runs the five-part gate and so hands the attacker
-    what the victim can read; (b) the unconditional touch slid
-    `last_seen_at` on every reconnect, so the 30-minute idle timeout never
-    fired and the replay kept the victim's session alive indefinitely --
-    the direct opposite of the invariant this file's header calls
-    load-bearing, which was true only over HTTP.
+    `live.py` must not call `SessionService.validate(token)` with `touch` defaulting to True and without
+    consulting `binding_mismatch`. Both consequences contradict what the operator is told: (a) a stolen
+    token refused on every HTTP request would still be accepted on the live case-event stream, where
+    `_may_read` re-runs the five-part gate and so hands the attacker what the victim can read; (b) the
+    unconditional touch would slide `last_seen_at` on every reconnect, so the 30-minute idle timeout never
+    fires and the replay keeps the victim's session alive indefinitely.
 
-    So: HTTP refuses the moved token AND the socket refuses it, the idle
-    window does not move for either, the audit row says which surface it
-    came from, and the legitimate holder's socket still works and still
-    counts as activity.
+    So: HTTP refuses the moved token AND the socket refuses it, the idle window does not move for either,
+    the audit row says which surface it came from, and the legitimate holder's socket still works and
+    still counts as activity.
     """
     from starlette.websockets import WebSocketDisconnect
     monkeypatch.setenv(FLAG, "1")
@@ -319,19 +295,15 @@ def test_the_websocket_applies_the_same_binding_as_http(conn, monkeypatch):
 
 
 def test_a_bootstrap_session_is_refused_as_unbound_not_as_a_replay(conn, monkeypatch):
-    """`scripts/bootstrap.py session` mints from a shell for a browser it
-    has never met, so it passes no address and no User-Agent and CANNOT.
-    Under strict binding it is therefore refused on its first request,
-    with the generic 401 -- the operator recovery path for a machine whose
-    clock TOTP cannot live with dies, and before 2026-09-02 it died saying
-    nothing at all about why.
+    """`scripts/bootstrap.py session` mints from a shell for a browser it has never met, so it passes no
+    address and no User-Agent and CANNOT. Under strict binding it is therefore refused on its first
+    request, with the generic 401: the operator recovery path for a machine whose clock TOTP cannot live
+    with must say why.
 
-    The audit row now separates the two facts a mismatch can mean. This is
-    an `unbound` session (nothing was ever recorded), not a moved one, and
-    the row says so; `cmd_session` prints the same warning before it hands
-    over the URL. `binding_mismatch` still refuses it -- "cannot verify"
-    and "verified" are different facts -- so this pins the DISCLOSURE, not
-    a carve-out.
+    The audit row separates the two facts a mismatch can mean. This is an `unbound` session (nothing was
+    ever recorded), not a moved one, and the row says so; `cmd_session` prints the same warning before it
+    hands over the URL. `binding_mismatch` still refuses it ("cannot verify" and "verified" are different
+    facts), so this pins the DISCLOSURE, not a carve-out.
     """
     from uuid import uuid4 as _uuid4
 
@@ -392,16 +364,14 @@ def _custody_revoke_sql() -> str:
 
 
 def test_the_custody_ledger_privileges_are_explicit_like_its_siblings(conn):
-    """0013 and 0052 revoke UPDATE, DELETE and TRUNCATE from PUBLIC on the
-    three other append-only ledgers; 0023 installed custody's triggers and
-    never the REVOKE, so the belt-and-braces argument 0052 makes applied
-    to every ledger but the chain of custody.
+    """0013 and 0052 revoke UPDATE, DELETE and TRUNCATE from PUBLIC on the three other append-only ledgers;
+    0023 installed custody's triggers and not the REVOKE, so the belt-and-braces argument 0052 makes must
+    be applied to the chain of custody too.
 
-    Two halves. The statement in the version file names the table, the
-    three privileges and PUBLIC. And the catalog: a table whose `relacl` is
-    NULL has only IMPLICIT privileges, which is exactly the state in which
-    nothing has been revoked from anyone -- so every ledger must carry an
-    explicit ACL, and that ACL must grant PUBLIC no mutation.
+    Two halves. The statement in the version file names the table, the three privileges and PUBLIC. And
+    the catalog: a table whose `relacl` is NULL has only IMPLICIT privileges, which is exactly the state in
+    which nothing has been revoked from anyone, so every ledger must carry an explicit ACL, and that ACL
+    must grant PUBLIC no mutation.
     """
     stmt = _custody_revoke_sql()
     assert "core.evidence_custody" in stmt and "FROM PUBLIC" in stmt

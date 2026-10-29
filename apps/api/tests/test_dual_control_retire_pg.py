@@ -1,13 +1,10 @@
-"""The dead dual-control configuration of 0012 is gone (F9c,
-2026-09-24; migration retire_dead_dual_control).
+"""The dead dual-control configuration of 0012 is gone (migration retire_dead_dual_control).
 
-`iam.permission.requires_dual_control` was seeded and never read, and said
-case.delete took two people when it took one; `iam.dual_control_request`
-was replaced by `core.approval_request` before anything wrote to it. The
-catalogue in `approvals.OPERATIONS` and `iam.dual_control_operation` are
-the one reader now. The migration's own directions run inside rolled-back
-transactions, and it is located by the stem of its file name, never by
-number. Env-gated on DATABASE_URL.
+`iam.permission.requires_dual_control` was seeded and never read, and claimed case.delete took two people
+when it took one; `iam.dual_control_request` was superseded by `core.approval_request` before anything
+wrote to it. The catalogue in `approvals.OPERATIONS` and `iam.dual_control_operation` are the one reader.
+The migration's own directions run inside rolled-back transactions, and it is located by the stem of its
+file name, never by number. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

@@ -1,26 +1,20 @@
-"""A break-glass use is counted once per request, not once per gate
-(sec-breakglass-double-count, 2026-09-23).
+"""A break-glass use is counted once per request, not once per gate.
 
-On a case classified above the invoker's own clearance, every request
-passes the case's gate only through the grant, so `PgAccessResolver`
-counts it there. A request that then passes a SECOND gate at an item's
-labels (an exhibit route, a capture screenshot, an entity write, a tag
-on a node, an approval) was counted again, so the officer's card read one
-exhibit opened as two accesses. `deps.authorize_object` now passes
-`count_use` through, and a second gate marked `after_case_gate=True`
+On a case classified above the invoker's own clearance, every request passes the case's gate only
+through the grant, so `PgAccessResolver` counts it there. A request that then passes a second gate at
+an item's labels (an exhibit route, a capture screenshot, an entity write, a tag on a node, an
+approval) must not be counted again, or the officer's card reads one exhibit opened as two accesses.
+`deps.authorize_object` passes `count_use` through, and a second gate marked `after_case_gate=True`
 counts only when the case's own gate did not.
 
-Every "counts once" assertion below fails on the base commit (245cb57),
-where each of those requests added two. The within-clearance test pins
-what must NOT change: there the case's gate never counted, and an item
+The within-clearance test pins what must not change: there the case's gate never counted, and an item
 whose own labels need the grant is still counted, once.
 
-The figure asserted is the one the Security Officer's review card prints:
-`action_count` on `GET /break-glass/unreviewed`.
+The figure asserted is the one the Security Officer's review card prints: `action_count` on
+`GET /break-glass/unreviewed`.
 
-**The email prefix is `bco-` and must stay unique**: the fixture cleans
-up by deleting on it, and two files sharing a prefix delete each other's
-rows mid-run.
+The email prefix is `bco-` and must stay unique: the fixture cleans up by deleting on it, and two
+files sharing a prefix delete each other's rows mid-run.
 
 Env-gated on DATABASE_URL.
 """
@@ -255,9 +249,8 @@ def test_on_a_case_above_clearance_each_request_is_one_use(conn, client):
                  f"{case}/curation/tags/{tag.json()['id']}/nodes", auth, 201,
                  json={"node_id": str(node)}) == 1
 
-    # A merge request names two real entities of the case the requester may
-    # merge (beta review http_ui-011, 2026-10-03); the case's gate counted the
-    # use and the entities' gates, which follow it, count none more.
+    # A merge request names two real entities of the case the requester may merge; the case's gate
+    # counted the use and the entities' gates, which follow it, count none more.
     other = _node(conn, case_id, owner, "bco_red_other", "RED")
     assert _uses(conn, client, gid, "POST", f"{case}/approvals", auth, 201,
                  json={"operation": "node.merge",
@@ -324,14 +317,11 @@ def test_within_clearance_only_an_item_above_it_is_counted(conn, client):
 
 
 def test_a_second_gate_refusal_keeps_the_case_gates_use(conn, client):
-    """The one request `counted_at_case_gate` leaves counted although it
-    was refused, pinned so it is a decision and not a surprise. A GREEN
-    analyst on an AMBER case under an AMBER grant asks for a RED exhibit:
-    the grant let the request past the case's gate, and the exhibit's gate
-    refuses. One use, not two, and not none. The refusal answers as a
-    missing exhibit does, so the
-    status no longer tells the two apart; the count still does, to the
-    officer reviewing the grant, which is what it is for."""
+    """The one request `counted_at_case_gate` leaves counted although it was refused, pinned so it is
+    a decision and not a surprise. A GREEN analyst on an AMBER case under an AMBER grant asks for a RED
+    exhibit: the grant let the request past the case's gate, and the exhibit's gate refuses. One use,
+    not two, and not none. The refusal answers as a missing exhibit does, so the status does not tell
+    the two apart; the count still does, to the officer reviewing the grant, which is what it is for."""
     owner, case_id, auth, _officer = _setting(
         conn, client, clearance="GREEN", case_level="AMBER")
     stricter = _exhibit(conn, case_id, owner, "RED")

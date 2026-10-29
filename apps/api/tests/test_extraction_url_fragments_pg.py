@@ -1,13 +1,12 @@
-"""The capture extractor trims prose punctuation from a URL, and two MEGA
-links in one paste are two proposals (L5, 2026-09-24).
+"""The capture extractor trims prose punctuation from a URL, and two MEGA links in one paste are two
+proposals.
 
-The URL pattern kept a sentence's full stop, comma or question mark, so a
-link written in prose carried it into the raw value and the normaliser; and
-`url_norm` dropped every fragment, so the second legacy MEGA link in a case
-was "already known" and never proposed. Each test fails on ab27a4a.
+A URL pattern that keeps a sentence's full stop, comma or question mark carries it into the raw value and
+the normaliser. `url_norm` must keep a MEGA link's fragment, or the second legacy MEGA link in a case is
+"already known" and never proposed.
 
-The first two tests are pure; the capture test is env-gated on
-DATABASE_URL. Email prefix `euf-`, titles `euf-`.
+The first two tests are pure; the capture test is env-gated on DATABASE_URL. Email prefix `euf-`, titles
+`euf-`.
 """
 from __future__ import annotations
 

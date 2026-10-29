@@ -1,51 +1,36 @@
-"""Static triage: the queue, the bounded runner and what a run writes (F11,
-with F12's YARA step and compile queue), 2026-09-24.
+"""Static triage: the queue, the bounded runner, and what a run writes (YARA step included).
 
-## Shape
+A machine step that runs after submission, outside the upload request: `submit()` enqueues a run in its
+insert transaction, a cron pass (`scripts/lab_triage.py`) drains the queue, and an analyst's "run it now"
+enqueues and, when a slot is free, starts the run after the response (`run_queued_detached`). Decision 30
+holds: functions you call, no resident worker. A run writes nothing to `core.*` or `collect.*` and raises
+no proposal: machines propose only when an analyst clicks.
 
-A machine step that runs AFTER submission, outside the upload request:
-`submit()` enqueues a run in its insert transaction, a cron pass
-(`scripts/lab_triage.py`) drains the queue, and an analyst's "run it now"
-enqueues and, when a slot is free, starts the run after the response
-(`run_queued_detached`). Decision 30 holds: functions you call, no
-resident worker. A run writes nothing to `core.*` or `collect.*` and
-raises no proposal: machines propose only when an analyst clicks.
+One run, in this order:
 
-## One run, in this order
-
-1. CLAIM, one transaction: the next QUEUED run whose sample has none
-   RUNNING, by priority (an analyst's request, then submissions and
-   retries, then retrohunts and backfills) then age, FOR
-   UPDATE SKIP LOCKED. Refusals end it SKIPPED having read nothing. The
-   per-run session lock is taken INSIDE this transaction, before COMMIT,
-   so a sweep can never see the run RUNNING with its lock free.
-2. MATERIALISE with no transaction open: `samples._verified_plaintext`,
-   which decrypts, verifies and, on a mismatch, commits the tamper alarm
-   on its own and raises. A failed check is FAILED and never retried.
-3. CUSTODY, committed, only after verification and before a byte leaves
-   this process: one SCANNED row per person whose request caused the read
-   and one SYSTEM row when a scheduled trigger did. The detail
-   names the run and the byte count, never the steps or the trigger, so
-   custody says who caused a read and not what a hidden rule set hunts.
-4. CHILDREN, one per step, each bounded (`lab_static`, `run_child`),
-   here or in the isolated analysis worker (`analysis_runner`, F42).
-5. RESULTS, one transaction: the sample re-read FOR UPDATE; a sample
-   rejected, excluded or whose case closed meanwhile has its findings
-   discarded. Otherwise the hashes, the gaps for the steps this run
-   covered, QUARANTINED to TRIAGED, the machine rows, the run DONE (only
-   while it is still RUNNING) and the audit row LAST. A failure here marks
-   the run FAILED on its own, retried only for a lock timeout.
+1. Claim, one transaction: the next QUEUED run whose sample has none RUNNING, by priority (an analyst's
+   request, then submissions and retries, then retrohunts and backfills) then age, FOR UPDATE SKIP LOCKED.
+   Refusals end it SKIPPED having read nothing. The per-run session lock is taken inside this
+   transaction, before COMMIT, so a sweep can never see the run RUNNING with its lock free.
+2. Materialise with no transaction open: `samples._verified_plaintext`, which decrypts, verifies and, on
+   a mismatch, commits the tamper alarm on its own and raises. A failed check is FAILED and never retried.
+3. Custody, committed, only after verification and before a byte leaves this process: one SCANNED row per
+   person whose request caused the read and one SYSTEM row when a scheduled trigger did. The detail names
+   the run and the byte count, never the steps or the trigger, so custody says who caused a read and not
+   what a hidden rule set hunts.
+4. Children, one per step, each bounded (`lab_static`, `run_child`), here or in the isolated analysis
+   worker (`analysis_runner`).
+5. Results, one transaction: the sample re-read FOR UPDATE; a sample rejected, excluded or whose case
+   closed meanwhile has its findings discarded. Otherwise the hashes, the gaps for the steps this run
+   covered, QUARANTINED to TRIAGED, the machine rows, the run DONE (only while it is still RUNNING) and the
+   audit row last. A failure here marks the run FAILED on its own, retried only for a lock timeout.
 6. The plaintext reference is dropped and both locks released.
 
-## Liveness without a clock
-
-A run's owner holds a session advisory lock for it. `sweep_abandoned`
-takes that lock for each RUNNING run: getting it proves the owner is gone,
-so the run is ABANDONED and re-queued as a RETRY under `MAX_ATTEMPTS`,
-carrying its requesters (a requested read never becomes SYSTEM on retry).
-The cron pass and the on-demand path both sweep first, so a restart
-cannot leave a permanent "already running". Compile jobs have the same
-idiom. Slots, also advisory locks, bound the runs in the
+Liveness without a clock: a run's owner holds a session advisory lock for it. `sweep_abandoned` takes
+that lock for each RUNNING run: getting it proves the owner is gone, so the run is ABANDONED and
+re-queued as a RETRY under `MAX_ATTEMPTS`, carrying its requesters (a requested read never becomes SYSTEM
+on retry). The cron pass and the on-demand path both sweep first, so a restart cannot leave a permanent
+"already running". Compile jobs have the same idiom. Slots, also advisory locks, bound the runs in the
 whole deployment (API workers and cron together).
 """
 from __future__ import annotations
@@ -184,10 +169,9 @@ def settings_or_default() -> AnalysisSettings:
 
 
 def limits_words(settings: AnalysisSettings, kind: str | None = None) -> dict:
-    """The limits line the run row, the card and readiness show, and
-    whether the children ran in the isolated worker (F42, 2026-10-02):
-    kept on the run and its findings, so how a sample was handled is on
-    the record beside what was found."""
+    """The limits line the run row, the card and readiness show, and whether the children ran in the
+    isolated worker: kept on the run and its findings, so how a sample was handled is on the record beside
+    what was found."""
     kind = kind or lab_static.limits_kind()
     return {"kind": kind, "words": lab_static.LIMITS_WORDS[kind],
             "memory_bytes": settings.memory_bytes if kind == "rlimit" else None,
@@ -203,9 +187,8 @@ def limits_words(settings: AnalysisSettings, kind: str | None = None) -> dict:
 #: a script that floods its output or never returns.
 CHILD_ARGV: list[str] = [sys.executable, "-m", "noctornal_api.lab_static"]
 
-# The bounded runner itself lives in analysis_runner since F42
-# (2026-10-02), so the isolated worker starts children with the very same
-# code; these names stay here for the callers and tests that use them.
+# The bounded runner itself lives in analysis_runner, so the isolated worker starts children with the very
+# same code; these names stay here for the callers and tests that use them.
 ChildResult = analysis_runner.ChildResult
 child_env = analysis_runner.child_env
 _package_root = analysis_runner.package_root
@@ -221,8 +204,8 @@ CHILD_FAILURES = {
     "bad_output": "the analysis process's answer could not be read",
     "version_mismatch": ("the analysis process reported a different parser "
                          "version from this server's"),
-    # The isolated worker's own failures (F42, 2026-10-02). Each means
-    # nothing was parsed, and none is ever answered by a local child.
+    # The isolated worker's own failures. Each means nothing was parsed, and none is ever answered by a
+    # local child.
     "isolation_refused": ("no isolated analysis worker is configured, so "
                           "nothing was parsed"),
     "worker_unavailable": "the isolated analysis worker did not answer",
@@ -236,24 +219,18 @@ def run_child(header: dict, payloads: tuple[bytes, ...] = (), *,
               wall_s: float, stdout_cap: int = CHILD_STDOUT_CAP,
               argv: list[str] | None = None,
               kind: str = "lab_static") -> ChildResult:
-    """One bounded child, on the runner this deployment chose
-    (analysis_runner.runner_choice): here, or in the isolated worker,
-    which runs the same `run_local` per request. `argv` is the local
-    child's (a test points it at a hostile script); the worker starts only
-    the module `kind` names. Production with no worker configured, or a
-    worker that does not answer, gets a failure, never a local child
-    (F42, 2026-10-02)."""
+    """One bounded child, on the runner this deployment chose (analysis_runner.runner_choice): here, or in
+    the isolated worker, which runs the same `run_local` per request. `argv` is the local child's (a test
+    points it at a hostile script); the worker starts only the module `kind` names. Production with no
+    worker configured, or a worker that does not answer, gets a failure, never a local child."""
     return analysis_runner.run(kind, header, payloads, wall_s=wall_s,
                                stdout_cap=stdout_cap, argv=argv or CHILD_ARGV)
 
 
 class AnalysisInterrupted(Exception):
-    """A child could not run because the sandbox failed mid-pass: one of
-    analysis_runner.SANDBOX_FAILURES, never the sample's or the rules'
-    fault. The run or the compile goes back to the queue with no attempt
-    spent, and the pass stops, since the next child would meet the same
-    worker (F42 review, 2026-10-02: until then such a step was stored as a
-    crashed scan, and a compile spent one of its three attempts)."""
+    """A child could not run because the sandbox failed mid-pass: one of analysis_runner.SANDBOX_FAILURES,
+    never the sample's or the rules' fault. The run or the compile goes back to the queue with no attempt
+    spent, and the pass stops, since the next child would meet the same worker."""
 
     def __init__(self, failure: str):
         super().__init__(failure)
@@ -306,15 +283,10 @@ class EnqueueResult:
     refused: str | None = None
 
 
-#: How a request merges into the sample's one queued run. Shared by
-#: `enqueue` and the RETRY a sweep queues, so both merge the same way: the
-#: verifier of 2026-09-24 found the RETRY path unioned the steps but not
-#: the rule set versions, so a retried yara-scoped request merged into a
-#: queued run lost its versions or had its scope widened (F11). Steps are
-#: unioned; an empty version list on a run that includes the yara step
-#: means every open activation at run time and absorbs a list; the merged
-#: run takes the highest priority it absorbs, with that request's trigger
-#: and person.
+#: How a request merges into the sample's one queued run. Shared by `enqueue` and the RETRY a sweep
+#: queues, so both merge the same way. Steps are unioned; an empty version list on a run that includes the
+#: yara step means every open activation at run time and absorbs a list; the merged run takes the highest
+#: priority it absorbs, with that request's trigger and person.
 _MERGE_INTO_QUEUED = """ON CONFLICT (sample_id) WHERE status = 'QUEUED' DO UPDATE SET
               requests = r.requests || EXCLUDED.requests,
               priority = least(r.priority, EXCLUDED.priority),
@@ -343,15 +315,12 @@ def enqueue(conn: psycopg.Connection, sample_id: UUID, *, trigger: str,
             priority: int | None = None) -> EnqueueResult:
     """Queue a run, or merge the request into the sample's queued run.
 
-    Steps are unioned; version lists are unioned, and an empty list on a
-    request that includes the yara step (every open activation at run
-    time) absorbs a list. The merged run takes the highest priority it
-    absorbs, and its trigger and named person are the highest-priority
-    request's. EVERY request is appended to `requests`, with its person
-    and trigger, because custody names each person whose request caused
-    the read. Nothing is inserted for a rejected sample or one
-    the Lab's exclusions hold back. Runs inside the caller's transaction
-    when there is one (submit's), and on its own otherwise."""
+    Steps are unioned; version lists are unioned, and an empty list on a request that includes the yara
+    step (every open activation at run time) absorbs a list. The merged run takes the highest priority it
+    absorbs, and its trigger and named person are the highest-priority request's. Every request is
+    appended to `requests`, with its person and trigger, because custody names each person whose request
+    caused the read. Nothing is inserted for a rejected sample or one the Lab's exclusions hold back. Runs
+    inside the caller's transaction when there is one (submit's), and on its own otherwise."""
     from noctornal_api.samples import lab_exclusions_sql
     if trigger not in TRIGGER_PRIORITY:
         raise ValueError(f"unknown trigger {trigger!r}")
@@ -646,9 +615,8 @@ def claim(conn: psycopg.Connection, settings: AnalysisSettings, *,
                            "was read")
             elif state == "REJECTED" or not kept \
                     or not bytes_may_move(conn, c.sample_id):
-                # lab-2 (2026-10-03): a list imported since the last pass
-                # binds before decryption; the pass isolates it next, so the
-                # card says what it will say then.
+                # A list imported since the last pass binds before decryption; the pass isolates it next,
+                # so the card says what it will say then.
                 refusal = "the sample was rejected before triage ran; nothing was read"
             elif case_status in CONTENT_READ_ONLY_STATES:
                 refusal = "the sample's case is closed; nothing was read"
@@ -933,7 +901,7 @@ def _yara_step(conn, c: Claimed, data: bytes) -> dict:
                            wall_s=timeout + WALL_GRACE_S)
         out, failure = _child_json(result)
         if failure in analysis_runner.SANDBOX_FAILURES:
-            # Not a crashed scan: the worker never ran it (F42 review).
+            # Not a crashed scan: the worker never ran it.
             raise AnalysisInterrupted(failure)
         error = None
         if out is None:
@@ -1089,7 +1057,7 @@ def _write_results(conn, c: Claimed, pe: dict | None, fz: dict | None,
             (Json(outcome), c.id)).fetchone()
         if done is None:
             raise _Discard()
-        # The audit row LAST in the transaction (final review C7).
+        # The audit row goes last in the transaction.
         _audit_run(conn, c, "SUCCESS", outcome)
     return "DONE"
 
@@ -1139,13 +1107,11 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
                     fz = _step_child("fuzzy", data, settings, STEP_GAPS["fuzzy"])
             if "yara" in c.steps:
                 yara = _yara_step(conn, c, data)
-            # Archive expansion's child (phase 8, 2026-10-02), through the
-            # SAME runner as every step above, so the sandbox failing under
-            # it interrupts the run the same way: nothing it found is
-            # written, the run waits for the worker at the same attempt, and
-            # the archive is never read as expanded or as clean. Only the
-            # child is asked here; the members become samples below, once
-            # the findings are on the record.
+            # Archive expansion's child, through the same runner as every step above, so the sandbox
+            # failing under it interrupts the run the same way: nothing it found is written, the run waits
+            # for the worker at the same attempt, and the archive is never read as expanded or as clean.
+            # Only the child is asked here; the members become samples below, once the findings are on the
+            # record.
             archive = lab_archive.prefetch(conn, c, data, settings)
         except AnalysisInterrupted as stop:
             data = archive = None
@@ -1162,8 +1128,7 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
                         retry=False, gap_status="skipped",
                         outcome={"skipped": "worker_too_large"})
                 return "SKIPPED"
-            # Nothing it found is written: the whole run waits for the
-            # worker, at the same attempt (F42 review, 2026-10-02).
+            # Nothing it found is written: the whole run waits for the worker, at the same attempt.
             log.warning("static triage run %s waits for the worker: %s",
                         c.id, stop.failure)
             _finish(conn, c, "FAILED", CHILD_FAILURES[stop.failure],
@@ -1185,10 +1150,9 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
                     f"{RESULTS_REASON} ({type(exc).__name__})", retry=False)
             return "FAILED"
         if status == "DONE":
-            # Archive expansion (phase 8, 2026-10-02): the same verified
-            # plaintext, once the run's findings are on the record, so a
-            # parent rejected mid-run never gains members. The plaintext is
-            # held until here for that one reader and dropped below.
+            # Archive expansion gets the same verified plaintext once the run's findings are on the record,
+            # so a parent rejected mid-run never gains members. The plaintext is held until here for that
+            # one reader and dropped below.
             lab_archive.expand_after_triage(conn, storage, c, data, settings,
                                             child=archive)
         return status
@@ -1207,15 +1171,11 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
 def run_due(conn: psycopg.Connection, storage, *,
             settings: AnalysisSettings | None = None, limit: int = 20,
             max_seconds: float = 90, budget_s: float | None = None) -> dict:
-    """One pass: sweep, compile what is queued for this host, then run
-    up to `limit` runs, starting none after `max_seconds`. With
-    `budget_s` a compile or a run starts only when its worst case (its
-    children's wall limits added up) still fits, so a pass sharing a loop
-    with other work cannot overrun it (2026-09-24).
-    The deadline is taken before the sweep, so the sweep's own time counts
-    against it too. When the sandbox fails under a compile or a run, the
-    pass stops and counts `interrupted`, with nothing spent (F42 review,
-    2026-10-02)."""
+    """One pass: sweep, compile what is queued for this host, then run up to `limit` runs, starting none
+    after `max_seconds`. With `budget_s` a compile or a run starts only when its worst case (its children's
+    wall limits added up) still fits, so a pass sharing a loop with other work cannot overrun it. The
+    deadline is taken before the sweep, so the sweep's own time counts against it too. When the sandbox
+    fails under a compile or a run, the pass stops and counts `interrupted`, with nothing spent."""
     from noctornal_api.samples import policy_declared
     counts = {"queued": 0, "done": 0, "failed": 0, "skipped": 0,
               "abandoned": 0, "left": 0, "compiled": 0, "compile_failed": 0}
@@ -1223,9 +1183,8 @@ def run_due(conn: psycopg.Connection, storage, *,
     if not declared:
         counts["refused"] = detail
         return counts
-    # F42 (2026-10-02): asked before the sweep, any claim or any decrypt,
-    # so a worker that is down or missing costs this pass and never a
-    # run's attempts; the queue waits for it.
+    # Asked before the sweep, any claim or any decrypt, so a worker that is down or missing costs this pass
+    # and never a run's attempts; the queue waits for it.
     refusal = analysis_runner.unavailable()
     if refusal:
         counts["refused"] = refusal
@@ -1239,8 +1198,8 @@ def run_due(conn: psycopg.Connection, storage, *,
             conn, settings,
             until=None if budget_s is None else started + budget_s)
     except AnalysisInterrupted:
-        # The worker failed under a compile: no run is claimed, so no
-        # sample is decrypted for a child that cannot run (F42 review).
+        # The worker failed under a compile: no run is claimed, so no sample is decrypted for a child that
+        # cannot run.
         counts["interrupted"] = 1
         counts["left"] = queue_depth(conn)
         return counts
@@ -1266,8 +1225,8 @@ def run_due(conn: psycopg.Connection, storage, *,
             counts[key] = counts.get(key, 0) + 1
             ran += 1
             if status == INTERRUPTED:
-                # The next run would meet the same worker: the pass stops,
-                # and the next pass asks the worker first (F42 review).
+                # The next run would meet the same worker: the pass stops, and the next pass asks the worker
+                # first.
                 break
         finally:
             release_slot(conn, slot)
@@ -1284,13 +1243,13 @@ def run_queued_detached(run_id: UUID) -> None:
     """After an analyst's request has been answered: open a connection
     and the sample store, sweep, and run THAT run if a slot is free. The
     request never waits for a child."""
-    # The worker's own connection is a system one (S1, 2026-09-25):
-    # triage reads and records every sample it is handed, whoever asked.
+    # The worker's own connection is a system one: triage reads and records every sample it is handed,
+    # whoever asked.
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.samples import SampleStorage
     refusal = analysis_runner.unavailable()
     if refusal:
-        # Left QUEUED for the next pass that can run it (F42, 2026-10-02).
+        # Left QUEUED for the next pass that can run it.
         log.warning("static triage run %s waits: %s", run_id, refusal)
         return
     try:
@@ -1323,7 +1282,7 @@ def run_queued_detached(run_id: UUID) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The compile queue (F12)
+# The compile queue
 # ---------------------------------------------------------------------------
 
 def _job_lock(conn, fn: str, version_id, key) -> bool:
@@ -1373,9 +1332,8 @@ def compile_worst_s(settings: AnalysisSettings) -> float:
 
 
 def run_worst_s(settings: AnalysisSettings, open_versions: int) -> float:
-    """The longest one run can take: its pe and fuzzy children and one
-    YARA child per open rule set version, each to its wall limit, and the
-    archive expansion child's (phase 8, 2026-10-02)."""
+    """The longest one run can take: its pe and fuzzy children and one YARA child per open rule set
+    version, each to its wall limit, and the archive expansion child's."""
     from noctornal_api import lab_archive
     return ((2 + open_versions) * (settings.timeout_s + WALL_GRACE_S)
             + lab_archive.wall_s())
@@ -1384,19 +1342,15 @@ def run_worst_s(settings: AnalysisSettings, open_versions: int) -> float:
 def compile_pending(conn: psycopg.Connection, settings: AnalysisSettings, *,
                     until: float | None = None, limit: int = 10,
                     version_id: UUID | None = None) -> tuple[int, int]:
-    """Compile the queued jobs for THIS host's engine, platform and
-    fingerprint (a process never builds for another host), each in a
-    child under the analysis limits. A deterministic result is a build
-    row; a timeout, crash or cap is transient and writes none. Returns
-    (builds written, jobs that failed for good this pass). Raises
-    AnalysisInterrupted when the sandbox fails under a compile, with that
-    job queued again and no attempt spent.
+    """Compile the queued jobs for this host's engine, platform and fingerprint (a process never builds for
+    another host), each in a child under the analysis limits. A deterministic result is a build row; a
+    timeout, crash or cap is transient and writes none. Returns (builds written, jobs that failed for good
+    this pass). Raises AnalysisInterrupted when the sandbox fails under a compile, with that job queued
+    again and no attempt spent.
 
-    With `until` (a monotonic deadline) a compile starts only when its
-    worst case, the child's wall limit, still fits before it: a budgeted
-    pass must never START work it cannot finish in time, compiles as
-    well as runs (2026-09-24: compiles had started whenever the deadline
-    had not yet passed)."""
+    With `until` (a monotonic deadline) a compile starts only when its worst case, the child's wall limit,
+    still fits before it: a budgeted pass must never start work it cannot finish in time, compiles as well
+    as runs."""
     from noctornal_api import yara_rules
     key = yara_rules.build_key()
     if key is None:
@@ -1462,9 +1416,8 @@ def _compile_one(conn, key, vid, ruleset_id, number, source_gz, files,
     report = blob = None
     kind = "error" if canonical is None else None
     if result is not None and result.failure in analysis_runner.SANDBOX_FAILURES:
-        # The worker, not the rules: back to the queue with no attempt
-        # spent, and the pass stops (F42 review, 2026-10-02: until then a
-        # worker restart cost every remaining job an attempt).
+        # The worker, not the rules: back to the queue with no attempt spent, and the pass stops, so a
+        # worker restart does not cost every remaining job an attempt.
         conn.execute(
             """UPDATE lab.yara_compile_job
                   SET status = 'QUEUED', last_error = %s, updated_at = now()
@@ -1604,11 +1557,11 @@ def _rescan_unbuilt(conn, version_id) -> int:
 def compile_one_detached(version_id: UUID) -> None:
     """After an upload or an activation attempt: compile that version for
     this host, in the background, when a slot is free."""
-    # A system connection, as the triage sweep above (S1).
+    # A system connection, as the triage sweep above.
     from noctornal_api.db import SystemPurpose, connect_system
     refusal = analysis_runner.unavailable()
     if refusal:
-        # The job stays QUEUED; a compile is a child like any other (F42).
+        # The job stays QUEUED; a compile is a child like any other.
         log.warning("compiling YARA version %s waits: %s", version_id, refusal)
         return
     try:
@@ -1696,19 +1649,16 @@ def static_runs(conn, sample_id, *, limit: int = 5) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Retrohunt (F12 F)
+# Retrohunt
 # ---------------------------------------------------------------------------
 
 def retrohunt(conn: psycopg.Connection, version_id: UUID, *, ruleset_id: UUID,
               number: int, actor_id: UUID, clearance: str,
               compartments) -> dict:
-    """Queue the yara step with one ACTIVE version for every sample the
-    caller can see (their lab gate), that is not rejected, whose case is
-    not closed and that is within the analysis maximum. The runs name the
-    caller, so each read's custody names them; the answer counts only
-    the caller's own view. A version
-    with no open activation is refused rather than decrypting samples to
-    scan with nothing (2026-09-24)."""
+    """Queue the yara step with one ACTIVE version for every sample the caller can see (their lab gate),
+    that is not rejected, whose case is not closed and that is within the analysis maximum. The runs name
+    the caller, so each read's custody names them; the answer counts only the caller's own view. A version
+    with no open activation is refused rather than decrypting samples to scan with nothing."""
     from noctornal_api.cases import CONTENT_READ_ONLY_STATES
     from noctornal_api.samples import gate_params, lab_gate
     from noctornal_api.yara_rules import RulesetError
@@ -1762,12 +1712,10 @@ def retrohunt(conn: psycopg.Connection, version_id: UUID, *, ruleset_id: UUID,
 
 def backfill(conn: psycopg.Connection, *, host_user: str | None,
              settings: AnalysisSettings | None = None) -> int:
-    """Queue a BACKFILL run for every held sample that has never been
-    triaged: not rejected or excluded, no DONE run, its case not closed,
-    within the analysis maximum. Decrypting every held sample is the
-    operator's decision, recorded as theirs: a SYSTEM audit row naming the
-    command and the host user, and the same `via` on every request
-    (2026-09-24)."""
+    """Queue a BACKFILL run for every held sample that has never been triaged: not rejected or excluded, no
+    DONE run, its case not closed, within the analysis maximum. Decrypting every held sample is the
+    operator's decision, recorded as theirs: a SYSTEM audit row naming the command and the host user, and
+    the same `via` on every request."""
     from noctornal_api.cases import CONTENT_READ_ONLY_STATES
     from noctornal_api.samples import lab_exclusions_sql
     settings = settings or settings_or_default()

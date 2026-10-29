@@ -1,13 +1,12 @@
 """Generate the TypeScript types and the SQL seed from the definition.
 
-Usage (from the repo root or the package dir):
+Run from the repository root or the package directory:
     python -m noctornal_ontology.generate           # (re)write generated/
     python -m noctornal_ontology.generate --check   # exit 1 on drift
 
-Outputs land in packages/ontology/generated/. Both files carry a
-DO-NOT-EDIT header; the definition module is the only editable source.
-The SQL output matches the shape of Alembic revision 0017 — a definition
-change ships as a NEW data migration, never by editing 0017.
+Both files land in packages/ontology/generated/ under a do-not-edit header. The SQL has the shape
+of Alembic revision 0017, and a definition change ships as a new data migration, never as an
+edit to 0017.
 """
 from __future__ import annotations
 

@@ -1,13 +1,10 @@
-"""Migrations 0098 to 0101 going down (F15.2 to F15.4, 2026-09-24): legal
-hold overrides deletion, so a downgrade that would drop a held case's
-lookups, answers or batches refuses; 0098 refuses while the ledger that
-names its providers exists; and 0101 cancels what it would
-otherwise strand in the queue. Every schema change runs inside a
-transaction that is rolled back (the test_roles_and_pii_pg.py pattern), so
-the database the rest of the suite uses never sees it.
+"""Migrations 0098 to 0101 going down: legal hold overrides deletion, so a downgrade that would drop a held
+case's lookups, answers or batches refuses; 0098 refuses while the ledger that names its providers exists;
+and 0101 cancels what it would otherwise strand in the queue. Every schema change runs inside a transaction
+that is rolled back (the test_roles_and_pii_pg.py pattern), so the database the rest of the suite uses never
+sees it.
 
-The fetcher and the routes are fakes. **The email prefix is `lkmig-`.**
-Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes. The email prefix is `lkmig-`. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

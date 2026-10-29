@@ -1,107 +1,14 @@
-"""Live change push over a WebSocket (Phase 2's last gap).
+"""Live change push over a WebSocket.
 
-Until this existed there was no timer anywhere in `app.js`: two analysts on
-one case each saw the graph as it was when they opened it, and a merge one
-of them performed was invisible to the other until a manual refresh. In a
-tool whose entire premise is that the picture is shared, that is not a
-performance nicety.
-
-## The socket is a HINT TO REFETCH, never a data channel
-
-This is the design decision everything else follows from, and it is a
-security decision rather than an architectural preference.
-
-An event says only: *case X changed, kind `node`, operation `INSERT`*. The
-message a client receives carries no label, no element id, no content. The
-client's response is to refetch through the ordinary REST endpoints, which
-already apply the five-part gate and the label filter. (Since 0146 the
-NOTIFY payload the SERVER hears also names the labels of what was written,
-so a hint about an element above the subscriber is never sent at all,
-http_ui-012, 2026-10-03; that is the one decision about labels this layer
-makes, it is the gate's own, and the labels go no further than this
-process.)
-
-The alternative — pushing the changed rows — would require this layer to
-re-implement classification and compartment filtering. That filtering has
-now been got wrong in five separate places in this codebase (docs/17 F19:
-the notification centre, the outbox drain, evidence egress, report
-release, and the sample download path), and there is no reason to believe
-a sixth implementation would be the one that is right. So there is no
-sixth implementation.
-
-## ONE listener for the whole process, not one per socket
-
-The first version of this file opened two Postgres connections per
-client — one to `LISTEN`, one held open to re-check authorisation — and
-blocked a thread-pool worker per client waiting on notifications.
-
-That works with one analyst and falls over with ten. Postgres ships with
-`max_connections = 100`; twenty-five people with two browser tabs each
-would consume every one of them, and the failure would arrive as the API
-being unable to serve *any* request — a total outage caused by people
-leaving tabs open overnight. `asyncio.to_thread` has the same shape: its
-default pool is `min(32, cpu + 4)` workers, so enough sockets starve every
-other thread-pool user in the process.
-
-So there is exactly one `LISTEN` connection and one worker thread per
-process, and sockets subscribe to it in memory. Authorisation re-checks
-borrow a short-lived connection instead of holding one.
-
-## Authorisation is re-checked on EVERY delivery, not at subscribe
-
-A socket is long-lived and an assignment is not. F19's headline finding
-was a notification centre that checked labels at write time and never
-again, so an analyst taken off a case kept reading it indefinitely. A
-socket authorised once at connect would be the same defect with a longer
-half-life — hours rather than a request.
-
-The re-check is one indexed query, and events are rare by construction
-(statement-level triggers, and a case changes when a human does
-something). Paying it every time is cheap and removes a whole class of
-reasoning about when a subscription goes stale.
-
-## Failure is silent and the client keeps working
-
-If the socket cannot connect, or the database cannot be listened to, the
-console behaves exactly as it did before: the analyst refreshes. Nothing
-here is load-bearing for correctness, and it must never become so — a
-push-based UI that silently stops pushing is worse than one that never
-pushed, because people stop refreshing. That is also why "ready" is sent
-only once the hub's LISTEN is registered: a socket that said it before, or
-that said it over a listener that never registered, would stand green over a
-channel nobody is listening on. A hub that cannot register closes the socket
-(1013) and the console shows it off.
-
-## The socket takes the session COOKIE, and therefore checks `Origin`
-
-The browser authenticates this socket with `__Host-session`, the cookie
-it presents to every REST call; the first-frame token remains only as
-the fallback for a caller with no cookie jar (`scripts/bootstrap.py
-session`, which mints in a shell for a browser it has never met).
-
-That changes what a cross-site upgrade is worth. A page on any origin
-may open a WebSocket to this one — there is no preflight and no
-same-origin rule on the handshake — and the browser attaches this host's
-cookies to it. Before, such a socket carried a credential this file did
-not read and gained nothing; now it carries one that authenticates.
-`SameSite=strict` stops a compliant browser attaching the cookie on a
-cross-SITE upgrade, and `_cross_site_upgrade` covers what that leaves:
-SameSite is scoped to the registrable domain, so a page on a SIBLING
-SUBDOMAIN of this one is same-site and the cookie travels. There the
-origin comparison is not a second control, it is the only one.
-
-## A socket is COUNTED FROM `accept()`, not from authentication
-
-Until 2026-09-09 the only ceiling in this file, `_MAX_SOCKETS`, was
-compared against the number of AUTHENTICATED subscribers, and nothing
-else on the way in counted anything: the HTTP rate-limit middleware is
-registered with `@app.middleware("http")` and is never run for a
-`websocket` scope. So the window between `accept()` and the hello frame
-— an asyncio task and a buffered connection each, held for the whole
-hello deadline — was open to anyone with a TCP connection. The pool
-could be exhausted with no session at all, and the ceiling reported
-zero while it happened. `_PendingBudget` below is the fix; the record
-of what was wrong is on `live()`.
+The socket is a hint to refetch, never a data channel: an event names only the case, the kind and
+the operation, and the client refetches through the gated REST endpoints, so this layer never
+filters content by label. A hint about an element above the subscriber is not sent (the NOTIFY
+payload carries its labels, migration 0146), and authorisation is re-checked on every delivery,
+since a socket outlives an assignment. One LISTEN connection and one worker thread serve the
+process, so open tabs cannot exhaust Postgres connections or the thread pool. Nothing here is
+load-bearing for correctness: "ready" is sent only once the LISTEN is registered. The socket takes
+the session cookie, so it checks `Origin` (`_cross_site_upgrade`), and sockets are counted from
+`accept()` (`_PendingBudget`), since the HTTP rate limiter never runs for a websocket scope.
 """
 from __future__ import annotations
 
@@ -118,7 +25,7 @@ from uuid import UUID
 import psycopg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-# The request role's connections (S1, 2026-09-25), as HTTP's are.
+# The request role's connections, as HTTP's are.
 from noctornal_api.db import connect_request, connect_timeout_seconds
 from noctornal_api.http.deps import (
     SESSION_COOKIE,
@@ -153,16 +60,11 @@ _POLL_SECONDS = 1.0
 #: responding.
 _MAX_SOCKETS = int(os.environ.get("NOCTORNAL_LIVE_MAX_SOCKETS", "200"))
 
-#: Sockets that have been accepted and have not yet authenticated. A
-#: SEPARATE, smaller budget from `_MAX_SOCKETS`, because the two states
-#: cost different things and are held by different people: a subscriber
-#: has spent a valid session to get its slot, a pending socket has spent
-#: nothing but a TCP handshake. Sized as a quarter of the subscriber
-#: ceiling by default; a deployment that sees a real burst of console
-#: opens at shift change can raise it. Zero refuses every socket, which
-#: is a second off switch nobody should need -- `NOCTORNAL_LIVE=0` is
-#: the one that is documented. Added 2026-09-09; see `live()` for what
-#: the absence of this counter allowed.
+#: Sockets accepted but not yet authenticated: a separate, smaller budget from `_MAX_SOCKETS`,
+#: since a subscriber has spent a valid session for its slot and a pending socket only a TCP
+#: handshake. A quarter of the subscriber ceiling by default; raise it for a real burst of
+#: console opens at shift change. Zero refuses every socket; `NOCTORNAL_LIVE=0` is the documented
+#: off switch.
 _MAX_PENDING = int(os.environ.get(
     "NOCTORNAL_LIVE_MAX_PENDING", str(max(1, _MAX_SOCKETS // 4))))
 
@@ -173,38 +75,24 @@ _MAX_PENDING = int(os.environ.get(
 _MAX_PENDING_PER_PEER = int(os.environ.get(
     "NOCTORNAL_LIVE_MAX_PENDING_PER_PEER", "8"))
 
-#: How long an accepted socket may sit without sending its hello. The
-#: value has been ten seconds since the file was written; what changed on
-#: 2026-09-09 is that a socket waiting it out now holds a counted slot,
-#: so the deadline bounds a budget instead of bounding nothing.
+#: How long an accepted socket may sit without sending its hello, holding a counted pending slot.
 _HELLO_SECONDS = float(os.environ.get("NOCTORNAL_LIVE_HELLO_SECONDS", "10"))
 
-#: The longest first frame the handshake will parse, in characters
-#: (http_ui-013, 2026-10-03). The hello is `{"token": ..., "case_id": ...}`
-#: and nothing else: a session token is 43 characters and a case id 36, so
-#: a frame this long is no console and no `bootstrap.py session` caller.
-#: It is the one input this process parses BEFORE it knows who sent it, and
-#: the 1 MiB ceiling on HTTP bodies (`http/body_ceiling.py`) never sees a
-#: websocket frame, so without a bound of its own a peer with no session
-#: made the process decode and parse up to the server's whole frame limit
-#: per connection (a 5 MiB hello was read and answered). The bound also
-#: keeps the nesting a JSON parser can be made to walk short of absurd.
+#: The longest first frame the handshake will parse, in characters. The hello is
+#: `{"token": ..., "case_id": ...}` (a token is 43 characters, a case id 36), and it is the one
+#: input parsed before the sender is known; the HTTP body ceiling never sees a websocket frame.
+#: The bound also keeps the nesting a JSON parser can be made to walk short.
 _HELLO_MAX_CHARS = 4096
 
-#: The longest session token a hello may name, and it must be ASCII (a real
-#: one is 43 URL-safe characters). A token is hashed before it is looked up,
-#: and the hash encodes the text as UTF-8: a lone surrogate escape in the
-#: hello (`"\ud800"`) decodes to text that cannot be encoded, so a peer with
-#: no session made the handshake log a traceback and close 1011 (2026-10-07). Anything else
-#: is the same refusal as no token.
+#: The longest session token a hello may name, and it must be ASCII (a real one is 43 URL-safe
+#: characters). The token is hashed as UTF-8 before lookup, and a lone surrogate escape in the hello
+#: decodes to text that cannot be encoded; anything else is the same refusal as no token.
 _TOKEN_MAX_CHARS = 512
 
-#: The largest WebSocket frame the server reads, in bytes: the value every
-#: launch line gives uvicorn as `--ws-max-size` (uvicorn's own default is
-#: 16 MiB, and the length check on the hello above runs only after the
-#: whole frame has been buffered). Nothing larger than the hello is ever
-#: sent by a client, and after the hello the channel is one-way
-#: (`test_ws_max_size_is_on_every_launch_line` holds the lines to this).
+#: The largest WebSocket frame the server reads, in bytes: every launch line gives uvicorn this as
+#: `--ws-max-size` (`test_ws_max_size_is_on_every_launch_line`), since its default is 16 MiB and
+#: the hello's length check runs only after the whole frame is buffered. After the hello the
+#: channel is one-way.
 WS_MAX_SIZE = 8192
 
 
@@ -220,16 +108,9 @@ class _UnusableHello(Exception):
 async def _read_hello(ws: WebSocket):
     """Read the first frame and decode it, or raise `_UnusableHello`.
 
-    This replaces `ws.receive_json()` (http_ui-013, 2026-10-03). Starlette's
-    version indexes `message["text"]` and calls `json.loads` bare, so a
-    BINARY first frame raised KeyError and a deeply nested one raised
-    RecursionError, neither a `ValueError`, out of the handshake: a logged
-    traceback per connection for a peer that had proved nothing. The first
-    fix covered the shapes that decode (a list, a number, a case id that is
-    not text) and left these two. Reading the message ourselves means the
-    kind of frame and the size are decided before anything is parsed, and
-    every way the parse itself can fail is named here rather than hoped to
-    be a ValueError."""
+    Not `ws.receive_json()`, which raises KeyError on a binary frame and RecursionError on deep
+    nesting: here the frame's kind and size are decided before anything is parsed, and every way
+    the parse can fail is named."""
     message = await ws.receive()
     if message.get("type") == "websocket.disconnect":
         raise WebSocketDisconnect(message.get("code", 1000),
@@ -253,22 +134,16 @@ async def _read_hello(ws: WebSocket):
 #: socket is a memory leak with a timer on it.
 _QUEUE_DEPTH = 32
 
-#: RFC 6455 "policy violation". One code for every refusal that is the
-#: caller's doing -- no credentials, a bad case id, a pending budget it
-#: has filled -- and the reason string says which. The console stops
-#: reconnecting on this code and backs off on every other close (app.js
-#: connectLive; test_ui_invariants binds the two), so this is the one
-#: code that must mean "the server decided" and nothing else.
+#: RFC 6455 "policy violation": one code for every refusal that is the caller's doing, with the
+#: reason saying which. The console stops reconnecting on this code and backs off on any other
+#: (app.js connectLive; test_ui_invariants binds the two), so it means only "the server decided".
 _CLOSE_POLICY = 1008
 _CLOSE_UNAUTHENTICATED = _CLOSE_POLICY
 _CLOSE_BUSY = 1013
 
-#: The reason sent with the policy close when the SESSION behind a socket
-#: has gone (idle or absolute expiry, a sign-out, a revocation), as distinct
-#: from the case gate refusing it. The console reads this reason to show the
-#: live dot as signed out and offer the in-place sign-in, rather than
-#: keeping a green "Live" over a session the next refetch will find dead
-#: (ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23).
+#: The reason sent with the policy close when the session behind a socket has gone (expiry,
+#: sign-out, revocation), as distinct from the case gate refusing it. The console reads it to show
+#: the live dot as signed out and offer the in-place sign-in.
 SESSION_ENDED_REASON = "session ended"
 
 #: How long a quiet socket waits before it pings, and so the longest a dead
@@ -277,47 +152,16 @@ _PING_SECONDS = 25.0
 
 
 class _PendingBudget:
-    """Slots for sockets that are not yet subscribed: reserved BEFORE
-    `accept()`, held through the hello and authentication.
+    """Slots for sockets that are not yet subscribed: reserved before `accept()`, held through the
+    hello and authentication, and given back when the handshake ends.
 
-    A socket takes a slot before `accept()` and gives it back when its
-    handshake ends -- authenticated and about to be handed to the hub, or
-    refused and closed -- so the count is of every socket the process is
-    holding on behalf of someone who has not yet proved who they are. Two ceilings: `_MAX_PENDING` for the process,
-    and `_MAX_PENDING_PER_PEER` keyed on the SAME address the HTTP rate
-    limiter and the login binding use -- `limits.client_ip`, trusted-hop
-    counting included -- so that behind a proxy the key is the analyst's
-    address and not the proxy's, exactly as it is for a 429. A socket
-    whose peer is unknown shares ONE bucket rather than escaping the
-    per-peer ceiling: unknown must bound more tightly, never less.
-
-    What the count does NOT cover, stated so nobody reads it as more
-    than it is. A socket refused because the budget is full is closed
-    BEFORE `accept()`, and under uvicorn's `websockets` backend -- the
-    one every launch script selects, since `--ws auto` picks it whenever
-    `websockets` is installed -- a pre-accept close is an HTTP 403
-    followed by an immediate `transport.close()`. There is no close
-    handshake for the peer to withhold, so a refused socket holds no
-    connection past the turn that refused it; measured on 2026-09-09 by
-    `test_live_handshake_pg`, which reads the server's own connection
-    set. A socket closed AFTER `accept()` -- a bad hello, a missed
-    deadline -- is different: that backend writes the close frame and
-    then keeps the transport up for its hard-coded ten-second
-    `close_timeout` waiting for the peer's echo, and this budget hands
-    the slot back when `close()` returns, not when the transport goes.
-    A peer that was accepted and then refused therefore keeps one TCP
-    connection lingering, uncounted, for those ten seconds, and by
-    cycling hellos one address can stack at most a per-peer budget's
-    worth of them per hello round trip. That residual is the server's
-    close handshake, not this budget's accounting; what changed on
-    2026-09-09 is that the REFUSAL itself -- the path reached with no
-    handshake completed, from one address, without limit -- no longer
-    lingers at all.
-
-    A plain `threading.Lock`, not an asyncio one: nothing here awaits,
-    and the counters must stay right even when more than one event-loop
-    thread drives sockets in one process, which Starlette's `TestClient`
-    does whenever it is not used as a context manager.
+    Two ceilings: `_MAX_PENDING` for the process, and `_MAX_PENDING_PER_PEER` keyed on
+    `limits.client_ip`, as the HTTP rate limiter is, so behind a proxy the key is the analyst's
+    address; an unknown peer shares one bucket, since unknown must bound more tightly. A socket
+    refused for a full budget is closed before `accept()` and holds no connection; one closed after
+    it keeps its TCP connection, uncounted, for uvicorn's ten-second `close_timeout`. A
+    `threading.Lock`, not an asyncio one: nothing awaits, and more than one event-loop thread may
+    drive sockets in one process.
     """
 
     def __init__(self) -> None:
@@ -359,14 +203,9 @@ class _PendingBudget:
 
 _pending = _PendingBudget()
 
-#: How often the refusal WARNING may be written. One line per refused
-#: connection would let the peer being refused choose how fast the log
-#: grows: the refusal is answered with no credential and no completed
-#: handshake, so it is the cheapest thing this file does, and a line per
-#: attempt from one address is an amplifier, not a record. One line per
-#: window, carrying the count, records the campaign the way
-#: `RateLimiter.should_audit` records a throttled subject. Added
-#: 2026-09-09 with the pre-accept refusal it describes.
+#: How often the refusal warning may be written. A line per refused connection would let the
+#: refused peer choose how fast the log grows; one line per window, carrying the count, records the
+#: campaign as `RateLimiter.should_audit` records a throttled subject.
 _REFUSAL_LOG_SECONDS = 10.0
 
 
@@ -408,8 +247,6 @@ def _refused(reason: str, ip: str | None) -> None:
     operator wants the size of the campaign, not one meter per excuse."""
     n = _refusals.note()
     if n is not None:
-        # The noun agrees with the count an operator reads, rather than
-        # a bracketed plural (README screenshot set review, 2026-09-23).
         log.warning("live socket refused before accept: %s (%d %s since "
                     "the last line; %d subscribed, %d pending, %d "
                     "pending from this peer)", reason, n,
@@ -440,11 +277,9 @@ class _Hub:
         self._subscribers: set[asyncio.Queue] = set()
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
-        # One stop flag and one registration future per RUN of the listener,
-        # not one pair for the hub (2026-10-08): a subscriber arriving while
-        # the previous run was still winding down used to clear the flag the
-        # old run was about to read, and two listeners then fanned out every
-        # event twice.
+        # One stop flag and one registration future per run of the listener, not per hub: a
+        # subscriber arriving while the previous run winds down would otherwise clear the flag the
+        # old run is about to read, and two listeners would fan out every event twice.
         self._stop = asyncio.Event()
         self._registered: asyncio.Future | None = None
 
@@ -455,16 +290,10 @@ class _Hub:
     async def subscribe(self) -> asyncio.Queue:
         """Add a subscriber and return its queue once the LISTEN is registered.
 
-        Not before: the socket tells its client "ready" on this return, and a
-        write made between "ready" and the registration was missed, which is
-        why the tests waited a second after it (docs/17 "the socket says
-        ready early"). A listener that cannot register (the database is down,
-        the connect times out) raises `ListenerUnavailable` and leaves no
-        subscriber behind, so the socket is closed for the console to retry
-        and say so, and does not stand green over a channel that is not
-        listening.
-
-        The wait is outside the lock: `unsubscribe` takes it.
+        Not before: the socket says "ready" on this return, and a write between "ready" and the
+        registration would be missed. A listener that cannot register raises `ListenerUnavailable`
+        and leaves no subscriber behind, so the socket closes and the console retries and says so.
+        The wait is outside the lock, which `unsubscribe` takes.
         """
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_DEPTH)
         async with self._lock:
@@ -494,22 +323,10 @@ class _Hub:
     async def unsubscribe(self, queue: asyncio.Queue) -> None:
         """Stop the listener when the last subscriber leaves.
 
-        By SETTING A FLAG the loop checks, not by cancelling the task.
-        `asyncio.to_thread` cannot be cancelled: cancelling the task raises
-        `CancelledError` at the await point immediately and leaves the
-        worker thread inside `notifies()`, still using the connection. The
-        cleanup in `finally` then tried to `UNLISTEN` and close a
-        connection another thread was reading, both raised, both were
-        suppressed — and the connection stayed open for the life of the
-        process.
-
-        Measured, not reasoned: `pg_stat_activity` showed one idle backend
-        with `LISTEN noctornal_change` still there after every socket had
-        gone. One per worker process, forever.
-
-        The task is awaited outside the lock so that a new subscriber
-        arriving during the (up to `_POLL_SECONDS`) shutdown is not blocked
-        behind it.
+        By setting a flag the loop checks, not by cancelling the task: `asyncio.to_thread` cannot
+        be cancelled, and cancelling would leave the worker thread inside `notifies()` holding the
+        LISTEN connection open for the life of the process. The task is awaited outside the lock,
+        so a new subscriber arriving during the (up to `_POLL_SECONDS`) shutdown is not blocked.
         """
         task = None
         async with self._lock:
@@ -576,30 +393,11 @@ def _live_enabled() -> bool:
 def _request_origin(ws: WebSocket) -> str | None:
     """The origin this upgrade actually arrived on, or None.
 
-    Built from the `Host` the request carried and the scheme it came
-    in on -- `x-forwarded-proto` first, because behind the production
-    Caddy the socket reaches uvicorn as plain `ws` while the browser
-    is speaking `wss`, and comparing an `https` Origin against a `ws`
-    scheme would refuse every socket the terminator forwards.
-
-    ## Why the Host header is trusted HERE and is not trusted in
-    ## `samples.origin_split`
-
-    That function used to read `request.url` -- which Starlette builds
-    from `Host` -- to decide WHICH ROLE a process was playing, so a
-    caller could name the sample origin in a header and be served
-    hostile bytes by the application process. A header decided a
-    security property on its own. It reads only configuration now.
-
-    Nothing is decided on its own here. `Host` is only ever COMPARED
-    with `Origin`, and the whole point of the comparison is that a
-    cross-site page cannot make the two agree: the browser writes the
-    attacker's origin into `Origin` and the victim's authority into
-    `Host`, and script can set neither on an upgrade. A caller who can
-    forge both is not a browser, and a non-browser holding the cookie
-    already holds a session token it could have sent in the first
-    frame -- so there is nothing on the other side of this check for
-    it to gain.
+    Built from the request's `Host` and scheme, `x-forwarded-proto` first, because behind the
+    production Caddy the socket reaches uvicorn as `ws` while the browser speaks `wss`. Trusting
+    `Host` is safe here, unlike in `samples.origin_split`, because it is only ever compared with
+    `Origin`: a cross-site page cannot make the two agree, since script sets neither on an upgrade,
+    and a caller that forges both is not a browser and could send its token in the first frame.
     """
     host = ws.headers.get("host")
     if not host:
@@ -617,114 +415,36 @@ def _request_origin(ws: WebSocket) -> str | None:
 def _cross_site_upgrade(ws: WebSocket) -> str | None:
     """Why this upgrade must be refused, or None to let it through.
 
-    Cross-site WebSocket hijacking. A page on ANY origin may open a socket
-    to this one: the upgrade is not a `fetch`, so there is no preflight,
-    no CORS answer to withhold and no same-origin rule on the handshake —
-    the browser connects and hands script the frames. Every cookie the
-    browser holds for this host rides along, and since the socket started
-    reading `__Host-session` one of those cookies is a credential it
-    ACCEPTS. An attacker's page would then hold a socket the analyst's own
-    session authenticated, and `_stream` would push that case's activity
-    down it.
-
-    `SameSite=strict` on the pair (`deps.COOKIE_ATTRS`) stops a compliant
-    browser attaching the cookie to a cross-SITE upgrade. Read that as
-    "so this check is only for the browser that ignores SameSite" and the
-    next person deletes it: SameSite's unit is the registrable domain,
-    not the origin. A page on `evil.example.gov` opening a socket to
-    `console.example.gov` is SAME-site, so a compliant browser attaches
-    the host-only `__Host-session` to it and SameSite refuses nothing --
-    and a sibling subdomain is the shape a compromised internal host, a
-    wildcard DNS entry or any other service on the domain actually takes.
-    Against that the comparison below is the whole defence. It covers the
-    non-compliant browser as well, which is the smaller half. None of
-    this mattered before the cookie was read here: a hijacked socket
-    carried a credential this file did not use and got nothing for it.
-
-    Three ways the rule is deliberately narrow, each of which a naive
-    reading would take for a hole:
-
-    - It fires on the cookie being PRESENT, not on the cookie having been
-      used, because the decision is made before `accept()` and the first
-      frame does not exist yet. Not a gap: `_handshake` prefers the cookie
-      over the frame token, so a cookie that is present IS the credential
-      that will be used.
-    - It compares against `public_origin()` — the origin THIS process is
-      served at — and not `app_origin()`. For the application process the
-      two are the same string, since `public_origin()` falls back to it;
-      they differ exactly where `app_origin()` would be wrong. A process
-      configured as the sample origin serves nothing but the download,
-      but the 404 that enforces that is an `@app.middleware("http")`
-      (`http/app.py`) and middleware never runs for a `websocket` scope,
-      so `/live` is routable there. Comparing against `app_origin()` on
-      such a process would accept an `Origin` naming a host it does not
-      serve and refuse the one it does. `live()` now refuses that process
-      its socket outright, so nothing here decides a real upgrade on one
-      any more; `public_origin()` stays because it is what "this origin"
-      means on EVERY process, and a comparison that is only correct while
-      a check somewhere else holds is a comparison waiting to be wrong.
-    - No `Origin` header at all is allowed through. A browser always sends
-      one on an upgrade and cannot be made to omit it, so its absence
-      means the caller is not a browser: a shell, a curl, an integration
-      test. Such a caller holds the cookie value only because it was given
-      it, and that value IS the session token it could have put in the
-      first frame instead — refusing it would protect nothing and would
-      break the token path this file still needs.
-
-    An `Origin` matching EITHER the configured origin or the origin the
-    request arrived on is accepted (`_request_origin`). The second half
-    was added after the first was measured: on the shipped laptop
-    configuration the launcher binds `127.0.0.1:8000`,
-    `NOCTORNAL_BASE_URL` keeps its matching default, the console is
-    opened at `localhost:8000`, and every live socket was refused. Two
-    origins, correctly distinguished, and the result was that live
-    updates were off for every developer -- refused before `accept()`,
-    which reaches a browser as a bare failure with neither code nor
-    reason (see `live()`), so the console runs out its six retries and
-    reports only that live is off. A control whose ordinary failure mode
-    is invisible is one somebody deletes. The refusal still names our
-    origin, and the log line still names both, because a deployment CAN
-    still be refused -- by a genuinely foreign origin, which is the case
-    the check is for.
+    Cross-site WebSocket hijacking: any page may open a socket here with no preflight, and the
+    browser attaches `__Host-session`, which this socket accepts. `SameSite=strict` does not cover
+    a sibling subdomain, which is same-site, so there this comparison is the whole defence. It
+    fires on the cookie being present, since `_handshake` prefers it to the frame token; it compares
+    with `public_origin()`, the origin this process is served at; and it lets through a request
+    with no `Origin`, which no browser sends on an upgrade. An `Origin` matching either the
+    configured origin or the one the request arrived on (`_request_origin`) is accepted, so a
+    console opened at localhost against a 127.0.0.1 binding still works.
     """
     if not ws.cookies.get(SESSION_COOKIE):
         return None
     origin = ws.headers.get("origin")
     if origin is None:
         return None
-    # Both sides through `normalise_origin`, so "the same origin" means
-    # here what it means to the download check and the console's CSP:
-    # case-folded host, default port dropped. `allow_path` on ours alone —
-    # `NOCTORNAL_BASE_URL` may carry a path prefix for a deployment
-    # mounted under one, an `Origin` header may not, so a header carrying
-    # a path normalises to None and is refused. So is `Origin: null`, the
-    # opaque origin a sandboxed frame or a redirected navigation sends:
-    # "the browser will not tell you who this is" is not a match.
+    # Both sides through `normalise_origin`, so "the same origin" means what it means to the
+    # download check and the CSP. `allow_path` on ours alone: `NOCTORNAL_BASE_URL` may carry a path
+    # prefix and an `Origin` header may not, so a header with a path normalises to None and is
+    # refused, as is `Origin: null`.
     here = normalise_origin(public_origin(), allow_path=True)
     arrived = _request_origin(ws)
     if here is None and arrived is None:
         return "cross-origin upgrade refused: this process has no valid origin"
     theirs = normalise_origin(origin)
-    # EITHER the origin this deployment is configured to be, OR the one
-    # the request actually arrived on. Configuration alone was the whole
-    # rule until it was measured: the shipped launcher binds
-    # 127.0.0.1:8000 and leaves NOCTORNAL_BASE_URL at that default, a
-    # developer opens localhost:8000, and every live socket is refused --
-    # before `accept()`, so the browser gets no code and no reason and
-    # the console can only say live is off. A control whose ordinary
-    # failure mode is 'the feature is silently gone' is a control that
-    # gets deleted. The second half needs no configuration to be right
-    # and is not weaker: see `_request_origin` for why a cross-site page
-    # cannot satisfy it.
+    # Either the configured origin or the one the request arrived on: the launcher binds
+    # 127.0.0.1:8000 and a developer opens localhost:8000. The second is not weaker; see
+    # `_request_origin` for why a cross-site page cannot satisfy it.
     if theirs is not None and theirs in (here, arrived):
         return None
-    # OUR origin, not theirs: theirs they already have, and ours is the
-    # one fact a developer reading a refused socket cannot see. Not an
-    # echo of the header for the same reason no other close reason in
-    # this file interpolates a caller's string -- RFC 6455 leaves 123
-    # bytes for a reason, and a caller chooses the length of anything
-    # echoed into it. The caller's origin goes in the log line instead,
-    # where nothing is truncating it and both halves can sit together.
+    # Our origin, not theirs: theirs they already have. No close reason here echoes a caller's
+    # string, since RFC 6455 leaves 123 bytes for a reason; the caller's origin goes in the log line.
     return ("cross-origin upgrade refused: this socket is served at "
             f"{here or arrived}")
 
@@ -733,153 +453,31 @@ def _cross_site_upgrade(ws: WebSocket) -> str | None:
 async def live(ws: WebSocket) -> None:
     """Stream change hints for one case.
 
-    ## The credential is the COOKIE; the first frame is the fallback
-
-    A browser authenticates this socket with `__Host-session`, the same
-    cookie it presents to every REST call — an upgrade is an ordinary HTTP
-    request until the server agrees to switch protocols, so the browser
-    attaches cookies to it like any other. Until Wave 2 this file read no
-    cookie and took a token from the first frame only, which is why the
-    console had to keep the login-body token in page memory: the one
-    credential that survives a reload was the one credential the live
-    channel would not take.
-
-    The first frame remains for the caller that has no cookie jar — see
-    `_handshake`. What has never been permitted, and still is not, is the
-    token in the QUERY STRING: a URL lands in proxy logs, browser history
-    and `Referer`, and this one would carry a session bearer token.
-    WebSocket has no header API in the browser, so for a token holder that
-    is not a browser the first frame is the only place left.
-
-    Accepting a cookie is why `_cross_site_upgrade` exists; its refusal is
-    sent with the other credential-free ones, before `accept()`.
-
-    ## The SAMPLE ORIGIN process opens no socket at all
-
-    Invariant 10 puts hostile bytes on a second origin so that no page
-    carrying an analyst's session ever runs beside them, and
-    `_allowed_on_sample_origin` (`http/app.py`) is what makes that a
-    property of the process rather than of a proxy allow-list: a process
-    configured as the sample origin 404s everything but the download.
-    That gate is an `@app.middleware("http")`, and Starlette runs http
-    middleware for an `http` scope only -- a `websocket` scope goes
-    straight to the router. So the gate has never seen an upgrade.
-    Measured on the assembled app rather than reasoned about: the same
-    sample-origin process answers `GET /api/v1/cases` with the
-    middleware's 404 and takes an upgrade on `/live` all the way to
-    `accept()`. `test_live_origin` puts both scopes through one
-    `create_app()` so that stays a measurement.
-
-    What that bought an attacker is not a stray route. The socket
-    authenticates, subscribes to a case and streams that case's activity
-    -- out of the one process whose whole purpose is to be an isolated
-    byte server with no session in it. The check below is therefore not a
-    second copy of the middleware's rule; for this route it is the only
-    copy, which is why it reads `origin_split().serves_here`, the same
-    verdict the middleware reads, rather than a fresh comparison the two
-    files could come to disagree about.
-
-    ## Counted from `accept()`, not from authentication
-
-    Until 2026-09-09 the only ceiling here was `_MAX_SOCKETS`, compared
-    against `_hub.count` -- and the hub only hears about a socket after it
-    has authenticated. The window between `accept()` and the hello frame
-    was counted by nobody: not by the hub, and not by the rate-limit
-    middleware, which is registered with `@app.middleware("http")` and is
-    never run for a `websocket` scope. So a peer with no session at all
-    could open sockets until the server ran out of descriptors, send
-    nothing, and hold every one of them for the full hello deadline -- an
-    asyncio task and a buffered connection each -- while `_hub.count`
-    reported zero. The pool could be exhausted with no credential
-    presented, and the module docstring's "a refusal an operator can see"
-    described only the sockets an attacker would never bother to
-    authenticate.
-
-    Now a socket takes a slot in `_pending` before it is accepted and gives
-    it back when its handshake ends, authenticated or refused, and a full
-    budget -- process-wide or per peer -- is refused with the policy close
-    code. The
-    subscriber ceiling is checked twice on purpose: before `accept()`, so
-    a full hub costs the caller no handshake and this process no database
-    round trip, and again after authentication, because up to
-    `_MAX_PENDING` sockets can pass the first check together and a check
-    that is only ever made before the count moves was never actually a
-    ceiling.
-
-    ## Refused BEFORE `accept()`, because a refused socket must hold nothing
-
-    Every refusal that needs no credential -- the off switch, a full hub,
-    a full budget -- is sent before the handshake completes. The first
-    version of this budget, earlier on 2026-09-09, sent them after it, on
-    the argument that a pre-accept close reaches a browser as a bare error
-    with no code, and that was wrong in the one way that mattered. Under
-    uvicorn's `websockets` backend a POST-accept close writes the close
-    frame and then arms a ten-second timer before dropping the transport,
-    waiting for the peer's echo, and `run_asgi` leaves the transport up
-    while that timer is armed. A peer that never echoed held one TCP
-    connection per refusal for ten seconds -- not counted by `_pending`,
-    which had just refused it, and invisible to `_hub.count`, which was
-    zero -- so the path added to close the hole was itself the hole:
-    reachable from one address, with no session, with no limit. A
-    PRE-accept close on that backend is an HTTP 403 and an immediate
-    `transport.close()`: no frame, no echo to wait for, nothing held. The
-    code-and-reason argument bought nothing in any case, and less than it
-    looked: a 403 carries no close code, so a browser reports 1006 and
-    NEITHER the code nor the reason sent here reaches one. (The clause
-    that used to sit here said the shipped client never reads the code.
-    It did not then; `connectLive` in `app.js` has returned on 1008
-    rather than retrying since later the same day, and
-    `test_ui_invariants` holds both files to that. The argument stands on
-    the transport instead: what is refused before `accept()` arrives at a
-    browser with nothing to read.) What remains is stated on
-    `_PendingBudget` so it is not mistaken for fixed: a socket refused
-    AFTER `accept()` still lingers for the server's ten seconds after its
-    slot is handed back. Measured on 2026-09-09 under uvicorn 0.52.4 with
-    websockets 17.1, by `test_live_handshake_pg` and by a twelve-second
-    sampling run of the same flood: two silent sockets held, thirty
-    refusals from the same address. Pre-accept, every refusal was a 403
-    and the server's own connection set read two from the first sample
-    (0.2 s) onward. Post-accept, every refusal was a 101 and the set read
-    thirty-two through nine seconds, then fell to two between 9.8 s and
-    10.3 s -- the backend's close timeout, and nothing this file did.
+    The credential is the session cookie; a first-frame token is the fallback for a caller with no
+    cookie jar (`_handshake`), and never the query string, which lands in logs and `Referer`.
+    Every refusal that needs no credential (the off switch, the sample-origin process, a cross-site
+    upgrade, a full hub or pending budget) is sent before `accept()`: under uvicorn's `websockets`
+    backend that is an HTTP 403 and a dropped transport, while a close after `accept()` holds the
+    connection for a ten-second close timeout. Each socket holds a `_pending` slot from before
+    `accept()` until its handshake ends. The sample-origin check is the only copy of invariant 10
+    for this route, since http middleware never runs for a websocket scope (`test_live_origin`).
+    The subscriber ceiling is checked again after authentication, since every pending socket can
+    pass the first check at once.
     """
-    # The peer this socket arrived from. `client_ip` is typed for a
-    # `Request` but only ever touches `.headers.getlist` and `.client`,
-    # which a Starlette `WebSocket` has for the same reason -- both are
-    # `HTTPConnection` -- so the socket gets the SAME address the rate
-    # limiter and the login handler compute, X-Forwarded-For hop counting
-    # included. It keys the per-peer pending bucket and, later, the
-    # session binding check; computing it differently here would make the
-    # binding comparison fail for every deployment behind a proxy.
+    # The peer, by the same `client_ip` the rate limiter and login use (a `WebSocket` is an
+    # `HTTPConnection` too), forwarded-hop counting included. It keys the per-peer pending bucket
+    # and the session binding check, which would fail behind a proxy if computed differently.
     ip = client_ip(ws)
-    # None of these five has called `accept()`. That is the whole fix
-    # (see the docstring): a close sent now is an HTTP 403 and a dropped
-    # transport, not a frame the peer can decline to answer. The origin
-    # refusal joined them rather than being made a post-hello check for
-    # the same reason as the other four -- and it is a refusal that a
-    # hostile PAGE causes, so a version of it that lingered would be one
-    # any visited site could aim at this server.
+    # None of these five refusals has called `accept()`, so each is an HTTP 403 and a dropped
+    # transport, not a frame the peer can decline to answer. The origin refusal is among them
+    # because a hostile page causes it: a lingering version would be one any visited site could aim.
     if not _live_enabled():
         await ws.close(code=_CLOSE_BUSY, reason="live updates are disabled")
         return
-    # Invariant 10, and the ONLY place it can be held for an upgrade: the
-    # gate that keeps a sample-origin process to the download alone is an
-    # `@app.middleware("http")` (`_allowed_on_sample_origin`, `http/app.py`),
-    # and Starlette passes a `websocket` scope to the router without
-    # running http middleware at all, so that gate has never seen one.
-    # Delete this as redundant with the middleware and a process serving
-    # hostile bytes quietly starts streaming case activity again; the
-    # docstring has the measurement. `origin_split().serves_here` is the
-    # middleware's own verdict rather than a second comparison, so the two
-    # cannot come to disagree about which process this is -- and it is
-    # False for a deployment whose split is unconfigured or broken, so a
-    # misconfigured sample origin refuses downloads without also taking
-    # the console's live channel down with it.
-    #
-    # No `_refused` line, for the reason the off switch above has none:
-    # the answer is decided by this process's configuration and not by the
-    # caller, so it is the same for every socket that arrives and a line
-    # each would record the deployment rather than a campaign.
+    # Invariant 10, and the only place it holds for an upgrade: the sample-origin gate is http
+    # middleware (`_allowed_on_sample_origin`), which never sees a websocket scope, so this is not
+    # redundant. `origin_split().serves_here` is the middleware's own verdict, False when the split
+    # is unconfigured. No `_refused` line: the answer is the deployment's, not the caller's.
     if origin_split().serves_here:
         await ws.close(code=_CLOSE_BUSY,
                        reason="this process is the sample origin and serves "
@@ -895,18 +493,9 @@ async def live(ws: WebSocket) -> None:
     # -- nothing the budget is there to protect.
     cross_site = _cross_site_upgrade(ws)
     if cross_site is not None:
-        # BOTH origins in one line, because the two readers of it need
-        # different halves: the security officer wants the origin that
-        # tried it, the operator of a deployment that refuses its own
-        # console wants what this process thinks it serves. The peer sees
-        # neither -- a pre-accept close is a 403 with no reason -- so this
-        # line is where the answer exists.
-        #
-        # `!r` and a slice on the header: it is text the caller chose and
-        # this is a log line, so repr escapes a newline that would
-        # otherwise forge a second line and the slice stops one header
-        # being the whole line. The sampler bounds how MANY lines a peer
-        # can cause, not how long each one is.
+        # Both origins in one line: the security officer wants the one that tried, the operator
+        # what this process serves, and the peer sees neither. `!r` and a slice on the caller's
+        # header, so a newline cannot forge a second log line and one header cannot fill the line.
         _refused(f"cross-origin upgrade from "
                  f"{(ws.headers.get('origin') or '')[:100]!r}: {cross_site}",
                  ip)
@@ -932,11 +521,9 @@ async def live(ws: WebSocket) -> None:
         log.warning("live socket refused: %d already open", _hub.count)
         await ws.close(code=_CLOSE_BUSY, reason="too many live subscribers")
         return
-    # "ready" is sent after the hub's LISTEN is registered, never before: the
-    # console shows a green Live dot on it, and a write made in the gap
-    # between the two was missed (docs/17 "the socket says ready early",
-    # 2026-10-08). A hub that cannot register ends the socket instead, with
-    # a code the console retries on and a dot that says it is off.
+    # "ready" is sent only after the hub's LISTEN is registered, or a write in the gap would be
+    # missed under a green Live dot. A hub that cannot register ends the socket instead, with a
+    # code the console retries on.
     try:
         queue = await _hub.subscribe()
     except ListenerUnavailable:
@@ -960,27 +547,13 @@ async def live(ws: WebSocket) -> None:
 
 
 async def _handshake(ws: WebSocket, ip: str | None):
-    """The pre-subscribe half of the socket: wait for the hello, then
-    authenticate it. Returns `(user_id, mfa_at, case_id, token)`, or None
-    after having closed the socket with a reason the client can act on.
-    The token is kept so the stream can ask, without sliding it, whether
-    the session is still alive (`_session_alive`).
+    """The pre-subscribe half of the socket: wait for the hello, then authenticate it.
 
-    Split out of `live()` on 2026-09-09 so that the pending slot is
-    released by ONE `finally` around this call rather than before each
-    of the five refusals below. Every one of them is necessarily sent
-    after `accept()` -- each needs a frame the peer sent -- and so every
-    one carries the ten-second linger `_PendingBudget` describes. The hub
-    ceiling used to be checked here first, after the handshake; it moved
-    to `live()`, in front of `accept()`, with the other credential-free
-    refusals, and the check that actually holds is the one `live()`
-    makes after authentication, because everything pending can pass a
-    pre-accept check at once.
-
-    The hello deadline is `_HELLO_SECONDS`, not a literal: before this
-    the ten seconds were written into the call, so nothing could shorten
-    it for a test or a deployment under load, and a socket that ran it
-    out was not counted anywhere while it did.
+    Returns `(user_id, mfa_at, case_id, token)`, or None after closing the socket with a reason the
+    client can act on. The token is kept so the stream can ask, without sliding it, whether the
+    session is still alive (`_session_alive`). A separate function so one `finally` around the call
+    releases the pending slot; its refusals all follow `accept()` and carry the linger
+    `_PendingBudget` describes.
     """
     try:
         hello = await asyncio.wait_for(_read_hello(ws),
@@ -993,17 +566,13 @@ async def _handshake(ws: WebSocket, ip: str | None):
             await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
         return None
     except _UnusableHello as unusable:
-        # A binary frame, an over-long one, text that is not JSON, JSON
-        # nested too deep to parse (http_ui-013, 2026-10-03).
+        # A binary frame, an over-long one, text that is not JSON, JSON nested too deep to parse.
         with contextlib.suppress(Exception):
             await ws.close(code=_CLOSE_UNAUTHENTICATED, reason=unusable.reason)
         return None
 
-    # The hello is untrusted input that arrives before any credential is
-    # checked (http_ui-013, 2026-10-03): a list, a number, or an object
-    # whose case_id is not text raised AttributeError out of this function,
-    # a traceback per connection that a peer with no session could cause.
-    # A JSON null still reads as an empty hello, as it always has.
+    # The hello is untrusted input that arrives before any credential is checked, so any shape but
+    # an object with a text or null case_id is refused. A JSON null reads as an empty hello.
     if hello is None:
         hello = {}
     if not isinstance(hello, dict) or not isinstance(
@@ -1013,37 +582,12 @@ async def _handshake(ws: WebSocket, ip: str | None):
         return None
     frame_token = hello.get("token")
     raw_case = hello.get("case_id")
-    # THE COOKIE FIRST, the first frame second, and nothing downstream
-    # changes: `__Host-session` holds the RAW session token
-    # (`routers/auth._set_session_cookies`), so the string taken from it
-    # is the same string `_authenticate` has always validated. A
-    # `WebSocket` is an `HTTPConnection`, so `ws.cookies` is parsed from
-    # the upgrade's headers exactly as it is for a request -- there was
-    # never anything to build here, only a cookie nobody read.
-    #
-    # The cookie first because a browser that has signed in HAS it: it
-    # survives the reload the page memory does not, it is `HttpOnly` so
-    # no script on any origin can read it back out, and `SameSite=strict`
-    # plus `_cross_site_upgrade` keep another origin's page from making
-    # the browser attach it. The frame token is the one a browser could
-    # be made to leak, because it exists in page memory at all.
-    #
-    # The frame stays as the FALLBACK, and is now the ONLY reason this
-    # protocol has a token field: `scripts/bootstrap.py session` mints a
-    # session through `SessionService` in a shell, for a browser it has
-    # never met, and a shell has no cookie jar to put it in. That is the
-    # operator recovery path for a machine whose clock TOTP cannot live
-    # with; it has no other way in, so the field does not go with the
-    # login-body token.
-    #
-    # The frame itself is still REQUIRED of everyone, cookie or not: it
-    # carries the case id, and there is nowhere else for a subscriber to
-    # say which case it wants. A hello whose case id is missing OR null
-    # gets a socket subscribed to notifications alone -- which is what the
-    # console holds while no case is open: `state.caseId` is null there,
-    # so the object it stringifies carries `"case_id": null` rather than
-    # dropping the key. Both spellings arrive as `raw_case = None`, which
-    # is why neither needs handling of its own.
+    # The cookie first, the frame token second: `__Host-session` holds the raw session token, the
+    # same string `_authenticate` validates, and it is `HttpOnly`, so no script can read it out,
+    # while a frame token exists in page memory. The frame token is kept for
+    # `scripts/bootstrap.py session`, the operator recovery path, which has no cookie jar. The hello
+    # is required of everyone because it carries the case id; a missing or null case id subscribes
+    # to notifications alone, as the console does while no case is open.
     token = ws.cookies.get(SESSION_COOKIE) or frame_token
     if (not isinstance(token, str) or not token or not token.isascii()
             or len(token) > _TOKEN_MAX_CHARS):
@@ -1055,12 +599,9 @@ async def _handshake(ws: WebSocket, ip: str | None):
         await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="bad case id")
         return None
 
-    # Authenticate on a SHORT-LIVED connection, released immediately. The
-    # first version held this one open for the life of the socket, which is
-    # how twenty-five people with two tabs each exhausted Postgres. The
-    # peer address and client software are read on the event loop and
-    # handed to the worker thread: `_authenticate` runs off the loop and
-    # has no request object of its own.
+    # Authenticate on a short-lived connection, released at once, so open sockets hold no Postgres
+    # connection. The peer address and user agent are read here and handed to the worker thread,
+    # where `_authenticate` has no request object of its own.
     user_agent = ws.headers.get("user-agent")
     try:
         session = await asyncio.to_thread(
@@ -1080,27 +621,11 @@ def _authenticate(token: str, case_id: UUID | None, ip: str | None,
                   user_agent: str | None):
     """Validate the session and the case gate on one borrowed connection.
 
-    Returns `(user_id, mfa_at)` or None. Runs on a worker thread because
-    psycopg is synchronous, and the connection is closed before returning
-    so nothing is held for the life of the socket.
-
-    The order is `deps.current_user`'s, deliberately and exactly:
-    validate WITHOUT touching, apply strict binding, and only then slide
-    the idle window. Until 2026-09-02 this called `validate(token)` with
-    `touch` defaulting to True and never consulted the binding at all,
-    which made this socket the hole in a control that was disclosed as
-    covering "validation". With NOCTORNAL_SESSION_STRICT_BINDING=1 a
-    stolen token refused on every HTTP request was still accepted here --
-    and because `_may_read` re-runs the five-part gate, the attacker read
-    exactly what the victim could read. Worse, the unconditional touch
-    meant each reconnect slid `last_seen_at`, so the 30-minute idle
-    timeout never fired and the replay kept the victim's session alive
-    for as long as the attacker kept the socket cycling.
-
-    The case gate runs AFTER the touch, as it does over HTTP: failing
-    `case.read` is an authorization outcome and does not make the session
-    itself less alive. Failing the binding check does, and that is why
-    only the binding check sits before the touch.
+    Returns `(user_id, mfa_at)` or None. Runs on a worker thread because psycopg is synchronous,
+    and closes the connection before returning. The order is `deps.current_user`'s: validate
+    without touching, apply strict binding, and only then slide the idle window, so a token refused
+    over HTTP is refused here and a reconnect loop cannot keep a stolen session alive. The case gate
+    runs after the touch, since failing `case.read` does not make the session less alive.
     """
     conn = connect_request()
     try:
@@ -1119,8 +644,7 @@ def _authenticate(token: str, case_id: UUID | None, ip: str | None,
             return None
         s = service.touch(s)
         if s is None:
-            # Ended between the read and the slide: refused like any dead
-            # session (authz-session-revoke-bypass, 2026-10-03).
+            # Ended between the read and the slide: refused like any dead session.
             return None
         user_id, mfa_at = s.user_id, s.mfa_satisfied_at
         if case_id is not None and not _may_read(conn, user_id, case_id, mfa_at):
@@ -1132,25 +656,15 @@ def _authenticate(token: str, case_id: UUID | None, ip: str | None,
 
 def _may_read(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
               mfa_at, *, count_use: bool = True) -> bool:
-    """The five-part gate, through the one `evaluate()` every other path
-    uses. `case.read` is the right permission: this stream tells a caller
-    only that the case changed, which is exactly what reading it would.
+    """The five-part gate, through the one `evaluate()` every other path uses, on `case.read`:
+    this stream tells a caller only that the case changed, which is what reading it would.
 
-    The CASE's own labels are resolved and passed, exactly as
-    `deps.effective_labels` does when there is no element. `resolve()`
-    parses whatever it is given and a `None` classification raises
-    `AccessResolutionError` — so passing None here did not fail open, it
-    failed the whole socket with a 1011. Loud, but for the wrong reason,
-    and it read as "the live feature is broken" rather than "this call was
-    wrong".
-
-    A case that does not exist returns False, which the caller reports as
-    "no such case" — the same answer an unassigned one gets, so the socket
-    is not an existence oracle either.
+    The case's own labels are passed, as `deps.effective_labels` does with no element, since
+    `resolve()` raises on a None classification. A case that does not exist returns False, the same
+    "no such case" an unassigned one gets, so the socket is no existence oracle.
     """
-    # The case's labels as lock facts (`iam.case_facts`, S1): the
-    # re-check runs on an unbound connection, which row-level security
-    # would show no case row at all.
+    # The case's labels as lock facts (`iam.case_facts`): the re-check runs on an unbound
+    # connection, which row-level security would show no case row at all.
     row = conn.execute(
         "SELECT classification, compartments FROM iam.case_facts(%s)",
         (case_id,)).fetchone()
@@ -1167,11 +681,8 @@ def _may_read(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
 def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
     """Borrow a connection, re-run the gate, give it back.
 
-    Asked without counting a break-glass use. The socket's opening was the
-    request and counted once at its gate; this re-asks the same question
-    before each delivery so a revoked assignment stops the stream, and on
-    a case above the caller's clearance it counted every event on a busy
-    case as another use (2026-09-23)."""
+    Asked without counting a break-glass use: the socket's opening counted once at its gate, and
+    this re-asks before each delivery only so a revoked assignment stops the stream."""
     conn = connect_request()
     try:
         return _may_read(conn, user_id, case_id, mfa_at, count_use=False)
@@ -1179,30 +690,22 @@ def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
         conn.close()
 
 
-#: The change kinds whose payload names the labels of what changed: node and
-#: edge from `core.announce_change` (0146), and proposal from
-#: `proposals.announce` (2026-10-07). Every other kind is
-#: delivered on the case alone. A labelled kind that arrives with no labels
-#: is dropped: what cannot be placed is not announced.
+#: The change kinds whose payload names the labels of what changed: node and edge from
+#: `core.announce_change` (migration 0146), and proposal from `proposals.announce`. Every other
+#: kind is delivered on the case alone. A labelled kind that arrives with no labels is dropped:
+#: what cannot be placed is not announced.
 _LABELLED_KINDS = frozenset({"node", "edge", "proposal"})
 
 
 def _labels_readable(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
                      mfa_at, labels) -> bool:
-    """Whether the subscriber may read at least one element a change hint
-    stands for (http_ui-012, 2026-10-03).
+    """Whether the subscriber may read at least one element a change hint stands for.
 
-    The hint carries no content, but until this it was delivered for
-    every node and edge write in the case, so an AMBER analyst's console
-    woke whenever a RED or compartmented node was written: a timing
-    channel saying restricted activity happened, and when. 0146 puts the
-    distinct (classification, compartments) pairs a reader would need into
-    the NOTIFY payload (a tie's pair is the join with its endpoints'); each
-    is composed with the case's labels exactly as `deps.effective_labels`
-    composes them and put to the gate, `case.read` asked as a question
-    (`count_use=False`), as `_recheck` asks it. One pair the subscriber may
-    read delivers the hint; none, or labels the trigger could not list
-    (`null`), drops it. The labels never reach the client."""
+    A hint about restricted writes alone would be a timing channel. The NOTIFY payload carries the
+    distinct (classification, compartments) pairs (migration 0146; a tie's is joined with its
+    endpoints'), each composed with the case's labels as `deps.effective_labels` does and put to the
+    gate as a `case.read` question. One readable pair delivers the hint; none, or `null` labels,
+    drops it. The labels never reach the client."""
     if not isinstance(labels, list) or not labels:
         return False
     row = conn.execute(
@@ -1267,17 +770,11 @@ def _delivery_verdict(user_id: UUID, case_id: UUID | None, mfa_at,
 
 
 def _session_alive(token: str) -> bool:
-    """Whether the session this socket opened on still stands: not
-    revoked, not past its absolute limit, not idle past its window.
+    """Whether the session this socket opened on still stands: not revoked, not past its absolute
+    limit, not idle past its window.
 
-    `touch=False`, and that is the whole point of the call. The socket
-    was only ever checked at its handshake, so a console left open kept a
-    green "Live" for as long as the tab lived after its session had died,
-    and the first colleague's edit then fired a refetch that threw the
-    analyst to the sign-in at a moment of somebody else's choosing
-    (ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23). Asking
-    must not keep the session alive, or the idle timeout would never fire
-    for a tab that is merely open (final review C20)."""
+    `touch=False`: asking must not keep the session alive, or the idle timeout would never fire
+    for a tab that is merely open."""
     conn = connect_request()
     try:
         return SessionService(PgSessionStore(conn)).validate(
@@ -1291,22 +788,10 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
                   token: str | None = None) -> None:
     """Forward what this caller may see, until the socket goes away.
 
-    Waits on the queue AND on the socket at the same time. Waiting only on
-    the queue means a disconnect is not noticed until the next send — the
-    idle ping, up to 25 seconds later — so a subscriber slot, and with it
-    the process's share of `_MAX_SOCKETS`, stays held long after the
-    analyst closed the tab. Measured: the listener connection was still
-    open four seconds after every client had gone, and released by
-    twenty-five.
-
-    A client that reconnects on a flaky link would churn through slots
-    faster than they are returned, and the refusal would look like the
-    server being broken.
-
-    The session is asked about on every idle ping and before every
-    delivery, and a dead one ends the socket with the policy close and
-    `SESSION_ENDED_REASON` (ux01-firstrun:live-dot-green-on-dead-session,
-    2026-09-23).
+    Waits on the queue and the socket together, so a disconnect frees its subscriber slot at once
+    rather than at the next idle ping. The session is asked about on every idle ping and before
+    every delivery, and a dead one ends the socket with the policy close and
+    `SESSION_ENDED_REASON`.
     """
     receiver = asyncio.create_task(ws.receive())
     getter: asyncio.Task | None = None
@@ -1322,16 +807,9 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
 
     try:
         while True:
-            # Only when there is NO getter, never because the last one is
-            # done (the lost-hint finding, 2026-10-03).
-            # A getter is set to None the moment its result is read, so a
-            # getter that is done HERE finished while the loop was in the
-            # idle branch below (the session check and the ping each
-            # yield), after `wait` had already timed out: its result is a
-            # hint nobody has read. Replacing it threw that hint away, and
-            # the console missed a refetch it had been told to make. The
-            # `wait` below returns at once for a done getter and the loop
-            # reads it.
+            # Only when there is no getter, never because the last one is done: a getter is set to
+            # None once its result is read, so one done here finished during the idle branch and
+            # holds an unread hint. The `wait` below returns at once for it and the loop reads it.
             if getter is None:
                 getter = asyncio.create_task(queue.get())
             done, _ = await asyncio.wait(
@@ -1355,12 +833,9 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
                 # refetch that 401s; the close says so first.
                 if await session_gone():
                     return
-                # RE-CHECKED PER DELIVERY. A socket outlives an assignment;
-                # F19's headline finding was this shape with a shorter
-                # half-life. The same connection also decides whether the
-                # hint is about anything this subscriber may read, so
-                # nothing is pushed about an element above them
-                # (http_ui-012, 2026-10-03).
+                # Re-checked per delivery, since a socket outlives an assignment. The same
+                # connection decides whether the hint is about anything this subscriber may read, so
+                # nothing is pushed about an element above them.
                 verdict = await asyncio.to_thread(
                     _delivery_verdict, user_id, case_id, mfa_at, payload)
                 if verdict == "close":
@@ -1401,14 +876,10 @@ def _drain(listener: psycopg.Connection, seconds: float) -> list[dict]:
 
 
 def _relevant(payload: dict, user_id: UUID, case_id: UUID | None) -> dict | None:
-    """Filter to what this subscriber asked for and may have.
+    """Filter to what this subscriber asked for and may have: which case and which kind.
 
-    Note what is NOT here: any decision about labels. This answers "which
-    case and which kind", and the message it builds carries no label. The
-    decision about what the subscriber may be told of is the next step,
-    `_delivery_verdict`, which reads the labels the trigger put in the
-    payload (0146) and never sends them on. The client refetches through
-    the gated endpoints and they decide again.
+    No decision about labels is made here, and the message carries none; `_delivery_verdict` reads
+    the payload's labels and never sends them on, and the client's refetch is gated again.
     """
     kind = payload.get("kind")
     if kind == "notification":

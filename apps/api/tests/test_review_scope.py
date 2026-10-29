@@ -1,20 +1,16 @@
-"""L3: the reviewed-ties-only projection option (2026-09-24), without a
-database.
+"""L3: the reviewed-ties-only projection option, without a database.
 
-`review_scope="accepted"` computes over the ties a reviewer has accepted
-and counts, by state, every tie it left out. The rules held here:
+`review_scope="accepted"` computes over the ties a reviewer has accepted and counts, by state, every tie
+it left out. The rules held here:
 
-- a DEFAULT projection names and hashes exactly as it did before the
-  option existed, so no stored run goes stale and no stored name is lost
-  (the anchors were computed on the tree the option was added to);
-- the accepted scope is a different projection name and a different cache
-  key, and so are its left-out counts (a cache key that missed the new
-  payload would serve an accepted-only run as current with stale counts
-  after a tie was added or reviewed);
-- every non-ACCEPTED state is counted, SUPERSEDED included, and a value
-  outside the enum lands in "other" rather than vanishing;
-- an unknown scope is refused in one place, with the preset and the
-  confidence floor.
+- a DEFAULT projection names and hashes exactly as it did before the option existed, so no stored run
+  goes stale and no stored name is lost;
+- the accepted scope is a different projection name and a different cache key, and so are its left-out
+  counts (a cache key that missed the new payload would serve an accepted-only run as current with stale
+  counts after a tie was added or reviewed);
+- every non-ACCEPTED state is counted, SUPERSEDED included, and a value outside the enum lands in "other"
+  rather than vanishing;
+- an unknown scope is refused in one place, with the preset and the confidence floor.
 
 Pure: no database.
 """

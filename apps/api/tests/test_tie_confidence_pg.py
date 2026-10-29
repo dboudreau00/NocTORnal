@@ -1,25 +1,9 @@
 """A tie's confidence has one source: the live assertions behind it.
 
-Migration 0064, written 2026-09-22 for two review findings that were the
-same defect seen from two panes:
-
-- ux06 edge-confidence-not-stored: the confidence chosen in the Add
-  relationship form reached the assertion and never the edge. `POST /edges`
-  passed none, the service defaulted to LOW, and the canvas, the Min
-  confidence filter and every metric with a floor read LOW.
-- ux05 two-disagreeing-confidences: the inspector printed the edge's value
-  above the assertion's, with nothing saying which was which, and the
-  "Correct..." path wrote the column while attaching an assertion graded
-  LOW, which opened a fresh disagreement every time it was used.
-
-The rule these tests hold: a tie's confidence is the HIGHEST confidence
-among its live claims about the tie, a correction that states the
-confidence counting at the value it states, and a correction to another
-field (weight, attrs) not counting at all (`core.tie_confidence`). The
-first test is the one the finding asked for by name: create a HIGH tie
-through `POST /edges` and read HIGH back. The last covers the demo seed's
-`--regrade`, which puts back the tie grades 0064's backfill took out of an
-estate seeded before it.
+A tie's confidence is the HIGHEST confidence among its live claims about the tie. A correction that
+states the confidence counts at the value it states; a correction to another field (weight, attrs) does
+not count at all (`core.tie_confidence`, migration 0064). The last test covers the demo seed's
+`--regrade`, which puts back the tie grades the 0064 backfill took out of an older estate.
 
 **The email prefix is `tconf-` and must stay unique**, for the reason
 `test_graph_mutation_api_pg.py` gives: fixtures clean up on an email
@@ -60,11 +44,9 @@ def conn():
     yield c
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'tconf-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
-    # One transaction, assertions and elements together, so the deferred
-    # invariant-1 triggers see the final state (all gone). Exhibits after
-    # the assertions that cite them and before the users who acquired
-    # them; they are inserted as rows here, never ingested, so no custody
-    # row pins one.
+    # One transaction, so the deferred invariant-1 triggers see the final state. Exhibits go after the
+    # assertions that cite them and before the users who acquired them; they are inserted as rows,
+    # never ingested, so no custody row pins one.
     with c.transaction():
         c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
@@ -128,8 +110,6 @@ def _case(client, token) -> str:
 def _node(client, token, case_id, label) -> str:
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
                     json={"node_type": "IDENTITY", "label": label,
-                          # What the API's defaults gave an entity before
-                          # its grading became required (2026-09-23).
                           "assertion": _graded("LOW", reliability="F",
                                                credibility="6")})
     assert r.status_code == 201, r.text
@@ -189,13 +169,8 @@ def _claims(conn, edge_id) -> int:
                         (edge_id,)).fetchone()[0]
 
 
-# =======================================================================
-# THE FINDING, BY NAME
-# =======================================================================
-
 def test_a_high_tie_created_through_post_edges_reads_back_high(conn, client):
-    """ux06 edge-confidence-not-stored. Before 0064 this tie came back LOW
-    from every read, and a HIGH floor hid it."""
+    """A HIGH tie created through `POST /edges` reads back HIGH, so a HIGH floor shows it."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="HIGH")
@@ -217,8 +192,8 @@ def test_a_top_level_confidence_is_refused_rather_than_dropped(conn, client):
     declared so a client that sends it there is told where it belongs."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
-    # Graded in full, so the request reaches the refusal under test rather
-    # than the 422 a missing grading earns (gap-api-grade-required).
+    # Graded in full, so the request reaches the refusal under test rather than the 422 a missing
+    # grading earns.
     r = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token),
                     json={"edge_type": "VOUCHED_FOR", "src_node_id": a,
                           "dst_node_id": b, "confidence": "HIGH",
@@ -263,10 +238,8 @@ def _drawn(client, token, case_id, **params) -> dict:
 
 
 def test_a_tie_with_no_live_claim_reads_low_and_leaves_the_graph(conn, client):
-    """This test held the opposite until the final review (2026-09-23): that the tie KEPT
-    the withdrawn claim's grade. A tie no
-    live claim grades now reads LOW, the ungraded value. With no live
-    assertion at all it has left the graph, as before."""
+    """A tie no live claim grades reads LOW, the ungraded value. With no live assertion at all it has
+    left the graph."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="MODERATE")
@@ -279,12 +252,9 @@ def test_a_tie_with_no_live_claim_reads_low_and_leaves_the_graph(conn, client):
 
 def test_a_tie_held_up_by_a_weight_fix_does_not_keep_the_withdrawn_grade(
         conn, client):
-    """Final review U11 (a), 2026-09-23, the reviewer's own steps. The
-    founding HIGH claim is retracted while a weight correction still
-    stands. The correction is live support, so the tie stays in the graph
-    (decision 24), but no live claim grades it. It used to stay HIGH: drawn
-    at HIGH opacity, passing a HIGH floor and printed HIGH, on a grade that
-    had just been withdrawn."""
+    """The founding HIGH claim is retracted while a weight correction still stands. The correction is
+    live support, so the tie stays in the graph (decision 24), but no live claim grades it: it reads
+    LOW, not the withdrawn HIGH."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="HIGH")
@@ -313,13 +283,11 @@ def test_a_tie_held_up_by_a_weight_fix_does_not_keep_the_withdrawn_grade(
 
 
 def test_a_superseded_claim_does_not_hold_a_tie_or_an_entity_up(conn, client):
-    """Final review U11 (b), 2026-09-23. `seed_showcase.py --regrade`
-    supersedes a seed claim with a regraded one, and is the first code to
-    write `superseded_at`. The rule already read a superseded row as dead
-    and the projection read it as live support, so retracting the
-    replacement left the tie drawn on a claim that no card offers to
-    retract. Live now means one thing in both. The entity leg is held to
-    the same definition."""
+    """A superseded claim is dead in both the rule and the projection.
+
+    `seed_showcase.py --regrade` supersedes a seed claim with a regraded one and is the first code to
+    write `superseded_at`. Retracting the replacement must not leave the tie held up by the superseded
+    claim. The entity leg is held to the same definition."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     uid = conn.execute("SELECT created_by FROM core.node WHERE id = %s",
@@ -404,12 +372,9 @@ def test_writing_the_column_directly_is_refused_not_silently_replaced(
 def _patch(client, token, case_id, edge_id, body):
     """A correction, its claim graded where the test leaves grading out.
 
-    The API grades nothing for the caller since gap-api-grade-required
-    (2026-09-23). The fill is what its defaults used to apply (F / 6 /
-    DIRECT_OBSERVATION) and, for a re-grade, the confidence it asks for,
-    which is what the service then graded the claim at. So these tests
-    exercise what they did before; the one about what the console sends
-    states its grading in full."""
+    The API grades nothing for the caller. The fill is F / 6 / DIRECT_OBSERVATION and, for a re-grade,
+    the confidence the request asks for. The test about what the console sends states its grading in
+    full."""
     claim = {"basis": "DIRECT_OBSERVATION", "reliability": "F",
              "credibility": "6", "confidence": body.get("confidence", "LOW")}
     claim.update(body.get("assertion") or {})
@@ -418,16 +383,13 @@ def _patch(client, token, case_id, edge_id, body):
 
 
 def test_a_correction_raises_the_tie_and_its_own_assertion_agrees(conn, client):
-    """ux05: the old path wrote the column and attached an assertion graded
-    LOW, so the inspector's header said HIGH above a card that said LOW."""
+    """A correction raises the tie, and the inspector's header and the correction's own card agree."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="LOW")
 
-    # Exactly what the console's Correct form sends since 2026-09-23
-    # (gap-api-grade-required): the new value, and the claim graded in full
-    # by the analyst, with the re-grade as its confidence. The Correct...
-    # prompt sent a rationale alone and the API graded the rest.
+    # Exactly what the console's Correct form sends: the new value, and the claim graded in full by
+    # the analyst, with the re-grade as its confidence.
     r = _patch(client, token, case_id, tie,
                {"confidence": "HIGH",
                 "assertion": {"basis": "THIRD_PARTY_REPORT", "reliability": "C",
@@ -439,10 +401,8 @@ def test_a_correction_raises_the_tie_and_its_own_assertion_agrees(conn, client):
     cards = client.get(f"/api/v1/cases/{case_id}/edges/{tie}/assertions",
                        headers=_auth(token)).json()
     assert sorted(c["confidence"] for c in cards) == ["HIGH", "LOW"]
-    # Found by its rationale rather than as cards[0] (fix round,
-    # 2026-09-23): the list is newest first by recorded_at, and this test
-    # is about the correction's grade, not about two rows recorded
-    # milliseconds apart sorting one way on a busy shared server.
+    # Found by its rationale rather than as cards[0]: the list is newest first by recorded_at, and
+    # rows recorded milliseconds apart can sort either way on a busy shared server.
     corrections = [c for c in cards if c["rationale"] == "second vouch"]
     assert len(corrections) == 1, cards
     newest = corrections[0]
@@ -512,12 +472,11 @@ def test_a_weight_correction_leaves_the_confidence_where_the_rule_puts_it(
 
 
 def test_a_field_correction_graded_high_does_not_raise_the_tie(conn, client):
-    """Found by the fix-round verifier, 2026-09-22. The rule counted EVERY
-    live assertion, so a weight fix graded HIGH raised a LOW tie to HIGH,
-    and the analyst's next attempt to put it back was refused with a 409
-    pointing at the weight fix. A correction to another field grades that
-    field, not the tie. Both shapes are covered: one field (claim_path
-    'weight') and two (no claim_path, both in claim_value)."""
+    """A field correction graded HIGH does not raise the tie.
+
+    The rule counts only claims about the tie, so a weight fix graded HIGH cannot raise a LOW tie or
+    block the analyst from putting it back. Both shapes are covered: one field (claim_path 'weight')
+    and two (no claim_path, both in claim_value)."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="LOW")
@@ -560,12 +519,8 @@ def test_a_correction_to_weight_and_confidence_counts_at_the_confidence(
 
 
 def test_the_refusal_names_the_analysts_own_correction(conn, client):
-    """Re-verifier, 2026-09-23: corrections accumulate, so an analyst who
-    raised a tie and then tried to bring it back down was refused because
-    of their OWN earlier correction, by a message that said only "a live
-    assertion". The refusal now names the claims in the way, and says when
-    one is the caller's, so they know which card to retract. Retracting it
-    then lets the lower correction through."""
+    """The refusal names the claims in the way and says when one is the caller's own, so they know
+    which card to retract. Retracting it lets the lower correction through."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="LOW")
@@ -585,8 +540,7 @@ def test_the_refusal_names_the_analysts_own_correction(conn, client):
     assert f"1 live claim grades it above MODERATE (your own correction of " \
            f"{mine[1]:%Y-%m-%d})" in detail, detail
     assert "Retract that claim first" in detail
-    # The remedy that keeps the tie graded names the console's control
-    # (final review C14): it used to prescribe one the console lacked.
+    # The remedy that keeps the tie graded names a control the console has.
     assert "add a MODERATE claim before retracting" in detail
     assert "Add a claim under the tie's assertions" in detail
     assert "\u2014" not in detail and "\u2013" not in detail
@@ -635,17 +589,13 @@ def _exhibit(conn, case_id, uid) -> str:
 
 def test_lowering_through_a_new_claim_keeps_the_tie_graded_and_evidenced(
         conn, client):
-    """Final review C14, 2026-09-23, the reviewer's scenario end to end.
+    """Lowering a tie through a new claim keeps it graded and evidenced, end to end.
 
-    A tie recorded HIGH on a B2 third-party report with exhibit X is to
-    come down to MODERATE. Correct... is refused (it cannot lower a tie
-    past a live claim) and names the remedy. The only route the console
-    had was to retract the founding claim and correct afterwards, which
-    left the tie on an ungraded correction (DIRECT_OBSERVATION, F6), with
-    exhibit X no longer backing it. The inspector's Add a claim form sends
-    exactly this body, the whole grading and the exhibit, to
-    `POST /edges/{id}/assertions`; the higher claim is then retracted with
-    its reason, and the tie never leaves the graph."""
+    A tie recorded HIGH on a B2 third-party report with exhibit X is to come down to MODERATE.
+    Correct... is refused (it cannot lower a tie past a live claim) and names the remedy. The
+    inspector's Add a claim form sends the whole grading and the exhibit to
+    `POST /edges/{id}/assertions`; the higher claim is then retracted with its reason, and the tie
+    never leaves the graph."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     uid = conn.execute("SELECT created_by FROM core.node WHERE id = %s",
@@ -693,14 +643,9 @@ def test_lowering_through_a_new_claim_keeps_the_tie_graded_and_evidenced(
         "the live claim keeps the grading and exhibit the analyst gave it")
 
 
-# =======================================================================
-# CONCURRENCY: two writers on one tie (re-verifier, 2026-09-23)
-# =======================================================================
-#
-# Each test holds one write open on a second connection, starts another
-# writer in a thread, waits until that writer is blocked on a lock (or
-# has finished, which is what the unfixed code did), and only then commits
-# the first. `lock_timeout` bounds a regression that hangs to seconds.
+# Concurrency: two writers on one tie. Each test holds one write open on a second connection, starts
+# another writer in a thread, waits until that writer is blocked on a lock (or has finished), and only
+# then commits the first. `lock_timeout` bounds a hang to seconds.
 
 def _open_tx():
     """A connection that is NOT autocommit, so a write stays uncommitted
@@ -752,12 +697,10 @@ def _claim_sql() -> str:
 
 
 def test_a_retraction_racing_a_new_claim_leaves_no_drift(conn, client):
-    """The drift the re-verifier reproduced. T1 retracts the HIGH claim and
-    has not committed; T2 adds a second HIGH claim and commits; T1 commits.
-    The first 0064 left the column LOW while the rule said HIGH: T2 derived
-    HIGH from a snapshot in which the retraction had not happened, found
-    the column already HIGH and wrote nothing, and T1's LOW landed last.
-    Now T2 waits for T1's lock and derives after it."""
+    """A retraction racing a new claim leaves the column equal to the rule.
+
+    T1 retracts the HIGH claim and has not committed; T2 adds a second HIGH claim and commits; T1
+    commits. T2 waits for T1's lock and derives after it, so the column does not end on a stale LOW."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="LOW")
@@ -797,11 +740,9 @@ def test_a_retraction_racing_a_new_claim_leaves_no_drift(conn, client):
 
 
 def test_two_claims_at_once_both_land(conn, client):
-    """The same race failing closed. T1 adds a HIGH claim and has not
-    committed; T2 adds a MODERATE one. The first 0064 made T2's UPDATE
-    wait, then re-check against T1's committed HIGH, and the edge guard
-    refused it as a "direct write": a legitimate claim was lost. Now T2
-    waits at the lock, derives HIGH afterwards, and both claims stand."""
+    """Two concurrent claims both land. T1 adds a HIGH claim and has not committed; T2 adds a MODERATE
+    one. T2 waits at the lock, derives HIGH afterwards, and both claims stand rather than the edge
+    guard refusing T2's update as a direct write."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="LOW")
@@ -899,20 +840,18 @@ def _m0064():
 
 
 def test_the_backfill_repairs_drift_and_honours_an_old_correction(conn, client):
-    """Models the database 0064 finds, in a rolled-back transaction with
-    the user triggers off (the suite's idiom, see
-    `test_compartment_binding_pg.py`):
+    """The backfill repairs drift and honours an old correction.
 
-    - a tie graded MODERATE whose column says LOW, the pre-0064 default;
-    - a tie corrected to HIGH the pre-0064 way: column HIGH, the
-      correction's own grade LOW, its claim_value saying HIGH. The rule
-      honours the stated value, so the backfill must leave it HIGH rather
-      than dragging it down to the grades.
-    - a LOW tie carrying a weight fix graded HIGH: a claim about the
-      weight, not the tie, so the backfill must leave it LOW.
-    - a HIGH tie whose founding claim was withdrawn while a weight fix
-      still stands: no live claim grades it, so it takes LOW (2026-09-23) instead of keeping
-      the withdrawn HIGH.
+    Models the database migration 0064 finds, in a rolled-back transaction with the user triggers off
+    (the suite's idiom, see `test_compartment_binding_pg.py`):
+
+    - a tie graded MODERATE whose column says LOW, the old default;
+    - a tie corrected to HIGH the old way: column HIGH, the correction's own grade LOW, its
+      claim_value saying HIGH. The rule honours the stated value, so the backfill leaves it HIGH;
+    - a LOW tie carrying a weight fix graded HIGH: a claim about the weight, not the tie, so the
+      backfill leaves it LOW;
+    - a HIGH tie whose founding claim was withdrawn while a weight fix still stands: no live claim
+      grades it, so it takes LOW.
     """
     from noctornal_api.db import dsn
     import psycopg
@@ -1007,13 +946,11 @@ def _seed_showcase():
 
 def test_the_demo_regrade_supersedes_seed_claims_and_touches_nothing_else(
         conn, client):
-    """Fix round, 2026-09-22. The seed used to grade every claim MODERATE
-    and give the tie a confidence of its own; 0064's backfill sided with
-    the claims and the demo lost every HIGH and LOW tie. `--regrade` puts
-    the seed's grades back by SUPERSESSION (invariant 5), so this checks
-    the history as well as the result: the old claim is kept, stamped and
-    linked to its replacement, and nothing about it is rewritten. A claim
-    an analyst added is not the seed's and is left alone."""
+    """`--regrade` puts the seed's grades back by SUPERSESSION (invariant 5).
+
+    The check covers the history as well as the result: the old claim is kept, stamped and linked to
+    its replacement, and nothing about it is rewritten. A claim an analyst added is not the seed's and
+    is left alone."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
     c = _node(client, token, case_id, "charlie")
@@ -1024,7 +961,7 @@ def test_the_demo_regrade_supersedes_seed_claims_and_touches_nothing_else(
     when = datetime(2026, 1, 5, tzinfo=timezone.utc)
 
     def seeded(src, dst):
-        """A tie the way the pre-0064 seed recorded it: claim MODERATE, C3."""
+        """A seeded tie: claim MODERATE, C3."""
         r = client.post(
             f"/api/v1/cases/{case_id}/edges", headers=_auth(token),
             json={"edge_type": "VOUCHED_FOR", "src_node_id": src,

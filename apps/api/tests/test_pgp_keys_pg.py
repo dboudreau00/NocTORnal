@@ -1,12 +1,10 @@
-"""The case key registry against Postgres (F10b, comms, 2026-09-24).
+"""The case key registry against Postgres.
 
-What holds: an import records what was obtained and from where; an
-identical import (bytes, source reference AND labels) answers with the row
-the caller could already see, and a RED import never answers an AMBER one;
-labels are raised to the floor of what is cited, from visible material
-only; confirmation compares a fingerprint the actor published and refuses
-everything else with an audited 409; the schema holds the same rules for a
-writer that skips the service; nothing is deleted.
+An import records what was obtained and from where; an identical import (bytes, source reference AND
+labels) answers with the row the caller could already see, and a RED import never answers an AMBER one;
+labels are raised to the floor of what is cited, from visible material only; confirmation compares a
+fingerprint the actor published and refuses everything else with an audited 409; the schema holds the same
+rules for a writer that skips the service; nothing is deleted.
 
 Rows are deleted at teardown (pgp_support.teardown).
 """
@@ -239,9 +237,8 @@ def test_confirm_by_a_typed_fingerprint_and_where_it_was_published(conn):
 
 
 def test_a_0x_prefixed_line_confirms_under_the_one_normalisation(conn):
-    """The ontology keeps a 0X prefix and pgp.normalise_fingerprint strips
-    it; the service reads comms.pgp_fingerprint_norm, as the trigger does,
-    so the two can no longer disagree into a 500."""
+    """The ontology keeps a 0X prefix and pgp.normalise_fingerprint strips it; the service reads
+    comms.pgp_fingerprint_norm, as the trigger does, so the two cannot disagree into a 500."""
     uid = user(conn, "pgpk")
     case_id = case(conn, uid)
     key_id = _key_id(_import(conn, case_id, uid))

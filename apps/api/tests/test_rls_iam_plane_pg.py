@@ -1,13 +1,11 @@
-"""The request role cannot write what decides who it is (S1, 2026-09-25).
+"""The request role cannot write what decides who it is.
 
-The policies read the IAM plane and lab.download_ticket, so a request
-role that could write them could rebind itself as anyone (a forged
-session row, a rewritten binding hash) or widen its own reach (its
-clearance, a role, an assignment, a grant). 0109 makes them read-only to
-the request role; 0112 confines the two column grants that remained, and
-0180 took the ticket's back (a ticket is spent through its definer). Each
-forging write below is attempted as SET ROLE noctornal_app, bound as an
-ordinary analyst, and must be refused.
+The policies read the IAM plane and lab.download_ticket, so a request role that could write them could
+rebind itself as anyone (a forged session row, a rewritten binding hash) or widen its own reach (its
+clearance, a role, an assignment, a grant). 0109 makes them read-only to the request role; 0112 confines
+the two column grants that remain, and 0180 removes the ticket's (a ticket is spent through its definer).
+Each forging write below is attempted as SET ROLE noctornal_app, bound as an ordinary analyst, and must
+be refused.
 """
 from __future__ import annotations
 
@@ -87,10 +85,9 @@ def test_every_forging_write_is_refused_to_the_request_role(owner, people, name)
 
 
 def test_the_request_role_keeps_its_own_session_activity_and_nothing_else(owner, people):
-    """Touch and logout still work on the bound session; the same columns
-    on anybody else's session are refused by 0112's guard, and a revoked
-    session stays revoked. Stamping step-up is no longer the request
-    role's to do (0144, rls-7 2026-10-03): it is a sign-in's."""
+    """Touch and logout still work on the bound session; the same columns on anybody else's session are
+    refused by 0112's guard, and a revoked session stays revoked. Stamping step-up is a sign-in's, not the
+    request role's (0144)."""
     # the idle window only slides forward (0144), and the fixture stamps the
     # session from the test host's clock, which can sit ahead of the database's:
     # put the stamp in the database's past first

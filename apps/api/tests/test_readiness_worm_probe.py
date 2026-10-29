@@ -1,45 +1,30 @@
 """The WORM probe: write-once is PROVEN by a refused delete, never read.
 
-docs/17 F24, decided by the owner 2026-09-22: stay on the pinned MinIO
-build, accepted in writing, and make the readiness register prove
-write-once instead of reading the bucket's lock configuration. Until that
-day `evidence_bucket_object_lock` passed on `get_object_lock_config`
-answering with a configuration, and research for the decision found two
-stores that would have passed it holding nothing: SeaweedFS accepts a
-COMPLIANCE retention and has let the delete succeed anyway (seaweedfs
-issues 8350 and 11333; the second deleted the locked version BY ITS ID),
-and Garage has no object lock at all.
+docs/17 F24: stay on the pinned MinIO build, and make the readiness register prove write-once instead of
+reading the bucket's lock configuration. A configuration read passes on stores that hold nothing: SeaweedFS
+accepts a COMPLIANCE retention and has let the delete succeed anyway (seaweedfs issues 8350 and 11333; the
+second deleted the locked version BY ITS ID), and Garage has no object lock at all.
 
-So the probe keeps one canary per bucket under a fixed key, writes it with
-a one-day COMPLIANCE retention only when it is absent or about to lapse,
-and on every run issues a DELETE naming that canary's VERSION ID. It passes
-only on a retention refusal with the version still there afterwards.
+So the probe keeps one canary per bucket under a fixed key, writes it with a one-day COMPLIANCE retention
+only when it is absent or about to lapse, and on every run issues a DELETE naming that canary's VERSION ID.
+It passes only on a retention refusal with the version still there afterwards.
 
-The verifier's round of 2026-09-22 added what this file now also holds: a
-missing bucket is a sentence, not a raw S3Error; canary versions past their
-lock are tidied rather than piling up; credentials that may not read a
-retention reuse the canary instead of writing one per probe; a refusal on
-the credentials' own permissions is marked as proving nothing, and the
-preservation check then proves with the credential that may delete; the
-proof has a time budget; and the preservation store is addressed exactly
-as `samples.PreservationStorage` addresses it.
+Also held here: a missing bucket is a sentence, not a raw S3Error; canary versions past their lock are
+tidied rather than piling up; credentials that may not read a retention reuse the canary instead of
+writing one per probe; a refusal on the credentials' own permissions is marked as proving nothing, and the
+preservation check then proves with the credential that may delete; the proof has a time budget; and the
+preservation store is addressed exactly as `samples.PreservationStorage` addresses it.
 
-The final review of 2026-09-23 added three more. C10: the probe asked for
-COMPLIANCE and never read what the store recorded, and a plain DELETE is
-refused under GOVERNANCE too, so a store that downgraded passed claiming
-COMPLIANCE and gained a locked canary per probe; the mode is now read back.
-C9: preserved samples carry a legal hold and no retention, and the
-preservation check proved only a retention; it now proves a hold as well.
-A transport error while tidying turned a proven check red.
+The mode is read back (the probe asks for COMPLIANCE, but a plain DELETE is refused under GOVERNANCE too,
+so a store that downgraded would pass claiming COMPLIANCE and gain a locked canary per probe). Preserved
+samples carry a legal hold and no retention, so the preservation check proves a hold as well. A transport
+error while tidying must not turn a proven check red.
 
-Most of this file drives a FAKE client, because the failure it exists for
-(a store that accepts the lock and deletes anyway) is not one the dev
-MinIO can be made to commit. The live half at the bottom runs the real
-probe against the dev MinIO and is gated on MINIO_ENDPOINT; it leaves one
-tiny canary per bucket locked for a day, which is the probe's designed
-standing cost and the reason the retention is a day and not a year, and
-one held canary in the preservation bucket, kept for good, because a hold
-has no expiry.
+Most of this file drives a FAKE client, because the failure it exists for (a store that accepts the lock
+and deletes anyway) is not one the dev MinIO can be made to commit. The live half at the bottom runs the
+real probe against the dev MinIO and is gated on MINIO_ENDPOINT; it leaves one tiny canary per bucket
+locked for a day, which is the probe's designed standing cost and the reason the retention is a day and
+not a year, and one held canary in the preservation bucket, kept for good, because a hold has no expiry.
 """
 from __future__ import annotations
 
@@ -323,8 +308,8 @@ def test_a_store_that_refuses_the_versioned_delete_passes():
     assert retention.retain_until_date == NOW + readiness.CANARY_RETENTION
     assert store.removes() == [("remove", KEY, "v1")]
     assert "v1" in store.versions, "the refused version must still be there"
-    # And the mode the evidence names is the one the store REPORTED for
-    # that version, read before the delete (final review C10).
+    # And the mode the evidence names is the one the store REPORTED for that version, read before the
+    # delete.
     calls = store.calls
     assert calls.index(("retention", KEY, "v1")) < calls.index(
         ("remove", KEY, "v1"))
@@ -345,10 +330,9 @@ def test_a_store_that_accepts_the_lock_and_deletes_anyway_fails():
 
 
 def test_every_delete_the_probe_issues_names_a_version():
-    """The mandatory half of the design. A keyless DELETE on a versioned
-    bucket succeeds by adding a delete marker (evidence.py measured it on
-    2026-08-10), so a probe that deleted by key would report every
-    honest store as broken, and seaweedfs 8350 reads exactly like that."""
+    """The mandatory half of the design. A keyless DELETE on a versioned bucket succeeds by adding a
+    delete marker, so a probe that deleted by key would report every honest store as broken (seaweedfs
+    8350 reads exactly like that)."""
     for store in (FakeStore(), FakeStore(enforces=False)):
         readiness.prove_write_once(store, "b", now=NOW)
         assert store.removes(), "the probe never tried to delete anything"
@@ -395,11 +379,9 @@ def test_a_bucket_without_object_lock_fails_with_the_stores_own_words():
 
 
 def test_a_missing_bucket_is_a_sentence_not_a_raw_s3_error():
-    """Verifier, 2026-09-22: the HEAD of the canary on a bucket that does
-    not exist raised NoSuchBucket out of the probe, so the register showed
-    `S3Error: S3 operation failed; code: NoSuchBucket ... request_id ...`
-    where the configuration read it replaced had said the bucket does not
-    exist. Nothing is written and nothing is deleted."""
+    """The HEAD of the canary on a bucket that does not exist must not raise NoSuchBucket out of the probe
+    as `S3Error: S3 operation failed; code: NoSuchBucket ... request_id ...`: the register says the bucket
+    does not exist. Nothing is written and nothing is deleted."""
     store = FakeStore(bucket_exists=False)
     ok, evidence = readiness.prove_write_once(store, "b", now=NOW)
     assert ok is False
@@ -449,11 +431,10 @@ def test_a_canary_that_cannot_be_tested_is_replaced(label, retention):
 # ---------------------------------------------------------------------------
 
 def test_a_governance_canary_fails_rather_than_being_replaced():
-    """Final review C10, 2026-09-23. GOVERNANCE is lifted by anyone holding
-    BypassGovernanceRetention, the root credential included, so it proves
-    nothing; this probe is the key's only writer and always asks for
-    COMPLIANCE, so a GOVERNANCE canary is the store's answer. Until then
-    it was quietly replaced, and the replacement was locked GOVERNANCE too."""
+    """GOVERNANCE is lifted by anyone holding BypassGovernanceRetention, the root credential included, so
+    it proves nothing; this probe is the key's only writer and always asks for COMPLIANCE, so a GOVERNANCE
+    canary is the store's answer. It is not quietly replaced, because the replacement would be locked
+    GOVERNANCE too."""
     store = FakeStore()
     old = store.seed(Retention(GOVERNANCE, NOW + timedelta(hours=20)))
     ok, evidence = readiness.prove_write_once(store, "b", now=NOW)
@@ -466,12 +447,10 @@ def test_a_governance_canary_fails_rather_than_being_replaced():
 
 
 def test_a_store_that_records_governance_for_compliance_fails_every_probe():
-    """The verifier's reproduction, as a test: a store that records its
-    GOVERNANCE 365d default whatever mode the PUT asks for. Three probes
-    passed with "write-once PROVEN ... COMPLIANCE until ..." and left
-    three versions locked for a year that no tidy could remove. Now every
-    probe fails, naming the mode the store recorded, and only the first
-    one writes anything."""
+    """A store that records its GOVERNANCE 365d default whatever mode the PUT asks for fails every probe,
+    naming the mode the store recorded, and only the first one writes anything. Otherwise three probes
+    would pass with "write-once PROVEN ... COMPLIANCE until ..." and leave three versions locked for a year
+    that no tidy could remove."""
     year = Retention(GOVERNANCE, NOW + timedelta(days=365))
     store = FakeStore(applies=year)
     for _ in range(3):
@@ -520,11 +499,9 @@ def test_a_store_that_will_not_say_what_it_recorded_fails():
 
 
 def test_credentials_that_may_not_read_a_retention_reuse_the_canary():
-    """Verifier, 2026-09-22: a refused GetObjectRetention used to read as
-    "no canary", so every probe wrote another locked version. The lock is
-    now taken from the canary's write time (the probe is the key's only
-    writer and always asks for a day), which picks the version to test and
-    never the verdict."""
+    """A refused GetObjectRetention must not read as "no canary", or every probe would write another
+    locked version. The lock is taken from the canary's write time (the probe is the key's only writer and
+    always asks for a day), which picks the version to test and never the verdict."""
     store = FakeStore(retention_denied=True)
     fresh = store.seed(_compliance(22), written=NOW - timedelta(hours=2))
     ok, evidence = readiness.prove_write_once(store, "b", now=NOW)
@@ -532,8 +509,7 @@ def test_credentials_that_may_not_read_a_retention_reuse_the_canary():
     assert store.puts() == []
     assert store.removes()[0] == ("remove", KEY, fresh)
     assert "taken from when it was written" in evidence
-    # Final review C10: the mode was asked for and never seen, so the
-    # evidence may not assert it.
+    # The mode was asked for and never seen, so the evidence may not assert it.
     assert "COMPLIANCE requested until" in evidence
     assert "not confirmed" in evidence
     assert "(COMPLIANCE until" not in evidence
@@ -566,10 +542,9 @@ def test_an_inferred_lock_the_store_never_applied_still_fails():
 # ---------------------------------------------------------------------------
 
 def test_canary_versions_past_their_lock_are_removed_after_a_proof():
-    """Verifier, 2026-09-22: a new version was written each day and none
-    was ever removed, about 365 a year per bucket. Only versions written
-    more than a day ago are touched, never the one just tested, and a
-    delete marker (which hides nothing) goes too."""
+    """Without tidying, a new version is written each day and none is ever removed, about 365 a year per
+    bucket. Only versions written more than a day ago are touched, never the one just tested, and a delete
+    marker (which hides nothing) goes too."""
     store = FakeStore()
     lapsed = [store.seed(_compliance(-48), written=NOW - timedelta(days=3)),
               store.seed(_compliance(-24), written=NOW - timedelta(days=2))]
@@ -627,11 +602,9 @@ def test_a_version_still_locked_is_kept_and_a_tidy_failure_keeps_the_proof():
     ServerError("server failed with HTTP status code 503", 503),
 ], ids=lambda exc: type(exc).__name__)
 def test_a_transport_error_while_tidying_keeps_the_proof(failure):
-    """2026-09-23. The tidy runs after the proof passed
-    and is best effort, but it caught only S3Error, and the probe's client
-    retries nothing. A reset or a slow page during the listing escaped
-    through `_guarded`, and the row went red with "start the object store"
-    for a store that is running and has just refused a locked delete."""
+    """The tidy runs after the proof passed and is best effort, and the probe's client retries nothing. A
+    reset or a slow page during the listing must not escape through `_guarded` and turn the row red with
+    "start the object store" for a store that is running and has just refused a locked delete."""
     store = FakeStore(list_raises=failure)
     ok, evidence = readiness.prove_write_once(store, "b", now=NOW)
     assert ok is True, evidence
@@ -644,10 +617,8 @@ def test_a_transport_error_while_tidying_keeps_the_proof(failure):
 # ---------------------------------------------------------------------------
 
 def test_a_slow_store_fails_inside_the_budget():
-    """Verifier, 2026-09-22: the proof is up to six calls where the read
-    it replaced was one, each allowed the 5s read timeout. A store that
-    answers every call slowly now fails when the budget runs out rather
-    than holding the register for most of a minute."""
+    """The proof is up to six calls, each allowed the 5s read timeout. A store that answers every call
+    slowly fails when the budget runs out rather than holding the register for most of a minute."""
     ticks = {"t": 0.0}
     store = FakeStore(on_call=lambda: ticks.__setitem__("t", ticks["t"] + 4.0))
     ok, evidence = readiness.prove_write_once(store, "b", now=NOW,
@@ -765,12 +736,9 @@ def _production_preservation(monkeypatch, store: FakeStore,
 
 def test_a_preservation_account_that_may_not_delete_is_proven_with_one_that_may(
         fake_store, monkeypatch):
-    """Found in the fix round of 2026-09-22 by reading the policy g04 mints:
-    the preservation account's refusal is AccessDenied whatever the store
-    would do, so a proof made with it proves nothing, and a check that
-    stopped there would be red for ever on a correct deployment. On the
-    same store the MINIO_* credentials may delete, and the proof is made
-    with those, saying so."""
+    """The preservation account's refusal is AccessDenied whatever the store would do, so a proof made
+    with it proves nothing, and a check that stopped there would be red for ever on a correct deployment.
+    On the same store the MINIO_* credentials may delete, and the proof is made with those, saying so."""
     template, stores = fake_store
     template["by_access"]["p-key"] = _production_preservation(
         monkeypatch, template["store"])
@@ -833,12 +801,10 @@ def test_an_account_that_cannot_reach_the_bucket_is_not_proven_around(
 # ---------------------------------------------------------------------------
 
 def test_a_store_that_enforces_a_retention_but_not_a_hold_fails(fake_store):
-    """Final review C9, 2026-09-23. Retention and legal hold are separate
-    S3 mechanisms, and a preserved sample has only the hold. A store that
-    refuses a COMPLIANCE delete and merely records a hold passed this
-    check, while any credential that may delete a version could remove a
-    held copy of prohibited material. The evidence bucket (retention) is
-    still proven on that same store; the preservation bucket is not."""
+    """Retention and legal hold are separate S3 mechanisms, and a preserved sample has only the hold. A
+    store that refuses a COMPLIANCE delete and merely records a hold must not pass this check, since any
+    credential that may delete a version could remove a held copy of prohibited material. The evidence
+    bucket (retention) is still proven on that same store; the preservation bucket is not."""
     template, _ = fake_store
     template["store"] = store = FakeStore(enforces_hold=False)
     assert readiness._evidence_bucket_object_lock(None).ok is True
@@ -974,9 +940,8 @@ def test_the_hold_proof_keeps_to_the_budget():
 
 @pytest.fixture(autouse=True)
 def _no_screening_list(monkeypatch):
-    """These checks are called with conn=None; since F13 the bucket
-    probe and the policy row also ask whether a screening list is active.
-    None is, here (2026-09-25)."""
+    """These checks are called with conn=None; the bucket probe and the policy row also ask whether a
+    screening list is active. None is, here."""
     monkeypatch.setattr(readiness, "_screening_active", lambda _conn: False)
     monkeypatch.setattr(readiness, "_screening_clause",
                         lambda _conn: "Screening: no hash list is loaded.")
@@ -1031,10 +996,9 @@ _STORE_VARS = ("PRESERVE_ENDPOINT", "PRESERVE_ACCESS_KEY", "PRESERVE_SECRET_KEY"
 
 
 @pytest.mark.parametrize("env, expect", [
-    # The dev stack: nothing but MINIO_*, and MINIO_SECURE does NOT carry
-    # over. The verifier caught this copy reading it on 2026-09-22 while
-    # the store does not, so the probe could pass over TLS while every
-    # rejection connected in plain text.
+    # The dev stack: nothing but MINIO_*, and MINIO_SECURE does NOT carry over. Reading it for the
+    # preservation store while the store does not would let the probe pass over TLS while every rejection
+    # connected in plain text.
     ({"MINIO_ENDPOINT": "m:9000", "MINIO_ACCESS_KEY": "ma",
       "MINIO_SECRET_KEY": "ms", "MINIO_SECURE": "true"},
      ("m:9000", "ma", "ms", False, "noctornal-preserved")),
@@ -1135,10 +1099,8 @@ needs_minio = pytest.mark.skipif(
 
 @needs_minio
 def test_the_dev_minio_proves_write_once_on_both_buckets(monkeypatch):
-    """Against the store the product runs on. Both buckets are created
-    WITH object lock by the dev compose (the preservation bucket since
-    2026-09-22), so a failure here is a store or bucket that does not
-    refuse, reported with the store's own words."""
+    """Against the store the product runs on. Both buckets are created WITH object lock by the dev compose,
+    so a failure here is a store or bucket that does not refuse, reported with the store's own words."""
     monkeypatch.delenv(readiness.DISPOSITION_ENV, raising=False)
     for probe in (readiness._evidence_bucket_object_lock,
                   readiness._preservation_bucket_object_lock):
@@ -1146,15 +1108,14 @@ def test_the_dev_minio_proves_write_once_on_both_buckets(monkeypatch):
         assert first.ok is True, first
         assert "refused" in first.evidence
         assert "not tidied" not in first.evidence, first.evidence
-        # The mode the evidence names was READ from the store, never
-        # merely requested (final review C10).
+        # The mode the evidence names was READ from the store, never merely requested.
         assert "not confirmed" not in first.evidence, first.evidence
         # And a second probe reuses the canary rather than locking another.
         second = probe(None)
         assert second.ok is True, second
         assert "reused" in second.evidence, second.evidence
-    # Final review C9: the preservation bucket's hold, proven on the real
-    # store, and the held canary reused rather than one held per probe.
+    # The preservation bucket's hold, proven on the real store, and the held canary reused rather than one
+    # held per probe.
     assert "legal hold PROVEN" in first.evidence, first.evidence
     assert "legal hold ON and no retention, reused" in second.evidence, \
         second.evidence
@@ -1162,8 +1123,7 @@ def test_the_dev_minio_proves_write_once_on_both_buckets(monkeypatch):
 
 @needs_minio
 def test_the_dev_minio_names_a_bucket_that_does_not_exist():
-    """The verifier's missing-bucket case, against the real store: a HEAD
-    on a bucket that is not there, so nothing is created."""
+    """A HEAD on a bucket that is not there, against the real store, so nothing is created."""
     client = readiness._object_store_client(
         os.environ["MINIO_ENDPOINT"], os.environ.get("MINIO_ACCESS_KEY", ""),
         os.environ.get("MINIO_SECRET_KEY", ""),

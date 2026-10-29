@@ -1,17 +1,13 @@
-"""egress-lookup-signoff-exposure (review of 2026-10-03).
+"""A lookup's sign-off compares the provider's exposure with the one the lookup recorded.
 
-A lookup requested and confirmed at VENDOR, with a colleague named to sign
-it off, was SENT at sign-off after an administrator raised its provider to
-PUBLIC and enabled it again: the sign-off ran the gates and never compared
-the provider's exposure with the one the lookup recorded. The drain refuses
-the same row (`exposure_changed`); raising the exposure also withdrew
-nothing, while lowering it cancels the waiting sign-offs.
+A lookup requested and confirmed at VENDOR, with a colleague named to sign it off, must not be SENT at
+sign-off after an administrator raised its provider to PUBLIC and enabled it again. The drain refuses the
+same row (`exposure_changed`); raising the exposure withdraws nothing, while lowering it cancels the
+waiting sign-offs. Without the comparison the fetcher is called once and the row ends ANSWERED at VENDOR
+while the LOOKUP_SENT audit says PUBLIC.
 
-These fail on dc28ffa: the fetcher is called once and the row ends
-ANSWERED at VENDOR while the LOOKUP_SENT audit says PUBLIC.
-
-The fetcher and the routes are fakes; nothing reaches a provider. Email
-prefix `r46x-`. Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. Email prefix `r46x-`. Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 

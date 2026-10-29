@@ -1,17 +1,15 @@
-"""The real egress proxy in a process of its own, for
-test_egress_proxy_contract_pg.py (S2, 2026-09-24).
+"""The real egress proxy in a process of its own, for test_egress_proxy_contract_pg.py.
 
-Not a test module and not shipped: the contract cases must count every name
-the CLIENT process hands its resolver, so the proxy cannot share that
-process. This child runs the unmodified EgressProxy with three test seams,
-all read from files in the control directory given on the command line:
+Not a test module and not shipped: the contract cases must count every name the client process hands
+its resolver, so the proxy cannot share that process. This child runs the unmodified EgressProxy with
+three test seams, all read from files in the control directory given on the command line:
 
 - names.json: the names the proxy's resolver answers, to loopback origins
   (egress_policy.resolve_and_pin calls socket.getaddrinfo, patched here);
-- 127.0.0.0/8 is public here, the way test_collection_ssrf_rebinding.py
-  stands loopback in for the internet (the classifier seam);
-- refuse: when present, every authorisation is refused with the code it
-  holds, which is how the runner arranges `refusing(code)`.
+- 127.0.0.0/8 is public here, the way test_collection_ssrf_rebinding.py stands loopback in for the
+  internet (the classifier seam);
+- refuse: when present, every authorisation is refused with the code it holds, which is how the
+  runner arranges `refusing(code)`.
 
 It prints "LISTENING <port>" once and serves until the file "stop" appears.
 """

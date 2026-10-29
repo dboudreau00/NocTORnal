@@ -1,5 +1,5 @@
-"""U2 -- "why is this hidden": telling an analyst their picture is
-incomplete, without telling them what is in it.
+"""Telling an analyst their picture is incomplete ("why is this hidden") without telling them what is
+in it.
 
 The failure this closes is analytical, not cosmetic. An analyst who cannot
 tell a sparse network from a censored one reads structure off a picture they
@@ -48,14 +48,12 @@ def conn():
 
 
 def _registered(conn, compartments) -> list[str]:
-    """Register each key before a row is filed under it, and return the
-    list the write wants. Since 2026-09-09 (migration 0059) every
-    compartment column -- the raw UPDATE in `_user` and the `core.node`
-    array `_node` writes through the graph service alike -- is bound to
-    `iam.compartment`, so an unregistered key is refused rather than
-    silently filed. Two tests here failed on that refusal. ON CONFLICT and
-    never deleted: OPERATION-X is shared across this file, and the
-    registry refuses to drop a key while any row still carries it."""
+    """Register each key before a row is filed under it, and return the list the write wants.
+
+    Every compartment column (the raw UPDATE in `_user` and the `core.node` array `_node` writes through
+    the graph service alike) is bound to `iam.compartment` (migration 0059), so an unregistered key is
+    refused rather than silently filed. ON CONFLICT and never deleted: OPERATION-X is shared across
+    this file, and the registry refuses to drop a key while any row still carries it."""
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -230,8 +228,7 @@ def test_count_mode_is_opt_in_per_case(conn):
 
 
 def test_none_mode_says_nothing_at_all_not_even_no(conn):
-    """"withheld: false" would itself be an answer. The key is absent,
-    exactly as it was before this existed."""
+    """"withheld: false" would itself be an answer, so the key is absent."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     _node(conn, case_id, owner, "alpha")

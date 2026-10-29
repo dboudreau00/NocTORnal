@@ -1,8 +1,7 @@
-"""The source routes over HTTP (2026-09-24; docs/00 decision 69).
+"""The source routes over HTTP (docs/00 decision 69).
 
-GET and POST /collection/sources, activate and deactivate, GET
-/collection/runs/{id}, the run route's new fields and refusals, and the due
-list's held sources. The adapter registry is replaced through the
+GET and POST /collection/sources, activate and deactivate, GET /collection/runs/{id}, the run route's
+fields and refusals, and the due list's held sources. The adapter registry is replaced through the
 get_adapters dependency, which is what it exists for. DATABASE_URL-gated.
 """
 from __future__ import annotations
@@ -171,8 +170,8 @@ def test_a_refused_source_is_409_and_writes_no_run(conn, api, monkeypatch):
 
 
 def test_poll_now_of_a_deactivated_feed_fetches_nothing(conn, api, monkeypatch):
-    """Only the authority path asked whether a source was deactivated, so a
-    feed an operator had switched off was still fetched by Poll now (2026-10-07)."""
+    """Poll now asks whether a source is deactivated for every feed, not only on the authority path, so
+    a feed an operator switched off is not fetched."""
     from noctornal_api import collection
     client, _stub = api
     _uid, amber = _caller(conn)

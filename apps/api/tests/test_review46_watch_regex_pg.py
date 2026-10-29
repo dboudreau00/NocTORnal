@@ -1,17 +1,14 @@
-"""collection-watch-regex-redos (review of 2026-10-03).
+"""A watch's regexes run under a bound, in a child process.
 
-A watch's regexes ran with `re.search` over the collected document's text
-(written by the people under investigation, up to 200,000 characters of a
-forum post), inside the persist transaction with the source's poll lock
-held, with no bound: a pattern with a nested repeat (`(a+)+$`) does not
-raise `re.error`, it spins, so one such pattern wedged a source's poll, its
-transaction and its lock.
+A watch's regexes match the collected document's text (written by the people under investigation, up to
+200,000 characters of a forum post). Run with `re.search` inside the persist transaction with the source's
+poll lock held and no bound, a pattern with a nested repeat (`(a+)+$`) does not raise `re.error`, it
+spins, and one such pattern would wedge a source's poll, its transaction and its lock.
 
-The regex is now matched in a child process under a wall clock the
-collector enforces, before the transaction opens, and a pattern that does
-not finish is reported once per run. These tests never let the hostile
-pattern run in THIS process: on dc28ffa the patched `re.search` raises where
-the old code called it, so the old code fails fast instead of hanging.
+So the regex is matched in a child process under a wall clock the collector enforces, before the
+transaction opens, and a pattern that does not finish is reported once per run. These tests never let the
+hostile pattern run in THIS process: the patched `re.search` raises where an in-process call would be made,
+so a regression fails fast instead of hanging.
 
 Prefix `r46w2-`. DATABASE_URL-gated.
 """
@@ -282,12 +279,10 @@ def test_the_watch_text_is_one_function_for_the_verdicts_and_the_matching():
     assert _watch_texts(Item(external_id="p", body="b")) == ("\nb", "")
 
 
-# --- through the isolated worker (2026-10-07) ------------
-# `run_child` defaulted to the kind `lab_static`, which neither the runner's
-# KINDS nor the worker's KIND_ARGV had a `watch_regex` for: with the worker's
-# socket set, every pattern was answered `bad_header` and reported failed. The
-# child is now a kind of its own, and these run it through the runner, not
-# only as a local subprocess.
+# --- through the isolated worker ------------------------------------------------
+# The child is its own kind (`watch_regex`) in the runner's KINDS and the worker's KIND_ARGV, since with
+# the worker's socket set any other kind is answered `bad_header` and every pattern reported failed. These
+# run it through the runner, not only as a local subprocess.
 
 SOCK = "/run/noctornal-analysis/worker.sock"
 

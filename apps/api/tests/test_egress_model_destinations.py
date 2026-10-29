@@ -1,14 +1,10 @@
-"""The two model-endpoint destinations of the egress gate (F6.2,
-embeddings, 2026-09-24).
+"""The two model-endpoint destinations of the egress gate (embeddings).
 
-MODEL_HOST is a model server declared as this host's own and reached over
-loopback on a DIRECT route outside production: inside the boundary like
-IN_APP, so invariant 8's floor does not apply, but ceilinged, and closed
-to compartmented material (egress.py's own rule that nothing outside the
-platform models compartments, kept for a model server too). MODEL_REMOTE
-is every other model endpoint and crosses the boundary: the floor, the
-compartment refusal, a required ceiling. The four destinations that
-existed decide exactly as before.
+MODEL_HOST is a model server declared as this host's own and reached over loopback on a DIRECT route
+outside production: inside the boundary like IN_APP, so invariant 8's floor does not apply, but ceilinged,
+and closed to compartmented material (egress.py's rule that nothing outside the platform models
+compartments, kept for a model server too). MODEL_REMOTE is every other model endpoint and crosses the
+boundary: the floor, the compartment refusal, a required ceiling.
 
 Pure.
 """

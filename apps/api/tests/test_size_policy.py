@@ -1,7 +1,7 @@
-"""The exhibit size cap is a declared policy, not a constant (2026-09-11).
+"""The exhibit size cap is a declared policy, not a constant.
 
-Pure: the reader, the readiness check (which opens no connection), and
-the console/document contract, read from the shipped files.
+Pure: the reader, the readiness check (which opens no connection), and the console/document contract,
+read from the shipped files.
 """
 from __future__ import annotations
 

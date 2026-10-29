@@ -1,56 +1,10 @@
 """Analyst curation over HTTP: tags and node sets (schema 0009, docs/09).
 
-`TagService` and `NodeSetService` were built, tested and green, and had no
-router, no endpoint and no caller outside their own tests — the dead
-subsystem the 2026-07-26 call-site audit found (see migration 0053, which
-added the `curation.manage` verb this file checks). This is the wiring.
-
-## A tag carries no assertion and no evidential weight
-
-This is the single most important thing to understand about everything
-below, because the UI renders a tag INLINE NEXT TO THE ENTITY, in colour,
-and a coloured chip beside a name reads with the authority of the case
-file. It has none.
-
-A tag is an analyst's organisational overlay: a bookmark, a work-queue
-label, a taxonomy pointer. Invariant 1 ("nothing is a fact") is not
-weakened by any endpoint here because nothing here writes a node
-attribute or an edge — a tag is not a claim ABOUT the entity, it is a note
-about the ANALYSIS. `TAGGED "CONFIRMED LAUNDERER"` is not an assessment
-and must never be read as one; the assessment is an assertion, with a
-source, an Admiralty grading and a time, and it goes through
-`/cases/{id}/nodes/{id}/assertions`.
-
-The same holds for node sets: docs/01 keeps working sets OUT of the graph
-precisely so that "these forty accounts are on my desk this week" does not
-become forty edges that distort every centrality number in the case.
-
-That is why 0053 granted `curation.manage` to CASE_OWNER and ANALYST only
-and deliberately not to CONTRIBUTOR or READ_ONLY, and why nothing in this
-file touches `core.assertion`.
-
-## Deletion here is real deletion, and that is correct
-
-`unassign` and `remove_member` DELETE their rows. That does not violate
-invariant 5 — which governs `core.assertion`, the evidential record.
-Un-tagging is the retraction of a sticky note, not of a claim, and a
-curation overlay that could only ever grow would be unusable within a
-week. Every removal is recorded in `audit.event`, which is append-only,
-so who un-tagged what is still answerable.
-
-## Same-case verification
-
-Every `tag_id`, `set_id`, `node_id` and `parent_id` in this file arrives
-from the caller. The route gate authorises against the `case_id` in the
-PATH; an id from a different case slipped into the body would otherwise be
-operated on under an authorisation that never covered it. Each is resolved
-and compared before use, and a mismatch returns 404 rather than 403 so
-these endpoints are not an existence oracle for other cases' objects.
-
-One deliberate exception, documented at `_own_tag`: `core.tag.case_id` is
-NULLABLE by design (NULL = the shared global taxonomy, e.g. MITRE ATT&CK
-via `external_id`), so a global tag is accepted in a case-scoped
-assignment. A global tag is shared reference data, not case content.
+A tag or a working set is an overlay on the analysis, not a claim about an entity: nothing here
+writes a node attribute, an edge or `core.assertion` (invariant 1), so removals are real deletes
+(invariant 5 governs assertions) and are audited. Every tag, set, node and parent id from the
+caller is checked against the path's case, and a mismatch is a 404, not an oracle; a global tag
+(`case_id` NULL) is shared reference data and is accepted (`_own_tag`).
 """
 from __future__ import annotations
 
@@ -88,14 +42,9 @@ def _ceiling(conn: psycopg.Connection, user: CurrentUser,
              case_id: UUID) -> tuple[str, list[str]]:
     """The caller's own clearance and compartments, in the shapes SQL wants.
 
-    An element may be classified ABOVE its case (the TLP floor trigger only
-    forbids going below), so passing the case gate is not permission to see
-    every node in the case. Read paths here filter on the CALLER's ceiling
-    for the same reason `SearchService` does.
-
-    Every read here is of ONE case's nodes, so a break-glass grant scoped
-    to that case raises the ceiling too, as it does on the graph those
-    nodes are drawn on (ux15 breakglass-grant-raises-nothing, 2026-09-23).
+    An element may be classified above its case, so passing the case gate is not permission to see
+    every node in it. Every read here is of one case's nodes, so a break-glass grant scoped to that
+    case raises the ceiling, as it does on the graph.
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return clearance.name, list(compartments)
@@ -134,26 +83,11 @@ def _audit(conn: psycopg.Connection, user: CurrentUser, case_id: UUID, *,
 
 
 def _own_tag(conn: psycopg.Connection, case_id: UUID, tag_id: UUID) -> tuple:
-    """Resolve a caller-supplied tag id, refusing one from another case.
+    """Resolve a caller-supplied tag id, refusing one from another case with a 404.
 
-    Returns `(case_id, namespace, name, colour)`.
-
-    **Why a NULL `case_id` is accepted.** `core.tag.case_id` is nullable in
-    0009 and the two partial unique indexes exist precisely so a GLOBAL
-    taxonomy entry and a case-local one can share a name. A global tag is
-    the MITRE ATT&CK technique row that `external_id` was added for, and it
-    is shared reference data — not the content of anybody's case. Refusing
-    it here would make `external_id` unusable and would push analysts into
-    re-creating T1566 once per case, which is how a controlled vocabulary
-    dies.
-
-    It is also not an existence oracle: the global taxonomy is listable by
-    any holder of `case.read` on any case (`GET /tags?include_global=true`),
-    so learning that a global tag id exists discloses nothing that is not
-    already served.
-
-    A tag belonging to a DIFFERENT case is 404, not 403 — the caller must
-    not be able to probe another case's vocabulary for hits.
+    Returns `(case_id, namespace, name, colour)`. A NULL `case_id` is accepted: a global tag (an
+    ATT&CK technique keyed by `external_id`) is shared reference data any `case.read` holder can
+    list, so accepting it discloses nothing and spares re-creating the vocabulary per case.
     """
     row = conn.execute(
         "SELECT case_id, namespace, name, colour FROM core.tag WHERE id = %s",
@@ -178,36 +112,22 @@ def _own_set(conn: psycopg.Connection, case_id: UUID, set_id: UUID) -> tuple:
 
 def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
                     node_id: UUID, *, require_live: bool = True) -> None:
-    """Same-case check, then the five-part gate against the NODE's own
-    labels, then liveness. The order is load-bearing.
+    """Same-case check, then the five-part gate against the node's own labels, then liveness.
 
-    1. Wrong case → 404 first, so this is not an oracle for another case.
-    2. `require("curation.manage")` on the route authorised against the
-       CASE. A RED node can live in an AMBER case (deps.py rule 1), and
-       attaching an overlay to it is a write against the node, so the gate
-       is re-run with the element's labels — the CR7 pattern `graph.py`
-       uses for assertions.
-    3. Liveness LAST. Returning 409 "this node is soft-deleted" before the
-       label check would confirm the node's existence and state to a caller
-       not cleared to see it.
-
-    `require_live=False` on the removal paths: a tag or membership left on
-    a node that was later soft-deleted or merged away must still be
-    removable, or the overlay accumulates entries no one can clear.
+    The order matters: a wrong case is a 404 first, so this is no oracle for another case; the gate
+    is re-run at the node's labels because a RED node can live in an AMBER case (deps.py rule 1);
+    liveness comes last, as a 409 for a soft-deleted node would confirm it to a caller not cleared
+    to see it. `require_live=False` on the removal paths, so an overlay on a node later
+    soft-deleted or merged away can still be cleared.
     """
-    # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still answers an element above the
-    # caller's labels with its AUTHZ_DENIED row, not a silent unrecorded 404
-    # from row-level security; the answer itself is the missing element's
-    # 404 since http_ui-016 (2026-10-03). Content is read only after the
-    # gate.
+    # The element's case and labels as facts (`deps.element_labels`), so the gate below answers an
+    # element above the caller's labels with its AUTHZ_DENIED row and the missing element's 404,
+    # not a silent unrecorded 404 from row-level security. Content is read only after the gate.
     facts = element_labels(conn, "node", node_id)
     if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", "no such node in this case")
-    # A second gate: it counts a break-glass use only if the route's gate
-    # at the case's labels did not (sec-breakglass-double-count, 2026-09-23).
-    # A refusal at the node's labels is the missing node's 404, its
-    # AUTHZ_DENIED row kept (http_ui-016, 2026-10-03).
+    # A second gate: it counts a break-glass use only if the route's gate at the case's labels did
+    # not. A refusal at the node's labels is the missing node's 404, its AUTHZ_DENIED row kept.
     authorize_element(conn, user, case_id=case_id,
                       permission_key="curation.manage",
                       classification=facts[1], compartments=facts[2],
@@ -223,14 +143,10 @@ def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
         raise Problem(409, "Conflict",
                       "that node is soft-deleted; restore it before curating it")
     if require_live and row[4] is not None:
-        # Invariant 12 in spirit: an overlay attached to the losing side of
-        # a merge is invisible in every read path (they all filter
-        # `merged_into_id IS NULL`), so accepting this would silently drop
-        # the analyst's work. Name the survivor so they can retry, when it
-        # is theirs to read (verification round three, A4, 2026-10-07): an
-        # entity folded into one above the caller is an alias of it, which
-        # the merge ledger withholds, and the sibling `_gate_endpoints` and
-        # `update_node` name a survivor only on the same condition.
+        # An overlay on the losing side of a merge is invisible in every read path, so refuse it
+        # (invariant 12) and name the survivor so they can retry, but only when they may read it:
+        # an entity folded into one above the caller is an alias the merge ledger withholds.
+        # `_gate_endpoints` and `update_node` name a survivor on the same condition.
         clearance, held = _ceiling(conn, user, case_id)
         survivor = (f" {row[4]}"
                     if _visible_node(conn, case_id, row[4], clearance, held)
@@ -348,26 +264,16 @@ def list_tags(
     case_id: UUID,
     include_global: bool = Query(
         True, description="Include the shared global taxonomy (case_id IS NULL)"),
-    # Paged like every list (http_ui-015, 2026-10-03).
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
-    """This case's tags, plus the global taxonomy by default.
+    """This case's tags, plus the global taxonomy by default; `scope` says which each row is.
 
-    Global entries are included because assignment accepts them (see
-    `_own_tag`); a picker that could not offer them would make the
-    `external_id` taxonomy unreachable from the UI. Every row carries
-    `scope` so the two are never confused.
-
-    `visible_node_count` is named for exactly what it is. It counts node
-    assignments IN THIS CASE that survive the caller's own clearance and
-    compartments, so it is a lower bound, not a total. Both predicates are
-    deliberate: without `n.case_id`, a GLOBAL tag's count would aggregate
-    every case in the deployment and turn a tag list into a cross-case
-    volume oracle; without the label predicates, the count would reveal how
-    many RED nodes an AMBER analyst is not allowed to see.
+    `visible_node_count` counts assignments in this case that the caller's clearance and
+    compartments allow, so it is a lower bound. Without the case predicate a global tag's count
+    would span every case, and without the label predicates it would count hidden nodes.
     """
     clearance, compartments = _ceiling(conn, user, case_id)
     rows = conn.execute(
@@ -419,20 +325,9 @@ def assign_tag(
 ) -> dict:
     """Assign a tag to a node. Idempotent.
 
-    **Why the pre-check rather than an upsert.** `core.tag_assignment` has
-    no primary key and no unique index (0009) — only the `tag_one_target`
-    CHECK. So `INSERT` twice inserts twice, and `TagService.tags_on_node`
-    would then list the tag twice, with no `ON CONFLICT` target available
-    to write instead. Re-tagging is a double-click away in any UI, so the
-    duplicate is the expected case, not the exotic one.
-
-    This narrows the window; it does not close it. Two concurrent POSTs can
-    still both see "absent" and both insert, because there is no constraint
-    for the database to refuse the second with. The real fix is
-    `CREATE UNIQUE INDEX ON core.tag_assignment (tag_id, node_id)
-     WHERE node_id IS NOT NULL` in a migration, which this file does not
-    own. The consequence of losing the race is a duplicated chip in a list,
-    not a wrong answer, and `DELETE` removes every matching row.
+    `core.tag_assignment` has no unique index (0009), so a pre-check stands in for an upsert. Two
+    concurrent requests can still both insert; the cost is a duplicated chip, which `DELETE`
+    removes with every matching row. A partial unique index on (tag_id, node_id) would close it.
     """
     _own_tag(conn, case_id, tag_id)
     _node_for_write(conn, user, case_id, body.node_id)
@@ -489,7 +384,6 @@ def unassign_tag(
             dependencies=[Depends(rate_limit("graph.view"))])
 def tags_on_node(
     case_id: UUID, node_id: UUID,
-    # Paged like every list (http_ui-015, 2026-10-03).
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
@@ -497,16 +391,9 @@ def tags_on_node(
 ) -> list[dict]:
     """The tags on one node.
 
-    Read directly rather than through `TagService.tags_on_node`, which
-    returns `(namespace, name)` pairs only: without the tag id a client
-    cannot offer an un-assign, so the endpoint would render a list nobody
-    can act on. Widening the service method is the better fix and belongs
-    in `curation.py`, which this task does not own — the query below is the
-    router compensating, not a preference.
-
-    A tag carries no classification of its own, so the only access decision
-    is whether the caller may see the NODE. If not: 404, same answer a
-    nonexistent node gives.
+    Read here rather than through `TagService.tags_on_node`, which returns no tag id to un-assign
+    by. A tag carries no classification, so the only access decision is whether the caller may see
+    the node; if not, the 404 of a missing node.
     """
     clearance, compartments = _ceiling(conn, user, case_id)
     if not _visible_node(conn, case_id, node_id, clearance, compartments):
@@ -573,7 +460,6 @@ def create_set(
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_sets(
     case_id: UUID,
-    # Paged like every list (http_ui-015, 2026-10-03).
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
@@ -637,20 +523,9 @@ def add_member(
 ) -> dict:
     """Add a node to a set, or update its note if it is already in.
 
-    Unlike `tag_assignment` this table HAS a primary key `(set_id,
-    node_id)`, and `NodeSetService.add_member` upserts on it — so re-adding
-    is safe at the database level.
-
-    **An omitted note must not erase an existing one.** The service's
-    upsert is `ON CONFLICT ... DO UPDATE SET note = EXCLUDED.note`, so
-    re-adding a member with no note writes NULL over whatever was there.
-    Re-adding is one drag or one double-click away in any UI, and the note
-    is the analyst's own reasoning — the single thing in a working set that
-    cannot be reconstructed from the graph. So an ABSENT note is read as
-    "leave it alone" and the current value is passed back through; an empty
-    string is read as "clear it", which is the only way to say that
-    deliberately. Fixed here rather than in `curation.py`, which this task
-    does not own.
+    The service upserts on `(set_id, node_id)` with `note = EXCLUDED.note`, so an absent note is
+    read as "leave it alone" and the current one passed back; an empty string clears it. The note
+    is the analyst's reasoning, which a re-add must not erase.
     """
     _own_set(conn, case_id, set_id)
     _node_for_write(conn, user, case_id, body.node_id)
@@ -704,9 +579,8 @@ def remove_member(
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_members(
     case_id: UUID, set_id: UUID,
-    # Paged like every list (http_ui-015, 2026-10-03). `members_total` and
-    # `truncated` say when a page is not the whole set, and `withheld`
-    # stays the exact count it was.
+    # Paged like every list: `members_total` and `truncated` say when a page is not the whole set,
+    # and `withheld` stays exact.
     limit: int = Query(1000, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
@@ -714,19 +588,9 @@ def list_members(
 ) -> dict:
     """Members of a set, with the labels a client needs to render them.
 
-    `NodeSetService.members` returns bare node ids and applies no access
-    filter at all, which is right for a service the workers call and wrong
-    for an HTTP response — a set may hold nodes above the caller's
-    clearance, and returning even their ids would leak. So the query is
-    here, with the label predicates in SQL.
-
-    **`withheld` is why this returns an object and not a list.** Invariant
-    12: nothing is silently dropped. A member the caller cannot see is
-    still a member, and a set that quietly renders 6 of 9 makes an analyst
-    reason about a working set that is not the one on the screen. The count
-    is deliberately undifferentiated — it does not say whether a member is
-    above your clearance, outside your compartments, or soft-deleted, since
-    that distinction is itself the disclosure.
+    The query is here, with the label predicates in SQL, because `NodeSetService.members` filters
+    nothing and even a hidden member's id would leak. Hidden members are counted in `withheld`
+    (invariant 12) without saying why each is hidden, as that distinction is itself a disclosure.
     """
     _own_set(conn, case_id, set_id)
     clearance, compartments = _ceiling(conn, user, case_id)
@@ -743,29 +607,11 @@ def list_members(
             ORDER BY n.label LIMIT %s OFFSET %s""",
         (set_id, case_id, clearance, compartments, limit, offset),
     ).fetchall()
-    # Merged-away members are listed SEPARATELY rather than folded into
-    # `withheld`.
-    #
-    # `withheld` means "you may not see this", and a merge is not a
-    # clearance fact — putting them there would tell an analyst they lack
-    # access to their own working set. But leaving them in `members` was
-    # wrong too: every graph read path filters `merged_into_id IS NULL`, so
-    # the set was counting rows the analyst could not open.
-    #
-    # Ids only, no labels. Enough to render "merged into X — remove?" and
-    # to call the removal endpoint, which is the point: `_node_for_write`
-    # passes `require_live=False` on the removal paths precisely so these
-    # can be cleared, and hiding them outright would leave the overlay
-    # accumulating entries no one can reach. The label predicates still
-    # apply, so a merged-away node above the caller's ceiling stays in
-    # `withheld` where it belongs.
-    #
-    # The survivor's id only where the caller may read the survivor
-    # (graph-merged-into-pointer, 2026-10-03): a member folded
-    # into an entity above the caller is an alias of it, which the merge
-    # ledger withholds, so the pointer is null here and the row still says
-    # the member is merged away. The survivor's own labels are tested, not
-    # only row security, so a development connection answers the same.
+    # Merged-away members are listed apart: they are not hidden from the caller, so not `withheld`,
+    # and no graph read opens them. Ids only, enough to offer the removal; the label predicates
+    # still apply, so one above the caller stays in `withheld`. The survivor's id only when the
+    # caller may read the survivor, tested on its labels and not only by row security: the merge
+    # ledger withholds an alias of an entity above them.
     merged = conn.execute(
         """SELECT n.id, v.id
              FROM core.node_set_member m
@@ -784,9 +630,8 @@ def list_members(
             ORDER BY n.id LIMIT %s""",
         (clearance, compartments, set_id, case_id, clearance, compartments, limit),
     ).fetchall()
-    # The two counts the page cannot give (http_ui-015, 2026-10-03), under
-    # the same label predicates, so `withheld` below stays exact when the
-    # lists above are cut at `limit`.
+    # The two counts the page cannot give, under the same label predicates, so `withheld` below
+    # stays exact when the lists above are cut at `limit`.
     visible_total, merged_total = conn.execute(
         """SELECT count(*) FILTER (WHERE n.merged_into_id IS NULL),
                   count(*) FILTER (WHERE n.merged_into_id IS NOT NULL)
@@ -798,22 +643,10 @@ def list_members(
               AND n.classification <= %s::core.tlp
               AND n.compartments <@ %s""",
         (set_id, case_id, clearance, compartments)).fetchone()
-    # A separate count rather than a flag on the rows above: the invisible
-    # members' labels are then never read into this process at all, so
-    # there is no variable holding a RED label for a later edit to return
-    # by accident.
-    #
-    # Counted on a system connection (S1, 2026-09-25). The members this
-    # count exists to own up to are exactly the ones row-level security
-    # hides from the caller's connection, where the count would equal the
-    # visible rows and `withheld` would always read 0.
-    #
-    # Said only as the case allows (rls-9, 2026-10-03): the count went out
-    # under every withheld_disclosure setting, so a case set to NONE still
-    # told every reader how many hidden entities each working set held. Now
-    # the graph's rule: nothing under NONE (and nothing counted), whether
-    # under PRESENCE, the number under COUNT, with `incomplete` and `mode`
-    # as the graph says them.
+    # A separate count, so the hidden members' labels never enter this process. Counted on a
+    # system connection, since row-level security hides exactly these members from the caller's.
+    # Said only as the case allows, by the graph's rule: nothing under NONE (and nothing counted),
+    # whether under PRESENCE, the number under COUNT, with `incomplete` and `mode` as in the graph.
     mode = disclosure_mode(conn, case_id)
     total = 0
     if mode != DISCLOSURE_NONE:
@@ -834,8 +667,7 @@ def list_members(
             "members_total": visible_total,
             "truncated": (offset + len(members) < visible_total
                           or len(merged_away) < merged_total)}
-    # exact when the lists above are cut at `limit` (http_ui-015), said only
-    # as the case allows (rls-9)
+    # Exact when the lists above are cut at `limit`, and said only as the case allows.
     hidden = max(0, total - visible_total - merged_total)
     body.update(withheld_notice(mode, hidden, noun="withheld"))
     if mode == DISCLOSURE_COUNT:

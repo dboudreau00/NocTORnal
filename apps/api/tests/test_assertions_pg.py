@@ -1,9 +1,8 @@
-"""Invariant 1 — nothing is a fact (CONVENTIONS.md / docs/01).
+"""Invariant 1: nothing is a fact (CONVENTIONS.md / docs/01).
 
-The load-bearing tests are the two named test_invariant_1_*: a graph
-element committed WITHOUT a supporting assertion must be rejected by the
-database, by any path. These prove the deferred constraint trigger, so the
-guarantee does not depend on every caller remembering to add an assertion.
+The load-bearing tests are the two named test_invariant_1_*: a graph element committed without a
+supporting assertion must be rejected by the database, by any path. These prove the deferred
+constraint trigger, so the guarantee does not depend on every caller remembering to add an assertion.
 
 Env-gated on DATABASE_URL (DB-level enforcement); skips otherwise.
 """
@@ -299,13 +298,11 @@ def test_ontology_still_enforced_on_service_writes(conn, case):
 
 
 def test_invariant_5_a_retraction_is_one_stamp_and_rewrites_nothing(conn, case):
-    """CONVENTIONS invariant 5 as decided on 2026-09-09: a retraction is a
-    marked row, not a supersession. The three stamp columns are written
-    once, from NULL, and every other column of the claim is exactly what
-    it was; a second retraction is refused and changes nothing, so the
-    stamp cannot be rewritten either. Column names come from the catalogue
-    rather than a list here, so a column added later is held to the same
-    rule without anyone remembering to add it."""
+    """CONVENTIONS invariant 5: a retraction is a marked row, not a supersession. The three stamp
+    columns are written once, from NULL, and every other column of the claim is exactly what it was; a
+    second retraction is refused and changes nothing, so the stamp cannot be rewritten either. Column
+    names come from the catalogue rather than a list here, so a column added later is held to the same
+    rule."""
     from noctornal_api.graph import GraphWriteError, GraphWriteService
     case_id, uid = case
     svc = GraphWriteService(conn)

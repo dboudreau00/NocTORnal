@@ -1,6 +1,6 @@
 # NocTORnal: the analyst and operator manual
 
-> Beta 1.4 (v0.9.4-beta). Beta software. See [README.md](README.md) for the legal status: five decisions, L1 to L5, gate any use against real material, and until they are made this manual is for use on synthetic or published, non-personal data only.
+> Beta 1.5 (v0.9.5-beta). Beta software. See [README.md](README.md) for the legal status: five decisions, L1 to L5, gate any use against real material, and until they are made this manual is for use on synthetic or published, non-personal data only.
 
 ### About this manual
 
@@ -20,7 +20,7 @@ First time on a machine? [START-HERE.md](START-HERE.md) installs it in about fif
 
 #### What this edition changed
 
-Beta 1.4 is the release in which the console went quiet. Every explanatory paragraph that used to open a pane was cut to a line, or removed, and its content moved here. If a screen no longer explains itself, that is deliberate and the explanation is in the chapter for that pane. Nothing that protects somebody was removed: a legal warning, a destruction warning, and the notices that keep you from misreading a number are still on screen, in one sentence each.
+Beta 1.5 closes the findings of a code review and leaves every screen as it was; its changes are in the changelog. The screens went quiet in Beta 1.4. Every explanatory paragraph that used to open a pane was cut to a line, or removed, and its content moved here. If a screen no longer explains itself, that is deliberate and the explanation is in the chapter for that pane. Nothing that protects somebody was removed: a legal warning, a destruction warning, and the notices that keep you from misreading a number are still on screen, in one sentence each.
 
 ---
 

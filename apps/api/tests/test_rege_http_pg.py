@@ -1,24 +1,18 @@
-"""REGE over HTTP (ROADMAP-REMAINING phase 3, 2026-10-02): the regular-role
-routes, held to CONCOR's (test_concor_http_pg.py).
+"""REGE over HTTP: the regular-role routes, held to CONCOR's (test_concor_http_pg.py).
 
-- `/rege/latest` is a 404 before a run and the run afterwards, per number
-  of roles and per weighting.
-- A regular-role run can be asked whether it still holds, alone and in the
-  pane's one batch beside the suite, key player and CONCOR runs.
-- It is metered on its own bucket, `analytics.rege`, which spends neither
-  CONCOR's nor the suite's, and a one-mode run spends `analytics.one_mode`
-  too.
+- `/rege/latest` is a 404 before a run and the run afterwards, per number of roles and per weighting.
+- A regular-role run can be asked whether it still holds, alone and in the pane's one batch beside the
+  suite, key player and CONCOR runs.
+- It is metered on its own bucket, `analytics.rege`, which spends neither CONCOR's nor the suite's, and a
+  one-mode run spends `analytics.one_mode` too.
 - Roles outside 2 to 8 and an unknown weighting are FastAPI's 422.
-- The gate is `analytics.run` on the case, on both routes: a caller with no
-  assignment to the case, or a Security Officer, gets nothing; so does a
-  caller assigned as READ_ONLY, REVIEWER, CONTRIBUTOR or LIAISON, who may
-  read the case and may not run analytics; an ANALYST gets through. None
-  leaves a run behind.
-- The routes serve a run's role-to-role blocks (alpha, density, tied, regular)
-  to the number.
+- The gate is `analytics.run` on the case, on both routes: a caller with no assignment to the case, or a
+  Security Officer, gets nothing; so does a caller assigned as READ_ONLY, REVIEWER, CONTRIBUTOR or LIAISON,
+  who may read the case and may not run analytics; an ANALYST gets through. None leaves a run behind.
+- The routes serve a run's role-to-role blocks (alpha, density, tied, regular) to the number.
 
-Borrows test_analytics_latest_pg's fixtures and helpers (teardown of `al-`
-accounts). Env-gated on DATABASE_URL.
+Borrows test_analytics_latest_pg's fixtures and helpers (teardown of `al-` accounts). Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -153,9 +147,8 @@ def test_roles_outside_two_to_eight_and_an_unknown_weighting_are_a_422(conn, cli
     ("REGE_MAX_NODES", 2, "capped at 2 entities")])
 def test_a_view_over_a_cap_is_a_422_that_names_it_and_leaves_no_run(
         conn, client, monkeypatch, name, value, text):
-    """Each cap over HTTP, the ties cap in its direction wording (2026-10-03): a
-    problem+json refusal naming the cap and the count,
-    no run row, no audit event, no trace, and no stored run to read back."""
+    """Each cap over HTTP, the ties cap in its direction wording: a problem+json refusal naming the cap and
+    the count, no run row, no audit event, no trace, and no stored run to read back."""
     from noctornal_api import rege
     token, case_id = _setup(conn, client)
     monkeypatch.setattr(rege, name, value)
@@ -200,12 +193,10 @@ def test_a_caller_without_the_case_or_a_security_officer_gets_nothing(conn, clie
 @pytest.mark.parametrize("role", ["READ_ONLY", "REVIEWER", "CONTRIBUTOR", "LIAISON"])
 def test_a_role_that_may_read_the_case_but_not_run_analytics_is_refused_on_both_routes(
         conn, client, role):
-    """The unassigned caller and the Security Officer are refused by ANY
-    case-level gate, so they could not tell `analytics.run` from `case.read`
-    (weakening either route to `case.read` passed every test: 2026-10-02). These roles hold
-    `case.read` and not `analytics.run`
-    (migration 0021): the assignment works, the read is theirs, and the
-    analysis is not."""
+    """The unassigned caller and the Security Officer are refused by ANY case-level gate, so they cannot
+    tell `analytics.run` from `case.read`: weakening either route to `case.read` would pass. These roles
+    hold `case.read` and not `analytics.run` (migration 0021): the assignment works, the read is theirs,
+    and the analysis is not."""
     owner_id, token, case_id = _setup_with_owner(conn, client)
     # The owner's run is what a weaker gate on /rege/latest would serve.
     assert _get(client, token, case_id, "/rege").status_code == 200
@@ -230,14 +221,12 @@ def test_an_analyst_assigned_to_the_case_gets_through_on_both_routes(conn, clien
 
 
 def test_the_routes_serve_the_role_to_role_blocks_to_the_number(conn, client):
-    """alpha, then bravo, then charlie, each vouching for the next. Two roles:
-    two entities together hold half the ties they could (the view's own
-    density is a third), so the block is tied and, with one of them sending
-    nothing back into the role, not regular. Which two is the ids' choice, a
-    tie in the data that the card's limits name (2026-10-02), so each
-    cut is held to its own numbers. Four roles asked of three entities: each
-    alone, and each single tie a full block, so tied and regular. Served by
-    the run, and again by the stored read, null for a block of nobody."""
+    """alpha, then bravo, then charlie, each vouching for the next. Two roles: two entities together hold
+    half the ties they could (the view's own density is a third), so the block is tied and, with one of
+    them sending nothing back into the role, not regular. Which two is the ids' choice, a tie in the data
+    that the card's limits name, so each cut is held to its own numbers. Four roles asked of three
+    entities: each alone, and each single tie a full block, so tied and regular. Served by the run, and
+    again by the stored read, null for a block of nobody."""
     token, case_id = _setup(conn, client)
     two = _get(client, token, case_id, "/rege", [("roles", "2")]).json()
     four = _get(client, token, case_id, "/rege", [("roles", "4")]).json()

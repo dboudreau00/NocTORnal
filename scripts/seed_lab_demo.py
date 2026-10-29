@@ -4,24 +4,15 @@
 
 **Nothing here is malware.** Every payload is a short synthetic buffer with
 a real file MAGIC and a chosen entropy profile, so triage classifies it the
-way it would classify the real thing and the queue looks like a queue,
-without a single hostile byte on disk. That distinction matters more here
-than in any other seed script in this repo: a demo fixture that reaches for
-a real sample "to make it realistic" is how a developer machine ends up
-holding evidence.
+way it would classify the real thing without a single hostile byte on disk.
+A demo fixture that reaches for a real sample is how a developer machine
+ends up holding evidence.
 
-The spread is deliberate, because the point of looking at a queue is to see
-the differences:
-
-- a **packed PE** near maximum entropy: what a modern loader looks like;
-- a **plain PE** around 5.5: an unpacked utility, or a dropper's stage one;
-- an **ELF**: the Linux half people forget to build a lane for;
-- a **document** with an OOXML magic, which is a ZIP, which is why entropy
-  alone never decides anything;
-- a **script**, low entropy, high nuisance;
-- one with a **hostile filename** carrying a right-to-left override, which
-  is the case the UI's filename treatment exists for;
-- one **rejected**, so the terminal state is on screen too.
+The spread: a packed PE near maximum entropy, a plain PE around 5.5, an ELF,
+an OOXML document (a ZIP, which is why entropy alone never decides), a
+low-entropy script, one whose filename carries a right-to-left override (the
+case the UI's filename treatment exists for), and one rejected, so the
+terminal state is on screen too.
 """
 from __future__ import annotations
 
@@ -40,11 +31,9 @@ load_env_local()
 
 
 def triage_seeded(conn, store, settings, seeded) -> tuple[int, bool]:
-    """Static triage over only the samples this run seeded (their bytes are
-    the ones held): `(runs, interrupted)`. A run the isolated analysis
-    worker failed under goes back to the queue at the same attempt, so a
-    loop that claimed until nothing was left would claim it again for ever:
-    it stops there instead (F42 review, 2026-10-02)."""
+    """Static triage over only the samples this run seeded (their bytes are the ones held):
+    `(runs, interrupted)`. A run the isolated analysis worker failed under goes back to the queue
+    at the same attempt, so the loop stops there rather than claim it again for ever."""
     from noctornal_api import lab_triage
     ran = 0
     while seeded:
@@ -69,13 +58,9 @@ def _entropy_bytes(magic: bytes, size: int, alphabet: int) -> bytes:
 
 #: (magic, size, alphabet, filename, note, classification, finding)
 #:
-#: `note` is what the submitter said when the sample came in; `finding` is
-#: the analyst's one-line reading after static analysis, recorded as the
-#: analysis narrative. They were one string until the README screenshot
-#: review, 2026-09-23: the Analysis narrative repeated the source note word
-#: for word, so the pane showed a submission note twice and no analysis at
-#: all. Each finding stays inside what the synthetic buffer and the
-#: recorded findings can bear (entropy, readable imports, the file type).
+#: `note` is what the submitter said when the sample came in; `finding` is the analyst's one-line
+#: reading after static analysis, recorded as the analysis narrative. Each finding stays inside
+#: what the synthetic buffer and the recorded findings can bear (entropy, readable imports, type).
 SPEC = [
     (b"MZ\x90\x00", 24000, 256,
      "svchost_update.exe",
@@ -111,19 +96,9 @@ SPEC = [
      "the binaries above.",
      "GREEN",
      "Plain shell script: it reads as text and needs no unpacking at all."),
-    # The filename attack, seeded on purpose so the quarantine treatment in
-    # the UI is exercised by something rather than only described.
-    #
-    # The RLO is an ESCAPE, never a literal byte in this file.
-    # `scripts/check_source_hygiene.py` refuses a literal U+202E in source
-    # (CVE-2021-42574, Trojan Source) and is right to: source that does not
-    # read the way it executes is the entire attack. This is the one place
-    # in the tree that legitimately needs the character, and an allowlist
-    # would have punched a hole in that check for the sake of demo data.
-    #
-    # `"\u202e"` produces the identical string at runtime, so the seeded
-    # filename still renders as "harmlessexe.pdf" wherever the direction is
-    # not forced -- which is the whole point of seeding it.
+    # The filename attack, seeded so the UI's quarantine treatment is exercised. The RLO is an
+    # escape, never a literal byte: scripts/check_source_hygiene.py refuses a literal U+202E in
+    # source (CVE-2021-42574, Trojan Source), and the escape gives the same string at runtime.
     (b"MZ\x90\x00", 7000, 200,
      "harmless\u202efdp.exe",
      "Submitted with a U+202E RIGHT-TO-LEFT OVERRIDE in the filename: it "
@@ -146,9 +121,8 @@ def main() -> int:
     ap.add_argument("--case", help="case CODE to attach them to (optional)")
     ap.add_argument("--email", default=None,
                     help="submitter; defaults to the first active user")
-    # Off by default (F11, 2026-09-24): a triaged demo sample has SCANNED
-    # custody and a machine finding, which the static-triage migrations
-    # refuse to downgrade past, and the demo estate must round-trip.
+    # Off by default: a triaged demo sample has SCANNED custody and a machine finding, which the
+    # static-triage migrations refuse to downgrade past, and the demo estate must round-trip.
     ap.add_argument("--triage", action="store_true",
                     help="also run static triage on the seeded samples, "
                          "from bytes held in memory for this run only")
@@ -223,10 +197,8 @@ def main() -> int:
         made += 1
         seeded.append(sample.id)
         if filename == "keygen.exe":
-            # purge_bytes=False: recorded, nothing disposed of. This store
-            # writes nothing, so there are no bytes to preserve, and since
-            # F2 (2026-09-22) a rejection that disposes of bytes preserves
-            # them by default and refuses when there is nothing to move.
+            # purge_bytes=False: recorded, nothing disposed of. This store writes nothing, and a
+            # rejection that disposes of bytes preserves them first and refuses when there are none.
             svc.reject(sample.id, actor_id=who,
                        reason="Out of scope: a licence bypass, not the "
                               "intrusion. Recorded so the decision is "

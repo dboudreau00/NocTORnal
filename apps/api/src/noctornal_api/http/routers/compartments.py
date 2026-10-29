@@ -1,54 +1,10 @@
 """The compartment registry over HTTP (migration 0057).
 
-## Who may read the vocabulary (decided 2026-09-02)
-
-The first version of this file returned the WHOLE registry -- every key,
-its administrator-written label, `created_by` and `created_at` -- to any
-authenticated account, on the argument that "a KEY is not a secret, a
-case's contents are". That argument was asserted here and supported
-nowhere: no docs/ entry, no decision record, and the rest of the tree
-disagrees with it. 0057's own docstring calls compartments "need-to-know
-locks" compared byte-for-byte; `cases.py` refuses an unregistered key
-because "a key is something typed into a warrant schedule"; and no other
-router discloses a compartment name beyond the caller's own ceiling or a
-case they can already read. In this system the key IS the lock, so
-listing `OP-KESTREL` and its human label to an analyst with zero read-ins
-tells them which operations exist -- the fact the compartment was created
-to withhold.
-
-So the listing is now scoped to the caller:
-
-- an ordinary account sees the compartments it is READ INTO, and only the
-  key and label of each, because a person needs to know the name of a
-  lock they already hold;
-- an account holding `user.manage` sees the whole registry with its
-  administration metadata, because that is the account that maintains it.
-
-The response says which of the two it is, in `scope`. A listing that
-silently narrows would be this codebase's signature defect in miniature:
-a correct answer to a different question, with nothing on the wire to say
-which question was answered. An analyst who needs a read-in asks the
-administrator who can see the whole list -- which is what asking for a
-read-in already means.
-
-Writing the registry, and setting what a user holds, is `user.manage`
-(SYS_ADMIN, step-up), like every other change to what an account can see.
-
-The user-side write is here rather than in `routers/admin.py` so that
-the registry and the two things gated on it ship as one surface; the
-refusal mapping is admin's own (`_refuse`: `409` for a rule, `404` for a
-user that is not there), so a client that knows one knows both.
-
-## Rename and retire (sec-compartment-retirement, 2026-09-23)
-
-`POST /compartments/{key}/rename` and `POST /compartments/{key}/retire`
-are the product route for what 0059 made a manual per-column operation
-(`compartment_lifecycle.py` explains both). They are `user.manage` like
-every other registry write, and step-up is asked for explicitly as well
-as through the permission's seed flag, because a rename rewrites the lock
-on every row filed under a key: the seed flag is data, and this route
-must not stop asking if it changes. Metered with the merge limit, because
-each one locks every compartmented table while it runs.
+A key is the lock itself, so listing one tells a reader which operations exist. An ordinary account
+sees only the compartments it is read into (key and label); a `user.manage` holder sees the whole
+registry with its metadata, and `scope` says which answer this is. Every write is `user.manage`
+(SYS_ADMIN). Rename and retire ask for step-up explicitly, as the seed flag is data, and use the
+merge limit, since each locks every compartmented table while it runs.
 """
 from __future__ import annotations
 
@@ -132,7 +88,7 @@ def register_compartment(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        # An IAM write, so on a system connection (S1, 0109).
+        # An IAM write, so on a system connection (0109).
         with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
             return IamAdminService(sconn).register_compartment(
                 key=body.key, label=body.label, actor_id=user.user_id)
@@ -148,7 +104,7 @@ def set_user_compartments(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        # An IAM write, so on a system connection (S1, 0109).
+        # An IAM write, so on a system connection (0109).
         with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
             held = IamAdminService(sconn).set_compartments(
                 user_id, body.compartments, actor_id=user.user_id)
@@ -187,9 +143,8 @@ def rename_compartment(
     Who holds it and what it locks do not change; see
     `compartment_lifecycle.py`."""
     try:
-        # A rename must reach EVERY row that carries the key, above the
-        # administrator's own labels too, and writes the registry: a system
-        # purpose (S1, 2026-09-25).
+        # A rename must reach every row that carries the key, above the administrator's own labels
+        # too, and writes the registry: a system purpose.
         with system_connection(SystemPurpose.COMPARTMENTS, reuse=conn) as sconn:
             return CompartmentLifecycle(sconn).rename(
                 key, body.new_key, label=body.label, actor_id=user.user_id)
@@ -211,8 +166,8 @@ def retire_compartment(
     see: `user.manage` is not a case role, and a case code is not told to
     somebody who cannot open the case (`compartment_lifecycle.py`)."""
     try:
-        # "nothing carries it" must be true of every row, not of the
-        # rows the administrator may read: a system purpose (S1).
+        # "Nothing carries it" must be true of every row, not of the rows the administrator may
+        # read: a system purpose.
         with system_connection(SystemPurpose.COMPARTMENTS, reuse=conn) as sconn:
             return CompartmentLifecycle(sconn).retire(key, actor_id=user.user_id)
     except CompartmentError as exc:

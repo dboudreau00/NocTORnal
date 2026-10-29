@@ -1,13 +1,7 @@
-"""The service-layer defects of docs/17 F15, and their fixes.
+"""Regression tests for the ingest service-layer defects of docs/17 F15.
 
-Every test here is named after the defect it prevents coming back. All of
-them were found by an adversarial review on 2026-07-25 that ran against a
-fully green suite -- which is the argument for the review, not for the
-suite.
-
-Split from `test_ingest_pg.py` because these are regression tests with a
-provenance rather than a description of the design, and mixing the two
-makes both harder to read.
+Every test is named after the defect it prevents coming back. They are split from `test_ingest_pg.py`
+because they are regression tests rather than a description of the design.
 """
 from __future__ import annotations
 
@@ -41,10 +35,8 @@ from noctornal_api.ingest import (  # noqa: E402
 from noctornal_api.rawstore import InMemoryRawStorage  # noqa: E402
 
 PW = "correct-horse-battery-staple"
-#: A prefix of this file's OWN, not shared with `test_ingest_pg.py`. Two
-#: fixtures that delete on the same LIKE pattern delete each other's rows,
-#: which passes alone and fails in sequence -- learned the hard way on
-#: 2026-07-25 when `gov-` was shared between two governance files.
+#: A prefix of this file's own, not shared with `test_ingest_pg.py`: two fixtures that delete on the same
+#: LIKE pattern delete each other's rows, which passes alone and fails in sequence.
 EMAIL_LIKE = "f15-%@noctornal.test"
 
 
@@ -79,12 +71,9 @@ def _user(conn):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"f15-{uuid4().hex[:8]}@noctornal.test", "F15", PW)
-    # Registered before it is used. `compartments` is set here with a raw
-    # UPDATE, which is the write path 0057's registry gate does not cover
-    # -- so without this the value is in use and unregistered, and
-    # test_compartment_registry_pg's whole-database invariant reports it.
-    # It only ever passed on a workstation whose database pre-dated 0057
-    # and had the value backfilled; CI builds a fresh one.
+    # Registered before use: `compartments` is set with a raw UPDATE, which the registry gate does not cover,
+    # so otherwise the value is in use and unregistered and test_compartment_registry_pg's whole-database
+    # invariant reports it.
     conn.execute("INSERT INTO iam.compartment (key, label) VALUES "
                  "('STEALER-2026', 'Stealer logs 2026 (test)') "
                  "ON CONFLICT (key) DO NOTHING")
@@ -125,19 +114,13 @@ def _stealer_key(svc, owner):
                 forced_compartment="STEALER-2026")
 
 
-# ---------------------------------------------------------------------------
-# F15(d) -- the dead-letter queue held victim PII unlabelled
-# ---------------------------------------------------------------------------
-
 def test_a_dead_lettered_credential_dump_keeps_no_values(conn, svc):
-    """The whole of F15(d) in one test.
+    """A dead-lettered credential dump keeps no values (docs/17 F15).
 
-    `categorise` sends anything with top-level email + password to
-    CREDENTIAL_DUMP, and a compartment is required at key issue only for
-    the category the key DECLARES (STEALER_LOG then; CREDENTIAL_DUMP and
-    DATABASE_LEAK too since 2026-09-23), so a routine feed declared
-    UNKNOWN could dead-letter victim credentials verbatim into a table
-    with no classification, no compartments and no retention.
+    `categorise` sends anything with top-level email + password to CREDENTIAL_DUMP, and a compartment is
+    required at key issue only for the category the key declares (STEALER_LOG, CREDENTIAL_DUMP and
+    DATABASE_LEAK), so a routine feed declared UNKNOWN could dead-letter victim credentials verbatim into a
+    table with no classification, no compartments and no retention.
     """
     owner = _user(conn)
     key = _key(svc, owner)
@@ -204,24 +187,14 @@ def test_redaction_keeps_the_shape_and_discards_the_content():
     assert "victim@acme.example" not in out, "a key can BE the datum"
 
 
-# ---------------------------------------------------------------------------
-# The second adversarial pass, 2026-07-25 evening. These were found in the
-# fixes above — which is the argument for reviewing a fix, not only a
-# feature.
-# ---------------------------------------------------------------------------
-
 def test_a_truncated_json_batch_does_not_leak_the_next_value():
-    """The pair matcher did the opposite of its job on the input it named
-    as most common.
+    """A truncated batch must not leak the value after a cut key.
 
-    `("...":\\s*)("..."|[^,\\s}\\]]+)` given `…"credentials": [{"password":
-    "Hunter2"…` matched `[{"password":` as the VALUE — swallowing the next
-    key — so the output was `"credentials": "[redacted]" "Hunter2"` and the
-    password went into `ingest.dead_letter.raw_fragment` in cleartext, in a
-    column with no index and no encryption, served by GET /dead-letters.
+    The pair matcher `("...":\\s*)("..."|[^,\\s}\\]]+)` given `"credentials": [{"password": "Hunter2"` once
+    matched `[{"password":` as the value, swallowing the next key, so the password reached
+    `ingest.dead_letter.raw_fragment` in cleartext (unindexed, unencrypted, served by GET /dead-letters).
 
-    Reached by a partner's writer crashing, or a batch cut at the key's
-    `max_bytes_per_request`. Not an attack.
+    A partner's writer crashing, or a batch cut at the key's `max_bytes_per_request`, produces such input.
     """
     truncated = ('{"machine_id": "DESKTOP-7", "country": "RU", '
                  '"credentials": [{"password": "Hunter2", "username": '
@@ -235,9 +208,8 @@ def test_a_truncated_json_batch_does_not_leak_the_next_value():
 
 
 def test_a_dangling_open_quote_does_not_keep_its_contents():
-    """A batch cut mid-string ends with an unterminated quote, which no
-    quoted-string pattern can match. `"value": "sid-8812` used to keep
-    `sid-8812` verbatim for exactly that reason."""
+    """A batch cut mid-string ends with an unterminated quote, which no quoted-string pattern can match; the
+    contents must be redacted all the same."""
     out = redact_fragment('{"a": "ok", "session": "tail-value-not-closed')
     assert "tail-value-not-closed" not in out
     assert "session" in out
@@ -299,18 +271,11 @@ def test_redaction_survives_the_shapes_a_blocklist_misses():
         assert secret not in out, secret
 
 
-# ---------------------------------------------------------------------------
-# F15(e) -- one NUL byte stranded the batch and lost every later fragment
-# ---------------------------------------------------------------------------
-
 def test_a_nul_byte_does_not_strand_the_batch(conn, svc):
-    """Reached by valid gzipped NDJSON, which docs/12 says to accept.
+    """A NUL byte in valid gzipped NDJSON (which docs/12 says to accept) must not strand the batch.
 
-    Before: DataError raised from inside the `except` handler, so the bad
-    fragment was never dead-lettered, every fragment AFTER it was never
-    processed, the records already inserted were committed, and the batch
-    sat in PARSING for ever. Invariant 12 failing on the path built to
-    catch loss.
+    The bad fragment is dead-lettered and later fragments are still processed; otherwise the batch sits in
+    PARSING for ever (invariant 12).
     """
     owner = _user(conn)
     key = _key(svc, owner)
@@ -328,18 +293,11 @@ def test_a_nul_byte_does_not_strand_the_batch(conn, svc):
 
 
 def test_a_broken_container_records_the_break_instead_of_vanishing(conn, svc):
-    """An exception raised by the GENERATOR escaped both inner handlers.
+    """An exception raised by the generator itself is recorded, not dropped.
 
-    `for fragment in iter_fragments(raw)` puts the `next()` outside the
-    try blocks, so `csv.Error` — raised on a field over
-    `csv.field_size_limit()`, which a stealer log's cookie column
-    routinely exceeds — propagated past them, past the router's `except
-    IngestError`, and out as a 500. Every remaining fragment was dropped
-    with `dead_count` still 0: nothing recorded that anything was lost or
-    how much, and re-parsing died at the same row every time.
-
-    This is the second time this exact shape has broken invariant 12 here;
-    the first was the NUL byte in F15(e).
+    `for fragment in iter_fragments(raw)` puts the `next()` outside the try blocks, so `csv.Error` (raised on
+    a field over `csv.field_size_limit()`, which a stealer log's cookie column routinely exceeds) must be
+    recorded in `dead_count` rather than escape as a 500 with the remaining fragments lost (invariant 12).
     """
     owner = _user(conn)
     key = _key(svc, owner)
@@ -399,21 +357,14 @@ def test_csv_becomes_header_keyed_records():
 
 
 def test_csv_overflow_columns_are_kept_not_deleted():
-    """`DictReader` puts fields beyond the header under the key `None`, and
-    the comprehension `{k: v for k, v in row.items() if k is not None}`
-    deleted exactly those.
+    """`DictReader` puts fields beyond the header under the key `None`; they must be kept, not deleted.
 
-    Not just loss — silent CORRUPTION. The row below stored
-    `password = "Summer"` for a credential that is `Summer,2024!`, and
-    `store_credential` fingerprints what it is given, so
-    `search_by_fingerprint` — "the ONLY lookup", and the correlation the
-    analytic work depends on — would miss the real credential for ever.
-    Ragged rows are normal input, not an attack.
+    Dropping them silently corrupts: `Summer,2024!` would be stored as `password = "Summer"`, and
+    `store_credential` fingerprints what it is given, so `search_by_fingerprint` would miss the real
+    credential. Ragged rows are normal input.
 
-    Twenty clean rows first, because `_looks_like_csv` samples only the
-    first twenty and correctly declines to guess CSV when it sees ragged
-    ones in that window. The bug bites exactly when the sample is uniform
-    and the drift arrives later — which is the ordinary way a feed widens.
+    Twenty clean rows come first because `_looks_like_csv` samples only the first twenty and declines to
+    guess CSV when it sees ragged rows in that window; later drift is the ordinary way a feed widens.
     """
     clean = b"".join(
         f"https://s{i}.example,u{i}@acme.co,pw{i}\n".encode() for i in range(21))
@@ -445,14 +396,9 @@ def test_a_combo_list_is_not_guessed_to_be_csv():
     assert all(":" in f for f in fragments)
 
 
-# ---------------------------------------------------------------------------
-# F15(g) -- the fingerprint hashed key names and lost field position
-# ---------------------------------------------------------------------------
-
 def test_a_record_and_its_inverse_are_not_the_same_record():
-    """`{"note": "leaked by LockBit", "victim": "ACME"}` and the same
-    document with those two values SWAPPED used to hash identically,
-    hamming distance 0, and the second was filed as a duplicate."""
+    """`{"note": "leaked by LockBit", "victim": "ACME"}` and the same document with those two values swapped
+    must not hash identically (hamming distance 0), or the second is filed as a duplicate."""
     from noctornal_api.ingest import hamming
     a = simhash_payload({"note": "leaked by LockBit", "victim": "ACME"})
     b = simhash_payload({"note": "ACME", "victim": "leaked by LockBit"})
@@ -460,9 +406,7 @@ def test_a_record_and_its_inverse_are_not_the_same_record():
 
 
 def test_a_repost_with_a_mirrors_envelope_is_still_the_same_post():
-    """The other half of the same defect: envelope fields a mirror adds
-    used to push a genuine repost past the threshold, so the feature
-    failed in both directions at once."""
+    """Envelope fields a mirror adds must not push a genuine repost past the duplicate threshold."""
     from noctornal_api.ingest import hamming
     post = {"victim": "ACME Ltd", "deadline": "2026-08-01",
             "note": "data will be published unless payment is received"}
@@ -471,14 +415,9 @@ def test_a_repost_with_a_mirrors_envelope_is_still_the_same_post():
     assert hamming(simhash_payload(post), simhash_payload(mirrored)) <= 3
 
 
-# ---------------------------------------------------------------------------
-# F15(h) -- categorise inspected top-level keys only
-# ---------------------------------------------------------------------------
-
 def test_a_wrapped_stealer_log_is_still_a_stealer_log():
-    """A partner wrapping their payload -- the shape half of them use --
-    used to have their stealer log classified UNKNOWN, which skipped the
-    high-risk compartment check and gave it 365 days instead of 90."""
+    """A wrapped stealer log is classified STEALER_LOG, not UNKNOWN, which would skip the high-risk
+    compartment check and give it 365 days retention instead of 90."""
     category, _confidence, source = categorise(
         {"schema": "v2", "log": {"passwords": [], "cookies": [],
                                  "autofill": []}})
@@ -496,8 +435,7 @@ def test_the_outer_document_wins_when_both_match():
 
 
 def test_a_wrapped_stealer_log_on_an_uncompartmented_key_is_refused(conn, svc):
-    """The consequence of F15(h) that actually mattered: the record-level
-    compartment check was being skipped, not just the label."""
+    """The record-level compartment check applies to a wrapped stealer log, not just the label."""
     owner = _user(conn)
     key = _key(svc, owner)          # no forced compartment
     raw = json.dumps({"log": {"passwords": [], "cookies": [],
@@ -510,10 +448,6 @@ def test_a_wrapped_stealer_log_on_an_uncompartmented_key_is_refused(conn, svc):
         (batch.batch_id,)).fetchone()[0]
     assert "compartment" in detail
 
-
-# ---------------------------------------------------------------------------
-# F15(a,b,c) -- the victim-PII paths answered for the whole corpus
-# ---------------------------------------------------------------------------
 
 def _record_with_credential(conn, svc, owner, case_id, value="hunter2"):
     key = _stealer_key(svc, owner)
@@ -537,11 +471,9 @@ def test_the_service_refuses_to_guess_at_a_clearance(conn, svc):
 
 def test_a_credential_cannot_be_revealed_under_another_cases_authorisation(
         conn, svc, reader):
-    """F15(a), the worst of the three. The service checked a live
-    authorisation for the case the CALLER named, then decrypted by
-    credential id with no join back to the record -- so an authorisation on
-    any case opened any credential in the corpus, and the audit event
-    recorded the wrong case against the disclosure."""
+    """A live authorisation for the case the caller named must not open a credential in another case: the
+    credential is decrypted by id joined back to the record, and the audit event records the credential's
+    own case."""
     owner, grantor = _user(conn), _user(conn)
     victim_case = _case(conn, owner)
     other_case = _case(conn, owner)
@@ -559,9 +491,8 @@ def test_a_credential_cannot_be_revealed_under_another_cases_authorisation(
 
 def test_correlation_does_not_answer_for_compartments_the_caller_lacks(
         conn, svc):
-    """F15(b). The query carries the ceiling now. Filtering the answer
-    afterwards is not the same as not asking: the hit count, the timing and
-    the audit event were all computed over the whole corpus first."""
+    """The correlation query carries the caller's ceiling. Filtering the answer afterwards is not the same as
+    not asking: the hit count, the timing and the audit event would all be computed over the whole corpus."""
     owner, grantor = _user(conn), _user(conn)
     case_id = _case(conn, owner)
     _record_with_credential(conn, svc, owner, case_id, value="a-shared-value")
@@ -582,8 +513,8 @@ def test_correlation_does_not_answer_for_compartments_the_caller_lacks(
 
 
 def test_the_masked_view_is_bound_to_the_records_own_case(conn, svc, reader):
-    """F15(c). Even the masked view discloses which victims of which
-    organisation are in a compartmented case."""
+    """Even the masked view discloses which victims of which organisation are in a compartmented case, so it
+    is bound to the record's own case."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     other_case = _case(conn, owner)

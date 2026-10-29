@@ -1,35 +1,28 @@
-"""The Python stack and the Mailpit image are pinned, and everything that
-installs them uses the pins (sec-pin-dependencies, 2026-09-23).
+"""The Python stack and the Mailpit image are pinned, and everything that installs them uses the pins.
 
-Until that date nothing was pinned. Every dependency in the pyproject files
-is a floor, so a clean install resolved each one to whatever was newest on
-the day: the clean VM of the Alpha 6 pre-release check ran starlette 1.7.0,
-uvicorn 0.53.0, alembic 1.20.0, psycopg 3.3.6, SQLAlchemy 2.0.54 and
-`axllent/mailpit:latest` (v1.31.2) while the suite had passed on older
-releases of every one (release/CLEAN-VM-INSTALL.md, F17 and G9).
+Every dependency in the pyproject files is a floor, so without pins a clean install resolves each one
+to whatever is newest that day, which can differ from the releases the suite passed on
+(release/CLEAN-VM-INSTALL.md).
 
 What this file holds, each half because the other can pass without it:
 
-* constraints.txt is well formed: exact pins, one per distribution, no
-  extras (pip refuses extras in a constraints file);
-* every dependency the pyproject files and db/requirements.txt DECLARE is
-  pinned, inside its declared range;
-* the environment this suite is running in IS the pinned one: every
-  distribution noctornal-api[dev] and noctornal-ontology[dev] pull in is
-  pinned at the version installed, and no pin names a distribution nothing
-  asks for. In CI that proves the `-c` took effect; on a workstation it
-  proves the suite is passing on the stack the release ships;
-* every place that installs the packages (both installers, CI and the
-  Dockerfile) installs with `-c constraints.txt`;
+* constraints.txt is well formed: exact pins, one per distribution, no extras (pip refuses extras in a
+  constraints file);
+* every dependency the pyproject files and db/requirements.txt DECLARE is pinned, inside its declared
+  range;
+* the environment this suite is running in IS the pinned one: every distribution noctornal-api[dev] and
+  noctornal-ontology[dev] pull in is pinned at the version installed, and no pin names a distribution
+  nothing asks for. In CI that proves the `-c` took effect; on a workstation it proves the suite is
+  passing on the stack the release ships;
+* every place that installs the packages (both installers, CI and the Dockerfile) installs with
+  `-c constraints.txt`;
 * Mailpit is a release tag, the same one in the compose file and in CI.
 
-Since 2026-09-24 it also holds the two
-optional extras, telegram and yara: that they are the only extras beside
-dev, that every installer offers them by name and the image only by a
-closed list, that CI installs them on one leg and runs the tests written
-for their absence on another, that the launchers probe the new hard
-dependencies, that every printed install hint carries the pins, and that
-NOTICE.md names every new distribution with its licence.
+It also holds the two optional extras, telegram and yara: that they are the only extras beside dev,
+that every installer offers them by name and the image only by a closed list, that CI installs them on
+one leg and runs the tests written for their absence on another, that the launchers probe the new hard
+dependencies, that every printed install hint carries the pins, and that NOTICE.md names every new
+distribution with its licence.
 
 Pure: reads files and installed metadata, installs nothing.
 """
@@ -121,8 +114,7 @@ def test_every_declared_dependency_is_pinned_inside_its_range():
 # The environment this suite runs in
 # ---------------------------------------------------------------------------
 
-#: The extras are walked too, so their pins are held to the environment and
-#: never reported stale (2026-09-24).
+#: The extras are walked too, so their pins are held to the environment and never reported stale.
 _ROOTS = (("noctornal-api", {"dev", "telegram", "yara"}), ("noctornal-ontology", {"dev"}))
 
 #: What each optional extra installs at its root: the distributions that
@@ -189,13 +181,11 @@ def _missing_extras() -> list[str]:
 
 
 def _require_installed(*, closure: bool = False):
-    """The two workspace packages always. The extras' distributions only
-    where they must be present: in CI, whose first leg installs both
-    extras, and, for a check that walks what they require (`closure`),
-    wherever this suite runs, because the pins of pyaes, rsa and pyasn1
-    are only reachable through an installed telethon. yara-x has no wheel
-    for macOS 13, so a workstation there cannot install the yara extra and
-    is not failed for it (2026-09-24)."""
+    """The two workspace packages always. The extras' distributions only where they must be present:
+    in CI, whose first leg installs both extras, and, for a check that walks what they require
+    (`closure`), wherever this suite runs, because the pins of pyaes, rsa and pyasn1 are only reachable
+    through an installed telethon. yara-x has no wheel for macOS 13, so a workstation there cannot
+    install the yara extra and is not failed for it."""
     for name, _extras in _ROOTS:
         if not _installed(name):  # pragma: no cover - a bare checkout
             pytest.fail(f"{name} is not installed; install with "
@@ -275,11 +265,9 @@ def _pip_installs(text: str) -> list[str]:
     ("release/install.ps1", "-c $Constraints"),
     (".github/workflows/ci.yml", "-c constraints.txt"),
     ("Dockerfile", "-c constraints.txt"),
-    # c3 (2026-09-24): the remedies these three PRINT are installs too.
-    # start.cmd runs launch.ps1 on a fresh clone before anything else, so
-    # its "no .venv" hint is the first install many developers run, and it
-    # left the pins off while the four files above kept them. The scan
-    # already reads quoted hint strings, so listing them is the whole fix.
+    # The remedies these three PRINT are installs too. start.cmd runs launch.ps1 on a fresh clone before
+    # anything else, so its "no .venv" hint is the first install many developers run, and it must carry
+    # the pins. The scan reads quoted hint strings, so listing them is enough.
     ("scripts/launch.ps1", "-c constraints.txt"),
     ("scripts/launch.sh", "-c constraints.txt"),
     ("scripts/bootstrap.py", "-c constraints.txt"),
@@ -328,8 +316,7 @@ def test_the_constraints_file_reaches_the_image():
 # Mailpit
 # ---------------------------------------------------------------------------
 
-#: The tag, up to the `@sha256:` digest the development file pins it with
-#: (2026-10-08) and CI does not.
+#: The tag, up to the `@sha256:` digest the development file pins it with and CI does not.
 _MAILPIT = re.compile(r"axllent/mailpit:([^\s@]+)")
 
 
@@ -355,9 +342,7 @@ def test_no_image_runs_at_latest(rel):
     assert not live, f"{rel}: {live}"
 
 
-# ---------------------------------------------------------------------------
-# New hard dependencies and two optional extras (2026-09-24)
-# ---------------------------------------------------------------------------
+# New hard dependencies and two optional extras
 
 def _pyproject() -> dict:
     return tomllib.loads((ROOT / "apps/api/pyproject.toml").read_text(encoding="utf-8"))["project"]
@@ -454,8 +439,8 @@ def test_ci_runs_the_extras_absent_job():
     assert legs["Tests and migrations"]["full"] == "true"
     assert legs["Tests without optional extras"]["full"] == "false"
     assert 'name: ${{ matrix.name }}' in text
-    # One run: the gate reads the Tests step's output rather than running
-    # the suite again on the database the first run wrote to (2026-09-25).
+    # One run: the gate reads the Tests step's output rather than running the suite again on the
+    # database the first run wrote to.
     assert '-m "${{ matrix.select }}"' in _step(text, "Tests")
     assert "tee /tmp/tests.out" in _step(text, "Tests")
     gate = _step(text, "No tests were skipped")
@@ -685,9 +670,8 @@ def test_the_extras_absent_leg_has_no_optional_extra():
 
 
 def test_every_workflow_action_is_pinned_to_a_commit():
-    """A tag on someone else's action moves under every build that names it; a
-    commit does not. Each `uses:` names a full 40-character commit, with the tag
-    it was taken from kept as a comment (2026-10-08)."""
+    """A tag on someone else's action moves under every build that names it; a commit does not. Each
+    `uses:` names a full 40-character commit, with the tag it was taken from kept as a comment."""
     import re
     from pathlib import Path
 

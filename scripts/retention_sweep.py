@@ -1,54 +1,37 @@
-"""Sweep what no case governs and is past its retention clock, once (F30,
-2026-10-02; F55, 2026-10-08). An operator runs this; nothing schedules it for
-you.
+"""Sweep what no case governs and is past its retention clock, once. An operator runs this;
+nothing schedules it.
 
-A Telegram group's messages and a forum's posts are collected documents
-with a retention clock, and no case-scoped route can reach them, so until
-this script nothing destroyed them when the clock ran out. Dead letters (the
-fragments the ingest could not parse) and the ingest records attached to no
-case are in the same position, and are swept with them. It calls the same
-purge every other family uses (`RetentionService.purge_due`, with its legal
-hold checks on the document and on every case that cites it, its locks, its
-markup deletion and its tombstone), for those three families only. Exhibits,
-lookups and the rest, and every ingest record attached to a case, keep their
-own routes: a record attached to a case is that case's, with its clock and its
-hold.
+Collected documents (a Telegram group's messages, a forum's posts), dead letters and ingest
+records attached to no case have retention clocks but no case-scoped route that can reach them.
+This calls the purge every other family uses (`RetentionService.purge_due`, with its legal hold
+checks on the document and on every case that cites it, its locks, its markup deletion and its
+tombstone) for those three families only. A record attached to a case is that case's, with its
+clock and its hold.
 
     python scripts/retention_sweep.py                      # a dry run, the default
     python scripts/retention_sweep.py --apply --actor you@example.org
 
-A dry run changes nothing, writes nothing and needs no declaration: it
-counts what is past its clock, what a hold keeps and what a sweep would
-destroy. A real run needs `--apply` AND a declared authority, a reference
-an auditor can follow to the schedule, instruction or ticket the destruction
-rests on, in NOCTORNAL_RETENTION_SWEEP_AUTHORITY. The software records the
-reference and cannot verify it (docs/16 L1), and refuses a missing one, a
-placeholder and a word that is an answer rather than a reference. A real run
-also names the account that answers for it, with `--actor` or
-NOCTORNAL_RETENTION_SWEEP_ACTOR: an active account that holds
-retention.purge, recorded on every tombstone.
+A dry run changes and writes nothing and needs no declaration: it counts what is past its clock,
+what a hold keeps and what a sweep would destroy. A real run needs `--apply` and a declared
+authority in NOCTORNAL_RETENTION_SWEEP_AUTHORITY, a reference an auditor can follow to the
+schedule, instruction or ticket the destruction rests on; the software records it and cannot
+verify it (docs/16 L1), and refuses a missing one, a placeholder or an answer that is not a
+reference. A real run also names the account that answers for it (`--actor` or
+NOCTORNAL_RETENTION_SWEEP_ACTOR): an active holder of retention.purge, recorded on every tombstone.
 
-It is not part of the production cron loop and must not be added to one by
-default. Who runs it, how often and under which authority is the owner's
-decision (docs/16 L4); infra/production/README.md, Retention sweep, says how
-to schedule it once that is made.
+It is not part of the production cron loop and must not be added to one by default: who runs it,
+how often and under which authority is the owner's decision (docs/16 L4; scheduling is in
+infra/production/README.md, Retention sweep). Prints the counters on one line, then any warnings.
+A real run writes one RETENTION_SWEEP audit event of counts, and clears a backlog bigger than one
+pass in the same run, up to --max-passes.
 
-Prints the counters on one line, first, then any warnings. One real run
-writes one RETENTION_SWEEP audit event of counts, and the purge writes its
-tombstones as it always does. A backlog bigger than one pass is cleared in
-the same run, up to --max-passes.
-
-Exit codes: 0 when the run did what it was asked (a dry run always, a real run
-that left nothing it could destroy); 1 when a real run left something it could
-have destroyed (a store refused a document's markup, or the pass limit was
-reached), so run it again after reading the warnings; 2 when it refused to run: a missing
-or placeholder authority, no named account, no store for collected markup, or,
-under NOCTORNAL_ENV=production and for a dry run as well, an environment every
-job refuses (`config.refuse_unsafe_job_environment`: a credential that carries a
-published value, the schema owner's password or DSN, or the persona key), one
-line per variable on stderr led by `retention_sweep: refusing to run:`. Nothing
-was destroyed on a 2 before any pass began, and what a pass destroyed before a
-refusal stays destroyed and is on its tombstone.
+Exit 0 when the run did what it was asked; 1 when a real run left something it could have
+destroyed (a store refused a document's markup, or the pass limit was reached), so read the
+warnings and run it again; 2 when it refused to run: a missing or placeholder authority, no named
+account, no store for collected markup, or under NOCTORNAL_ENV=production, dry run included, an
+environment every job refuses (`config.refuse_unsafe_job_environment`). Nothing is destroyed on a
+2 before any pass began; what a pass destroyed before a refusal stays destroyed and is on its
+tombstone.
 """
 from __future__ import annotations
 
@@ -115,12 +98,8 @@ def main(argv: list[str] | None = None, *, conn=None,
     if max_passes < 1:
         parser.error("--max-passes must be at least 1")
 
-    # The one refusal every job makes first, before anything is connected to
-    # (config.refuse_unsafe_job_environment): a published credential, the
-    # schema owner's, or the persona key only the collector holds. Until the
-    # beta 1 gates (2026-10-07) this script asked for the first alone, and
-    # only on --apply, so a dry run, or a real run holding the owner's DSN
-    # or the persona key, started where every other job refused.
+    # The refusal every job makes first, before anything is connected to, dry run included: a
+    # published credential, the schema owner's, or the persona key only the collector holds.
     refusals = refuse_unsafe_job_environment("retention_sweep")
     if refusals:
         print("\n".join(refusals), file=sys.stderr)
@@ -134,8 +113,8 @@ def main(argv: list[str] | None = None, *, conn=None,
             return _refuse(str(exc))
 
     own = conn is None
-    # The system role: on the request role under row-level security a sweep
-    # would see only some documents and report success (S1, 2026-09-25).
+    # The system role: on the request role, row-level security would show a sweep only some
+    # documents and it would report success.
     conn = conn or connect_system(SystemPurpose.RETENTION)
     try:
         actor_id = None

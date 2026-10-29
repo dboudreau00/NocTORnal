@@ -1,22 +1,17 @@
-"""The authenticated forum path: XenForo and MyBB read as a signed-in
-member, through the real adapters, the real pinned client and the egress
-contract's stub proxy on loopback (ROADMAP-REMAINING "the authenticated
-forum path", docs/16 L3, 2026-10-02).
+"""The authenticated forum path: XenForo and MyBB read as a signed-in member, through the real adapters,
+the real pinned client and the egress contract's stub proxy on loopback (docs/16 L3).
 
-Each test stands up a loopback forum that imitates the platform's sign-in
-form, its session cookie, its member-only pages and its failure modes
-(a wrong password, a CAPTCHA, a second factor, a sign-in that wants
-JavaScript, a forced password change, a session the board ends mid-run, a
-hostile sign-in page), and polls it through `run_once` with the shipped
-member adapter: every request leaves through the contract stub as the
-persona's run, the credential is posted once and never stored, the
-session is sealed in the vault's storage and reused, the posts land as
-MEMBER documents naming the persona and the authority, and a sign-out on
-stop clears the session. The read is refused without a MEMBER_READ
-authority, and the module posts nothing but the two forms.
+Each test stands up a loopback forum that imitates the platform's sign-in form, its session cookie, its
+member-only pages and its failure modes (a wrong password, a CAPTCHA, a second factor, a sign-in that wants
+JavaScript, a forced password change, a session the board ends mid-run, a hostile sign-in page), and polls
+it through `run_once` with the shipped member adapter: every request leaves through the contract stub as
+the persona's run, the credential is posted once and never stored, the session is sealed in the vault's
+storage and reused, the posts land as MEMBER documents naming the persona and the authority, and a sign-out
+on stop clears the session. The read is refused without a MEMBER_READ authority, and the module posts
+nothing but the two forms.
 
-DATABASE_URL-gated. Nothing contacts a forum: the stub proxy dials the
-loopback server by number, and the socket guard refuses anything else.
+DATABASE_URL-gated. Nothing contacts a forum: the stub proxy dials the loopback server by number, and the
+socket guard refuses anything else.
 """
 from __future__ import annotations
 
@@ -46,10 +41,9 @@ P = "test-fmbr-"
 PASSWORD = "correct-horse-battery-staple-91"
 XF_TOKEN = "1789139000,9f0e3c1b2a7d6e5f4a3b2c1d0e9f8a7b"
 MB_KEY = "3b4c5d6e7f8091a2b3c4d5e6f7081920"
-# Onion names: a member read signs the persona in over https or to an onion
-# address only (2026-10-03), and this loopback board
-# speaks plain http through the stub proxy, which is exactly what an onion
-# hop is. The board's pages still name their canonical https origin.
+# Onion names: a member read signs the persona in over https or to an onion address only, and this loopback
+# board speaks plain http through the stub proxy, which is exactly what an onion hop is. The board's pages
+# still name their canonical https origin.
 XF_HOST = "xfboardtest.onion"
 MB_HOST = "mbforumtest.onion"
 
@@ -570,10 +564,9 @@ def test_a_stop_signs_the_persona_out_through_its_route_and_clears_the_session(
 
 def test_a_sign_out_that_fails_with_the_cookie_in_its_error_does_not_audit_it(
         conn, stub, monkeypatch):
-    """The failed sign-out's note is written to the audit log, which no label
-    gates, after the scope that made the jar's cookies live has ended: an
-    error that quotes a cookie (a redirect to a URL carrying it) was audited
-    as it stood (2026-10-07)."""
+    """The failed sign-out's note is written to the audit log, which no label gates, after the scope that
+    made the jar's cookies live has ended: an error that quotes a cookie (a redirect to a URL carrying it)
+    must not be audited as it stands."""
     from noctornal_api import forum_member, forum_session
     from noctornal_api.collection import CollectionError
 
@@ -687,7 +680,7 @@ def test_the_member_adapters_are_registered_and_ask_for_the_member_scope():
 
 
 # ---------------------------------------------------------------------------
-# 2026-10-03: whose session is whose, and what a stop clears
+# Whose session is whose, and what a stop clears
 # ---------------------------------------------------------------------------
 
 class _OtherBoard(MemberForum):
@@ -928,12 +921,10 @@ def test_a_member_read_over_plain_http_to_a_clearnet_host_is_refused_before_a_re
 @pytest.mark.parametrize("platform", ["xenforo", "mybb"])
 def test_a_board_that_reflects_the_personas_secrets_gets_none_of_them_stored(
         conn, stub, monkeypatch, platform):
-    """2026-10-07: a board that echoed the persona's
-    password and session cookie into a post (a debug echo, or a hostile
-    board) had both stored as the post's text, in its side rows and in the
-    raw markup store, contrary to this module's own account of the vault. The
-    secrets are removed from every item while they are still live; the post
-    itself is kept, with the place of the echo marked."""
+    """A board that echoes the persona's password and session cookie into a post (a debug echo, or a
+    hostile board) must not get either stored as the post's text, in its side rows or in the raw markup
+    store, contrary to this module's own account of the vault. The secrets are removed from every item
+    while they are still live; the post itself is kept, with the place of the echo marked."""
     from noctornal_api.collection import CollectionService
     from noctornal_api.rawstore import InMemoryDocumentRawStorage
 

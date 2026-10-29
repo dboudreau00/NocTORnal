@@ -1,22 +1,19 @@
 """A real purge destroys what its dry run counted, or nothing (over HTTP).
 
-2026-09-23. `POST /retention/purge` with `dry_run` false
-took only a case and an authority and read what was due afresh, while the
-console's confirmation repeated the counts of a dry run of any age. At
-09:00 a dry run counts 3 exhibits and 11 held; at 11:00 a colleague lifts
-the holds; at 14:00 "Destroy 3 exhibits" is confirmed and 14 go.
+`POST /retention/purge` with `dry_run` false must not read what is due afresh while the console's
+confirmation repeats the counts of a dry run of any age: a dry run that counted 3 exhibits and 11 held
+could otherwise be followed by a confirmation of "Destroy 3 exhibits" after the holds were lifted, and 14
+would go.
 
-Now a dry run returns `preview`, a digest of the case, the authority and
-every due item with its hold, and a real run must present it: 428 without
-one, 409 when what is due has changed since. These drive that through the
-router against a real database, with one exhibit whose hold is lifted
-between the count and the confirmation, and never destroy anything: the
-only real run that passes the gate has nothing actionable to act on. The
-pure half (the digest, and one `as_of` for both reads of what is due) is
+So a dry run returns `preview`, a digest of the case, the authority and every due item with its hold, and a
+real run must present it: 428 without one, 409 when what is due has changed since. These drive that
+through the router against a real database, with one exhibit whose hold is lifted between the count and the
+confirmation, and never destroy anything: the only real run that passes the gate has nothing actionable to
+act on. The pure half (the digest, and one `as_of` for both reads of what is due) is
 `test_purge_preview_binding.py`.
 
-**The email prefix is `ppb-` and must stay unique**: the fixture cleans up
-by deleting on it. Env-gated on DATABASE_URL.
+**The email prefix is `ppb-` and must stay unique**: the fixture cleans up by deleting on it. Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -69,10 +66,9 @@ def client():
     from noctornal_api.http.app import create_app
     from noctornal_api.ratelimit import LIMITS, InProcessBackend, RateLimiter
     app = create_app()
-    # The destruction meter allows a burst of three, and one test here
-    # makes six purge calls in a second. What is under test is the binding,
-    # not the meters, so this client's two (the real run's, and since
-    # 2026-10-08 the dry run's own) are widened and nothing else is.
+    # The destruction meter allows a burst of three, and one test here makes six purge calls in a second.
+    # What is under test is the binding, not the meters, so this client's two (the real run's and the dry
+    # run's) are widened and nothing else is.
     limits = dict(LIMITS)
     for name in ("retention.destroy", "retention.dry_run"):
         limits[name] = dataclasses.replace(LIMITS[name], quota=100, burst=50)

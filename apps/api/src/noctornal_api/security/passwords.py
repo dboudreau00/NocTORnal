@@ -27,14 +27,12 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(stored_hash: str, password: str) -> bool:
-    """Verify a password against an Argon2id hash. False on mismatch, and
-    False (fast, no work) on a malformed/empty hash.
+    """Verify a password against an Argon2id hash. False on mismatch, and False (fast, no work) on a
+    malformed or empty hash.
 
-    NOTE the timing asymmetry: a malformed/empty hash returns in
-    microseconds while a real hash costs the full Argon2id work. Callers
-    that must not leak account existence/state MUST verify against a fixed
-    valid dummy hash for unknown/no-password accounts (AuthService does
-    this) so every attempt does comparable work.
+    Timing asymmetry: a malformed or empty hash returns in microseconds while a real hash costs the full
+    Argon2id work. Callers that must not leak account existence or state must verify against a fixed valid
+    dummy hash for unknown or no-password accounts (AuthService does) so every attempt does comparable work.
     """
     try:
         return _PH.verify(stored_hash, password)

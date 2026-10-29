@@ -1,16 +1,14 @@
-"""Document vectors follow their document (F6.1, embeddings, 2026-09-24).
+"""Document vectors follow their document.
 
-The labels on a vector row are set by trigger from the document and its
-source; any change to a document's labels, category, text or purge, and
-any change to its source's label or kind, deletes its vector rows in the
-writer's own transaction and queues it again. A compartment rename through
-the real lifecycle service therefore leaves no row under the old key, a
-purge leaves none at all, and a held document keeps its vectors.
+The labels on a vector row are set by trigger from the document and its source; any change to a
+document's labels, category, text or purge, and any change to its source's label or kind, deletes its
+vector rows in the writer's own transaction and queues it again. A compartment rename through the real
+lifecycle service therefore leaves no row under the old key, a purge leaves none at all, and a held
+document keeps its vectors.
 
-The races are the pass's two short transactions:
-no row lock is held while the embedder works, so a purge or a relabel
-arriving then never waits on the pass, and the pass writes nothing for an
-item that changed after it was read.
+The races are the pass's two short transactions: no row lock is held while the embedder works, so a
+purge or a relabel arriving then never waits on the pass, and the pass writes nothing for an item that
+changed after it was read.
 
 Env-gated on DATABASE_URL. Prefix `edv-`.
 """

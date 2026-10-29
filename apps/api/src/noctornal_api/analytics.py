@@ -1,42 +1,28 @@
-"""Phase 3 analytics: the SNA maths, over igraph (docs/03, docs/09).
+"""The SNA maths, over igraph (docs/03, docs/09).
 
-Phase 2 shipped the metrics cheap enough to compute live in Python --
-degree, weighted and signed degree, clustering, k-core. This module adds
-the ones that are not: betweenness, closeness, eigenvector, Burt's
-structural holes, Leiden communities, cut vertices and bridges, signed
-structural balance, and the key-player problem.
+The metrics not cheap enough to compute live in Python: betweenness, closeness, eigenvector, Burt's
+structural holes, Leiden communities, cut vertices and bridges, signed structural balance, and the
+key-player problem. Four rules govern everything here.
 
-Four rules govern everything here.
+**Nothing is computed against "the graph".** Every function takes a `Subgraph` produced by
+`GraphService.project()`, which has already applied the caller's clearance and compartments and
+the projection's filters. This module never touches the database and never re-queries the graph,
+so it cannot widen what the caller can see. The projection parameters travel with every answer.
 
-**Nothing is computed against "the graph".** Every function takes a
-`Subgraph` produced by `GraphService.project()`, which has already applied
-the caller's clearance and compartments and the projection's filters. This
-module never touches the database and never re-queries the graph, so it
-cannot accidentally widen what the caller can see. The projection
-parameters travel with every answer.
+**The graph is simple and undirected for structural metrics.** Betweenness, constraint and
+clustering are defined over neighbour sets, so two actors joined by both a vouch and an accusation
+are one dyad, and `dyad_count` is reported beside `edge_count`. Direction is kept where it carries
+meaning: positive in-degree (vouches received) and out-degree (vouches given) "mean opposite
+things" (docs/03), so they are reported apart.
 
-**The graph is simple and undirected for structural metrics.** Betweenness,
-constraint and clustering are defined over neighbour sets, so two actors
-joined by both a vouch and an accusation are ONE dyad. Phase 2 made the
-same choice and reports `dyad_count` beside `edge_count` so the difference
-does not read as a bug; this module inherits it. Direction is preserved
-separately where it carries meaning: docs/03 is explicit that in-degree of
-positive edges (vouches received, accumulated reputation) and out-degree
-(vouches given, reputation staked) "mean opposite things", so they are
-reported apart.
+**Signs are not weights.** A negative tie is a real, strong, hostile relationship. Metrics that
+treat a tie as a conduit (closeness, eigenvector) would be nonsense over hostility, so eigenvector
+runs over the positive subgraph only and says so; positional metrics (betweenness, constraint) use
+the absolute strength, because brokering between enemies is still brokering.
 
-**Signs are not weights.** A negative tie is a real, strong relationship
-that happens to be hostile. Metrics that assume a tie is a conduit --
-closeness, eigenvector -- would be nonsense over a graph containing
-hostility, so eigenvector is computed over the POSITIVE subgraph only and
-says so. Metrics about structural position -- betweenness, constraint --
-use the absolute tie strength, because brokering between two people who
-hate each other is still brokering.
-
-**Approximation is disclosed, never hidden.** Above a node-count threshold
-betweenness switches to Brandes pivot sampling and the result carries
-`is_approximate` and `sample_size`. docs/03: analysts will make removal
-decisions from these numbers and are entitled to know the error bars exist.
+**Approximation is disclosed, never hidden.** Above a node-count threshold betweenness switches to
+Brandes pivot sampling and the result carries `is_approximate` and `sample_size`: analysts make
+removal decisions from these numbers and are entitled to the error bars.
 """
 from __future__ import annotations
 
@@ -89,9 +75,8 @@ class AnalyticsParams:
     the metric run and echoed in the response, because a metric whose
     parameters are not recorded is not reproducible (docs/03)."""
 
-    # None means decay is OFF. It defaults to off deliberately: switching it
-    # on silently would change every number relative to Phase 2's local
-    # metrics, and an analyst comparing the two panels would see a
+    # None means decay is off, deliberately: switched on silently it would change every number
+    # relative to the live local metrics, and an analyst comparing the two panels would see a
     # discrepancy with no visible cause.
     decay_half_life_months: float | None = None
     # The reference instant decay measures age from. Defaults to now.
@@ -148,18 +133,11 @@ class Materialised:
 def _edge_age_days(edge: dict, reference: datetime) -> float | None:
     """Age of a tie in days, or None when the graph does not date it.
 
-    The anchor is WORLD time, never record time. `created_at` says when an
-    analyst typed the row, so decaying by it would treat a freshly-entered
-    2019 vouch as fresh and a long-standing tie as stale purely because
-    nobody edited it -- exactly backwards. `valid_to` (the tie ended) is
-    preferred over `valid_from` (it started), since a relationship known to
-    have ended is the more recent fact about it.
-
-    Undated ties are NOT decayed. Guessing an age would silently
-    down-weight ties whose age is simply unrecorded, and docs/14 U3 notes
-    that nothing in the UI sets these intervals yet -- so on today's data
-    most ties are undated. The count is reported so the answer can say the
-    decay did not bite rather than implying it did.
+    The anchor is world time, never record time: `created_at` says when an analyst typed the row,
+    so decaying by it would treat a freshly entered 2019 vouch as fresh. `valid_to` (the tie ended)
+    is preferred over `valid_from`, being the more recent fact. Undated ties are not decayed,
+    because guessing an age would silently down-weight them; the count is reported so the answer
+    can say the decay did not bite.
     """
     anchor = edge.get("valid_to") or edge.get("valid_from")
     if anchor is None:
@@ -266,43 +244,21 @@ def materialise(sub: Subgraph, params: AnalyticsParams | None = None) -> Materia
 # --------------------------------------------------------------------------
 
 def graph_hash(sub: Subgraph, p: Projection, params: AnalyticsParams) -> bytes:
-    """A deterministic digest of everything that could change a number.
+    """A deterministic digest of everything that could change a number (docs/02: an unchanged hash
+    serves the cached metrics).
 
-    docs/02: "Hash the sorted edge list of the projection. Unchanged hash ->
-    serve cached metrics, skip the run entirely."
-
-    Two properties matter beyond determinism.
-
-    The digest covers the NODE set as well as the edge list, because an
-    isolated node changes density, percentile ranks and fragmentation
-    without touching a single edge.
-
-    And it is taken over the subgraph AS THE CALLER SEES IT. Because
-    `project()` has already dropped everything above the caller's clearance,
-    two analysts with different clearance hash different edge lists and so
-    land on different cache entries. That is what stops a cached run
-    computed over RED nodes from being served to an AMBER analyst, whose
-    view would otherwise gain betweenness scores explained by nodes they
-    cannot see.
+    It covers the node set as well as the edge list, because an isolated node changes density,
+    percentile ranks and fragmentation. And it is taken over the subgraph as the caller sees it,
+    after `project()` has dropped everything above their clearance, so analysts with different
+    clearances land on different cache entries: a run computed over RED nodes is never served to
+    an AMBER analyst.
     """
     h = hashlib.sha256()
-    # v2 since 2026-09-23: the rows below carry each tie's review state and
-    # whether an exhibit backs it. The suite now reports that coverage
-    # beside the numbers (ux10-analytics:metrics-hide-review-and-evidence-
-    # state), so a run whose ties have since been reviewed or evidenced is
-    # a different answer and must not be served, or called current, as if
-    # it were the same one.
-    #
-    # v3 since the release review (c16, 2026-09-24): each node's label and
-    # type go in beside its id. The payload NAMES people (the table, the
-    # broker card, the removal set, cut vertices and bridges), and with ids
-    # alone a renamed entity kept its old name on a cache hit, on `latest`
-    # and under "nothing it was computed from has changed", with no way in
-    # the console to recompute short of an unrelated edit to the graph. A
-    # label corrected because it named the wrong person or held personal
-    # data kept printing. The type is in because the payload carries it too
-    # and the console colours the name by it. The bump retires every run
-    # stored under v2: a cache miss, and `current` false until run again.
+    # The rows carry each tie's review state and whether an exhibit backs it, and each node's label
+    # and type beside its id: the payload reports that coverage and names people, so a tie reviewed
+    # or evidenced, or an entity renamed (a label that named the wrong person, say), is a different
+    # answer and must not be served or called current as the same one. Bumping the version retires
+    # every stored run: a cache miss, and `current` false until run again.
     h.update(b"noctornal-analytics-v3\x00")
     for key, value in sorted(p.describe().items()):
         h.update(f"{key}={value}\x00".encode())
@@ -326,15 +282,11 @@ def graph_hash(sub: Subgraph, p: Projection, params: AnalyticsParams) -> bytes:
     for row in rows:
         h.update("|".join(row).encode())
         h.update(b"\x00")
-    # L3 and F2 (2026-09-24): the cache key must cover the new payloads.
-    # Both are folded ONLY when present, so a default
-    # Subgraph hashes exactly as before and no stored run goes stale; no
-    # version bump. The left-out counts are in the payload, so a tie added,
-    # reviewed or superseded under the accepted scope is a different answer.
-    # The one-mode coverage names venues and their sizes that never reach
-    # `nodes`: without it a renamed oversized forum kept its old name on a
-    # cache hit, and a forum raised above the caller's clearance left the
-    # digest unchanged and its label was served back with current: true.
+    # The accepted-ties scope's left-out counts and the one-mode coverage are folded in only when
+    # present, so a default Subgraph's digest does not change and no stored run goes stale. Both are
+    # in the payload: a tie added, reviewed or superseded under the accepted scope is a different
+    # answer, and the one-mode coverage names venues and sizes that never reach `nodes`, so a
+    # renamed oversized forum, or one raised above the caller's clearance, changes the digest.
     if sub.review_left_out is not None:
         h.update(b"review_left_out\x00")
         h.update(json.dumps(sub.review_left_out, sort_keys=True).encode())
@@ -347,7 +299,7 @@ def graph_hash(sub: Subgraph, p: Projection, params: AnalyticsParams) -> bytes:
 
 
 # --------------------------------------------------------------------------
-# What the projection options did (L3, F2)
+# What the projection options did
 # --------------------------------------------------------------------------
 
 REVIEW_SCOPE_NOTE = (
@@ -357,7 +309,7 @@ REVIEW_SCOPE_NOTE = (
 
 def review_scope_block(p: Projection, sub: Subgraph) -> dict | None:
     """What the accepted-ties scope left out, for the payload; None under
-    the default scope, so a default payload is unchanged (L3, 2026-09-24).
+    the default scope, so a default payload is unchanged.
     `review_coverage` is deliberately NOT changed: under this scope it
     truthfully reads "all reviewed" of what the numbers rest on, and this
     block says what they do not rest on."""
@@ -368,9 +320,8 @@ def review_scope_block(p: Projection, sub: Subgraph) -> dict | None:
 
 
 def one_mode_block(sub: Subgraph) -> dict | None:
-    """The one-mode coverage with the prose that reads it (F2, 2026-09-24);
-    None when no venue family was projected. The prose is added here and
-    never hashed, so a copy edit never makes a stored run stale."""
+    """The one-mode coverage with the prose that reads it; None when no venue family was projected.
+    The prose is added here and never hashed, so a copy edit never makes a stored run stale."""
     if sub.one_mode is None:
         return None
     families = "+".join(sub.one_mode.get("families") or [])
@@ -439,22 +390,13 @@ def _clean(x: float) -> float | None:
 # --------------------------------------------------------------------------
 
 def burt(m: Materialised) -> dict[str, list[float | None]]:
-    """Effective size, efficiency, constraint and hierarchy.
+    """Effective size, efficiency, constraint and hierarchy (Burt's structural holes, docs/03).
 
-    docs/03: "Burt's constraint is arguably the single most useful metric
-    for cybercrime network analysis and almost no commercial link-analysis
-    tool exposes it." Low constraint means an actor spans otherwise
-    disconnected groups and profits from the gap -- the initial access
-    broker, the launderer, the escrow provider.
-
-    Constraint comes from igraph's C implementation. Effective size,
-    efficiency and hierarchy are computed here because igraph does not
-    expose them, following Burt (1992) with the proportional tie strengths
-    p_ij = w_ij / sum_k w_ik over the symmetric weighted adjacency.
-
-    Absolute tie strength is used, not signed: brokering between two people
-    who are hostile to each other is still brokering, and a hostile tie
-    still constrains the actor who holds it.
+    Low constraint means an actor spans otherwise disconnected groups: the initial access broker,
+    the launderer, the escrow provider. Constraint comes from igraph; effective size, efficiency
+    and hierarchy are computed here, which igraph does not expose, following Burt (1992) with
+    p_ij = w_ij / sum_k w_ik over the symmetric weighted adjacency. Absolute tie strength, not
+    signed: brokering between enemies is still brokering, and a hostile tie still constrains.
     """
     g, w = m.g, m.strength
     n = m.n
@@ -537,23 +479,11 @@ def burt(m: Materialised) -> dict[str, list[float | None]]:
 def centrality(m: Materialised, params: AnalyticsParams) -> dict:
     """Betweenness, closeness, harmonic and eigenvector.
 
-    Distance-based centralities need a COST, but the stored weight is an
-    affinity: a strong tie is a shorter social distance, not a longer one.
-    Feeding affinity to a shortest-path routine inverts the meaning, so the
-    cost passed to igraph is 1/strength.
-
-    Closeness is reported as HARMONIC closeness. Classical closeness is
-    undefined on a disconnected graph, and criminal networks are routinely
-    disconnected; igraph would silently compute it per component, making
-    scores from different components incomparable. Harmonic centrality sums
-    reciprocal distances, treats unreachable pairs as contributing zero, and
-    is defined on any graph.
-
-    Eigenvector is computed over the POSITIVE subgraph only. It measures
-    embeddedness among the important, which presumes a tie confers standing;
-    being accused by a well-connected actor does not make you influential.
-    igraph accepts negative weights here but warns that the result may be
-    meaningless, and it is right.
+    The stored weight is an affinity, and a shortest-path routine needs a cost, so the cost passed
+    to igraph is 1/strength. Closeness is reported as harmonic closeness, defined on a disconnected
+    graph (criminal networks routinely are), where classical closeness computed per component would
+    make scores incomparable. Eigenvector runs over the positive subgraph only: it presumes a tie
+    confers standing, and being accused by a well-connected actor does not.
     """
     g, n = m.g, m.n
     out: dict = {}
@@ -592,15 +522,10 @@ def centrality(m: Materialised, params: AnalyticsParams) -> dict:
     if positive:
         sub = g.subgraph_edges(positive, delete_vertices=False)
         sub_w = [strength[i] for i in positive]
-        # igraph warns -- correctly -- that eigenvector centrality is not
-        # meaningful on a disconnected graph: the power iteration converges
-        # on the dominant component and everything outside it collapses
-        # towards zero, so a well-connected actor in a smaller component
-        # reads as unimportant. Criminal networks are routinely
-        # disconnected, so this is the normal case, not an edge case.
-        # The numbers are still comparable WITHIN the dominant component,
-        # so they are returned with the caveat attached rather than
-        # withheld -- but the caveat is not optional.
+        # Eigenvector centrality is not meaningful across a disconnected graph: the power iteration
+        # converges on the dominant component and a well-connected actor elsewhere reads as
+        # unimportant. The numbers are still comparable within the dominant component, so they are
+        # returned with the caveat attached, never without it.
         components = [c for c in sub.connected_components(mode="weak") if len(c) > 1]
         meaningful = len(components) <= 1
         with warnings.catch_warnings():
@@ -636,12 +561,8 @@ def centrality(m: Materialised, params: AnalyticsParams) -> dict:
 def cohesion(m: Materialised, params: AnalyticsParams) -> dict:
     """Leiden communities, components, cut vertices and bridges.
 
-    Leiden rather than Louvain: docs/03 notes Louvain can produce
-    internally disconnected communities, which in this domain would mean a
-    "cell" whose members have no path to each other.
-
-    Cut vertices and bridges are single points of failure in the network's
-    structure -- remove one and the graph falls apart. They are the cheap,
+    Leiden rather than Louvain, which can produce internally disconnected communities: a "cell"
+    whose members have no path to each other (docs/03). Cut vertices and bridges are the cheap,
     exact companion to the key-player search.
     """
     import leidenalg
@@ -665,10 +586,8 @@ def cohesion(m: Materialised, params: AnalyticsParams) -> dict:
     cut = sorted(g.articulation_points())
     bridge_edges = g.bridges()
 
-    # ux10-analytics:communities-anonymous-table-unsortable (2026-09-23):
-    # the pane printed "4 communities" and a bare integer per actor, so
-    # "how big is each cell" meant counting rows by eye. The sizes travel
-    # with the answer, largest first, each with the id the rows carry.
+    # Community sizes travel with the answer, largest first, each with the id the rows carry, so
+    # nobody counts rows by eye.
     sizes: dict[int, int] = {}
     for c in membership:
         sizes[c] = sizes.get(c, 0) + 1
@@ -701,18 +620,13 @@ def cohesion(m: Materialised, params: AnalyticsParams) -> dict:
 # --------------------------------------------------------------------------
 
 def balance(m: Materialised) -> dict:
-    """Structural balance over the signed triads, and the unbalanced ones
-    enumerated as leads.
+    """Structural balance over the signed triads, and the unbalanced ones enumerated as leads
+    (docs/03).
 
-    docs/03: "A vouches for B, B vouches for C, A accuses C is an unstable
-    configuration: either the data is wrong, a relationship is breaking, or
-    one of them is running two personas."
-
-    Only triads whose three dyads ALL carry a valence take part. A tie with
-    sign 0 (POSTS_ON, CONTROLS) is structural, not social approval, and
-    counting it as friendly would manufacture balance that is not there.
-    The count of skipped triads is reported so a low signed-triad count
-    reads as thin data rather than a balanced network.
+    Only triads whose three dyads all carry a valence take part: a sign-0 tie (POSTS_ON, CONTROLS)
+    is structural, not social approval, and counting it as friendly would manufacture balance. The
+    skipped triads are counted, so a low signed-triad count reads as thin data rather than a
+    balanced network.
     """
     g, n = m.g, m.n
     if n > TRIAD_MAX_NODES:
@@ -799,19 +713,12 @@ def fragmentation(g: igraph.Graph, removed: frozenset[int] = frozenset()) -> flo
 
 
 def key_player(m: Materialised, n_remove: int) -> dict:
-    """KPP-Neg: which set of n actors, removed, maximally fragments this
-    network (Borgatti 2006).
+    """KPP-Neg: which set of n actors, removed, maximally fragments this network (Borgatti 2006).
 
-    docs/03 flags the part that makes this worth building: "the optimal
-    removal set is usually not the top-n individually-central actors. Two
-    high-betweenness nodes often broker the same two clusters, so removing
-    both is redundant." The response therefore reports the top-n by
-    betweenness alongside the optimised set and the fragmentation each
-    achieves, so the analyst can see the difference rather than take it on
-    trust.
-
-    Greedy seed then a swap local search, which is what docs/03 specifies.
-    Neither is guaranteed optimal, and the result says so.
+    The optimal removal set is usually not the top n by centrality, since two high-betweenness
+    actors often broker the same clusters (docs/03), so the response reports the top n by
+    betweenness beside the optimised set with the fragmentation each achieves. Greedy seed then a
+    swap local search, as docs/03 specifies; neither is guaranteed optimal, and the result says so.
     """
     if not 1 <= n_remove <= KPP_MAX_REMOVE:
         raise AnalyticsError(
@@ -908,8 +815,7 @@ def run_suite(sub: Subgraph, p: Projection,
     m = materialise(sub, params)
     if m.n == 0:
         if sub.one_mode is not None:
-            # Said as what happened: the view had nodes, and they were all
-            # venues (F2, 2026-09-24).
+            # Said as what happened: the view had nodes, and they were all venues.
             raise AnalyticsError("projecting the venues left no entities in this view")
         raise AnalyticsError("this projection contains no visible nodes")
 
@@ -952,20 +858,12 @@ def run_suite(sub: Subgraph, p: Projection,
             ("effective_size", holes["effective_size"]),
         )
     }
-    # Constraint is ranked ASCENDING: low constraint is the interesting end,
-    # because it means the actor spans a structural hole. Rank 1 = least
-    # constrained = the broker.
-    #
-    # The percentile runs the SAME way since 2026-09-23 (ux10-analytics:
-    # rank-percentile-opposite-directions). It was taken over the raw
-    # values, so the least constrained actor read "1st of 30 · p2" beside a
-    # betweenness column where 1st is p98, and "p2" reads as "bottom 2%" to
-    # anyone who is not a statistician: the table's own best broker looked
-    # like the one to dismiss. Now p98 is the least constrained, as rank 1
-    # is, and `constraint_order` says so on the payload so a stored run
-    # computed the old way can be told apart and brought up to date
-    # (`analytics_runs.upgrade_stored`). An isolate's undefined constraint
-    # sorts to the constrained end, as it always did.
+    # Constraint is ranked ascending: low constraint means the actor spans a structural hole, so
+    # rank 1 is the least constrained, the broker. The percentile runs the same way, the least
+    # constrained highest as in the betweenness column, and `constraint_order` says so on the
+    # payload, so a stored run computed the other way can be brought up to date
+    # (`analytics_runs.upgrade_stored`). An isolate's undefined constraint sorts to the constrained
+    # end.
     c_ranks, c_pct = _rank_and_percentile(_least_constrained_first(holes["constraint"]))
 
     nodes = []
@@ -1007,7 +905,7 @@ def run_suite(sub: Subgraph, p: Projection,
         "constraint_order": CONSTRAINT_ORDER,
         "broker_rule": leads,
         "review_coverage": review_coverage(sub),
-        # L3 and F2 (2026-09-24): None unless the projection asked for them.
+        # None unless the projection asked for them.
         "review_scope": review_scope_block(p, sub),
         "one_mode": one_mode_block(sub),
         # A metric over a CUT-OFF node set is not a metric over the case.
@@ -1025,18 +923,8 @@ def run_suite(sub: Subgraph, p: Projection,
         "dyad_count": m.dyad_count,
         "dyad_note": "metrics treat the graph as simple: parallel edges "
                      "between the same pair count once",
-        # CR8 (2026-07-26): through `_clean`, not `round`.
-        #
-        # `run_suite` guards n == 0 but not n == 1, and igraph's density()
-        # on a single vertex is NaN (the denominator n(n-1) is zero).
-        # `round(NaN, 6)` is still NaN, psycopg serialises it as a literal
-        # `NaN`, and Postgres jsonb rejects that -- so any single-node
-        # projection 500s the whole suite. Density was the ONLY float in
-        # this payload not already routed through `_clean`, which exists
-        # for exactly this and returns None instead.
-        #
-        # A single-node projection is not exotic: a case with one entity,
-        # or TLP filtering that leaves one visible node, reaches it.
+        # Through `_clean`, not `round`: igraph's density() on a single vertex is NaN, which jsonb
+        # refuses, and a one-node projection is common (one entity, or one left visible).
         "density": _clean(g.density()),
         "is_approximate": cent["is_approximate"],
         "sample_size": cent["sample_size"],
@@ -1073,26 +961,15 @@ def _mode_warning(node_types: list[str], degrees: list[int],
                   projectable: tuple[str, ...] = ()) -> str | None:
     """Warn when a projection mixes actors with artefacts or contexts.
 
-    docs/03 is blunt that identity plumbing "will wreck centrality if
-    included", and names CONTROLS specifically -- yet the Financial preset
-    includes CONTROLS, TX_INPUT and TX_OUTPUT, which make WALLET and
-    TRANSACTION first-class vertices, and Communication includes
-    PARTICIPANT_IN, which does the same for CONVERSATION. That is a
-    two-mode (affiliation) graph, and centrality over it answers a
-    different question than the analyst thinks they asked: a wallet with
-    many controllers scores as a broker.
-
-    Silently rewriting the presets would change every number the Phase 2
-    sociogram already shows, so the honest move is to say so and let the
-    analyst decide. docs/03's proper fix, bipartite projection to one-mode
-    with Newman weighting, is built for forums and wallets as a projection
-    option (`affiliation.py`, F2, 2026-09-24), never as a rewritten preset
-    (decision 33). `projectable` is the families NOT projected in this run:
-    when a tied non-actor type is one of their venues, the two-mode sentence
-    names the option. Both branches stay whatever is projected, because a
-    projected view can still hold an isolated SELECTOR or a tied SERVICE.
-    CONVERSATION is in no family (docs/00 decision 73), so the Communication
-    preset keeps its warning as it was and names no option.
+    The Financial preset's CONTROLS, TX_INPUT and TX_OUTPUT make WALLET and TRANSACTION vertices,
+    and Communication's PARTICIPANT_IN does the same for CONVERSATION: a two-mode graph, over which
+    centrality answers a different question (a wallet with many controllers scores as a broker).
+    Rewriting the presets silently would change every number the sociogram shows, so this says so
+    and the analyst decides; the one-mode projection is an option (`affiliation.py`), never a
+    rewritten preset (decision 33). `projectable` is the families not projected in this run: when a
+    tied non-actor type is one of their venues, the sentence names the option. Both branches stay
+    whatever is projected, since a projected view can still hold an isolated SELECTOR or a tied
+    SERVICE. CONVERSATION is in no family (decision 73), so that warning names no option.
     """
     from noctornal_ontology.definition import NODE_TYPES
 
@@ -1129,10 +1006,9 @@ def _mode_warning(node_types: list[str], degrees: list[int],
     return None
 
 
-#: What `constraint_rank` and `constraint_percentile` mean on a payload that
-#: says so: rank 1 and the highest percentile are the LEAST constrained
-#: actor. A stored payload without this key was computed before 2026-09-23,
-#: when the percentile ran the other way.
+#: What `constraint_rank` and `constraint_percentile` mean on a payload that says so: rank 1 and
+#: the highest percentile are the least constrained actor. A stored payload without this key has
+#: its percentile running the other way.
 CONSTRAINT_ORDER = "least_constrained_first"
 
 #: The broker leads' thresholds, as percentiles among the actors that have
@@ -1167,41 +1043,20 @@ def assign_broker_leads(nodes: list[dict]) -> dict:
     node rows themselves (`broker_kind`, `broker_signature`), and return the
     rule that chose them.
 
-    The pattern docs/03 wants the UI to teach rather than merely print:
-    "high betweenness with low degree is the classic broker signature. Few
-    connections, but they are the only connections between clusters." A
-    sentence rather than a flag, so the interface explains the finding
-    instead of showing a badge whose meaning an analyst has to remember.
+    The broker signature is high betweenness with low degree (docs/03), said as a sentence rather
+    than a badge so the interface explains the finding. The sentence ends up in reports about
+    people, so both leads rank the actor against the others rather than against an absolute
+    threshold, which can hold for nearly every actor in a case:
 
-    RELATIVE since 2026-09-23 (ux10-analytics:broker-lead-card-overclaims).
-    The structural-hole lead fired on an ABSOLUTE constraint below 0.4 with
-    betweenness in the top 30%. In OP-CORVID-26, 29 of 30 actors are below
-    0.4, so the rule was "top 30% by betweenness": it tagged nine actors,
-    among them two of the most constrained in the case, and the card then
-    told an analyst that the busiest actors "profit from the gap between
-    otherwise disconnected groups" in a network with one component. That
-    sentence ends up in reports about people. Both leads now rank the actor
-    against the others:
+    - few ties: three ties or fewer, or fewer than the median actor; and betweenness in the top
+      fifth;
+    - structural hole: in the least constrained quarter and the top quarter for betweenness.
 
-    - few ties: three ties or fewer (few by any standard, and the old
-      rule's cut), or fewer than the median actor; and betweenness in the
-      top fifth. "At or below the median" was tried first and, on
-      OP-NIGHTJAR-26, called actors with exactly the median nine ties
-      "few ties";
-    - structural hole: in the least constrained quarter AND the top quarter
-      for betweenness.
-
-    The population is the actors with at least one tie. An isolate has no
-    brokerage and no defined constraint, and counting isolates would move
-    every percentile when an unconnected entity is added to the case,
-    promoting actors whose position had not changed. The sentence says
-    what Burt says about the position, not about components, because a
-    structural hole is a gap between an actor's own contacts and exists in
-    a network of one component.
-
-    Runs over node ROWS (degree, betweenness, constraint) rather than the
-    igraph build, so a stored run computed under the old rule can be
-    brought up to date from its own numbers (`analytics_runs`).
+    The population is the actors with at least one tie: an isolate has no brokerage and no defined
+    constraint, and counting isolates would move every percentile when an unconnected entity is
+    added. The sentence says what Burt says about the position, not about components, because a
+    structural hole is a gap between an actor's own contacts. Runs over node rows rather than the
+    igraph build, so a stored run can be brought up to date from its own numbers (`analytics_runs`).
     """
     for n in nodes:
         n["broker_kind"] = None
@@ -1244,27 +1099,13 @@ def review_coverage(sub: Subgraph) -> dict:
     """How much of what the numbers rest on an analyst has reviewed, and how
     much an exhibit backs.
 
-    ux10-analytics:metrics-hide-review-and-evidence-state (2026-09-23).
-    Machines propose, analysts dispose, and every claim traces to graded
-    evidence: the Graph pane rings unreviewed proposals and counts the
-    elements an exhibit backs. The Analysis pane, which is the one that
-    turns ties into claims about people ("Brokers worth a look", "Removal
-    set"), said neither, so a removal set computed entirely from
-    unreviewed machine proposals with no exhibit read exactly like one
-    computed from reviewed, evidenced ties.
-
-    Counted over the projection's ties, the same population as
-    `edge_count`. Nothing here filters: whether to compute over reviewed
-    ties only is the projection's question, and this is the answer to
-    "what did these numbers rest on".
-
-    DISPUTED is counted since the release review (c11, 2026-09-24). Tie
-    review (`graph.REVIEW_STATES`) can set ACCEPTED, DISPUTED or PROPOSED
-    and refuses REJECTED, so DISPUTED is the one doubt a reviewer can
-    record, and it had no bucket here: five disputed ties at a hub read
-    "reviewed 58 of 58" and "All 58 ties ... have been reviewed" as a calm
-    note, while those ties still drove the brokers and the removal set.
-    REJECTED stays for rows written before tie review refused it.
+    The Analysis pane turns ties into claims about people ("Brokers worth a look", "Removal set"),
+    so a removal set computed from unreviewed machine proposals with no exhibit must not read like
+    one computed from reviewed, evidenced ties. Counted over the projection's ties, the same
+    population as `edge_count`; nothing here filters, since whether to compute over reviewed ties
+    only is the projection's question. DISPUTED, the one doubt tie review (`graph.REVIEW_STATES`)
+    can record, has a bucket of its own; REJECTED is kept for rows written before tie review
+    refused it.
     """
     out = {"ties": len(sub.edges), "proposed": 0, "accepted": 0,
            "disputed": 0, "rejected": 0, "evidenced": 0, "inferred": 0}

@@ -1,48 +1,36 @@
-"""The COMPLIANCE lock, exercised against the REAL MinIO for the first time.
+"""The COMPLIANCE lock, exercised against the REAL MinIO.
 
-`EvidenceStorage.delete()` is exercised here against a live COMPLIANCE
-lock. A stub, which every earlier test of the purge's storage half used,
-proves the code maps what it is told; it cannot prove what the store
-actually says. Two of those things matter enough to measure rather than
-assume:
+`EvidenceStorage.delete()` is exercised here against a live COMPLIANCE lock. A stub proves the code maps
+what it is told; it cannot prove what the store actually says. Two of those things matter enough to
+measure rather than assume:
 
-1. The keyless `delete()` RETURNS SUCCESS on this bucket and destroys
-   nothing. The bucket is created `--with-lock`, which forces versioning
-   on, and a keyless `remove_object` on a versioned bucket inserts a
-   DELETE MARKER. The bytes stay retrievable by version id. This is the
-   defect `retention._purge_evidence` reported as DELETED for a month,
-   and `test_the_old_keyless_delete_returns_success_while_holding_the_bytes`
-   below asserts it STILL happens -- deliberately. It is the documented
-   reason the purge now calls `delete_all_versions()`. If that test ever
-   fails, MinIO's semantics changed and every docstring that quotes the
-   measurement must be re-measured, not deleted.
+1. The keyless `delete()` RETURNS SUCCESS on this bucket and destroys nothing. The bucket is created
+   `--with-lock`, which forces versioning on, and a keyless `remove_object` on a versioned bucket inserts a
+   DELETE MARKER; the bytes stay retrievable by version id. That is why the purge calls
+   `delete_all_versions()`, and
+   `test_the_old_keyless_delete_returns_success_while_holding_the_bytes` below asserts the behaviour STILL
+   happens, deliberately. If that test ever fails, MinIO's semantics changed and every docstring that
+   quotes the measurement must be re-measured, not deleted.
 
-2. What the refusal actually looks like. `retention._is_retention_refusal`
-   was tightened the same day to require a WORM / retention / object-lock
-   message on `AccessDenied` and `InvalidRequest` (a plain policy denial
-   is not a retention lock). Measured here: MinIO answers a locked-version
-   delete with `InvalidRequest` and "Object is WORM protected and cannot
-   be overwritten" -- NOT `AccessDenied`, as the evidence module had it.
-   The stub tests cannot catch a vocabulary drift between MinIO and the
-   classifier; this file can.
+2. What the refusal looks like. `retention._is_retention_refusal` requires a WORM / retention /
+   object-lock message on `AccessDenied` and `InvalidRequest` (a plain policy denial is not a retention
+   lock). Measured here: MinIO answers a locked-version delete with `InvalidRequest` and "Object is WORM
+   protected and cannot be overwritten", not `AccessDenied`. The stub tests cannot catch a vocabulary drift
+   between MinIO and the classifier; this file can.
 
 ## The precondition is a FAILURE, not a skip
 
-Against a bucket where locking is off, every assertion about a refusal
-passes for the wrong reason: nothing refuses, `delete_all_versions`
-removes everything, and a test written to check the lock would be
-checking its absence. So `locked_bucket` FAILS with "lock is off; a pass
-here would be for the wrong reason" rather than skipping. Verified by
-pointing EVIDENCE_BUCKET at the unlocked samples bucket, 2026-09-02.
+Against a bucket where locking is off, every assertion about a refusal passes for the wrong reason: nothing
+refuses, `delete_all_versions` removes everything, and a test written to check the lock would be checking
+its absence. So `locked_bucket` FAILS with "lock is off; a pass here would be for the wrong reason" rather
+than skipping.
 
 ## Every object written here is locked for LOCK_SECONDS, permanently
 
-A COMPLIANCE retention cannot be shortened, lifted or overridden by any
-credential; that is the entire point of the mode. So the objects are
-tiny, the retention is seconds (`put()` takes `retain_until`, so the
-365-day default never applies), the keys sit under one prefix, and each
-run sweeps the previous run's leftovers once their locks have expired.
-Never raise LOCK_SECONDS to something that outlives a working day.
+A COMPLIANCE retention cannot be shortened, lifted or overridden by any credential; that is the entire
+point of the mode. So the objects are tiny, the retention is seconds (`put()` takes `retain_until`, so the
+365-day default never applies), the keys sit under one prefix, and each run sweeps the previous run's
+leftovers once their locks have expired. Never raise LOCK_SECONDS to something that outlives a working day.
 
 Gated exactly like `test_evidence_pg.py`: DATABASE_URL and MINIO_ENDPOINT.
 """
@@ -210,12 +198,10 @@ def test_delete_all_versions_reports_the_lock_and_the_bytes_survive(
 
 def test_the_live_refusal_is_recognised_as_a_lock_by_the_classifier(
         storage, locked_bucket):
-    """The one thing a stub cannot prove. The classifier now requires the
-    WORM / retention / object-lock words on AccessDenied and
-    InvalidRequest; if MinIO's real refusal ever stops carrying them, the
-    purge would record FAILED for a lawful lock -- wrong in the other
-    direction. Measured 2026-09-02: InvalidRequest, "Object is WORM
-    protected and cannot be overwritten"."""
+    """The one thing a stub cannot prove. The classifier requires the WORM / retention / object-lock words
+    on AccessDenied and InvalidRequest; if MinIO's real refusal ever stops carrying them, the purge would
+    record FAILED for a lawful lock. Measured: InvalidRequest, "Object is WORM protected and cannot be
+    overwritten"."""
     from noctornal_api import retention
     from noctornal_api.evidence import is_retention_refusal
 
@@ -232,13 +218,11 @@ def test_the_live_refusal_is_recognised_as_a_lock_by_the_classifier(
 
 def test_a_second_exhibit_of_the_same_bytes_has_a_key_the_store_lists(
         storage, locked_bucket):
-    """2026-10-07. The second exhibit of bytes another exhibit holds
-    (another label, or a lost race) was stored at `plain/<evidence id>`, and
-    MinIO does not list an object whose name continues another object's past
-    a "/": `delete_all_versions` saw no version, so the purge reported "no
-    object found" for bytes still served by version id and could never
-    destroy them. `own_key` puts it beside the plain key. Both halves are
-    measured, so a change in MinIO's listing shows up here."""
+    """The second exhibit of bytes another exhibit holds (another label, or a lost race) is not stored at
+    `plain/<evidence id>`: MinIO does not list an object whose name continues another object's past a "/",
+    so `delete_all_versions` would see no version and the purge would report "no object found" for bytes
+    still served by version id, and never destroy them. `own_key` puts it beside the plain key. Both halves
+    are measured, so a change in MinIO's listing shows up here."""
     from noctornal_api.evidence import own_key
 
     data = b"plain-" + uuid4().bytes
@@ -265,12 +249,10 @@ def test_a_second_exhibit_of_the_same_bytes_has_a_key_the_store_lists(
 
 def test_the_old_keyless_delete_returns_success_while_holding_the_bytes(
         storage, locked_bucket):
-    """THIS PASSES TODAY, on purpose. It is the measured reason the purge
-    no longer calls `delete()`: the call returns normally, a delete
-    marker becomes the latest version, the real version is still listed
-    and still served by version id -- and a keyed `get()` now says
-    NoSuchKey, which is exactly how the defect hid. Until 2026-09-02 the
-    purge took this path, recorded DELETED, and marked the row purged."""
+    """THIS PASSES, on purpose. It is the measured reason the purge does not call `delete()`: the call
+    returns normally, a delete marker becomes the latest version, the real version is still listed and
+    still served by version id, and a keyed `get()` now says NoSuchKey, which is how the defect hides (the
+    purge would record DELETED and mark the row purged)."""
     data = b"held-" + uuid4().bytes
     key, version_id, _ = _locked_object(storage, data)
 

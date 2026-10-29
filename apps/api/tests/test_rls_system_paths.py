@@ -1,12 +1,10 @@
-"""Every connection that sees every row says why (S1, 2026-09-25).
+"""Every connection that sees every row says why.
 
-Static: no database. Under row-level security the request role sees only
-what its user may read, and some work must see everything (a purge, a
-legal hold, a guard that permits on zero, the withheld counts, a merge,
-sign-in, every script). That work runs on `db.connect_system(purpose)`,
-`db.system_connection(purpose, ...)` or the `deps.system_conn(purpose)`
-dependency, and the purpose is a `db.SystemPurpose` member, so the list
-of places that bypass row security is one grep and one enum.
+Static: no database. Under row-level security the request role sees only what its user may read, and some
+work must see everything (a purge, a legal hold, a guard that permits on zero, the withheld counts, a
+merge, sign-in, every script). That work runs on `db.connect_system(purpose)`,
+`db.system_connection(purpose, ...)` or the `deps.system_conn(purpose)` dependency, and the purpose is a
+`db.SystemPurpose` member, so the list of places that bypass row security is one grep and one enum.
 """
 from __future__ import annotations
 
@@ -112,9 +110,8 @@ _MUST_BE_SYSTEM = {
     ("http/routers/compartments.py", "retire_compartment"): "COMPARTMENTS",
     ("http/routers/evidence.py", "mint_production_ticket"): "TICKETS",
     ("http/routers/samples.py", "mint_download_ticket"): "TICKETS",
-    # S1, 2026-09-25: the collected-document tables under policy (0118).
-    # Each dedupes, counts or sweeps across every document, exhibit or
-    # claim, or writes every version of one.
+    # The collected-document tables under policy (0118). Each dedupes, counts or sweeps across every
+    # document, exhibit or claim, or writes every version of one.
     ("http/routers/collection.py", "run_once"): "COLLECTION",
     ("http/routers/proposals.py", "capture"): "COLLECTION",
     ("http/routers/governance.py", "document_legal_hold"): "RETENTION",
@@ -124,22 +121,19 @@ _MUST_BE_SYSTEM = {
     ("http/routers/embeddings.py", "recheck_embedding_space"): "EMBEDDINGS",
     ("http/routers/embeddings.py", "run_embedding_pass"): "EMBEDDINGS",
     ("readiness.py", "_probe_connections"): "READINESS",
-    # S1, 2026-09-25: the Lab under policy (0121). A submission's duplicate
-    # check, the officer's label-free screening record and its passes, and
-    # the lookup refusal for the hash of never-screened material.
+    # The Lab under policy (0121). A submission's duplicate check, the officer's label-free screening
+    # record and its passes, and the lookup refusal for the hash of never-screened material.
     ("http/routers/samples.py", "submit"): "SAMPLE_INTAKE",
     ("http/routers/samples.py", "screening_overview"): "SCREENING",
     ("http/routers/samples.py", "import_screening_list"): "SCREENING",
     ("http/routers/samples.py", "start_screening_pass"): "SCREENING",
     ("http/routers/samples.py", "review_screening_result"): "SCREENING",
     ("lookups.py", "_sample_hashes"): "LOOKUPS",
-    # S1, 2026-09-25: comms under policy (0122). Minimisation is a legal
-    # obligation done in full, and the incidental flag it finds third
-    # parties by.
+    # Comms under policy (0122). Minimisation is a legal obligation done in full, and the incidental flag
+    # it finds third parties by.
     ("http/routers/comms.py", "minimise"): "MINIMISATION",
     ("http/routers/comms.py", "mark_incidental"): "MINIMISATION",
-    # S1, 2026-09-25: watches under policy (0124). A quarantined record
-    # scores against every watch in the deployment.
+    # Watches under policy (0124). A quarantined record scores against every watch in the deployment.
     ("ingest.py", "_watches_for"): "INGEST",
 }
 
@@ -149,7 +143,7 @@ def test_the_work_that_must_see_every_row_runs_on_a_system_connection():
     for (rel, fn), purpose in _MUST_BE_SYSTEM.items():
         tree = ast.parse((SRC / rel).read_text(encoding="utf-8"))
         found = [n for n in ast.walk(tree)
-                 # Async routes too (an upload route is async, S1 2026-09-25).
+                 # Async routes too (an upload route is async).
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                  and n.name == fn]
         assert found, f"{rel} has no function {fn}"

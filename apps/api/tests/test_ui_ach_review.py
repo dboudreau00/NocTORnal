@@ -1,21 +1,14 @@
-"""The ACH pane after the 2026-09-23 usability review (ux11-ach).
+"""The ACH pane's console behaviour.
 
-Pure, beside `test_ui_invariants.py`: these read the shipped static assets
-and the router source, with no database. The checks marked `needs_node`
-EXECUTE the shipped functions under Node with a small DOM stub, because
-"Cancel does nothing" and "a second save keeps the note" are claims about
-behaviour, and the defects they close were each a line that read fine and
-did the wrong thing:
+Pure, beside `test_ui_invariants.py`: these read the shipped static assets and the router source, with
+no database. The checks marked `needs_node` EXECUTE the shipped functions under Node with a small DOM
+stub, because "Cancel does nothing" and "a second save keeps the note" are claims about behaviour, not
+about source text:
 
-- the stance chooser cleared its note box on every open and sent the
-  emptiness (stance-note-erased-on-rescore);
-- window.prompt's Cancel returned null and the assumption was withdrawn,
-  for good (withdraw-cancel-still-withdraws);
-- Confirm on a refuted assumption sent no note and got a rule refusal
-  with "needs case.update" glued to it (refuted-assumption-cannot-be-
-  confirmed);
-- the router could reject a hypothesis and the console never asked it to
-  (no-hypothesis-lifecycle-in-console).
+- the stance chooser keeps its note box on reopen and does not send the emptiness;
+- window.prompt's Cancel returns null and must not withdraw the assumption;
+- Confirm on a refuted assumption sends a note, so the rule refusal is not glued to "needs case.update";
+- the console can reject a hypothesis, as the router can.
 """
 from __future__ import annotations
 
@@ -234,7 +227,7 @@ def test_the_router_keeps_a_note_the_body_leaves_out():
     assert '"note_was"' in router, "a replaced note is not kept anywhere"
 
 
-# --- withdraw-cancel-still-withdraws and refuted-assumption-cannot-be-confirmed
+# Cancel on withdraw, and Confirm on a refuted assumption
 
 @needs_node
 def test_cancel_on_withdraw_withdraws_nothing(tmp_path):
@@ -339,12 +332,10 @@ console.log(JSON.stringify({offered, label, unsent, sent, reopen, prefilled,
 
 @needs_node
 def test_the_status_note_says_where_it_goes(tmp_path):
-    """The Reject label promised "printed in the report" while the report
-    printed only the status (verifier of ux11-ach:no-hypothesis-lifecycle-
-    in-console, 2026-09-23). reports.py now prints the reason recorded with
-    each current status, and leaves a SUPERSEDED hypothesis out entirely,
-    so the label says exactly that (test_ach_lifecycle_pg::test_the_report_
-    prints_why_a_hypothesis_was_ruled_out holds the server's half)."""
+    """The Reject label says what the report prints: reports.py prints the reason recorded with each
+    current status and leaves a SUPERSEDED hypothesis out entirely
+    (test_ach_lifecycle_pg::test_the_report_prints_why_a_hypothesis_was_ruled_out holds the server's
+    half)."""
     got = _run("""
 const labels = {};
 for (const v of ['ACCEPTED', 'DISPUTED', 'REJECTED', 'SUPERSEDED']) {

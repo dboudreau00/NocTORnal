@@ -1,14 +1,12 @@
-"""A claim batch holds no lock while the model answers (F6.4, 2026-09-25).
+"""A claim batch holds no lock while the model answers.
 
-This variant sits beside the document one in
-test_embed_pass_meaning_pg.py: while a similar meaning batch of claims
-waits on the model, an edit of the node a claim in the batch sits on, and
-an audited edit of its case, each finish in under a second. A claim is
-read in T1 without locks and re-read in T2, so the claim whose facts moved
-during the send is left in the queue rather than written.
+While a meaning batch of claims waits on the model, an edit of the node a claim sits on, and an audited
+edit of its case, each finish in under a second. A claim is read in T1 without locks and re-read in T2,
+so a claim whose facts moved during the send stays in the queue rather than being written. Sits beside
+the document variant in test_embed_pass_meaning_pg.py.
 
-Against a stub model server on loopback that sleeps 3 s per request.
-Env-gated on DATABASE_URL. Prefix `cbw-`.
+Against a stub model server on loopback that sleeps 3 s per request. Env-gated on DATABASE_URL.
+Prefix `cbw-`.
 """
 from __future__ import annotations
 

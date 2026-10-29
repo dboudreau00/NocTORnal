@@ -1,17 +1,13 @@
-"""Every similarity statement carries its labels, read from the source
-(F6.3, 2026-09-24).
+"""Every similarity statement carries its labels, read from the source.
 
-A SQL literal in embeddings.py or http/routers/similarity.py that reads a
-document's content (title, body, author, URL, source name) must check the
-document's compartments (`d.compartments <@`) and its source's label
-(`s.classification <=`), except the embedding pass's own SYSTEM reads,
-named below with the reason. A literal that orders vector rows by
-distance must stay inside one partition (`read_compartments = '{}'`) or
+A SQL literal in embeddings.py or http/routers/similarity.py that reads a document's content (title, body,
+author, URL, source name) must check the document's compartments (`d.compartments <@`) and its source's
+label (`s.classification <=`), except the embedding pass's own SYSTEM reads, named below with the reason. A
+literal that orders vector rows by distance must stay inside one partition (`read_compartments = '{}'`) or
 inside the reader's compartments (`read_compartments <@`).
 
-This does not lean on test_document_reads_check_compartments.py: a
-substring such as `read_compartments <@` would satisfy a looser scan while
-the document's own compartments went unchecked.
+This does not lean on test_document_reads_check_compartments.py: a substring such as
+`read_compartments <@` would satisfy a looser scan while the document's own compartments went unchecked.
 
 Pure: parses the source.
 """

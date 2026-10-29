@@ -1,13 +1,8 @@
 """Counts in agreement with their nouns and verbs.
 
-A server sentence that prints a count already knows the number, so a
-bracketed plural only makes every reader do the agreement. The console
-showed the soft-delete note's incident edges and the unregistered
-compartment refusal with that hedge, verbatim (README screenshot set
-review, 2026-09-23), and the console's own copy had the same habit, which
-it now fixes with `countOf` and `agree` in app.js. This is the server's
-copy of those two helpers; test_server_copy_no_lazy_plurals.py refuses the
-hedge in any server string a reader can meet.
+A server sentence that prints a count already knows the number, so a bracketed plural only makes
+every reader do the agreement. This is the server's copy of `countOf` and `agree` in app.js;
+test_server_copy_no_lazy_plurals.py refuses the hedge in any server string a reader can meet.
 """
 from __future__ import annotations
 

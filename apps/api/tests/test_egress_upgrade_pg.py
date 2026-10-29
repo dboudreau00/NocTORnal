@@ -1,11 +1,9 @@
-"""Upgrading an Alpha 6 deployment to the egress proxy (S2, 2026-09-24;
-release/egress-upgrade/README.md).
+"""Upgrading a deployment that has no egress routes to the egress proxy (release/egress-upgrade/README.md).
 
-An Alpha 6 deployment has feeds, an SMTP relay and a webhook, and no route
-at all. adopt proposes the passive default and the two routes from its own
-settings, creates nothing until an authenticated administrator confirms,
-and afterwards a feed run leaves through the passive route and a delivery
-through smtp, both via the real proxy. Env-gated on DATABASE_URL.
+Such a deployment has feeds, an SMTP relay and a webhook, and no route at all. adopt proposes the passive
+default and the two routes from its own settings, creates nothing until an authenticated administrator
+confirms, and afterwards a feed run leaves through the passive route and a delivery through smtp, both via
+the real proxy. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -44,12 +42,11 @@ def conn(monkeypatch):
     for key, value in es.keys().items():
         monkeypatch.setenv(key, value)
     c = connect()
-    # `preserved` brings back whatever live configuration this database had
-    # (a developer's, the demo's) once the suite has made it look like Alpha
-    # 6 by retiring it (2026-09-25).
+    # `preserved` brings back whatever live configuration this database had (a developer's, the demo's)
+    # after the suite retires it to look like a deployment with no routes.
     with es.preserved(c), es.collection_standin(c):
         admin = es.user(c, "SYS_ADMIN", prefix=PREFIX)
-        # An Alpha 6 deployment: no passive default and no route.
+        # A deployment with no passive default and no route.
         c.execute("""UPDATE collect.egress_profile SET is_passive_default = false,
                        is_active = false, retired_at = now(), retired_by = %s,
                        retire_reason = 'upgrade suite start'
@@ -94,8 +91,7 @@ def test_adopt_proposes_what_rss_and_the_relay_always_had(conn, alpha6):
     passive = proposal["passive_default"]
     assert passive["any_public_host"] is True and passive["exit_kind"] == "DIRECT"
     assert {80, 443, 8443} <= set(passive["allowed_ports"])
-    # egress-rss-floor (2026-10-03): capped at AMBER; the AMBER_STRICT feed
-    # is a gap, never carried by the passive route.
+    # Capped at AMBER; the AMBER_STRICT feed is a gap, never carried by the passive route.
     assert passive["ceiling"] == "AMBER" and passive["feeds_above_ceiling"] >= 1
     routes = {r["name"]: r for r in proposal["routes"]}
     assert routes["smtp"]["entry"] == "relay.unit.test@10.1.2.0/24:587"
@@ -129,9 +125,8 @@ def test_adopt_creates_nothing_until_confirmed_and_then_everything(conn, alpha6)
 
 
 def test_adopt_creates_everything_or_nothing(conn, alpha6):
-    """A refused entry on the last route leaves no passive default and no
-    earlier route behind (2026-09-25): adopt once ran each
-    step in its own transaction."""
+    """A refused entry on the last route leaves no passive default and no earlier route behind: adopt
+    commits in one transaction."""
     from noctornal_api.egress_admin import EgressAdminError
     svc = EgressAdminService(conn)
     proposal = svc.adopt_proposal()

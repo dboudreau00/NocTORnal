@@ -1,23 +1,17 @@
-"""The production compose file runs the analysis worker isolated, and
-wires every user of it (docs/17 F42, 2026-10-02).
+"""The production compose file runs the analysis worker isolated, and wires every user of it (docs/17
+F42).
 
-The worker parses bytes written by the people under investigation, so its
-service is held here to what makes it a sandbox rather than another
-application container: no env_file and no setting but its own, no
-network, a read-only root, no-new-privileges, pids and memory limits, and
-(since the F42 review of 2026-10-02) root holding only kill, setgid and
-setuid, with an init, so each child runs as a user of its own. Its
-socket's volume is a tmpfs only it writes; api, collector and lab-triage
-mount it read-only and name the same socket; nothing else mounts it (the
-cron loop did until the collection poll moved to the collector, A collector
-process, 2026-10-02).
+The worker parses bytes written by the people under investigation, so its service is held here to
+what makes it a sandbox rather than another application container: no env_file and no setting but its
+own, no network, a read-only root, no-new-privileges, pids and memory limits, and root holding only
+kill, setgid and setuid, with an init, so each child runs as a user of its own. Its socket's volume is
+a tmpfs only it writes; api, collector and lab-triage mount it read-only and name the same socket;
+nothing else mounts it.
 
-Pure: the compose file is read with test_egress_topology's reader, which
-fails closed on any construct it does not understand. That the container
-really behaves so (cannot connect out, cannot see another container's
-environment) was shown with docker on 2026-10-02, and
-infra/production/README.md, Analysis worker, has the commands for a
-human to repeat it.
+Pure: the compose file is read with test_egress_topology's reader, which fails closed on any construct
+it does not understand. That the container really behaves so (cannot connect out, cannot see another
+container's environment) is for a human to repeat with the commands in infra/production/README.md,
+Analysis worker.
 """
 from __future__ import annotations
 
@@ -43,7 +37,7 @@ def worker(doc):
     return doc["services"][WORKER]
 
 
-#: process_facts() of the worker this file starts (F42 review, 2026-10-02).
+#: process_facts() of the worker this file starts.
 COMPOSE_FACTS = {"euid": 0, "pid": 7, "capabilities": ["kill", "setgid", "setuid"],
                  "no_new_privileges": True, "read_only_root": True,
                  "state_left_open": []}
@@ -84,11 +78,10 @@ def test_the_worker_is_confined(worker):
 
 
 def test_nothing_a_child_makes_outlives_its_request(worker):
-    """F42 verify 2 (2026-10-03): the container's own IPC namespace with no
-    /dev/shm, the sysctls that leave a child unable to create SysV or POSIX
-    objects, and a /tmp no child's uid can write. The same values the
-    worker reads from its own process (`state_left_open`) are the ones
-    compose.yml sets, so the file and the check cannot drift apart."""
+    """The container has its own IPC namespace with no /dev/shm, the sysctls that leave a child unable
+    to create SysV or POSIX objects, and a /tmp no child's uid can write. They are the same values the
+    worker reads from its own process (`state_left_open`), so the file and the check cannot drift
+    apart."""
     # `ipc: none`, never `host` or a shared service: the reader keeps
     # scalars as text.
     assert worker["ipc"] == "none"
@@ -122,9 +115,8 @@ def test_the_worker_starts_under_the_compose_files_own_settings(worker, monkeypa
 
 
 def test_the_worker_supervises_children_that_are_users_of_their_own(doc, worker):
-    """F42 review (2026-10-02): root with kill, setgid and setuid only, so
-    each child runs as a uid that is neither root, nor the application,
-    nor shared with another slot; an init to reap what is killed."""
+    """Root with kill, setgid and setuid only, so each child runs as a uid that is neither root, nor
+    the application, nor shared with another slot; an init reaps what is killed."""
     uid, gid = worker["user"].split(":")
     assert (uid, gid) == ("0", "10001")
     assert sorted(worker["cap_add"]) == ["KILL", "SETGID", "SETUID"]
@@ -145,7 +137,7 @@ def test_the_worker_mounts_only_its_socket(worker):
 
 def test_the_worker_is_the_application_image_running_the_worker(doc, worker):
     # The image migrate builds, never pulled (one builder: the note above
-    # x-noctornal-app in compose.yml, and test_g48_image_context).
+    # x-noctornal-app in compose.yml, and test_image_context_and_production_stack).
     assert worker["image"] == doc["services"]["migrate"]["image"]
     assert "build" in doc["services"]["migrate"] and "build" not in worker
     assert worker["pull_policy"] == "never"
@@ -196,12 +188,10 @@ def test_nothing_else_mounts_the_socket(doc):
 
 
 def test_the_image_the_worker_runs_carries_none_of_the_operators_secret_files():
-    """F42 verify 5 (2026-10-03): the worker is the application image
-    (`COPY . /app`), so a secret file the operator keeps beside compose.yml
-    is baked into it unless .dockerignore excludes it, and the worker holds
-    no secret only while that file's mode keeps a child out. Every secret
-    path .gitignore names under infra/production is excluded from the
-    build context, and the tracked templates are not."""
+    """The worker is the application image (`COPY . /app`), so a secret file the operator keeps beside
+    compose.yml is baked into it unless .dockerignore excludes it, and the worker holds no secret only
+    while that file's mode keeps a child out. Every secret path .gitignore names under
+    infra/production is excluded from the build context, and the tracked templates are not."""
     import fnmatch
 
     from test_egress_topology import ROOT

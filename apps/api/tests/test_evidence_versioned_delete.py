@@ -1,45 +1,30 @@
-"""`EvidenceStorage.delete_all_versions` -- written, verified, and since
-2026-09-02 the purge's one destruction path.
+"""`EvidenceStorage.delete_all_versions`, the purge's one destruction path.
 
 ## Why this exists
 
-The evidence bucket is created `--with-lock`, which forces versioning on.
-`remove_object(bucket, key)` with no `version_id` does not remove anything
-on a versioned bucket: it inserts a DELETE MARKER and returns success.
+The evidence bucket is created `--with-lock`, which forces versioning on. `remove_object(bucket, key)` with
+no `version_id` does not remove anything on a versioned bucket: it inserts a DELETE MARKER and returns
+success.
 
-Reproduced against a live MinIO before any of this was written -- an
-object under a COMPLIANCE lock, then `remove_object(key)` returned
-normally, the real version was still listed, and `get_object(version_id)`
-returned the original bytes. So `EvidenceStorage.delete()` reported a
-destruction while still holding the object, `RetentionService` recorded
-`evidence_purged`, and the tombstone -- the record that is supposed to
-outlive the data -- said DELETED.
+Against a live MinIO, an object under a COMPLIANCE lock and then `remove_object(key)` returned normally, the
+real version was still listed, and `get_object(version_id)` returned the original bytes. So
+`EvidenceStorage.delete()` reports a destruction while still holding the object, `RetentionService`
+records `evidence_purged`, and the tombstone, the record that is supposed to outlive the data, says
+DELETED. `retention._purge_evidence` and `ingest._with_raw` each carried the same defect.
 
-That is the third instance of one defect: `retention._purge_evidence` and
-`ingest._with_raw` both reported destructions they had not performed.
+## The guard at the bottom
 
-## The guard at the bottom was INVERTED on 2026-09-02
+The last tests assert that `retention._purge_evidence` is the one production caller of
+`delete_all_versions`, and a second test reads both modules and migration 0032 together: the purge maps the
+three COUNTS and never `outcome`, whose words the tombstone's CHECK would refuse.
 
-Until then the last tests here asserted that NOTHING called
-`delete_all_versions` and that the purge still used `delete()` -- a
-deliberate hold, because wiring it flipped production outcomes and could
-not repair the DELETED tombstones already written for still-locked
-objects. That decision was taken that day (the method's docstring records
-what was decided, item by item). The guard is inverted rather than
-deleted so the pair of facts cannot drift back to "neither is called",
-and a second test reads both modules and migration 0032 together: the
-purge maps the three COUNTS and never `outcome`, whose words the
-tombstone's CHECK would refuse.
+These tests use a STUB client. They must never create a real COMPLIANCE-locked object: that retention
+cannot be shortened, lifted or overridden by any credential, so a test that locks something for a year has
+added a year of storage to the bucket, permanently. The live measurement is
+`tests/test_evidence_lock_live_pg.py`, with locks of seconds; the refusal shape the stub here raises is what
+that file measured.
 
-These tests use a STUB client. They must never create a real
-COMPLIANCE-locked object: that retention cannot be shortened, lifted or
-overridden by any credential, so a test that locks something for a year
-has added a year of storage to the bucket, permanently. The live
-measurement is `tests/test_evidence_lock_live_pg.py`, with locks of
-seconds; the refusal shape the stub here raises is what that file
-measured.
-
-Pure -- no MinIO, no database.
+Pure: no MinIO, no database.
 """
 from __future__ import annotations
 
@@ -61,12 +46,9 @@ class _Version:
         self.is_delete_marker = is_delete_marker
 
 
-#: What MinIO actually says for a COMPLIANCE-locked version, measured
-#: against the live stack 2026-09-02 (`tests/test_evidence_lock_live_pg.py`
-#: re-measures it every run). Until that day this stub refused with a bare
-#: `AccessDenied` and the classifier counted it as a lock -- the same
-#: defect `retention._is_retention_refusal` had, seen from the other side:
-#: a policy denial recorded as a retention lock.
+#: What MinIO says for a COMPLIANCE-locked version, measured against the live stack
+#: (`tests/test_evidence_lock_live_pg.py` re-measures it every run). A bare `AccessDenied` is a policy
+#: denial, which the classifier must not record as a retention lock (`retention._is_retention_refusal`).
 WORM = ("InvalidRequest", "Object is WORM protected and cannot be overwritten")
 
 
@@ -180,12 +162,10 @@ def test_only_versions_of_the_requested_key_are_touched():
 
 
 def test_a_bare_access_denied_is_not_a_lock_and_raises():
-    """What a read-only key, or a bucket policy denying s3:DeleteObject,
-    produces. Until 2026-09-02 the code-only tuple here counted it under
-    `versions_locked`, so the purge recorded LOCKED_UNTIL_RETENTION -- "the
-    bytes will go when a retention expires" -- for an object nothing is
-    retaining. It is neither a deletion nor a lock, so it raises, and the
-    purge counts it as FAILED, named per key."""
+    """What a read-only key, or a bucket policy denying s3:DeleteObject, produces. It is neither a deletion
+    nor a lock, so it raises: counting it under `versions_locked` would record LOCKED_UNTIL_RETENTION ("the
+    bytes will go when a retention expires") for an object nothing is retaining. The purge counts it as
+    FAILED, named per key."""
     stub = _StubClient([_Version("k", "v1")], locked_ids=["v1"],
                        refusal=("AccessDenied", "Access Denied."))
     with pytest.raises(S3Error) as info:
@@ -217,16 +197,8 @@ def _attribute_calls(tree: ast.AST, attr: str) -> list[ast.Call]:
 
 
 def test_delete_all_versions_is_called_by_retention_and_nothing_else():
-    """Inverted 2026-09-02. Until then this asserted that NOTHING called
-    `delete_all_versions` -- deliberately, because wiring it flipped
-    production purge outcomes and could not repair the DELETED tombstones
-    already written for still-locked objects. That decision was taken (the
-    method's docstring records what was decided, item by item), and the
-    guard is inverted rather than deleted so the pair of facts cannot
-    drift back to "neither is called": `retention._purge_evidence` is the
-    one production caller, and a second caller would be a second
-    destruction path nobody reviewed.
-    """
+    """`retention._purge_evidence` is the one production caller of `delete_all_versions`; a second caller
+    would be a second destruction path nobody reviewed."""
     callers = {}
     for path in SRC.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -242,18 +214,13 @@ def test_delete_all_versions_is_called_by_retention_and_nothing_else():
 def test_retention_maps_the_counts_and_never_the_outcome_string():
     """Both modules and the migration, read together.
 
-    `VersionedDeleteResult.outcome` says DESTROYED / NOTHING_TO_DELETE /
-    LOCKED_UNTIL_RETENTION. The tombstone column takes DELETED /
-    LOCKED_UNTIL_RETENTION / FAILED / NOT_APPLICABLE, enforced by a CHECK in
-    migration 0032. Until 2026-09-02 the property's docstring claimed the
-    two vocabularies matched; one word coincided, which is what made the
-    claim look true. Writing `outcome` into the tombstone would fail the
-    CHECK on every successful destruction -- a crash that aborts the purge
-    transaction -- so retention reads the three counts and never the
-    string. This proves the vocabularies really differ (so the rule is not
-    vacuous), that retention's words are exactly the CHECK's, and that the
-    name retention binds the versioned result to is never read for
-    `.outcome`.
+    `VersionedDeleteResult.outcome` says DESTROYED / NOTHING_TO_DELETE / LOCKED_UNTIL_RETENTION. The
+    tombstone column takes DELETED / LOCKED_UNTIL_RETENTION / FAILED / NOT_APPLICABLE, enforced by a CHECK in
+    migration 0032; one word coincides, which makes the two look alike. Writing `outcome` into the tombstone
+    would fail the CHECK on every successful destruction, a crash that aborts the purge transaction, so
+    retention reads the three counts and never the string. This proves the vocabularies really differ (so
+    the rule is not vacuous), that retention's words are exactly the CHECK's, and that the name retention
+    binds the versioned result to is never read for `.outcome`.
     """
     from noctornal_api import retention
     from noctornal_api.evidence import VersionedDeleteResult

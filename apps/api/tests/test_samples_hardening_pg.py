@@ -1,26 +1,15 @@
-"""The Phase 8 criticals from the first adversarial pass, 2026-07-26.
+"""Sample-handling criticals: the label check on `download()` and the encrypted archive.
 
-Phase 8 went through six hostile lenses, then a refutation
-round, which produced nine CRITICAL findings under 1108 passing tests — with two
-distinct root causes:
+1. `download()` must apply the sample's classification, compartments and its case's label. `queue()`
+   filters and `detail()` 404s, so without the check the same caller would be told the sample did not
+   exist and handed its bytes one request later, on the one path in the system that puts working malware
+   on somebody's disk.
 
-  1. **`download()` applied no label check of any kind.** Not the sample's
-     classification, not its compartments, not its case's. `queue()`
-     filters and `detail()` 404s, so the same caller was told the sample
-     did not exist and handed its bytes one request later — on the one
-     path in the system that puts working malware on somebody's disk.
+2. The "encrypted archive" must really be encrypted. Python's `zipfile` cannot write encrypted entries
+   (`setpassword` is decrypt-only), so the archive is built here; a plain ZIP would open with no prompt
+   while the archive comment and a response header told the analyst a password protected it.
 
-  2. **The "encrypted archive" was a plain ZIP.** Python's `zipfile`
-     cannot write encrypted entries (`setpassword` is decrypt-only), so
-     `ARCHIVE_PASSWORD` was defined, exported and referenced by nothing.
-     The entry carried flag bits 0x0000 and opened with no prompt, while
-     the archive comment and a response header both told the analyst a
-     password protected it.
-
-Both are fixed. These tests are the reason they cannot come back.
-
-Env-gated on DATABASE_URL for the ones that need it; the archive tests are
-pure and always run.
+Env-gated on DATABASE_URL for the ones that need it; the archive tests are pure and always run.
 """
 from __future__ import annotations
 
@@ -74,21 +63,14 @@ def test_the_archive_cannot_be_opened_without_the_password():
 
 
 def test_a_wrong_password_never_yields_the_payload():
-    """The 12-byte header's last byte is the high byte of the CRC, which is
-    how a reader recognises a wrong password. Getting that field wrong
-    produces an archive that 'works' and silently yields garbage.
+    """A wrong password NEVER returns the plaintext.
 
-    That check is ONE BYTE, so a wrong password slips past it about once
-    in 256 and the read then fails inside zlib instead of raising "Bad
-    password". This test used to assert only the RuntimeError, which made
-    it fail roughly one run in 350 -- measured here at 0.28% over 5,000
-    trials against a theoretical 0.39%. A test that reddens CI at random
-    teaches people to re-run CI.
-
-    So it asserts the property that is actually guaranteed and is the one
-    that matters: a wrong password NEVER returns the plaintext. Refused
-    outright or decoded to garbage are both correct; handing back the
-    payload would be the security defect, and that is what is checked.
+    The 12-byte header's last byte is the high byte of the CRC, which is how a reader recognises a wrong
+    password. Getting that field wrong produces an archive that 'works' and silently yields garbage. The
+    check is ONE BYTE, so a wrong password slips past it about once in 256 and the read then fails inside
+    zlib instead of raising "Bad password". So the test asserts the guaranteed property, not the
+    RuntimeError: refused outright or decoded to garbage are both correct; handing back the payload would
+    be the security defect.
     """
     zf = _open(archive(PAYLOAD, "ab" * 32))
     zf.setpassword(b"not-the-password")
@@ -175,10 +157,8 @@ def policy(monkeypatch):
 
 
 def _register(conn, compartments):
-    """0059 binds `lab.sample.compartments` to the registry; a submit under
-    an unregistered key is refused by the database, which until
-    2026-09-09 this file only escaped because test_f19_review_pg sorts
-    earlier and registers OP-KESTREL."""
+    """0059 binds `lab.sample.compartments` to the registry; a submit under an unregistered key is
+    refused by the database, so the test registers the keys it uses."""
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -195,9 +175,8 @@ def _submit(conn, store, *, classification="AMBER", compartments=frozenset(),
     conn.execute("UPDATE iam.app_user SET tlp_clearance = 'RED' WHERE id = %s",
                  (who,))
     sample = SampleService(conn, store).submit(
-        # Unique per call. `submit()` deduplicates on content — two
-        # analysts finding the same binary is a finding about the actors,
-        # not a reason for two copies of live malware — so a fixed payload
+        # Unique per call. `submit()` deduplicates on content (two analysts finding the same binary is a
+        # finding about the actors, not a reason for two copies of live malware), so a fixed payload
         # makes the second test in a run fail on the first one's row.
         b"MZ\x90\x00not-really-malware-" + uuid4().bytes,
         submitted_by=who, case_id=case_id,
@@ -209,24 +188,17 @@ def _submit(conn, store, *, classification="AMBER", compartments=frozenset(),
 def _cleanup(conn, sample_id, *user_ids, case_id=None):
     """Remove what can be removed, and leave what must not be.
 
-    `lab.sample_access` is APPEND-ONLY — a trigger raises on DELETE, and
-    docs/11 wants exactly that: a custody ledger you can prune is not one.
-    So a test that downloads a sample cannot delete the sample (the ledger
-    references it), nor the actor (the ledger names them). The rows stay,
-    and that is the system working rather than a leak.
-
-    Third instance of this shape today: `core.purge_tombstone` does the
-    same for a destruction, and `audit.event` for everything. Append-only
-    records outlive their subject BY DESIGN, and any teardown that assumes
-    otherwise fails on a foreign key pointing at a table the test never
-    touched.
+    `lab.sample_access` is APPEND-ONLY: a trigger raises on DELETE, and docs/11 wants exactly that. So a
+    test that downloads a sample cannot delete the sample (the ledger references it), nor the actor (the
+    ledger names them). The rows stay by design. The same holds for `core.purge_tombstone` and
+    `audit.event`: any teardown that assumes otherwise fails on a foreign key pointing at a table the test
+    never touched.
     """
     held = conn.execute(
         "SELECT count(*) FROM lab.sample_access WHERE sample_id = %s",
         (sample_id,)).fetchone()[0]
-    # A held sample's triage run is a queue entry, not a ledger: left QUEUED
-    # it went stale over a long run and failed the readiness tests that
-    # read the whole queue (2026-10-07).
+    # A held sample's triage run is a queue entry, not a ledger: left QUEUED it goes stale over a long run
+    # and fails the readiness tests that read the whole queue.
     conn.execute("DELETE FROM lab.static_run WHERE sample_id = %s "
                  "AND status = 'QUEUED'", (sample_id,))
     if not held:
@@ -255,14 +227,9 @@ def test_download_refuses_to_guess_at_a_clearance(conn):
 @pg
 def test_an_over_classified_sample_does_not_exist_to_the_downloader(
         conn, policy):
-    """The critical, in one test.
-
-    `detail()` 404s an over-classified sample and `download()` used to
-    hand the same caller its bytes one request later. The answer is now
-    the same on both paths, and it is "no such sample" rather than a
-    refusal — a status code must not be an existence oracle for a
-    compartmented case.
-    """
+    """`detail()` 404s an over-classified sample, so `download()` answers the same: "no such sample"
+    rather than a refusal, since a status code must not be an existence oracle for a compartmented
+    case."""
     store = _MemStore()
     sample_id, who = _submit(conn, store, classification="RED",
                              compartments=frozenset({"OP-KESTREL"}))

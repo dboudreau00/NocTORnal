@@ -1,10 +1,7 @@
-"""The console half of sec-compartment-retirement (2026-09-23).
+"""The console half of compartment rename and retirement.
 
-`test_compartment_lifecycle_pg.py` holds the routes; this holds the Admin
-pane to them by reading the shipped static assets, beside
-`test_ui_invariants.py`. Before the fix nothing in app.js called either
-route, because neither existed, and every test here fails on the base
-commit for that reason.
+`test_compartment_lifecycle_pg.py` holds the routes; this holds the Admin pane to them by reading the
+shipped static assets, beside `test_ui_invariants.py`.
 
 Pure: no database, no browser.
 """
@@ -39,10 +36,8 @@ def _code(text: str) -> str:
 
 
 def test_the_admin_pane_has_a_compartments_section():
-    """The Admin pane is split into subpanes (ux16-admin, 2026-09-23), so
-    rename and retire live on the Compartments subpane, under their own
-    heading beside the registry, rather than as a flat section of the
-    pane."""
+    """The Admin pane is split into subpanes, so rename and retire live on the Compartments subpane,
+    under their own heading beside the registry."""
     html = _html()
     pane = html[html.index('id="pane-admin"'):]
     pane = pane[:pane.index("</section>")]
@@ -85,10 +80,8 @@ def test_the_key_is_checked_as_the_server_checks_it():
 
 
 def test_a_rename_redraws_the_account_cards_too():
-    """A rename rewrites the key on every account read into it, so the
-    account cards on the same pane are redrawn with the compartment list
-    rather than left showing the old key (verifier,
-    sec-compartment-retirement, 2026-09-23)."""
+    """A rename rewrites the key on every account read into it, so the account cards on the same pane
+    are redrawn with the compartment list rather than left showing the old key."""
     row = _code(_fn("compartmentKeyRow"))
     assert ("Promise.all([loadCompartmentKeys(), loadAdminUsers()])"
             in row)

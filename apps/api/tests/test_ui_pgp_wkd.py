@@ -1,4 +1,4 @@
-"""Web Key Directory lookups in the console (F10c, comms, 2026-09-24).
+"""Web Key Directory lookups in the console (comms).
 
 The source is offered only when lookups are on and the case's own labels
 let an address out; asking, approving and declining go through the step-up
@@ -56,12 +56,10 @@ def test_asking_and_approving_go_through_step_up():
 
 
 def test_every_lookup_write_goes_through_step_up():
-    """comms.key.lookup and comms.key.lookup.approve are step-up
-    permissions (0090), and all three POST routes need one of them.
-    Decline once called api() bare, so a sign-in older than the
-    window got "re-authentication required" and no identity prompt (F10c,
-    2026-09-24). Every console function that posts to a lookup
-    route wraps that call in withStepUp, including any added later."""
+    """comms.key.lookup and comms.key.lookup.approve are step-up permissions (0090), and all three POST
+    routes need one of them. Every console function that posts to a lookup route wraps that call in
+    withStepUp, including any added later: called bare, a sign-in older than the window gets
+    "re-authentication required" and no identity prompt."""
     js = _js()
     writers = []
     for m in re.finditer(r"^(?:async )?function (\w+)\(", js, flags=re.M):

@@ -274,20 +274,15 @@ class TestMxidNorm:
 
 
 class TestTelegramIdNorm:
-    """CR3 (2026-07-26): the Bot-API encoding is arithmetic, not textual.
-
-    `chat_id = -(10**12 + channel_id)`. The old implementation dropped the
-    characters "100" from the front, which inverts that only for a
-    ten-digit channel id — and the single test here covered exactly that
-    case, so a wrong function stayed green.
-    """
+    """The Bot-API encoding `chat_id = -(10**12 + channel_id)` is decoded arithmetically:
+    stripping a leading "100" as text inverts it only for a ten-digit channel id."""
 
     # NOT a class attribute: a plain function stored on a class becomes a
     # bound method, so `self.N(x)` would pass `self` as the argument.
     N = staticmethod(NORMALISERS["telegram_id_norm"])
 
     def test_user_id_digits(self):
-        # A bare positive is refused (2026-09-11); typed, it is a user.
+        # A bare positive is refused; typed, it is a user.
         assert self.N(" 777000 ") == ""
         assert self.N(" u:777000 ") == "u:777000"
 
@@ -305,9 +300,8 @@ class TestTelegramIdNorm:
         assert self.N("-1012345678901") == "c:12345678901"
 
     def test_a_channel_and_a_user_with_the_same_number_stay_apart(self):
-        """TELEGRAM_ID is is_strong, so a collision here is a merge lead
-        of a channel and a person onto one actor. The bare positive is
-        REFUSED rather than assumed to be the user (2026-09-11)."""
+        """TELEGRAM_ID is strong, so a collision here would be a merge lead joining a
+        channel and a person; a bare positive is refused rather than assumed to be a user."""
         assert self.N("-1001234567890") == "c:1234567890"
         assert self.N("1234567890") == ""
         assert self.N("u:1234567890") != self.N("c:1234567890")
@@ -331,10 +325,9 @@ class TestTelegramIdNorm:
         assert self.N("not a number") == ""
 
     def test_a_bare_positive_is_refused_and_the_reason_names_the_fix(self):
-        """The residual docs/17 F1 carried from 2026-07-26: a bare positive
-        was ASSUMED `u:` on a strong selector, so a channel that reached
-        the normaliser as a bare number merged with a same-numbered user.
-        Refused now, with the sentence every door shows."""
+        """A bare positive is refused, not assumed `u:`, with the sentence every door shows:
+        assumed, a channel given as a bare number would collide on a strong selector with the
+        user of the same number."""
         from noctornal_ontology import refusal
         for bare in ("1234567890", " 1234567890 ", "+1234567890", "12 34"):
             assert self.N(bare) == "", bare

@@ -19,9 +19,7 @@ while [ $# -gt 0 ]; do
     --skip-docker) SKIP_DOCKER=1; shift ;;
     --port)        PORT="${2:?--port needs a number}"; shift 2 ;;
     --port=*)      PORT="${1#*=}"; shift ;;
-    # The header comment and nothing after it. `sed -n '2,12p'` ran past
-    # the block and printed `set -euo pipefail` as part of the usage text,
-    # as install.sh's did (Alpha 6 pre-release check, 2026-09-23).
+    # The header comment and nothing after it: a fixed line range drifts when the header changes.
     -h|--help)     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -70,10 +68,8 @@ printf '  repo: %s\n' "$REPO_ROOT"
 
 step 'Checking the Python environment'
 
-# Every remedy printed below carries -c constraints.txt, the pins the
-# installers, CI and the image install from. Without it pip resolves each
-# >= floor to the newest release, and a developer who follows the remedy
-# word for word runs a stack nobody tested (c3, 2026-09-24).
+# Every remedy printed below carries -c constraints.txt, the pins the installers, CI and the image
+# use. Without it pip resolves each >= floor to the newest release, a stack nobody tested.
 
 if [ ! -x "$PYTHON" ]; then
   fail "no virtual environment at $REPO_ROOT/.venv" \
@@ -83,11 +79,9 @@ if [ ! -x "$PYTHON" ]; then
     '  .venv/bin/python -m pip install -c constraints.txt -e packages/ontology -e apps/api'
 fi
 
-# uvicorn and the two editable packages are what the last step actually needs.
-# numpy, selectolax and pefile are hard dependencies since 2026-09-24: a
-# venv built before then is told to reinstall here, not at the first CONCOR
-# run or forum poll. The optional
-# extras (telegram, yara) are not probed; their absence is a readiness gap.
+# Probe what the API needs, numpy, selectolax and pefile included, so a stale venv is told to
+# reinstall here rather than at the first CONCOR run or forum poll. The optional extras (telegram,
+# yara) are not probed: their absence is a readiness gap.
 if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile' 2>&1)"; then
   printf '%s\n' "$probe" | indent
   fail 'the virtual environment is missing packages the API needs' \
@@ -154,13 +148,9 @@ if [ "$SKIP_DOCKER" -eq 1 ]; then
 else
   [ -f "$COMPOSE_FILE" ] || fail "no compose file at $COMPOSE_FILE"
 
-  # -f rather than a directory change: compose derives the project directory
-  # from the compose file, so the relative volume paths (../db/init) still
-  # resolve, and the caller's working directory is left alone.
-  #
-  # The port list below is the compose file's today. It named 8080 and 4222,
-  # OpenFGA's and NATS's, removed in R13, and left out Mailpit's 1025 (Alpha 6
-  # pre-release check, 2026-09-23).
+  # -f rather than a directory change: compose derives the project directory from the compose file,
+  # so ../db/init still resolves and the caller's working directory is left alone. The port list
+  # below is the one the compose file publishes; a test holds them together.
   if ! docker compose -f "$COMPOSE_FILE" up -d 2>&1 | indent; then
     fail 'docker compose up failed' \
       'Read the output above. Common causes:' \
@@ -213,11 +203,9 @@ if [ -n "${NOCTORNAL_TOTP_KEK:-}" ]; then
   good 'NOCTORNAL_TOTP_KEK already set in this environment'
 fi
 
-# Load the local key store first, then generate only if the key is still
-# missing. An explicitly exported value always wins over the file, which is the
-# usual .env precedence and stops this script overriding a deliberate choice
-# made by whoever launched it. Parsed line by line rather than sourced: the
-# file is data, and a hand-edited line should never execute.
+# Load the local key store first, then generate the key only if it is still missing. An exported
+# value always wins over the file (the usual .env precedence). Parsed line by line, never sourced:
+# the file is data, and a hand-edited line must never execute.
 if [ -f "$ENV_LOCAL" ]; then
   detail "reading $ENV_LOCAL"
   while IFS= read -r line || [ -n "$line" ]; do
@@ -229,22 +217,15 @@ if [ -f "$ENV_LOCAL" ]; then
     value="${line#*=}"
     name="$(printf '%s' "$name" | tr -d '[:space:]')"
     [ -n "$name" ] || continue
-    # Only an identifier is a name. `${!name+x}` below evaluates an array
-    # subscript, so `x[$(cmd)]=1` in a handed-over file ran `cmd` as this user
-    # (2026-10-07: the sibling of infra-9 that install.sh
-    # closed with the same check). Skipped silently, as install.sh does: a name
-    # that is not an identifier is not worth echoing back.
+    # Only an identifier is a name: `${!name+x}` below evaluates an array subscript, so
+    # `x[$(cmd)]=1` in a handed-over file would run `cmd` as this user. Skipped silently, as
+    # install.sh does.
     case "$name" in [!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;; esac
-    # A name that changes how programs start is left out (2026-10-03): this loop is data,
-    # not shell, but it still exported any
-    # identifier, so `PYTHONPATH=./evil`, `PATH=./evilbin`, `LD_PRELOAD=` or
-    # `BASH_ENV=` in a handed-over file ran code as this user in the next
-    # python this script starts. The tools it starts are on the list too
-    # (2026-10-07): `DOCKER_CONFIG` ran a fake compose
-    # plugin as root. Not an allow-list on purpose: a new setting
-    # would silently stop loading. The same list is in release/install.sh,
-    # scripts/_env.py, scripts/launch.ps1 and scripts/open-ui.ps1; a test holds
-    # them together.
+    # A name that changes how programs start is left out: `PYTHONPATH`, `PATH`, `LD_PRELOAD` or
+    # `BASH_ENV` in a handed-over file would run code as this user in the next program this script
+    # starts, and `DOCKER_CONFIG` would run a fake compose plugin as root. A deny-list, because an
+    # allow-list would silently drop a new setting. A test holds this list equal to the ones in
+    # release/install.sh, scripts/_env.py, scripts/launch.ps1 and scripts/open-ui.ps1.
     case "$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')" in
       PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|PSMODULEPATH|BASH_*|LD_*|DYLD_*|PYTHON*|DOCKER_*|COMPOSE_*|GIT_*|PIP_*|NODE_*)
         detail "$name ignored: it changes how programs start (set it in your shell if you mean it)"
@@ -253,15 +234,9 @@ if [ -f "$ENV_LOCAL" ]; then
     value="${value#\"}"; value="${value%\"}"
     value="${value#\'}"; value="${value%\'}"
 
-    # `+x`, not `:-`. A variable that is DEFINED AND EMPTY is a deliberate
-    # choice and the file must not overrule it.
-    #
-    # `[ -n "${!name:-}" ]` treated empty as absent, so an operator who
-    # blanked a variable to turn something OFF had the file's value put
-    # straight back. `SMTP_ALLOW_PLAINTEXT=` is the case that matters:
-    # emptied to stop plaintext SMTP, and silently re-enabled on the next
-    # launch. `db.py` and `scripts/_env.py` both make this distinction
-    # deliberately; the launchers were undoing it.
+    # `+x`, not `:-`: a variable defined and empty is a deliberate choice the file must not overrule
+    # (`SMTP_ALLOW_PLAINTEXT=` emptied to stop plaintext SMTP, say). db.py and scripts/_env.py make
+    # the same distinction.
     if [ -n "${!name+x}" ]; then
       if [ -z "${!name}" ]; then
         detail "$name is set but EMPTY in the environment - file value ignored (blank it back if that was not deliberate)"
@@ -283,13 +258,9 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
     # anything else the operator put in there survives.
     printf 'NOCTORNAL_TOTP_KEK=%s\n' "$generated" >> "$ENV_LOCAL"
   else
-    # The header and the box below say everything the key seals, from
-    # security/sealed.py's SEALED_COLUMNS, and what the ingest pepper
-    # keys if it is kept here too. They said only that users would re-enrol
-    # their authenticators (Alpha 6 pre-release check, 2026-09-23).
-    #
-    # Created under umask 077 (infra-9, 2026-10-03), so the key store is
-    # never readable by anyone else between the write and the chmod below.
+    # The header and the box below list everything the key seals (SEALED_COLUMNS in
+    # security/sealed.py) and what the ingest pepper keys if it is kept here too. Created under
+    # umask 077, so the key store is never readable by anyone else before the chmod below.
     previous_umask="$(umask)"
     umask 077
     cat > "$ENV_LOCAL" <<EOF
@@ -339,10 +310,9 @@ elif [ "$kek_from_environment" -eq 0 ]; then
   good 'TOTP key ready'
 fi
 
-# A collector process (2026-10-02): persona credentials seal under a key of
-# their own. On this machine the API holds it and runs persona acts inline
-# (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector
-# service does. Appended, never replacing anything in the file.
+# Persona credentials seal under a key of their own. On this machine the API holds it and runs
+# persona acts inline (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector service
+# does. Appended, never replacing anything in the file.
 if [ -z "${NOCTORNAL_PERSONA_KEK:-}" ]; then
   generated="$("$PYTHON" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
   printf '%s\n%s\n' \
@@ -359,27 +329,15 @@ fi
 
 step 'Setting the service connection details'
 
-# Dev-only credentials, mirroring infra/docker-compose.yml. They are the only
-# literal secrets allowed in this repo, they only ever address containers on
-# this machine's loopback, and a real deployment supplies all of these from
-# the environment or Vault instead.
-#
-# 127.0.0.1 rather than localhost: the compose file publishes on 127.0.0.1
-# only, so nothing answers on ::1, and a client that tries ::1 first waits
-# about two seconds per connection on a Windows default address order
-# (Alpha 6 pre-release check, 2026-09-23). These apply only where
-# .env.local and the environment say nothing.
+# Dev-only credentials, mirroring infra/docker-compose.yml: the only literal secrets allowed in this
+# repo, addressing containers on this machine's loopback only; a real deployment supplies them from
+# the environment or Vault. They apply only where .env.local and the environment say nothing.
+# 127.0.0.1, not localhost: compose publishes on 127.0.0.1 only, and a client that tries ::1 first
+# can wait about two seconds per connection.
 set_default() {
   local name="$1" value="$2"
-  # Same "defined, not merely non-empty" rule as the .env.local loader
-  # above -- a SECOND implementation of it in the same file, which
-  # disagreed with the first until 2026-08-07.
-  #
-  # It matters most for DATABASE_URL. `db.py` distinguishes set-but-empty
-  # from unset precisely so a blanked DSN produces a refusal instead of a
-  # silent default, and this quietly replaced it with the local
-  # development stack -- the one outcome an operator who blanked it was
-  # trying to prevent.
+  # The same "defined, not merely non-empty" rule as the .env.local loader above. It matters most
+  # for DATABASE_URL, where db.py turns a blanked DSN into a refusal rather than a silent default.
   if [ -z "${!name+x}" ]; then
     export "$name=$value"
     detail "$name set to the local development default"
@@ -395,12 +353,10 @@ set_default MINIO_ENDPOINT   '127.0.0.1:9000'
 set_default MINIO_ACCESS_KEY 'noctornal'
 set_default MINIO_SECRET_KEY 'dev_only_change_me'
 set_default EVIDENCE_BUCKET  'noctornal-evidence'
-# Raw markup of collected forum pages (2026-09-24), without object
-# lock, because it is deleted with its document.
+# Raw markup of collected forum pages, without object lock: it is deleted with its document.
 set_default COLLECT_RAW_BUCKET 'noctornal-collect-raw'
-# A collector process (2026-10-02): there is no collector process on this
-# machine, so persona acts run inside the API, as they always did here.
-# Refused in production.
+# No collector process runs on this machine, so persona acts run inside the API. Refused in
+# production.
 set_default NOCTORNAL_COLLECTOR_INLINE '1'
 
 # ---------------------------------------------------------------------------

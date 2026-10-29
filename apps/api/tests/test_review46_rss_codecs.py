@@ -1,16 +1,12 @@
-"""collection-rss-codec-dos (verification of the review of 2026-10-03).
+"""A feed's declared encoding is read only if it is one a feed may use.
 
-The fix for the RSS DOCTYPE bypass decodes a feed once, and it handed the
-encoding name the feed's author declared to Python's whole codec registry.
-`punycode` decodes in quadratic time, so a feed declaring it held `parse_rss`
-for minutes (a 1 MB body: two minutes; the 16 MiB cap: hours) in the
-collector's own process with no bound, where the base refused it in
-microseconds because expat supports only a few encodings. The declared name
-is now read only if it is in `collection._FEED_CODECS`, and any other is
-refused before it is looked up.
+`parse_rss` decodes a feed once and must not hand the encoding name the feed's author declared to Python's
+whole codec registry. `punycode` decodes in quadratic time, so a feed declaring it would hold `parse_rss`
+for minutes (a 1 MB body: two minutes; the 16 MiB cap: hours) in the collector's own process with no
+bound, where expat refuses all but a few encodings in microseconds. The declared name is read only if it
+is in `collection._FEED_CODECS`, and any other is refused before it is looked up.
 
-These fail without the fix: the punycode feed takes seconds, and the utf-7
-and idna feeds are decoded and parsed.
+Without this, the punycode feed takes seconds, and the utf-7 and idna feeds are decoded and parsed.
 
 No database and no network.
 """
@@ -36,8 +32,8 @@ def _declared(name: str, text: str = BODY) -> str:
 
 @pytest.mark.parametrize("size", [200_000, 2_000_000])
 def test_a_punycode_feed_is_refused_at_once_whatever_its_size(size):
-    """The finding's own reproduction: `-` then bytes, declared punycode.
-    Quadratic before (200 KB took about 2 s, 1 MB about two minutes)."""
+    """`-` then bytes, declared punycode. Quadratic without the refusal (200 KB takes about 2 s, 1 MB about
+    two minutes)."""
     body = b'<?xml version="1.0" encoding="punycode"?><rss/>-' + b"b" * size
     began = time.monotonic()
     with pytest.raises(CollectionError, match=REFUSED):
@@ -51,8 +47,8 @@ def test_a_punycode_feed_is_refused_at_once_whatever_its_size(size):
     "no-such-codec", "mbcs", "oem", "charmap", "hz", "cp437", "cp866",
 ])
 def test_a_clean_feed_declaring_a_codec_outside_the_list_is_refused_unread(declared):
-    """Refused for the NAME, not for what the bytes would have decoded to: a
-    clean feed in utf-7 or idna was decoded and parsed before this."""
+    """Refused for the NAME, not for what the bytes would have decoded to: a clean feed in utf-7 or idna
+    must not be decoded and parsed."""
     with pytest.raises(CollectionError, match=REFUSED):
         parse_rss(_declared(declared, PLAIN).encode("ascii"))
 

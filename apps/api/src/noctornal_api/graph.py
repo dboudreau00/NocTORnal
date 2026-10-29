@@ -1,16 +1,10 @@
-"""The graph write path — the ONLY sanctioned way to create nodes and edges.
+"""The graph write path: the only sanctioned way to create nodes and edges.
 
-Every create_* here writes the graph element and at least one supporting
-assertion in a SINGLE transaction (invariant 1 / docs/01: nothing is a
-fact). The database's deferred constraint triggers (migration 0022) are
-the guarantee; this service is the ergonomic, atomic API on top. If the
-assertion fails to insert — e.g. an inference basis with no rationale
-(CHECK assertion_inference_needs_rationale) — the whole transaction rolls
-back and no orphan element remains.
-
-Connections are autocommit (db.connect); each create_* opens one explicit
-transaction so the element + assertion commit together and the deferred
-trigger validates at that commit.
+Every create_* writes the element and at least one supporting assertion in a single transaction
+(invariant 1 / docs/01: nothing is a fact), so a failing assertion insert (for example CHECK
+assertion_inference_needs_rationale) rolls everything back and leaves no orphan. The deferred constraint
+triggers (migration 0022) are the guarantee. Connections are autocommit (db.connect), so each create_*
+opens its own transaction and the triggers validate at its commit.
 """
 from __future__ import annotations
 
@@ -56,37 +50,24 @@ class ClaimNotDatable(GraphWriteError):
 def _write_error(exc: psycopg.Error) -> GraphWriteError:
     """Wrap a database failure without copying its text into the message.
 
-    Eight sites in this module raised `GraphWriteError(str(exc))`, and
-    `str()` on a psycopg error is the full server message: the constraint
-    name, which describes the schema, and the `DETAIL:` line, which echoes
-    the offending column VALUE. On a real deployment that value is case
-    data -- a node label, an analyst's real name, a selector.
+    `str()` on a psycopg error is the full server message: the constraint name, which describes the
+    schema, and the `DETAIL:` line, which echoes the offending column value (case data such as a node
+    label, a real name or a selector). `errors.safe_detail` strips it at the HTTP boundary, but logs, a
+    stored `error_detail` column and scripts read the string too, so it is kept out of the message.
 
-    `errors.safe_detail` walks `__cause__` and replaces this at the HTTP
-    boundary, so client responses were already covered by the time this
-    was written. What it does not cover is every OTHER reader of the
-    string: a log line, a stored `error_detail` column, a `str(exc)` in a
-    script, a future caller who has no idea the message is tainted. The
-    text should not be in the message in the first place.
-
-    The exception CLASS is kept, because `UniqueViolation` and
-    `ForeignKeyViolation` are genuinely different problems and neither
-    name discloses anything about the data. `raise ... from exc` at every
-    call site keeps the real error on `__cause__`, so a developer still
-    gets the whole thing in a traceback and `safe_detail` still finds it.
+    The exception class is kept (`UniqueViolation` and `ForeignKeyViolation` disclose nothing about the
+    data). `raise ... from exc` at each call site keeps the real error on `__cause__` for tracebacks and
+    `safe_detail`.
     """
     return GraphWriteError(
         f"the database refused this write ({type(exc).__name__})")
 
 
 def _refuse_credential_attrs(attrs: dict | None) -> None:
-    """Refuse an entity whose `attrs.raw_value` or `attrs.value` (the
-    selector as it was written, copied there by an accepted proposal)
-    carries a URL's password or token. Every path that writes it should have redacted it first; this
-    is the one writer, so a path that did not is refused rather than
-    recorded (graph-url-selector-keeps-credentials, 2026-10-03, verify
-    round: a lab extraction's raw value reached `core.node.attrs`). The
-    message names no value."""
+    """Refuse an entity whose `attrs.raw_value` or `attrs.value` (the selector as written, copied there
+    by an accepted proposal) carries a URL's password or token. Every path that writes it should have
+    redacted it first; this is the one writer, so a path that did not is refused rather than recorded.
+    The message names no value."""
     for key in ("raw_value", "value"):
         found = (attrs or {}).get(key)
         if isinstance(found, str) and redact_url_credentials(found) != found:
@@ -115,13 +96,10 @@ def _is_real_name_key(key: object) -> bool:
 def _refuse_real_name(node_type: str, attrs: dict | None) -> None:
     """Refuse a `real_name` among an IDENTITY's attributes, at any depth.
 
-    Invariant 2 (CONVENTIONS, docs/01): a handle is not a person, and
-    "never add a real_name to IDENTITY". The schema cannot say so, because
-    `core.node.attrs` is free-form jsonb, and this is the one writer, so the
-    graph service said nothing until 2026-10-08 (docs/17, "`real_name` on an
-    identity"). A PERSON may carry one; an IDENTITY is tied to a PERSON by
-    `ATTRIBUTED_TO`. Walks the attributes without recursion, so a deeply
-    nested object cannot exhaust the stack. The message names no value."""
+    Invariant 2 (CONVENTIONS, docs/01): a handle is not a person. The schema cannot say so, because
+    `core.node.attrs` is free-form jsonb, and this is the one writer. A PERSON may carry one; an IDENTITY
+    is tied to a PERSON by `ATTRIBUTED_TO`. Walks the attributes without recursion, so a deeply nested
+    object cannot exhaust the stack. The message names no value."""
     if node_type != "IDENTITY" or not attrs:
         return
     pending: list[object] = [attrs]
@@ -141,32 +119,25 @@ def _refuse_real_name(node_type: str, attrs: dict | None) -> None:
 #: enum remains the source of truth and rejects anything else regardless.
 _CONFIDENCE = frozenset({"LOW", "MODERATE", "HIGH"})
 
-#: The review states a person may put a tie in (gap-tie-review and ux05
-#: review-state-never-leaves-proposed, 2026-09-23). ACCEPTED and DISPUTED
-#: are the two dispositions; PROPOSED reopens one. The other two values of
-#: `core.review_state` are refused on purpose: a REJECTED tie that stays in
-#: the live graph says two opposite things at once (the remedy for a wrong
-#: tie is Retire, or retracting the claims it rests on), and SUPERSEDED
-#: belongs to the model's own history, not to a reviewer's hand.
+#: The review states a person may put a tie in. ACCEPTED and DISPUTED are the two dispositions;
+#: PROPOSED reopens one. REJECTED is refused on purpose (a rejected tie left in the live graph says two
+#: opposite things; the remedy is Retire, or retracting the claims it rests on) and SUPERSEDED belongs to
+#: the model's own history, not to a reviewer.
 REVIEW_STATES = ("ACCEPTED", "DISPUTED", "PROPOSED")
 
-#: The refusal of a retirement over material above the caller, kept in one
-#: place since 2026-10-03 because a second guard (a live merge into the
-#: entity whose merged side the caller cannot see) must answer in exactly
-#: these words, so the two cannot be told apart. This is the sentence under
-#: PRESENCE and COUNT; `hidden_ties_refusal` chooses between it and the one
-#: below.
+#: The refusal of a retirement over material above the caller. A second guard (a live merge into the
+#: entity whose merged side the caller cannot see) must answer in exactly these words, so the two cannot
+#: be told apart. This is the sentence under PRESENCE and COUNT; `hidden_ties_refusal` chooses between it
+#: and the one below.
 HIDDEN_TIES_REFUSAL = (
     "this entity carries ties that are above your clearance or "
     "outside your compartments. Retiring it would remove them "
     "too, so the whole operation is refused rather than done "
     "half-way. Someone cleared for those ties has to do it.")
 
-#: The same refusal under a case whose `withheld_disclosure` is NONE (0030).
-#: That case has chosen not to say that anything is withheld, so the sentence
-#: names no tie, no clearance, no compartment and no reason: it reads as any
-#: refusal of an act that was not done, and nothing is retired (owner
-#: decision, 2026-10-08). Modelled on a refused case-hold lift under NONE
+#: The same refusal under a case whose `withheld_disclosure` is NONE (0030). That case chooses not to say
+#: that anything is withheld, so the sentence names no tie, clearance, compartment or reason and reads as
+#: any refusal of an act that was not done. Modelled on a refused case-hold lift under NONE
 #: (`RetentionService._lift_refusal`).
 HIDDEN_TIES_REFUSAL_NONE = (
     "this entity was not retired and nothing was changed. If it should be "
@@ -174,15 +145,13 @@ HIDDEN_TIES_REFUSAL_NONE = (
 
 
 def hidden_ties_refusal(conn: psycopg.Connection, case_id: UUID) -> str:
-    """What a retirement refused over material the caller cannot see says,
-    by the case's `withheld_disclosure` (migration 0030): today's sentence
-    under PRESENCE and COUNT, `HIDDEN_TIES_REFUSAL_NONE` under NONE.
+    """What a retirement refused over material the caller cannot see says, by the case's
+    `withheld_disclosure` (migration 0030): `HIDDEN_TIES_REFUSAL` under PRESENCE and COUNT,
+    `HIDDEN_TIES_REFUSAL_NONE` under NONE.
 
-    The setting is read as a lock fact (`iam.case_facts`), which answers for
-    a case whose row the caller's own connection cannot read. A mode that
-    cannot be read is NONE: when it is unknown, say nothing. Both guards that
-    refuse in these words call this, so under every mode they stay one
-    answer."""
+    The setting is read as a lock fact (`iam.case_facts`), which answers for a case whose row the caller's
+    connection cannot read. A mode that cannot be read is NONE: when it is unknown, say nothing. Both
+    guards that refuse in these words call this, so they stay one answer."""
     row = conn.execute("SELECT withheld_disclosure FROM iam.case_facts(%s)",
                        (case_id,)).fetchone()
     if row is not None and row[0] in ("PRESENCE", "COUNT"):
@@ -196,14 +165,11 @@ MACHINE_BASIS = "AUTOMATED_INFERENCE"
 
 
 def _outvoted(now: str, wanted: str, higher: list[tuple]) -> str:
-    """The 409 text for a correction the rule would ignore, naming the
-    claims that stop it so the analyst knows which card to retract.
+    """The 409 text for a correction the rule would ignore, naming the claims that stop it so the analyst
+    knows which card to retract.
 
-    `higher` is (is the caller's own, recorded_at, is a confidence
-    correction) per live claim that grades the tie above `wanted`, newest
-    first. Added in the fix round of 2026-09-23: the re-verifier found the
-    old text said only "a live assertion", so an analyst whose own earlier
-    correction was in the way was not told it was theirs.
+    `higher` is (is the caller's own, recorded_at, is a confidence correction) per live claim that grades
+    the tie above `wanted`, newest first, so the text can say when the claim in the way is the caller's own.
     """
     def one(mine: bool, at: datetime, is_correction: bool) -> str:
         kind = "correction" if is_correction else "claim"
@@ -219,10 +185,8 @@ def _outvoted(now: str, wanted: str, higher: list[tuple]) -> str:
     # shared tie_grade should make impossible; say what is known anyway.
     why = (f"{claims} it above {wanted} ({', '.join(named)})" if n
            else f"a live claim grades it above {wanted}")
-    # The last sentence names the console's control since the final review
-    # (C14, 2026-09-23): it used to prescribe an assertion the console had
-    # no way to add, so the only route an analyst could follow was retract
-    # then correct, which left the tie resting on an ungraded correction.
+    # The last sentence names the console's control (Add a claim), so the analyst can keep the tie graded
+    # and evidenced before retracting.
     return (
         f"This tie stays {now}: {why}. A tie's confidence is the highest grade "
         f"among the live claims about it, so a correction cannot lower it "
@@ -235,16 +199,14 @@ def _outvoted(now: str, wanted: str, higher: list[tuple]) -> str:
         f"one takes it out of the live graph.")
 
 
-# Admiralty + ICD-203 grading and basis, mirroring core enums. Kept as
-# strings; the DB enums are the source of truth and reject anything else.
+# Admiralty + ICD-203 grading and basis, mirroring core enums. Kept as strings; the DB enums are the
+# source of truth and reject anything else.
 #
-# The F / 6 / LOW defaults below are for in-process FIXTURES only (the test
-# suite builds hundreds of throwaway claims with them). No product path
-# reaches them: the HTTP bodies require all four grading fields
-# (routers/graph.py AssertionBody, gap-api-grade-required, 2026-09-23),
-# proposal acceptance grades its AUTOMATED_INFERENCE claims explicitly, and
-# the seeders grade every claim they write. test_api_grade_required.py
-# fails any AssertionInput built outside the tests without all three.
+# The F / 6 / LOW defaults below are for in-process fixtures only (the test suite builds hundreds of
+# throwaway claims with them). No product path reaches them: the HTTP bodies require all four grading
+# fields (routers/graph.py AssertionBody), proposal acceptance grades its AUTOMATED_INFERENCE claims
+# explicitly, and the seeders grade every claim they write. test_api_grade_required.py fails any
+# AssertionInput built outside the tests without all three.
 @dataclass(frozen=True)
 class AssertionInput:
     basis: str                 # DIRECT_OBSERVATION | ANALYST_INFERENCE | ...
@@ -260,19 +222,15 @@ class AssertionInput:
     observed_at: datetime | None = None
     claim_path: str | None = None      # e.g. 'attrs.role' for a node attribute
     claim_value: dict | None = None    # jsonb
-    # The lookup answer an accepted claim rests on (F15.3, 2026-09-24;
-    # migration 0100). AUTOMATED_INFERENCE only, by a CHECK.
+    # The lookup answer an accepted claim rests on (migration 0100). AUTOMATED_INFERENCE only, by a CHECK.
     lookup_result_id: UUID | None = None
-    # The claim this one replaces (migration 0131, 2026-10-02). Written only
-    # by `supersede_assertion`, which stamps the replaced row in the same
-    # transaction; the database refuses one in another case, about another
+    # The claim this one replaces (migration 0131). Written only by `supersede_assertion`, which stamps
+    # the replaced row in the same transaction; the database refuses one in another case, about another
     # element, or already withdrawn or replaced.
     supersedes_id: UUID | None = None
-    # On a correction, the value of each field it changes as the element
-    # held it just before (migration 0136). Set by `update_node` and
-    # `update_edge` from the row they lock, never by a caller, so that
-    # retracting the correction can restore the supported value
-    # (graph-retracted-correction-stays-in-force, 2026-10-03).
+    # On a correction, the value of each field it changes as the element held it just before (migration
+    # 0136). Set by `update_node` and `update_edge` from the row they lock, never by a caller, so that
+    # retracting the correction can restore the supported value.
     prior_value: dict | None = None
 
 
@@ -287,11 +245,9 @@ class _Keep:
 #: Passed for `valid_to` when the correction does not change it.
 KEEP = _Keep()
 
-#: The fields a correction can change, as `routers.read.CORRECTION_FIELDS`
-#: names them (a test holds the two equal), and per element the ones a
-#: retraction restores. `confidence` is not restored by hand: the tie's
-#: confidence is derived from its live claims by the 0064 trigger, so
-#: retracting a re-grade already moves it.
+#: The fields a correction can change, as `routers.read.CORRECTION_FIELDS` names them (a test holds the
+#: two equal), and per element the ones a retraction restores. `confidence` is not restored by hand: the
+#: 0064 trigger derives it from the live claims.
 CORRECTION_KEYS = frozenset({"label", "attrs", "weight", "confidence",
                              "valid_to"})
 RESTORED_FIELDS = {"node": ("label", "attrs", "valid_to"),
@@ -369,30 +325,15 @@ class GraphWriteService:
     ) -> UUID:
         """Create an edge and its founding assertion, atomically.
 
-        **`review` is born from who is speaking** (ux05 review-state-never-
-        leaves-proposed, 2026-09-23). The column defaulted to PROPOSED and
-        this INSERT never set it, so an analyst's own direct observation,
-        and a suggestion they had already accepted in Triage, both read as
-        an unreviewed machine proposal forever, and the canvas ringed every
-        tie in every case. Invariant 3 is "machines propose, analysts
-        dispose", so a tie whose founding claim is a machine's
-        (`MACHINE_BASIS`) is born PROPOSED and waits for a person, and a tie
-        a person asserts is born ACCEPTED: there is nothing to dispose of.
-        A caller that has just disposed of a machine's suggestion says so
-        explicitly (`ProposalService.accept` passes ACCEPTED), because its
-        claim still carries the machine's basis, and it must: docs/03 wants
-        inference told from observation forever.
+        `review` follows who is speaking. A tie whose founding claim is a machine's (`MACHINE_BASIS`) is
+        born PROPOSED and waits for a person (invariant 3: machines propose, analysts dispose); a tie a
+        person asserts is born ACCEPTED. A caller that has just accepted a machine's suggestion passes
+        ACCEPTED explicitly (`ProposalService.accept`), because the claim keeps the machine's basis
+        (docs/03: inference stays distinguishable from observation).
 
-        THERE IS NO `confidence` PARAMETER, and that is the fix for ux05
-        two-disagreeing-confidences and ux06 edge-confidence-not-stored
-        (2026-09-22). There used to be one, defaulting to LOW, and
-        `POST /edges` never passed it: every tie an analyst graded HIGH was
-        stored, drawn and filtered as LOW while its assertion said HIGH.
-        Two parameters for one fact disagree, so there is now one. A tie's
-        confidence is its assertions' (`core.tie_confidence`, migration
-        0064), the row is born with the founding assertion's grade, and
-        the 0064 triggers keep it there as assertions are added and
-        retracted.
+        There is no `confidence` parameter: a tie's confidence is its assertions' (`core.tie_confidence`,
+        migration 0064). The row is born with the founding assertion's grade and the 0064 triggers keep it
+        in step as assertions are added and retracted.
         """
         if review is None:
             review = "PROPOSED" if assertion.basis == MACHINE_BASIS else "ACCEPTED"
@@ -433,25 +374,14 @@ class GraphWriteService:
 
     # -- correcting and retiring -----------------------------------------
     #
-    # Added 2026-07-26. `graph.node.update`, `graph.node.delete` and
-    # `graph.edge.update` were seeded as permissions in 0017 and granted in
-    # 0021, and nothing had ever checked them, because none of this
-    # existed. A mistyped node label was permanent.
+    # Every one of these requires an assertion (invariant 1 applied to the change itself): "we corrected
+    # the label" is a claim about the world and needs a basis. The original assertion stays, retracted or
+    # not, so the sequence of assertions is the audit of what this element has been called.
     #
-    # EVERY ONE OF THESE REQUIRES AN ASSERTION. That is invariant 1 applied
-    # to the change itself, not just to the original: "we corrected the
-    # label" is a claim about the world and needs a basis like any other.
-    # It is also what preserves history — the original assertion stays,
-    # retracted or not, so the sequence of assertions IS the audit of what
-    # this element has been called.
-    #
-    # CLASSIFICATION AND COMPARTMENTS ARE DELIBERATELY NOT EDITABLE HERE.
-    # Re-labelling an element's TLP changes who can see it and whether it
-    # may leave the platform — that is an egress decision (invariant 8), not
-    # a typo fix, and folding it into the same call as "correct the
-    # spelling" would let a routine edit silently widen distribution. If it
-    # is wanted it needs its own verb, its own audit action and probably
-    # step-up.
+    # Classification and compartments are deliberately not editable here. Re-labelling an element's TLP
+    # changes who can see it and whether it may leave the platform (an egress decision, invariant 8), and
+    # folding it into a routine edit would silently widen distribution. It needs its own verb, audit
+    # action and probably step-up.
 
     def update_node(
         self,
@@ -465,38 +395,26 @@ class GraphWriteService:
         clearance: str | None = None,
         compartments: frozenset[str] | list[str] = (),
     ) -> UUID | None:
-        """Correct a node's label, attributes and/or end date, with a
-        reason. Returns another live entity that already holds the
-        corrected label as its selector (a merge lead), or None.
+        """Correct a node's label, attributes and/or end date, with a reason. Returns another live entity
+        that already holds the corrected label as its selector (a merge lead), or None.
 
-        `clearance` and `compartments` are the caller's. They bound which
-        index rows a label correction may be validated against, so a value
-        held above the caller reads as held by nobody
-        (`SelectorStore.follow_label`). A request names them; without them
-        the lookup is not made.
+        `clearance` and `compartments` are the caller's. They bound which index rows a label correction
+        may be validated against, so a value held above the caller reads as held by nobody
+        (`SelectorStore.follow_label`). Without them the lookup is not made.
 
-        `case_id` is checked, not trusted: the caller supplies both, and a
-        node id from another case must not be editable by passing the
-        caller's own case. Same-case verification on caller-supplied ids is
-        a defect this codebase has already had once (F-series review).
+        `case_id` is checked, not trusted: a node id from another case must not be editable by passing
+        the caller's own case.
 
-        There is deliberately no `updated_by`: the actor is
-        `assertion.created_by`. Two parameters for one fact can disagree,
-        and then the audit trail and the assertion name different people.
+        There is deliberately no `updated_by`: the actor is `assertion.created_by`, so the audit trail
+        and the assertion cannot name different people.
 
-        The claim records the values it replaces (`prior_value`, 0136), read
-        from the row it locks, so retracting it restores what the remaining
-        claims support (graph-retracted-correction-stays-in-force,
-        2026-10-03). `valid_to` (KEEP to leave it, None to clear it) says
-        the entity stopped being true at that moment, the non-destructive
-        alternative to retiring it (graph-valid-to-cannot-be-set-after,
-        2026-10-03). A corrected label of an entity whose label IS its
-        selector moves the selector index with it, refused with the
-        ontology's reason when it is not a selector of that type
-        (graph-selector-index-drift, 2026-10-03). Attributes that put a
-        `real_name` on a persona are refused, as at creation (invariant 2,
-        `_refuse_real_name`); a correction that leaves it out is how one
-        written before then is taken off.
+        The claim records the values it replaces (`prior_value`, 0136), read from the row it locks, so
+        retracting it restores what the remaining claims support. `valid_to` (KEEP to leave it, None to
+        clear it) says the entity stopped being true at that moment, the non-destructive alternative to
+        retiring it. A corrected label of an entity whose label is its selector moves the selector index
+        with it, and is refused with the ontology's reason when it is not a selector of that type.
+        Attributes that put a `real_name` on a persona are refused, as at creation (invariant 2,
+        `_refuse_real_name`); a correction that leaves it out removes one already present.
         """
         if label is None and attrs is None and valid_to is KEEP:
             raise GraphWriteError(
@@ -506,11 +424,10 @@ class GraphWriteService:
         _refuse_credential_attrs(attrs)
         try:
             with self._c.transaction():
-                # The values this correction replaces are read from the row
-                # it locks, so a concurrent correction cannot slip between
-                # the read and the write. NO KEY UPDATE, the lock the
-                # UPDATE below takes anyway, so an assertion being added to
-                # this entity (a key-share lock) is not made to wait.
+                # The values this correction replaces are read from the row it locks, so a concurrent
+                # correction cannot slip between the read and the write. NO KEY UPDATE is the lock the
+                # UPDATE below takes anyway, so an assertion being added to this entity (a key-share
+                # lock) does not wait.
                 old = self._c.execute(
                     """SELECT label, attrs, valid_from, valid_to, node_type
                          FROM core.node
@@ -585,62 +502,33 @@ class GraphWriteService:
     ) -> None:
         """Correct an edge's weight, confidence, attributes and/or end date.
 
-        As `update_node`, the claim records the values it replaces
-        (`prior_value`) from the row it locks, and `valid_to` (KEEP to
-        leave it, None to clear it) is the date the tie stopped being true
-        (review 2026-10-03).
+        As `update_node`: the claim records the values it replaces (`prior_value`) from the row it locks,
+        and `valid_to` (KEEP to leave it, None to clear it) is the date the tie stopped being true.
 
-        `sign` is NOT editable: flipping a vouch into an accusation is not a
-        correction, it is a different claim about the relationship, and the
-        balance arithmetic in `analytics.py` would silently re-derive every
-        triad from it. Record the opposing claim as its own edge — the model
-        represents disagreement without forcing consensus (docs/01), which
-        is the whole reason `add_assertion` exists.
+        `sign` and `edge_type` are not editable. Flipping a vouch into an accusation is a different claim
+        (record the opposing claim as its own edge, docs/01), and the balance arithmetic in `analytics.py`
+        would re-derive every triad from it. `edge_type` drives ontology validation and `is_social_tie`,
+        so changing it in place would bypass the 0016 endpoint-type trigger.
 
-        `edge_type` is not editable either, for the same reason plus a
-        mechanical one: the type drives ontology validation and
-        `is_social_tie`, so changing it in place would bypass the 0016
-        trigger that checks endpoint types against the ontology.
+        `confidence` is not written to the edge row (migration 0064): a tie's confidence is the highest
+        among its live claims, so a re-grade is an assertion, graded at the stated value, and the 0064
+        trigger derives the tie from it. A correction to `weight` or `attrs` alone does not move the tie
+        (`core.tie_confidence`).
 
-        **`confidence` is not written to the edge row**, since migration
-        0064 (ux05 two-disagreeing-confidences, 2026-09-22). A tie's
-        confidence is the highest among its live claims about the tie, so
-        a re-grade IS an assertion: the correction is recorded graded at
-        the value it states, and the 0064 trigger derives the tie from it.
-        The old path wrote the column and attached an assertion graded LOW,
-        which started a new disagreement with every correction. A
-        correction to `weight` or `attrs` alone is a claim about that
-        field, and its grade does not move the tie (`core.tie_confidence`).
+        Raising a tie always works. Lowering one beneath a claim that is still live is refused rather than
+        recorded and quietly outvoted (`TieConfidenceConflict`, whose text names the claims in the way).
+        The remedy is to withdraw the claim that grades the tie higher, with a reason. To keep the tie
+        graded at the lower grade, add that claim first (`add_assertion`, the console's Add a claim),
+        because retracting first takes the tie out of the live graph when nothing else supports it. An
+        analyst's earlier correction is not superseded silently: invariant 5 makes a correction a
+        retraction plus a new assertion, and a retraction carries a reason.
 
-        Raising a tie therefore always works. LOWERING one beneath a claim
-        that is still live cannot, because that claim still grades it, and
-        a correction the rule would ignore is refused rather than recorded
-        and quietly outvoted (`TieConfidenceConflict`, whose text names the
-        claims in the way). The remedy is retraction: withdraw the claim
-        that grades the tie higher, with the reason, and the tie drops.
-        To keep the tie graded and evidenced at the lower grade, add that
-        claim first (`add_assertion`, the console's Add a claim; final
-        review C14, 2026-09-23), since retracting first takes the tie out
-        of the live graph whenever nothing else supports it. (A correction
-        also used to be recorded at the HTTP API's ungraded defaults; its
-        grading is required since gap-api-grade-required, 2026-09-23.)
-        That holds for the analyst's own earlier correction too. It is not
-        superseded automatically, because invariant 5 as decided on
-        2026-09-09 makes a correction "a retraction plus a new assertion",
-        and a retraction carries a reason that a silent supersession would
-        not.
-
-        **The refusal is decided by the rule, after the write, inside the
-        transaction** (fix round, 2026-09-23). The correction is recorded,
-        the 0064 trigger derives the tie, and if the tie is not at the
-        value the correction states, the transaction is rolled back and
-        nothing survives. So the check cannot disagree with the rule, and
-        there is no second copy of the enum's order in Python. The edge is
-        locked first, in a statement of its own, for the reason
-        `core.sync_tie_confidence` gives: the old single statement,
-        `SELECT tie_confidence(...) ... FOR UPDATE`, waited behind a
-        concurrent retraction and then answered from the snapshot it had
-        started with, refusing a correction the committed state allowed.
+        The refusal is decided by the rule, after the write, inside the transaction: the 0064 trigger
+        derives the tie, and if it is not at the stated value the transaction rolls back. The check cannot
+        disagree with the rule, and Python holds no second copy of the enum's order. The edge is locked
+        first, in its own statement (see `core.sync_tie_confidence`): a single
+        `SELECT tie_confidence(...) ... FOR UPDATE` waits behind a concurrent retraction and then answers
+        from its older snapshot.
         """
         if (weight is None and confidence is None and attrs is None
                 and valid_to is KEEP):
@@ -708,15 +596,13 @@ class GraphWriteService:
 
     def _refuse_if_outvoted(self, edge_id: UUID, confidence: str,
                             by: UUID | None) -> None:
-        """Raise `TieConfidenceConflict` if the correction just written did
-        not move the tie to the value it states. Called inside
-        `update_edge`'s transaction, after the write, with the edge locked,
-        so raising rolls the correction back.
+        """Raise `TieConfidenceConflict` if the correction just written did not move the tie to the value
+        it states. Called inside `update_edge`'s transaction, after the write, with the edge locked, so
+        raising rolls the correction back.
 
-        The tie's value is the column the 0064 trigger has just derived;
-        the claims named in the refusal are chosen by `core.tie_grade`, the
-        same function the rule is built from, so the text cannot count a
-        claim the rule ignores (a weight fix, say) or miss one it counts.
+        The tie's value is the column the 0064 trigger has just derived; the claims named in the refusal
+        come from `core.tie_grade`, the function the rule is built from, so the text cannot count a claim
+        the rule ignores (a weight fix, say) or miss one it counts.
         """
         now = self._c.execute(
             "SELECT confidence::text FROM core.edge WHERE id = %s", (edge_id,)
@@ -747,29 +633,17 @@ class GraphWriteService:
     ) -> int:
         """Retire a node and every live edge touching it. Returns the edge count.
 
-        NOTHING IS DESTROYED. `deleted_at` is what every read path in
-        `projections.py` already filters on, and both tables carry partial
-        indexes `WHERE deleted_at IS NULL` — the mechanism was fully built
-        and simply had no writer.
+        Nothing is destroyed: `deleted_at` is what every read path in `projections.py` filters on. It is
+        not `valid_to`, which is temporal validity (the thing stopped being true) and would rewrite what
+        the case looked like last week (invariant 5).
 
-        Not `valid_to`: that is temporal validity, meaning the thing stopped
-        being true in the world, and an as-of query into the past must still
-        show it. Retiring via `valid_to` would silently rewrite what the case
-        looked like last week (invariant 5).
+        The incident edges go too, in the same transaction. The projection constrains edges to the visible
+        node set, so a live edge to a retired node would vanish from the sociogram while staying live in
+        the table, visible to a path query and counted by anything reading `core.edge` directly.
 
-        **The incident edges go too, in the same transaction.** The
-        projection constrains edges to the visible node set
-        (`src_node_id = ANY(ids) AND dst_node_id = ANY(ids)`), so a live
-        edge to a retired node would vanish from the sociogram while
-        remaining live in the table — visible to a path query, invisible on
-        the canvas, and counted by anything reading `core.edge` directly.
-        Retiring them explicitly keeps the table honest rather than relying
-        on every future reader to re-derive the same exclusion.
-
-        **And it is refused outright if any of those ties is above the
-        caller's clearance** — see `_refuse_if_ties_above_clearance`. The
-        router gates the NODE; without this the cascade wrote past the
-        caller's ceiling and then reported the count back to them.
+        Refused outright if any of those ties is above the caller's clearance (see
+        `_refuse_if_ties_above_clearance`): the router gates the node, and without this the cascade would
+        write past the caller's ceiling and report the count back.
         """
         self._refuse_if_ties_above_clearance(
             node_id, case_id, clearance, compartments)
@@ -793,10 +667,8 @@ class GraphWriteService:
                           AND (src_node_id = %s OR dst_node_id = %s)""",
                     (at, deleted_by, case_id, node_id, node_id),
                 )
-                # Its selectors go free in the same transaction, so the
-                # entity recorded in its place holds them and the index
-                # stops pointing at a retired one (graph-selector-index-
-                # drift, 2026-10-03).
+                # Its selectors go free in the same transaction, so the entity recorded in its place holds
+                # them and the index stops pointing at a retired one.
                 SelectorStore(self._c).release_node(case_id=case_id,
                                                     node_id=node_id,
                                                     label=retired[0])
@@ -810,58 +682,32 @@ class GraphWriteService:
         self, node_id: UUID, case_id: UUID,
         clearance: str, compartments: frozenset[str] | list[str],
     ) -> None:
-        """Refuse the retirement if this node carries a tie the caller
-        cannot see. Called BEFORE anything is written.
+        """Refuse the retirement if this node carries a tie the caller cannot see. Called before anything
+        is written.
 
-        ## Why refusing beats the two obvious alternatives
+        The router gates the node (`_gate_for_change` runs `authorize_object` on the node's own
+        classification and compartments), but the cascade would otherwise retire every higher-classified
+        edge touching it, and the returned `edges_retired` count would tell the caller how many existed: a
+        write past the caller's clearance and a counting oracle. Retiring only the visible edges would
+        leave a live edge pointing at a retired node, live in the table to anyone cleared for it. Not
+        reporting the count would leave the unauthorised write. So the operation is refused.
 
-        The router gates the NODE properly — `_gate_for_change` runs
-        `authorize_object` against the node's own classification and
-        compartments. The cascade below did not, so an AMBER-cleared
-        analyst retiring a node also retired every RED edge touching it,
-        and the returned `edges_retired` count then told them how many RED
-        edges existed. Two defects in one statement: a write past the
-        caller's clearance, and a counting oracle over material they are
-        refused elsewhere by design.
-
-        RETIRING ONLY THE VISIBLE EDGES would fix the disclosure and leave
-        a live edge pointing at a retired node — invisible on the canvas
-        (the projection constrains edges to the visible node set) but live
-        in the table to anyone cleared for it, which is worse than either
-        honest outcome.
-
-        NOT REPORTING THE COUNT would close the oracle and leave the
-        unauthorised write, which is the more serious half.
-
-        So the operation is refused. Under PRESENCE and COUNT the refusal
-        does disclose one bit, that a tie above the caller's clearance
-        exists, and that is deliberate: an analyst whose retirement silently
-        failed to remove half a node's ties reads structure off a picture
-        they believe is complete, which is what the console's
-        withheld-material notice exists to prevent (docs/14 U2).
-
-        It follows the case's `withheld_disclosure` (migration 0030) as that
-        notice does: nothing under NONE, whether under PRESENCE, how many
-        under COUNT. Under NONE the operation is still refused, and nothing
-        is retired over a tie the caller cannot see, but the sentence is
-        `HIDDEN_TIES_REFUSAL_NONE`, which names no tie, no clearance and no
-        compartment (owner decision, 2026-10-08; the refusal said so under
-        every mode until then, verification round three, A8, 2026-10-07).
-        That a retirement was refused at all differs from one that was not,
-        which no wording can hide.
+        Under PRESENCE and COUNT the refusal discloses one bit, that a tie above the caller's clearance
+        exists. That is deliberate: an analyst whose retirement silently failed to remove half a node's
+        ties would read structure off a picture they believe is complete, which the console's
+        withheld-material notice exists to prevent (docs/14). The refusal follows the case's
+        `withheld_disclosure` (migration 0030) as that notice does. Under NONE the operation is still
+        refused and nothing is retired, but the sentence is `HIDDEN_TIES_REFUSAL_NONE`, which names no
+        tie, clearance or compartment. That a retirement was refused at all cannot be hidden by wording.
         """
-        # Counted on a system connection with the caller's ceiling (S1,
-        # 2026-09-25). The ties it looks for are exactly the ones row-level
-        # security hides from the caller's own connection, so counted there
-        # the answer is always zero, the retirement goes ahead, and the
-        # cascade below retires only the visible edges: the outcome this
-        # docstring rejects (the node-retirement anti-join).
+        # Counted on a system connection with the caller's ceiling. The ties it looks for are exactly the
+        # ones row-level security hides from the caller's own connection, so counted there the answer is
+        # always zero, the retirement goes ahead, and the cascade below retires only the visible edges:
+        # the outcome this docstring rejects.
         #
-        # A tie whose OTHER end is above the caller counts too
-        # (graph-edge-endpoints-not-gated, 2026-10-03): an AMBER-labelled tie
-        # to a RED entity passed the test on the tie's own labels, so the
-        # cascade retired a tie the caller could not see and `edges_retired`
-        # counted it, localising a hidden tie to this entity.
+        # A tie whose other end is above the caller counts too: an AMBER-labelled tie to a RED entity
+        # passes the test on the tie's own labels, so the cascade would retire a tie the caller cannot see
+        # and `edges_retired` would localise a hidden tie to this entity.
         with system_connection(SystemPurpose.GRAPH_GUARD, reuse=self._c) as counter:
             blocked = counter.execute(
                 """SELECT count(*) FROM core.edge e
@@ -910,23 +756,14 @@ class GraphWriteService:
     def review_edge(self, edge_id: UUID, *, case_id: UUID, review: str) -> str:
         """Put a live tie in a review state, returning the state it left.
 
-        gap-tie-review (2026-09-23). Nothing could ever move `core.edge.
-        review`: the canvas rang every node, the inspector's "Unreviewed
-        proposals" always equalled "Ties in projection", and it told
-        analysts there was work pending that no control could complete.
-        This is the control's service half. The router gates it on
-        `proposal.review`, the verb Triage already uses to dispose of a
-        machine's suggestion, and writes the audit row (who, when, the
-        state left and the note) in the same transaction, because the
-        table has no column for the reviewer: the audit log is where a
-        disposal is recorded, as it is for a Triage acceptance.
+        The router gates it on `proposal.review`, the verb Triage uses to dispose of a machine's
+        suggestion, and writes the audit row (who, when, the state left, the note) in the same
+        transaction, because the table has no column for the reviewer.
 
-        No assertion is written: a review is a person's disposal of a
-        claim, not a claim about the world, so it adds no support, moves
-        no confidence and changes nothing the projection draws except the
-        ring. The edge is locked first, the lock `update_edge` takes, so two
-        reviewers pressing at once are ordered and the second is told the
-        state the first left rather than overwriting it unseen.
+        No assertion is written: a review is a person's disposal of a claim, not a claim about the world,
+        so it adds no support, moves no confidence and changes only the projection's ring. The edge is
+        locked first, as `update_edge` does, so two simultaneous reviewers are ordered and the second is
+        told the state the first left rather than overwriting it unseen.
         """
         if review not in REVIEW_STATES:
             raise GraphWriteError(
@@ -988,23 +825,15 @@ class GraphWriteService:
     ) -> Restoration:
         """Retract (never delete) an assertion, and return what it put back.
 
-        Invariant 5, as decided 2026-09-09: this is a MARKED ROW, not a
-        supersession. One UPDATE stamps `retracted_at`/`retracted_by`/
-        `retraction_reason` from NULL and writes no other column, so the
-        claim itself is never rewritten; the projection drops the row.
-        There is nothing to supersede it with — a retraction withdraws a
-        claim rather than replacing one, and a correction is a new
-        assertion.
+        Invariant 5: this is a marked row, not a supersession. One UPDATE stamps
+        `retracted_at`/`retracted_by`/`retraction_reason` from NULL and writes no other column, so the
+        claim is never rewritten and the projection drops the row. A retraction withdraws a claim rather
+        than replacing one; a correction is a new assertion.
 
-        **A retracted CORRECTION gives its value back**, in the same
-        transaction (graph-retracted-correction-stays-in-force,
-        2026-10-03). A correction writes its value onto the element, and
-        every reader reads the element, so withdrawing the claim used to
-        leave the value standing on nothing. Each field it set returns to
-        the value the remaining live claims support: the newest live
-        correction of that field, or, when none is left, the value the
-        element held before its first correction of it. See
-        `_restore_after_retraction`."""
+        A retracted correction gives its value back, in the same transaction. A correction writes its
+        value onto the element, and every reader reads the element, so each field it set returns to the
+        value the remaining live claims support: the newest live correction of that field, or, when none
+        is left, the value the element held before its first correction. See `_restore_after_retraction`."""
         try:
             with self._c.transaction():
                 cur = self._c.execute(
@@ -1030,26 +859,19 @@ class GraphWriteService:
     def _restore_after_retraction(self, assertion_id: UUID) -> Restoration:
         """Put back what a just-retracted correction had set.
 
-        "Supported" is read from the claims, never from the element: for
-        each field the correction set, the newest correction of that field
-        still live (neither retracted nor superseded) gives the value;
-        when none is left, the oldest correction of the field gives it,
-        through the `prior_value` it recorded, which is the value the
-        element was created with. A copy made by `supersede_assertion`
-        ranks at its original's time, so dating an old correction does not
-        make it the newest.
+        The supported value is read from the claims, never from the element: for each field the correction
+        set, the newest correction of that field still live (neither retracted nor superseded) gives the
+        value; when none is left, the oldest correction of the field gives it, through the `prior_value` it
+        recorded (the value the element was created with). A copy made by `supersede_assertion` ranks at
+        its original's time, so dating an old correction does not make it the newest.
 
-        A correction recorded before migration 0136 has no prior value.
-        When it is the oldest of its field and nothing live remains, the
-        original value is not known, the field is left as it is, and the
-        caller is told (`Restoration.unknown`); the retraction itself
-        still stands, because a withdrawn source is never kept live by a
-        missing record.
+        A correction recorded before migration 0136 has no prior value. When it is the oldest of its field
+        and nothing live remains, the original value is unknown: the field is left as it is, the caller is
+        told (`Restoration.unknown`), and the retraction still stands.
 
-        The element is locked first, as `update_edge` locks it, so two
-        retractions at once are ordered and the second reads the first's
-        result. A restored label follows the selector index, without the
-        refusal a new label gets (`SelectorStore.follow_label`).
+        The element is locked first, as `update_edge` locks it, so two simultaneous retractions are
+        ordered and the second reads the first's result. A restored label follows the selector index
+        without the refusal a new label gets (`SelectorStore.follow_label`).
         """
         row = self._c.execute(
             """SELECT node_id, edge_id, claim_path, claim_value
@@ -1139,11 +961,9 @@ class GraphWriteService:
 
     def _set_field(self, kind: str, element: UUID, field_name: str,
                    value: object) -> bool:
-        """Write one restored value onto the element; False when the value
-        is not one the column can hold (nothing is written then), or carries
-        a password, token or key in a URL: a withdrawn correction's prior
-        value must not put onto the graph what the graph no longer keeps
-        (graph-url-selector-keeps-credentials, 2026-10-03)."""
+        """Write one restored value onto the element; False when the value is not one the column can hold
+        (nothing is written then), or carries a password, token or key in a URL, or a real name on a persona:
+        a withdrawn correction's prior value must not put back onto the graph what the graph no longer keeps."""
         if kind == "node" and field_name == "label":
             if not isinstance(value, str) or not value.strip():
                 return False
@@ -1153,6 +973,16 @@ class GraphWriteService:
         elif field_name == "attrs":
             if not isinstance(value, dict) or _carries_credential(value):
                 return False
+            if kind == "node":
+                # The correction being withdrawn may be the one that took a real name off a persona. An
+                # entity whose type cannot be read is treated as a persona.
+                row = self._c.execute(
+                    "SELECT node_type FROM core.node WHERE id = %s",
+                    (element,)).fetchone()
+                try:
+                    _refuse_real_name(row[0] if row else "IDENTITY", value)
+                except GraphWriteError:
+                    return False
             sql, arg = "attrs = %s::jsonb", Json(value)
         elif field_name == "valid_to":
             if value is not None and not isinstance(value, str):
@@ -1174,38 +1004,26 @@ class GraphWriteService:
         self, assertion_id: UUID, *, case_id: UUID, observed_at: datetime,
         rationale: str, created_by: UUID,
     ) -> UUID:
-        """Give a claim that never had an observation date one, by
-        SUPERSESSION, and return the new claim's id (2026-10-02; docs/00
-        open question 11, settled by the owner).
+        """Give a claim that never had an observation date one, by supersession, and return the new
+        claim's id (docs/00 open question 11).
 
-        Claims accepted from Triage before Alpha 6 carry no `observed_at`.
-        Writing a date onto one would rewrite a recorded claim, which
-        invariant 5 forbids, and the owner decided it is NOT amended. So the
-        old claim is never written to: a NEW claim is recorded, a copy of it
-        in every column but three (the observation date the analyst gives,
-        the rationale the analyst writes, and the author, who is the analyst)
-        and citing the old one in `supersedes_id`, and the old row is
-        stamped `superseded_at` / `superseded_by`, once, from NULL, which
-        every reader honours. Its own columns are as they were. The same
-        shape as a retraction's marked row, and the mechanism the demo
-        seed's regrade already uses (scripts/seed_showcase.py), with the new
-        claim now citing the old.
+        Claims accepted from Triage in earlier releases carry no `observed_at`. Writing a date onto one
+        would rewrite a recorded claim, which invariant 5 forbids. So the old claim is never written to: a
+        new claim is recorded, a copy of it in every column but three (the observation date, the
+        rationale, and the author, who is the analyst) and citing the old one in `supersedes_id`, and the
+        old row is stamped `superseded_at` / `superseded_by`, once, from NULL, which every reader honours.
+        The same shape as a retraction's marked row.
 
-        One transaction, the new claim first, so the element is never
-        without a live claim and the 0064 trigger derives a tie from
-        what is live at each statement (the copy grades as the original
-        did, so the tie does not move). The old row is locked first, so
-        two analysts dating one claim cannot both succeed; the unique index
-        on `supersedes_id` is the same refusal if they could.
+        One transaction, the new claim first, so the element is never without a live claim and the 0064
+        trigger derives a tie from what is live at each statement (the copy grades as the original did, so
+        the tie does not move). The old row is locked first, so two analysts dating one claim cannot both
+        succeed; the unique index on `supersedes_id` is the same refusal if they could.
 
-        Only a claim with NO date is dated this way. A claim that already
-        has one is corrected as every dated claim is: retract it, giving the
-        reason, and record the corrected claim (invariant 5 as decided
-        2026-09-09). Supersession is how a claim gains a field it never had,
-        which is the whole of open question 11, and nothing wider.
+        Only a claim with no date is dated this way. A claim that already has one is corrected by
+        retracting it, with a reason, and recording the corrected claim (invariant 5).
 
-        `case_id` is the case the caller was authorised on: a claim of
-        another case is "not found" here, whatever its id.
+        `case_id` is the case the caller was authorised on: a claim of another case is "not found" here,
+        whatever its id.
         """
         if not rationale or not rationale.strip():
             raise GraphWriteError(
@@ -1248,8 +1066,7 @@ class GraphWriteService:
                         observed_at=observed_at, claim_path=old[2],
                         claim_value=old[3], lookup_result_id=old[12],
                         supersedes_id=assertion_id,
-                        # A dated correction still knows what it replaced
-                        # (graph-retracted-correction, 2026-10-03).
+                        # A dated correction still knows what it replaced.
                         prior_value=old[16]),
                     node_id=old[0], edge_id=old[1])
                 stamped = self._c.execute(
@@ -1301,7 +1118,7 @@ class GraphWriteService:
              a.basis, a.reliability, a.credibility, a.confidence,
              a.source_id, a.document_id, a.evidence_id, a.external_ref,
              a.rationale, a.observed_at, a.created_by,
-             a.lookup_result_id,  # F15.3
+             a.lookup_result_id,  # 0100
              a.supersedes_id,     # 0131
              Json(a.prior_value) if a.prior_value else None),  # 0136
         ).fetchone()[0]

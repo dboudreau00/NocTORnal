@@ -1,8 +1,7 @@
-"""scripts/egress_setup.py, the headless egress configuration (S2, 2026-09-24).
+"""scripts/egress_setup.py, the headless egress configuration.
 
-Every write signs its operator in: a claimed email is not an identity. The
-prompts are injected; the database is the real one (DATABASE_URL) for the
-commands that write.
+Every write signs its operator in: a claimed email is not an identity. The prompts are injected; the
+database is the real one (DATABASE_URL) for the commands that write.
 """
 from __future__ import annotations
 
@@ -129,9 +128,8 @@ def test_preflight_checks_the_compose_floor(tmp_path):
 
 
 def test_preflight_in_the_image_takes_the_hosts_compose_version(tmp_path):
-    """2026-10-07: a production host has no python
-    with this tree's dependencies, and inside the image there is no docker
-    to ask. The README runs preflight in the image and passes the host's
+    """A production host has no python with this tree's dependencies, and inside the image there is no
+    docker to ask. The README runs preflight in the image and passes the host's
     `docker compose version --short`, which the floor is still held to."""
     def no_docker():
         return None

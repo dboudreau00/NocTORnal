@@ -1,24 +1,19 @@
-"""F53 (docs/17, 2026-10-08): a route and a console form create a watch.
+"""A route and a console form create a watch (docs/17).
 
-Only a seeding script wrote a watch until now, so a watch of target kind
-TELEGRAM_CHAT could be written only by hand, and the rule for its reference
-(a typed chat id) was held by the database (0130) and the matcher but by no
-writer that could say why in words. `POST /cases/{id}/collection/watches` is
-that writer, and `GET` lists a case's watches for the Feeds pane.
+`POST /cases/{id}/collection/watches` writes a watch, and `GET` lists a case's watches for the Feeds
+pane. The rule for a TELEGRAM_CHAT reference (a typed chat id) is held by the database (0130) and the
+matcher, and this writer says why in words.
 
 What is held here:
 
-- the gate: the global `watch.manage` AND the five-part gate on the case
-  (`collection.read`, refused on a read-only case), so a collection manager
-  not on the case, an analyst without the verb, an unauthenticated caller and
-  a closed case are each refused, and nothing is written;
-- the writer's own rules: a source the caller can see (a 404 otherwise), a
-  kind from the list, a term for every kind but a Telegram chat, a chat named
-  by its typed id and the chat its source reads, patterns that parse, and a
-  name the case does not already hold (a 409);
-- the stored row is the one the matcher reads (a created watch fires), the
-  audit row carries counts and never terms, and the reader of the list does
-  not see a watch on a source above them.
+- the gate: the global `watch.manage` AND the five-part gate on the case (`collection.read`, refused on
+  a read-only case), so a collection manager not on the case, an analyst without the verb, an
+  unauthenticated caller and a closed case are each refused, and nothing is written;
+- the writer's own rules: a source the caller can see (a 404 otherwise), a kind from the list, a term
+  for every kind but a Telegram chat, a chat named by its typed id and the chat its source reads,
+  patterns that parse, and a name the case does not already hold (a 409);
+- the stored row is the one the matcher reads (a created watch fires), the audit row carries counts
+  and never terms, and the reader of the list does not see a watch on a source above them.
 
 DATABASE_URL-gated. Rows are `f53w-`.
 """
@@ -74,11 +69,9 @@ HAS_ROLES = bool(os.environ.get("NOCTORNAL_APP_DB_ROLE", "").strip())
 
 @pytest.fixture(autouse=True)
 def _as_the_request_role(monkeypatch):
-    """Where the database has the runtime roles, every route here runs as the
-    request role, bound to its caller, as production does: the INSERT then
-    meets 0124's policy on `collect.watch` and the grants of the role, and the
-    list is read through them. Nothing wrote a watch as the request role
-    before this route, so a missing grant would only show here."""
+    """Where the database has the runtime roles, every route here runs as the request role, bound to
+    its caller, as production does: the INSERT meets 0124's policy on `collect.watch` and the grants of
+    the role, and the list is read through them, so a missing grant shows here."""
     if HAS_ROLES:
         from noctornal_api.db import ASSUME_ROLE_ENV
         monkeypatch.setenv(ASSUME_ROLE_ENV, "1")

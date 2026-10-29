@@ -1,9 +1,8 @@
-"""A case owner keeps a case out of Jira (F7, 2026-09-24): case.update to
-set it, a reason required, audited both ways, allowed before Jira is
-configured and on a closed case, and the answer counts the issues already
-raised about the case.
+"""A case owner keeps a case out of Jira: case.update to set it, a reason required, audited both ways,
+allowed before Jira is configured and on a closed case, and the answer counts the issues already raised
+about the case.
 
-**The email prefix is `nveto-`.** Env-gated on DATABASE_URL.
+The email prefix is `nveto-`. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

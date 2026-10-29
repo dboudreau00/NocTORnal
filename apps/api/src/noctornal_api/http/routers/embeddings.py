@@ -1,19 +1,11 @@
-"""Similarity status and Administration, Embeddings (F6.3, embeddings,
-2026-09-24).
+"""Similarity status and Administration, Embeddings.
 
-`GET /embeddings/status` answers any signed-in account: whether each mode
-can be used, and where the model is, in words. No counts and no host.
-
-Everything under `/admin/embeddings` needs `embedding.manage` (SYS_ADMIN,
-step-up). Figures (coverage and the list of gaps) need the global
-`collection.read` as well and follow the caller's own case-less clearance
-and compartments, because the register is read by administrators who need
-not read collected documents, and a count of what is indexed at every
-label is a volume disclosure. Case-item figures are not here: they appear
-in a case's own similarity answers, to that case's readers. Table sizes
-are not here either: they are in the embed-pass log, read at host level.
-No answer carries a count to a caller without collection.read, and
-activate's refusal carries no number.
+`GET /embeddings/status` tells any signed-in account, in words, whether each mode can be used and
+where the model is: no counts, no host. Everything under `/admin/embeddings` needs the step-up
+`embedding.manage` (SYS_ADMIN); figures also need the global `collection.read` and follow the
+caller's own case-less labels, since a count of what is indexed at every label is a volume
+disclosure. No answer carries a count to a caller without `collection.read`, and activate's
+refusal carries no number.
 """
 from __future__ import annotations
 
@@ -112,26 +104,18 @@ def admin_embedding_gaps(
     after_at: datetime | None = None,
     after_id: UUID | None = None,
     user: CurrentUser = Depends(require_global("embedding.manage")),
-    # The second verb is a gate of its own, after the first (a dependency
-    # runs in the order it is declared), so a caller who lacks it is refused
-    # with the gate's sentence and its AUTHZ_DENIED row. It was a
-    # `_holds_global` check in the body, which refused with no row at all
-    # (docs/17, "a second permission check in a handler", 2026-10-08).
+    # The second verb is a gate of its own, after the first (dependencies run in declared order),
+    # so a caller who lacks it is refused with the gate's sentence and its AUTHZ_DENIED row; a
+    # check in the body would write no row (docs/17).
     _reads: CurrentUser = Depends(require_global("collection.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The documents of one index that are not embedded, with each reason
-    in words, at the caller's own labels; keyset paging on (embedded_at,
-    document_id).
+    """The documents of one index that are not embedded, with each reason in words, at the
+    caller's own labels; keyset paging on (embedded_at, document_id).
 
-    Needs `embedding.manage` and the global `collection.read`, both through
-    the gate: the figures follow the caller's own case-less labels, and
-    "what is indexed at every label" is a volume disclosure to an
-    administrator who reads no documents.
-
-    `after_at` is parsed here as a time, so a malformed one is a 422 and
-    never reaches the SQL cast, where it would be a 500 (2026-09-25). The
-    two halves of the key come together or not at all."""
+    Needs `embedding.manage` and the global `collection.read`, both through the gate. `after_at` is
+    parsed as a time, so a malformed one is a 422 rather than a failed SQL cast; the two halves of
+    the key come together or not at all."""
     if (after_at is None) != (after_id is None):
         raise Problem(422, "Unprocessable", "after_at and after_id come together: pass "
                       "both from the previous page's next, or neither.")
@@ -174,15 +158,10 @@ def _conflict(exc: EmbedRefused) -> Problem:
     return Problem(409, "Conflict", str(exc))
 
 
-# The index administration below runs on a system connection (S1,
-# 2026-09-25). Registering an index queues EVERY document, exhibit and
-# claim; activating one first sweeps the queue of entries whose item is
-# gone, by an anti-join; a recheck and a pass work through every row of
-# every kind. As the request role each would see only what the
-# administrator may read: an index registered by an administrator on no
-# case would queue no exhibit or claim at all, and the sweep would delete
-# the queue entries of every one it could not see. The gate
-# (embedding.manage, step-up) ran on the request connection first.
+# The index administration below runs on a system connection, after the gate (embedding.manage,
+# step-up) on the request connection. Registering queues every document, exhibit and claim, and
+# activating sweeps queue entries whose item is gone; as the request role, an administrator on no
+# case would queue no exhibit or claim and the sweep would delete every entry it could not see.
 
 
 @router.post("/admin/embeddings/spaces", response_model=dict, status_code=201)

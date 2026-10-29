@@ -1,12 +1,8 @@
-"""Bipartite to one-mode projection for the forum and wallet families
-(F2, 2026-09-24).
+"""Bipartite to one-mode projection for the forum and wallet families (docs/00 decision 73).
 
-docs/03 has always said the proper answer to a two-mode projection is "a
-bipartite projection to one-mode with Newman weighting", and
-`analytics._mode_warning` recorded it as the open item: the Financial
-preset makes WALLET and TRANSACTION first-class vertices, so a wallet with
-many controllers scored as a broker. This module is that projection, for
-two families of venue only (docs/00 decision 73):
+Without it the Financial preset makes WALLET and TRANSACTION vertices, so a wallet with many
+controllers scores as a broker (docs/03: "a bipartite projection to one-mode with Newman
+weighting").
 
 - **forum**: FORUM and CHANNEL. Entities who POST ON the same venue are
   tied, each shared venue counting 1 / (size - 1) under Newman weighting.
@@ -15,53 +11,28 @@ two families of venue only (docs/00 decision 73):
   becomes a directed tie from the payer's controller to the payee's
   (wallet flow), one hop only.
 
-The conversation family is NOT built. Over core.edge PARTICIPANT_IN it
-would lose decision 58's incidental-party exclusion and the raw room size
-the Comms pane's co-participation view keeps (`coparticipation.py`), so
-conversations stay that view's job and the Communication preset keeps its
-mode warning.
+There is no conversation family: over core.edge PARTICIPANT_IN it would lose decision 58's
+incidental-party exclusion and the raw room size `coparticipation.py` keeps, so conversations
+stay that view's job and the Communication preset keeps its mode warning.
 
-Four rules (2026-09-24):
+The rules this module keeps:
 
-**Sizes come from everything the caller can see.** A venue's size, the
-venue limit, the transaction's |I| and |O| and a wallet's controller count
-are taken from EVERY visible live membership, including those the
-confidence floor or the accepted-ties scope then leaves out of the drawing.
-Filtering first made the scope that is meant to remove doubtful ties the
-one that switched the caps off: a 26-in, 25-out CoinJoin with one accepted
-leg a side became a 1 x 1 transaction drawing a full-weight money tie, and
-a 60-poster board with four accepted posters drew a 4-clique at 1/3.
-Pairs and legs are then drawn only from the memberships that pass.
+- Sizes come from everything the caller can see: a venue's size, the venue limit, a
+  transaction's |I| and |O| and a wallet's controller count count every visible live membership,
+  including those the confidence floor or the accepted-ties scope leave out of the drawing, so a
+  filter cannot switch the caps off. Pairs and legs are then drawn only from the memberships that
+  pass.
+- The limits are checked before anything is built: `MAX_DERIVED_TIES` and `MAX_PERIOD_STEPS` are
+  upper bounds computed by arithmetic in time linear in the rows, before any derived edge is
+  allocated or leg enumerated, so the transform's work is at most the two limits.
+- Identity links (SAME_AS, ALIAS_OF, ATTRIBUTED_TO) only ever remove a tie, and only when nobody
+  doubts them: two entities recorded as one identity sharing a wallet are one actor, but a
+  DISPUTED or REJECTED link suppresses nothing, and such a pair keeps its tie, counted apart.
+- Nothing is dropped silently: every exclusion is counted in the coverage dict, which is data only
+  so `analytics.graph_hash` can fold it into the cache key.
 
-**The limits are checked before anything is built.** `MAX_DERIVED_TIES`
-is an upper bound computed by arithmetic (sums of products over the
-drawing memberships), so a view that would draw too many ties is refused in
-time linear in its rows, before a single derived edge is allocated and
-before any leg is enumerated. Legs that cannot draw (an end with no visible
-controller, or through an oversized wallet) are counted as products, never
-walked one by one. The tie limit bounds pairs, not the dated periods behind
-each, so each constituent's rows are merged once into disjoint periods (a
-sort of its rows) and `MAX_PERIOD_STEPS` bounds, again by arithmetic, the
-steps of every overlap test the transform will then make. Past both
-checks, the transform's work is at most the two limits.
-
-**Identity links only ever remove a tie, and only when nobody doubts
-them.** Two entities recorded as one identity (SAME_AS, ALIAS_OF,
-ATTRIBUTED_TO) sharing a wallet is one actor, not a tie. A link a reviewer
-has DISPUTED, or a legacy REJECTED one, no longer suppresses anything: a
-contested machine proposal must not keep changing the numbers ("machines
-propose, analysts dispose"), so such a pair keeps its tie and is counted
-apart.
-
-**Nothing is dropped silently.** Every exclusion is counted in the
-coverage dict, which is data only (counts, dicts keyed by type, the
-oversized venues named) so `analytics.graph_hash` can fold it into the
-cache key: a renamed oversized forum, or one raised above the caller's
-clearance, is a different answer and must not be served as the same one.
-
-Pure and database-free, like `analytics.py`. It imports `coparticipation`
-for its weighting constants and never imports `projections`, which
-imports it.
+Pure and database-free, like `analytics.py`. It imports `coparticipation` for its weighting
+constants and never imports `projections`, which imports it.
 """
 from __future__ import annotations
 
@@ -82,27 +53,16 @@ DEFAULT_MAX_VENUE_SIZE = DEFAULT_MAX_ROOM_SIZE
 MAX_VENUE_SIZE_RANGE = (2, 500)
 MIN_SHARED_RANGE = (1, 100)
 
-#: Measured on a development host (Python 3.13, the real graph_hash and
-#: materialise): 50,225 derived ties cost 0.45 s to transform, 0.14 s to
-#: hash and 0.10 s to materialise, peaking at 52 MB; 249,900 cost 2.26 s,
-#: 0.61 s and 0.60 s at 249 MB. A read route pays this, so the ceiling is
-#: the smaller figure. The pre-count that refuses above it took 0.04 s.
-#: This implementation, measured on the build host (2026-09-24): 49,000
-#: derived ties from 40 boards of 50 posters cost 0.50 s to transform,
-#: 0.11 s to hash and 0.14 s to materialise.
+#: A read route pays the transform, so the ceiling is the smaller measured figure: 50,000 derived
+#: ties cost about 0.5 s to transform and 0.25 s to hash and materialise, at 52 MB; 250,000 cost
+#: about 3.5 s in all, at 249 MB.
 MAX_DERIVED_TIES = 50_000
 
-#: The contemporaneity check's own ceiling, in steps of the linear merge of
-#: two constituents' dated periods (`_overlap`, `_last_overlap`). The tie
-#: limit bounds PAIRS; a pair costs as many steps as its two members have
-#: separate periods, and an analyst can record a membership over as many
-#: periods as they like. Undated memberships cost one step a side, so a
-#: view at the tie limit uses 100,000 and this never binds on it. Measured
-#: on the build host (2026-09-24), worst cases at the limit: 100 posters
-#: with 100 dated rows each whose periods never meet (990,000 steps) took
-#: 0.16 s to transform, 0.08 s of it before the first merge; a flow of
-#: 3 x 3 wallets with 2,200 dated rows on every constituent (1,009,800
-#: steps, 52,800 rows) took 0.5 s, nearly all of it reading the rows.
+#: The contemporaneity check's own ceiling, in steps of the linear merge of two constituents'
+#: dated periods (`_overlap`, `_last_overlap`). The tie limit bounds pairs, but a pair costs as
+#: many steps as its members have separate periods, and an analyst can record any number. Undated
+#: memberships cost one step a side, so a view at the tie limit uses 100,000. The worst cases
+#: measured at this limit took 0.16 s and 0.5 s.
 MAX_PERIOD_STEPS = 1_000_000
 
 #: Oversized venues named in the payload. The total is always given, and
@@ -110,8 +70,8 @@ MAX_PERIOD_STEPS = 1_000_000
 OVERSIZED_LISTED = 25
 
 IDENTITY_LINK_TYPES = ("SAME_AS", "ALIAS_OF", "ATTRIBUTED_TO")
-#: The review states under which an identity link suppresses a tie. A
-#: DISPUTED or REJECTED link is a recorded doubt (2026-09-24).
+#: The review states under which an identity link suppresses a tie. A DISPUTED or REJECTED link is
+#: a recorded doubt.
 SUPPRESSING_REVIEW = frozenset({"ACCEPTED", "PROPOSED"})
 
 FORUM_VENUES = ("FORUM", "CHANNEL")
@@ -178,11 +138,9 @@ class OneModeTooLarge(OneModeError):
 
 
 class OneModeTooManyPeriods(OneModeTooLarge):
-    """The pre-count found more dated-period comparisons than the limit (a
-    422, answered like the derived-tie limit). Its own class so the message
-    names the right cause: a view within the tie limit can still record
-    each membership over hundreds of separate dated periods (verifier,
-    2026-09-24)."""
+    """The pre-count found more dated-period comparisons than the limit (a 422, answered like the
+    derived-tie limit). Its own class so the message names the right cause: a view within the tie
+    limit can still record each membership over hundreds of separate dated periods."""
 
     def __init__(self, steps: int):
         self.bound = steps
@@ -196,9 +154,9 @@ class OneModeTooManyPeriods(OneModeTooLarge):
 
 @dataclass(frozen=True)
 class OneModeParams:
-    """Which families to project and how. Part of the projection's name and
-    cache key whenever a family is listed; absent from both when none is,
-    so every run stored before this existed keeps its name and digest."""
+    """Which families to project and how. Part of the projection's name and cache key whenever a
+    family is listed, and absent from both when none is, so runs stored without it keep their
+    names and digests."""
 
     families: tuple[str, ...] = ()
     weighting: str = WEIGHT_NEWMAN
@@ -360,20 +318,13 @@ def _interval(row: dict) -> tuple:
     return (_utc(row.get("valid_from")), _utc(row.get("valid_to")))
 
 
-# Contemporaneity (F2, 2026-09-24). A constituent (one entity's membership
-# of one venue, one wallet's leg of one transaction) may be recorded by
-# several parallel rows, each dated: core.edge keeps one live row per
-# (src, dst, type, valid_from), and ANY of them may make two members
-# contemporaneous, not only the strongest. So a
-# constituent's time is the UNION of its rows' closed intervals, None
-# meaning unbounded on that side, merged once into a sorted tuple of
-# disjoint periods, and two constituents meet where their unions overlap.
-#
-# An earlier version took one interval from each constituent in every
-# combination, which grows as the PRODUCT of the parallel rows: a 4-leg
-# flow with 200 dated rows a leg took 4.3 s for one derived tie (verifier,
-# 2026-09-24). Merged periods meet in one linear pass, and the cost of
-# every pass is bounded before any is made (`_period_steps`).
+# Contemporaneity. A constituent (one entity's membership of one venue, one wallet's leg of one
+# transaction) may be recorded by several parallel dated rows, since core.edge keeps one live row
+# per (src, dst, type, valid_from), and any of them may make two members contemporaneous. So a
+# constituent's time is the union of its rows' closed intervals, None meaning unbounded on that
+# side, merged once into a sorted tuple of disjoint periods; two constituents meet where their
+# unions overlap, found in one linear pass whose cost is bounded before any is made
+# (`_period_steps`), rather than by trying every combination of rows.
 
 #: A constituent recorded as undated on both sides: it covers all time, so
 #: meeting it changes nothing. The common case, answered without a pass.
@@ -669,9 +620,8 @@ def to_one_mode(nodes: list[dict], ties: list[dict], consumable: list[dict],
 
     # 4b. Every constituent's dated periods and strongest row, once, not
     #     once per pair or leg; then the cost of every merge the transform
-    #     will make, by arithmetic, before it makes any (verifier,
-    #     2026-09-24: the tie limit bounds pairs, not the periods behind
-    #     each).
+    #     will make, by arithmetic, before it makes any (the tie limit
+    #     bounds pairs, not the periods behind each).
     span_of: dict = {}          # venue or wallet -> entity -> periods
     best_of: dict = {}          # venue or wallet -> entity -> strongest row
     for v in co_venues:
@@ -920,8 +870,3 @@ def to_one_mode(nodes: list[dict], ties: list[dict], consumable: list[dict],
         "edges_dropped_with_venues": dict(sorted(dropped.items())),
     })
     return keep_nodes, edges_out, cov
-
-
-def is_derived(edge: dict) -> bool:
-    return bool(edge.get("derived"))
-

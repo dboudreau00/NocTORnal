@@ -1,49 +1,29 @@
-"""A persona's forum session: the cookies a board handed it at sign-in,
-sealed in the vault's storage between runs (the authenticated forum path,
-2026-10-02).
+"""A persona's forum session: the cookies a board handed it at sign-in, sealed in the vault's storage between runs.
 
-## Why a session is a credential
+A session cookie obtained with a persona's credentials IS a credential: it opens the member's view of the board
+exactly as the password does. So it gets the credential's treatment (invariant 7): sealed at rest under the same
+ring as the password (`collect.collection_account.session_*`, 0161), opened only inside the member adapter's run
+and for a sign-out, registered for redaction for exactly as long as it is in memory
+(`pinned_http.secret_in_scope`), never written to a run row, a warning, a document, a log line or a response, and
+cleared when the persona signs out or stops.
 
-A session cookie obtained with a persona's credentials IS a credential: it
-opens the member's view of the board exactly as the password does. So it
-gets the credential's treatment, invariant 7's shape rather than a rule to
-remember: sealed at rest under the same ring as the password
-(`collect.collection_account.session_*`, 0161), opened only inside the
-member adapter's run and for a sign-out, registered for redaction for
-exactly as long as it is in memory (`pinned_http.secret_in_scope`), never
-written to a run row, a warning, a document, a log line or a response,
-and cleared when the persona signs out or stops.
+The key is the persona ring, `security.persona_envelope` (NOCTORNAL_PERSONA_KEK), a key of its own that only the
+collector holds in production (decision 174). The two calls below are the only places this module names it, and
+nothing here ever falls back to the TOTP ring: no process that cannot open the password can open a session. So a
+jar is sealed and opened only inside the collector's process (a run, or the sign-out act), and what the API does
+with one is database only: it clears it (`clear_session` with no origin opens nothing).
 
-## Where the key comes from
+A jar is `{name: value}` for ONE origin, and what is sealed is one jar PER ORIGIN (`{"v": 2, "origins": {origin:
+jar}}`), because a persona may read more than one board and a cookie is the board's own: a persona bound to two
+boards must not send the first board's live session to the second's operator. A run opens only the jar of the
+origin of the source it is reading (`origin_key`), and the run context refuses a request to any other origin, so
+a board's cookies reach that board and no other. A blob in the earlier shape (one flat jar for the persona)
+cannot be attributed to any origin and is discarded: the persona signs in again.
 
-The persona ring, `security.persona_envelope` (NOCTORNAL_PERSONA_KEK), the
-key of its own that only the collector holds in production (the persona
-vault split, decision 174, merged 2026-10-03). The two calls below are the
-only places this module names it, and nothing here ever falls back to the
-TOTP ring: a session cookie opens a member's view of a board as the
-password does, so no process that cannot open the password can open it. So
-a jar is sealed and opened only inside the collector's process (a run, or
-the sign-out act), and what the API does with one is database only: it
-clears it (`clear_session` with no origin opens nothing).
-
-## The jar, and whose it is
-
-A jar is `{name: value}` for ONE origin, and what is sealed is one jar PER
-ORIGIN (`{"v": 2, "origins": {origin: jar}}`), because a persona may read
-more than one board and a cookie is the board's own: the jar was once keyed by persona alone,
-so a persona bound to two boards sent the first board's live session to
-the second's operator (2026-10-03). A run opens only the jar of the origin of the source it is
-reading (`origin_key`), and the run context refuses a request to any other
-origin, so a board's cookies reach that board and no other. A blob in the
-earlier shape (one flat jar for the persona) cannot be attributed to any
-origin and is discarded: the persona signs in again.
-
-Caps bound what a hostile board can make the persona carry:
-`MAX_COOKIES` per origin, `MAX_ORIGINS` per persona, `MAX_COOKIE_NAME`,
-`MAX_COOKIE_VALUE`. A cookie with `Max-Age=0` or an expiry in the past is a
-deletion. Domain and Path attributes are not honoured (one origin, every
-path), which is the safe direction: a cookie is sent where a browser would
-send it and possibly more widely within the same origin, never to another.
+Caps bound what a hostile board can make the persona carry: `MAX_COOKIES` per origin, `MAX_ORIGINS` per persona,
+`MAX_COOKIE_NAME`, `MAX_COOKIE_VALUE`. A cookie with `Max-Age=0` or an expiry in the past is a deletion. Domain
+and Path attributes are not honoured (one origin, every path), which is the safe direction: a cookie is sent
+where a browser would send it and possibly more widely within the same origin, never to another.
 """
 from __future__ import annotations
 
@@ -150,11 +130,10 @@ def take_cookies(jar: dict[str, str], set_cookie_values, *,
 
 
 def _sendable(name, value) -> bool:
-    """Whether a cookie can ride in a request: a printable name and an ASCII
-    value within the caps (2026-10-07: a value printable but
-    not ASCII, or a jar whose header outgrew what the client sends, made
-    every later request of the persona's session fail, and the poisoned jar
-    was sealed, so every later run failed the same way)."""
+    """Whether a cookie can ride in a request: a printable name and an ASCII value within the caps. A value that
+    is printable but not ASCII, or a jar whose header outgrows what the client sends, would make every later
+    request of the persona's session fail, and the poisoned jar would be sealed, so every later run would fail
+    the same way."""
     return (_printable(name, MAX_COOKIE_NAME) and isinstance(value, str)
             and len(value) <= MAX_COOKIE_VALUE and value.isascii()
             and value.isprintable() and ";" not in value)
@@ -236,18 +215,15 @@ STOPPED_SQL = ("status::text IN ('LOCKED', 'BURNED') OR machine_lock_code IS NOT
 
 def seal_session(conn: psycopg.Connection, persona_id: UUID, origin: str,
                  jar: dict[str, str]) -> None:
-    """Seal `jar` as the persona's session on `origin`, beside its
-    credential and beside any other board's jar. An empty jar removes this
-    origin's only. Read, change and write under one row lock, so two runs
-    of one persona cannot overwrite each other's board.
+    """Seal `jar` as the persona's session on `origin`, beside its credential and beside any other board's jar.
+    An empty jar removes this origin's only. Read, change and write under one row lock, so two runs of one
+    persona cannot overwrite each other's board.
 
-    Whether the persona is stopped is read under that same lock, and a
-    stopped persona is sealed nothing and has what it held cleared. A stop
-    writes the persona's status and then clears its sessions, so a check
-    made before the lock could pass, the stop could land between the check
-    and this seal, and a burnt persona was left holding a sealed session
-    (docs/17, "a stopped persona resealed"). The stop's status write waits
-    for the row lock, and a stop that came first is seen here."""
+    Whether the persona is stopped is read under that same lock, and a stopped persona is sealed nothing and has
+    what it held cleared. A stop writes the persona's status and then clears its sessions, so a check made before
+    the lock could pass, the stop could land between the check and this seal, and a burnt persona would be left
+    holding a sealed session. The stop's status write waits for the row lock, and a stop that came first is seen
+    here."""
     if not origin:
         return
     with conn.transaction():

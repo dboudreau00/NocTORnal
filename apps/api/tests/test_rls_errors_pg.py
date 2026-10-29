@@ -1,11 +1,8 @@
-"""What a row-security refusal and a missing system connection answer (S1,
-2026-09-25).
+"""What a row-security refusal and a missing system connection answer.
 
-A WITH CHECK refusal means the gate let through a write
-the policy refuses: the second line firing, which is a finding, so it is a
-403 with an RLS_REFUSED audit row written out of band. A 42501 that is a
-missing GRANT is a deployment defect and stays the 500 it always was. No
-system connection is a 503 that names the setting.
+A WITH CHECK refusal means the gate let through a write the policy refuses: the second line firing, which
+is a defect, so it is a 403 with an RLS_REFUSED audit row written out of band. A 42501 that is a missing
+GRANT is a deployment defect and stays a 500. No system connection is a 503 that names the setting.
 """
 from __future__ import annotations
 

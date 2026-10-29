@@ -1,8 +1,6 @@
-"""The Phase 4 service defects of docs/17 F15(f), (i) and (j).
+"""Collection service hardening, pure halves: the SSRF floor, the redactor and the jitter arithmetic.
 
-No database: these are the pure halves -- the SSRF floor, the redactor and
-the jitter arithmetic. The persistence halves live in
-`test_collection_hardening_pg.py`.
+No database. The persistence halves live in `test_collection_hardening_pg.py`.
 """
 from __future__ import annotations
 
@@ -29,16 +27,12 @@ def _addr(text: str):
     return ipaddress.ip_address(text)
 
 
-# ---------------------------------------------------------------------------
-# F15(f) -- the SSRF floor was not the floor it claimed to be
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("address", [
     "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254",
     "::1", "fc00::1", "fe80::1", "0.0.0.0",
     # The ones the enumerated list missed.
     "::ffff:127.0.0.1",     # IPv4-mapped loopback: parsed as IPv6, matched
-                            # nothing, and was a complete bypass.
+                            # nothing, a complete bypass.
     "::ffff:10.0.0.1",
     "::",                   # unspecified; reaches the local host
     "100.64.1.1",           # carrier-grade NAT
@@ -81,14 +75,11 @@ def redirector():
 
 
 def test_a_redirect_into_private_space_is_refused(redirector):
-    """The defect, reproduced and then closed. `urlopen` followed redirects
-    internally, so hops 2..N were never checked: a public host answering
-    `302 -> http://127.0.0.1/` fetched the internal page.
+    """A redirect into private space is refused at every hop.
 
-    The server here is itself on loopback, so the FIRST hop is refused --
-    which is the same check doing its job. `max_redirects=0` on a public
-    URL would be the cleaner demonstration and needs a network, so the
-    redirect-following logic is exercised by the hop-limit test below.
+    The server here is itself on loopback, so the FIRST hop is refused, which is the same check doing
+    its job. `max_redirects=0` on a public URL would be the cleaner demonstration and needs a network,
+    so the redirect-following logic is exercised by the hop-limit test below.
     """
     port = redirector.server_address[1]
     with pytest.raises(CollectionError, match="private address space"):
@@ -120,10 +111,6 @@ def test_a_cloud_metadata_hostname_is_refused():
         fetch("http://metadata.google.internal/computeMetadata/v1/")
 
 
-# ---------------------------------------------------------------------------
-# F15(j) -- redact() was a keyword list
-# ---------------------------------------------------------------------------
-
 def test_a_live_secret_is_removed_verbatim_however_it_is_encoded():
     """The layer that actually holds invariant 7: it does not depend on
     the remote server labelling the field in a way we anticipated."""
@@ -137,10 +124,9 @@ def test_a_live_secret_is_removed_verbatim_however_it_is_encoded():
 
 
 def test_scrubbing_removes_exactly_the_live_secrets_and_nothing_else():
-    """2026-10-07: stored material (a post, its markup) is
-    scrubbed of the secrets this process holds, and ONLY those: a post that
-    says `password: hunter2` is still the investigator's evidence, which
-    `redact`'s structural patterns would have changed."""
+    """Stored material (a post, its markup) is scrubbed of the secrets this process holds, and ONLY
+    those: a post that says `password: hunter2` is still the investigator's evidence, which `redact`'s
+    structural patterns would change."""
     from noctornal_api.pinned_http import scrub_live_secrets
 
     secret = "Tr0ub4dor&3-<persona>-\"pw\""
@@ -198,8 +184,7 @@ def test_a_secret_stops_being_removed_once_its_block_ends():
 
 
 def test_the_shapes_a_keyword_list_misses():
-    """docs/17 F15(j): `pass`, `p=`, `credential`, `bearer`, `passphrase`
-    and any unlabelled echo walked through the old list."""
+    """`pass`, `p=`, `credential`, `bearer`, `passphrase` and any unlabelled echo are redacted."""
     assert "hunter2hunter2" not in redact("p=hunter2hunter2")
     assert "hunter2hunter2" not in redact("credential: hunter2hunter2")
     assert "hunter2hunter2" not in redact("passphrase=hunter2hunter2")
@@ -223,10 +208,6 @@ def test_redaction_does_not_shred_the_message_it_has_to_keep_readable():
 def test_url_credentials_are_masked():
     assert "hunter2" not in redact("https://persona:hunter2@forum.example/x")
 
-
-# ---------------------------------------------------------------------------
-# F15(i) -- jitter that was re-rolled on read
-# ---------------------------------------------------------------------------
 
 def test_jitter_is_symmetric_around_the_interval():
     """Only ever ADDING makes the minimum gap the interval, which is still

@@ -1,15 +1,12 @@
-"""The outbound integrations' guarded ledgers lose what their migrations say
-they lose (F7, F15.2 to F15.4, 2026-09-25).
+"""The outbound integrations' guarded ledgers lose what their migrations say they lose.
 
-test_app_role_privileges_pg.py reads the catalog for every GUARDED_TABLES
-entry, but only where the least-privilege role exists (a production-shaped
-stack, and CI once it creates the role). Everywhere else it skips, so a
-migration that declared a table guarded and forgot its REVOKE would pass
-here unseen. This reads the migrations themselves: every table that 0097,
-0098, 0099 or 0101 declares in GUARDED_TABLES has DELETE revoked from the
-runtime role in the same migration, and UPDATE too where the declaration
-keeps no UPDATE. The triggers that refuse DELETE and TRUNCATE are tested
-against the database in each item's own file.
+test_app_role_privileges_pg.py reads the catalog for every GUARDED_TABLES entry, but only where the
+least-privilege role exists (a production-shaped stack, and CI once it creates the role). Everywhere else it
+skips, so a migration that declared a table guarded and forgot its REVOKE would pass there unseen. This
+reads the migrations themselves: every table that 0097, 0098, 0099 or 0101 declares in GUARDED_TABLES has
+DELETE revoked from the runtime role in the same migration, and UPDATE too where the declaration keeps no
+UPDATE. The triggers that refuse DELETE and TRUNCATE are tested against the database in each item's own
+file.
 
 Pure: no database.
 """

@@ -1,16 +1,12 @@
-"""N4 (2026-09-02): `transports.send_smtp` has a real message pass through
-it.
+"""`transports.send_smtp` has a real message pass through it.
 
-Until now the SMTP transport had zero test coverage: every drain test
-injected `send_mail=lambda m: ...`, which proves the gate, the redaction
-and the ledger and proves nothing about the function that opens the
-socket. The dev stack ships Mailpit (SMTP on 1025, HTTP API on 8025)
-precisely so this can be exercised without a real relay.
+Every drain test injects `send_mail=lambda m: ...`, which proves the gate, the redaction and the ledger
+and proves nothing about the function that opens the socket. The dev stack ships Mailpit (SMTP on 1025,
+HTTP API on 8025) precisely so this can be exercised without a real relay.
 
-Gated on SMTP_HOST as well as DATABASE_URL: an operator's `.env.local` that
-points SMTP_HOST at a real relay would make this test send real mail, so it
-also requires the Mailpit API to answer -- a relay that is not Mailpit has
-no /api/v1 and the test skips rather than sends blind.
+Gated on SMTP_HOST as well as DATABASE_URL: an operator's `.env.local` that points SMTP_HOST at a real
+relay would make this test send real mail, so it also requires the Mailpit API to answer: a relay that is
+not Mailpit has no /api/v1 and the test skips rather than sends blind.
 
 **The email prefix is `nsmtp-` and must stay unique.**
 """
@@ -82,23 +78,19 @@ def test_a_notification_drains_through_real_smtp_and_lands_in_mailpit(conn, mail
     marker = uuid4().hex[:10]
     n = NotificationService(conn).notify(
         recipient_id=recipient, actor_id=actor, kind="MERGE_PERFORMED",
-        # URGENT so it sorts to the FRONT of `due()` (priority, then age):
-        # a NORMAL row raised behind a backlog is not reached in one capped
-        # pass, and the first version of this test stalled for minutes
-        # pushing 200 rows a killed run had left through real SMTP before
-        # failing on a row it never got to.
+        # URGENT so it sorts to the FRONT of `due()` (priority, then age): a NORMAL row raised behind a
+        # backlog is not reached in one capped pass, and the test would push a killed run's leftover rows
+        # through real SMTP before failing on a row it never got to.
         priority=URGENT,
         subject=f"OP-{marker}: two entities were merged",
         summary=f"A merge in OP-{marker} re-pointed 3 relationship(s).",
         body="shadowbroker was merged into A. Petrov.", classification="AMBER")
     assert n is not None
 
-    # One real notification, not the whole outbox. The cap is the due rows
-    # that sort ahead of ours -- other URGENT ones, none in a clean
-    # database -- plus ours, so exactly the rows the drain must reach to
-    # reach ours go through the socket. The predicate mirrors `due()`,
-    # which has no channel filter, so neither does this: an undercount
-    # would starve our row, an overcount only drains a few more.
+    # One real notification, not the whole outbox. The cap is the due rows that sort ahead of ours (other
+    # URGENT ones, none in a clean database) plus ours, so exactly the rows the drain must reach to reach
+    # ours go through the socket. The predicate mirrors `due()`, which has no channel filter, so neither
+    # does this: an undercount would starve our row, an overcount only drains a few more.
     ahead = conn.execute(
         """SELECT count(*) FROM notify.delivery d
              JOIN notify.notification n ON n.id = d.notification_id

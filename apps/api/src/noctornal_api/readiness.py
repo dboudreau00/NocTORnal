@@ -1,124 +1,27 @@
-"""The facts from the legal register (docs/16) that code can check, in one
-place. Not every entry in docs/16 -- see "What is deliberately NOT here".
+"""The code-checkable facts from the legal register (docs/16), in one place.
 
-docs/16 lists what must be settled before this build may be switched on.
-Some of those entries are decisions only a human can take and the software
-can only record; the rest are facts the software CAN establish -- an
-environment variable is set, a table row is confirmed, a role has a
-holder, a service answers and is configured the way the code assumes.
-Until 2026-09-02 those facts were scattered: docs/16's blocking items
-behind a Lab banner, the unconfirmed retention rules behind
-`GET /retention/rules`, "is there a security officer" behind a break-glass
-refusal, and the KEK, rate-limit and Redis warnings in process-log lines
-nobody reads after boot. Readiness was whatever the last person to look at
-the logs remembered.
+`report(conn)` runs every check and returns `{ready, checks}`. `ready` is the conjunction of the checks and
+nothing else, and every check carries evidence (the number, the name, the version, the error): a verdict
+without evidence is an opinion an operator cannot act on.
 
-`report(conn)` runs every check and returns `{ready, checks}`, where
-`ready` is the conjunction and nothing else, and every check carries
-EVIDENCE -- the number, the name, the version, the error -- because a
-verdict without evidence is an opinion, and an operator cannot act on an
-opinion.
+Every probe runs under `_guarded`, so a down service is a failed check (`ok=False`, the exception as evidence,
+the check's standing action), never a 500. Where the code already decides something
+(`limits.rate_limiting_disabled`, `samples.policy_declared`, `samples.sample_origin`, `envelope._load_kek`), the
+check calls that reader rather than keeping its own copy of the rule.
 
-## Two rules every check follows
+`BLOCKING_CHECKS` name decisions that must be settled before real material arrives, so a caller may refuse on
+them: the poll route, and the cron in `scripts/collection_poll.py`, through `blocking_failures(conn)`, which runs
+only those checks so a poll never waits on a MinIO round trip. `report()` carries the tier on every check
+(`blocking`) and lists the failing ones once (`blocking_failures`).
 
-**A down service is a failed check, never a 500.** A readiness endpoint
-that crashes when Redis is down has reported the outage as its own bug,
-which is this codebase's signature defect ("a failure reported as the
-wrong thing") wearing an operator's hat. Every probe runs under
-`_guarded`, so an exception becomes `ok=False` with the exception as
-evidence and the check's standing action.
-
-**One reader per fact.** Where the code already decides something
-(`limits.rate_limiting_disabled`, `samples.policy_declared`,
-`samples.sample_origin`, `envelope._load_kek`), the check calls that
-reader rather than keeping its own copy of the rule. Two internally
-consistent halves that are wrong together is the other signature defect,
-and a readiness check that kept its own list of off-values would be
-exactly that. `_totp_kek_set` is the cautionary tale: until 2026-09-02 it
-CLAIMED to apply the envelope's test and instead applied a stricter one,
-so a KEK the product encrypted and decrypted with every day was reported
-not-ready. A rule stated in a docstring and not in the code is not a rule.
-
-## Two tiers, because a register nothing refuses on is a list
-
-Until 2026-09-10 every entry here was worth the same: eleven rows, one
-`ready` boolean, and nothing anywhere in the tree REFUSED on either.
-`GET /admin/readiness` served the report and the admin pane drew it, and
-that was the whole of the consequence -- read, never acted on. An
-operator could leave four of them red for a month and the product would
-collect covertly against a real target the whole time, because the only
-consequence of a failed check was a row on a pane nobody had to open.
-That is a quiet green -- a control that reports rather than refuses --
-and it is the same defect as a log line nobody reads after boot, which
-is the thing this module was written to end.
-
-So four checks are now BLOCKING (`BLOCKING_CHECKS`, which justifies each
-one) and the rest are not. A blocking check is not "a more important
-check": it names a decision that has to be settled BEFORE real material
-arrives rather than after it, so a caller may REFUSE on it. For three of
-the four the reason it cannot wait is that running anyway does harm
-nothing afterwards can undo; the fourth (`sample_origin_configured`) is
-reversible and blocks on the first ground alone, which its own entry
-says in those words -- a tier whose stated bar three of its rows meet
-and the fourth does not is exactly the failure "One reader per fact"
-above ends on: a rule stated in a docstring and not in the code.
-`blocking_failures(conn)` is the cheap form for a caller that refuses --
-the poll route, and the cron in `scripts/collection_poll.py`, which asks
-once per pass so the UNATTENDED path is gated and not only the one an
-analyst is watching. It runs only those four, because making a
-collection poll wait on a MinIO round trip would turn a readiness
-refusal into a latency bug. `report()`
-carries the tier on every check (`blocking`) and lists the failing ones
-once (`blocking_failures`) so a caller does not re-derive it and get a
-different answer from the rows beneath it.
-
-## What is deliberately NOT here
-
-Whether the referenced policy exists, whether counsel has reviewed the
-deployment, whether the retention periods are the right ones: the software
-records declarations and cannot verify them, and docs/16 says so. This
-module reports that the declarations have been made. `ready=true` means
-"the code-side preconditions hold", not "this deployment is lawful".
-
-Two register items are checked only as far as the code CAN check them,
-and each says so in its own passing evidence rather than leaving the
-operator to infer it. docs/16 C8: `redis_limiter_store` confirms Redis is
-reachable and reports its eviction policy, and since 2026-09-23
-(sec-redis-isolation) `redis_limiter_isolated` counts the keys in it that
-are not the limiter's and the keys in the instance's other databases,
-reading no value. A tenant holding no keys at that moment, or a second
-server behind the same address, stays invisible, and that row's passing
-evidence says so. docs/16 C9: the
-check reads `samples.origin_split()` -- the same verdict `download()`
-refuses or serves on -- so it can say that the sample origin is set, is
-an origin, is not a second name for the application's, and which of the
-two THIS process is configured as. It cannot see the other process, and
-docs/16 says outright that the runtime "cannot tell the difference
-between a real origin split and a CNAME", so that the sample origin is
-actually served by a process configured as it, and that the two hostnames
-are genuinely separate, stay human confirmations. When
-`NOCTORNAL_SAMPLE_ORIGIN` is unset the check FAILS and says the control is
-off: every download refuses, and `ready=true` must not be readable as
-"invariant 10 holds".
-
-docs/16 C2 is checked the same partial way, and since 2026-09-22 by
-behaviour rather than by configuration: the two bucket checks try to
-DELETE a locked canary version and pass only when the store refuses (the
-block above `prove_write_once` says why a configuration read was not
-evidence). That establishes that this store refused this delete today.
-It cannot establish that nothing else can remove an object (whoever holds
-the volume can), and that the store's upstream is archived and unpatched
-(docs/17 F24) is a custody question for a human, which no probe answers.
-
-And the register below is NOT claimed to be exhaustive over docs/16.
-docs/16 runs to L1-L5, D1-D8 and C1-C13, most of which are decisions and
-external confirmations with no code-side half; `_CHECKS` holds the ones
-that do have one and that somebody has since wired up. So `ready=true`
-means "every check in this list passes", which is weaker than "docs/16 is
-satisfied" -- read it alongside docs/16, never instead of it. Saying so
-here is the point: until 2026-09-02 this docstring described itself as the
-code-side half of the register "in one place" while C9's env fact was not
-checked at all, which made ready=true claim more than it had established.
+Whether the referenced policy exists, whether counsel has reviewed the deployment and whether the retention
+periods are right are declarations the software records and cannot verify. So `ready=true` means "every check
+in this list passes", not "this deployment is lawful" or "docs/16 is satisfied". Some items are checked only as
+far as code can, and the passing evidence says so: C8 (Redis reachable, its eviction policy, foreign keys; not a
+second server behind the same address), C9 (the sample origin is set, is an origin, differs from the
+application's, and which one this process is; not that another process serves it or that the hostnames are a
+real split) and C2 (this store refused to delete a locked canary version; not that nothing else can remove an
+object).
 """
 from __future__ import annotations
 
@@ -138,12 +41,8 @@ from noctornal_api.wording import agree, count_of
 
 log = logging.getLogger("noctornal.readiness")
 
-#: Where the migration scripts live relative to this file: the repository
-#: root is four levels up (noctornal_api / src / api / apps). Resolved
-#: from `__file__` rather than the working directory because the API is
-#: started from wherever the operator happens to be, and a check that
-#: depended on `cwd` would fail on a correctly migrated database run from
-#: the wrong shell.
+#: Migration scripts, relative to this file (the repository root is four levels up). Resolved from `__file__`,
+#: not the working directory, because the API starts from wherever the operator happens to be.
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _MIGRATIONS_DIR = _REPO_ROOT / "db" / "migrations"
 
@@ -157,12 +56,9 @@ _PROBE_READ_S = 5.0
 _TOTP_KEK_ENV = "NOCTORNAL_TOTP_KEK"
 _PEPPER_ENV = "NOCTORNAL_INGEST_PEPPER"
 
-#: The table whose ownership `_app_db_role_not_owner` reads. Any table
-#: Alembic created would answer the same question -- one migration run
-#: creates them all as one role -- and core.node is the one that has
-#: existed at every head since 0002. The ledgers the answer is ABOUT are
-#: `audit.event` and `core.evidence_custody`, whose append-only triggers
-#: are what an owner can switch off in a single statement.
+#: The table whose ownership `_app_db_role_not_owner` reads; any Alembic-created table would answer. The
+#: ledgers the answer is about are `audit.event` and `core.evidence_custody`, whose append-only triggers an
+#: owner can switch off.
 _OWNERSHIP_PROBE_TABLE = "core.node"
 
 
@@ -170,40 +66,18 @@ _OWNERSHIP_PROBE_TABLE = "core.node"
 class Check:
     """One line of the register.
 
-    `action` is what an operator does about a failure; it is empty when
-    `ok` is True, because "everything is fine, and here is what to do
-    about it" is noise.
+    `action` is what an operator does about a failure; it is empty when `ok` is True.
 
-    `blocking` says a caller may refuse on this row rather than merely
-    display it. It is stamped from the register in `run_checks` and never
-    by the probe: a probe that decided its own tier would be a second
-    copy of a rule that exists precisely so ONE list decides what
-    refuses, and this module has already been bitten once by a check that
-    kept its own copy of a rule (`_totp_kek_set`, below).
+    `blocking` says a caller may refuse on this row. It is stamped from the register in `run_checks`, never by
+    the probe, so one list decides what refuses.
 
-    `consequence` and `ui_target` are stamped the same way and for the
-    same reason, and only on a FAILED row (2026-09-23). `consequence` is
-    what the product refuses while this check fails, in a sentence: the
-    admin banner's headline used to be hard-coded to "the collection poll
-    route is refused" while its own items said sample ingest, every
-    sample download and break-glass were refused too, so an operator who
-    read the headline alone decided the red box could wait
-    (ux16-admin:blocking-headline-understates-impact). `ui_target` names
-    where in the console the check is settled, as "tab/subtab", so the
-    pane can offer a way there instead of a path template for curl
-    (ux16-admin:readiness-actions-speak-api). `consequence` is empty when
-    the check passes; `ui_target` is empty when the check is settled by
-    configuration, and when it passes with no caveat.
+    `consequence` (what the product refuses while the check fails) and `ui_target` (where in the console the
+    check is settled, as "tab/subtab") are stamped the same way, only on a failed row. `consequence` is empty
+    when the check passes; `ui_target` is empty when the check is settled by configuration.
 
-    `caveat` is the PROBE's, and only on a PASSING row (2026-09-23,
-    ux16-admin:security-officer-false-green): a standing condition the
-    operator has to see although the verdict is right to pass. A lone
-    SECURITY_OFFICER who can also invoke break-glass passes, because a
-    single-operator install is a design choice, and has no emergency
-    access at all. That sentence was first written into the evidence, and
-    the console folds passing rows away, so nobody would ever have read
-    it; a caveat is drawn outside the fold and marked. A failed row has an
-    action instead, so `_register_facts` drops a caveat from it.
+    `caveat` is the probe's, only on a passing row: a standing condition the operator has to see although the
+    verdict is right to pass. The console draws it outside the fold of passing rows. A failed row has an action
+    instead, so `_register_facts` drops a caveat from it.
     """
     check: str
     ok: bool
@@ -239,38 +113,27 @@ def _guarded(name: str, action: str, probe: Callable[[], Check]) -> Check:
 # The checks
 # ---------------------------------------------------------------------------
 
-#: docs/17 F2, decided by the owner 2026-09-22: a REJECTED sample is
-#: preserved by default, and destroyed only where the deployment declares
-#: it. The variable, its two values and its default are the preservation
-#: store's contract (`samples.py`); read here only to say in the L1
-#: evidence which of the two a rejection will actually do.
+#: A REJECTED sample is preserved unless the deployment declares otherwise (docs/17 F2). The variable, its
+#: values and its default are the preservation store's contract (`samples.py`); read here only for the L1
+#: evidence.
 DISPOSITION_ENV = "NOCTORNAL_REJECTED_SAMPLE_DISPOSITION"
 PRESERVE_BUCKET_ENV = "PRESERVE_BUCKET"
 PRESERVE_BUCKET_DEFAULT = "noctornal-preserved"
 
 
 def rejected_sample_disposition() -> tuple[str | None, str]:
-    """`(disposition, raw)`: "preserve" or "destroy", or None when the
-    variable holds anything else, which the reject path refuses on (docs/17
-    F2: "any other value refuses with a message naming the variable").
-    Unset or blank is the default, preserve. Read through
-    `samples.disposition_setting()`, the reject path's own reading, so the
-    register cannot report a disposition the reject path would not apply.
-    Imported here rather than at the top: the register loads for every
-    readiness probe, and the sample service is only needed for this."""
+    """`(disposition, raw)`: "preserve" or "destroy", or None when the variable holds anything else, which the
+    reject path refuses on. Unset or blank is preserve. Read through `samples.disposition_setting()`, the reject
+    path's own reading, so the register cannot report a disposition the reject path would not apply. Imported
+    inside the function: the sample service is needed only here."""
     from noctornal_api.samples import disposition_setting
     disposition, _problem = disposition_setting()
     return disposition, os.environ.get(DISPOSITION_ENV, "")
 
 
 def _disposition_evidence() -> str:
-    """The sentence the L1 evidence carries about what a rejection does.
-
-    Added 2026-09-22 with docs/17 F2. Until then the L1 row said the policy
-    was declared and nothing about what the software would do with the
-    material the policy is about, so an operator could read a green L1 on
-    a build that destroyed every rejected sample, in a jurisdiction where
-    destroying it is itself the offence."""
+    """The sentence the L1 evidence carries about what a rejection does, so a green L1 cannot hide a build that
+    destroys rejected samples."""
     disposition, raw = rejected_sample_disposition()
     bucket = preservation_store_settings().bucket
     if disposition == "preserve":
@@ -303,8 +166,7 @@ def _prohibited_content_policy(conn: psycopg.Connection) -> Check:
             "prohibited_content_policy", True,
             f"NOCTORNAL_PROHIBITED_CONTENT_POLICY={reference}; "
             f"NOCTORNAL_DESIGNATED_PERSON={person}. {disposition}. "
-            # F13: one clause from the screening reader, so each fact
-            # keeps one reader; the verdict does not move on it.
+            # One clause from the screening reader, so each fact keeps one reader; the verdict does not move on it.
             f"{_screening_clause(conn)} This is a "
             f"declaration the software records, not one it can verify "
             f"(docs/16 L1).")
@@ -332,14 +194,8 @@ def _retention_rules_confirmed(conn: psycopg.Connection) -> Check:
         return Check("retention_rules_confirmed", True, evidence)
     if total == 0:
         evidence += " (no rules at all: the seed did not run)"
-    # The console first (ux16-admin:readiness-actions-speak-api,
-    # 2026-09-23): Records, Retention has had a Confirm rule form since
-    # the day this action sent operators to curl, and `ui_target` below
-    # makes it a link. The route stays, second, for a scripted deployment.
-    # "Records", not "Lifecycle" (2026-09-24): the rail tab was
-    # renamed in the same pass this sentence was written, so it sent
-    # operators to a tab that no longer exists, one line above the
-    # console's own "open any case, then Records, Retention".
+    # The console first: Records, Retention has a Confirm rule form, which `ui_target` links to. The route stays
+    # second, for a scripted deployment.
     return Check(
         "retention_rules_confirmed", False, evidence,
         "confirm each placeholder rule in the console under Records, "
@@ -361,26 +217,15 @@ def _active_holders(conn: psycopg.Connection, role: str) -> int:
 
 
 def _security_officer_present(conn: psycopg.Connection) -> Check:
-    """Break-glass REFUSES to grant when nobody can review it, so a
-    deployment with no active SECURITY_OFFICER has no emergency access at
-    all, and nothing said so until someone needed it.
+    """Break-glass refuses to grant when nobody can review it, so a deployment with no active SECURITY_OFFICER
+    has no emergency access.
 
-    The evidence names the holders, and says when the only one can also
-    INVOKE break-glass (ux16-admin:security-officer-false-green,
-    2026-09-23). Nobody reviews their own break-glass, so `invoke()`
-    refuses unless an officer OTHER than the invoker exists
-    (`break_glass.py`, final review C6): a lone officer who is also an
-    administrator or a Lead investigator has no emergency access at all,
-    and the register used to pass that with "1 active SECURITY_OFFICER
-    account" and nothing else.
-    The verdict does not move: a single-operator install holding every
-    role is a documented design choice (`iam_admin.create_first_admin`),
-    and failing a BLOCKING check on it would refuse collection on every
-    fresh install. What moves is that the register now says it, as the
-    row's `caveat` and not inside its evidence: the console folds passing
-    rows away, and a warning in a passing row's evidence sat in a fold
-    nothing opens, on exactly the out-of-the-box install it was written
-    for (the 2026-09-23 verifier's correction to the first fix).
+    The evidence names the holders and says when the only one can also invoke break-glass: nobody reviews their
+    own, so `invoke()` refuses unless another officer exists (`break_glass.py`). The verdict does not move,
+    because a single-operator install holding every role is a documented design choice
+    (`iam_admin.create_first_admin`) and failing a BLOCKING check on it would refuse collection on every fresh
+    install. It is reported as the row's `caveat`, not in the evidence, because the console folds passing rows
+    away.
     """
     rows = conn.execute(
         """SELECT u.email,
@@ -394,9 +239,8 @@ def _security_officer_present(conn: psycopg.Connection) -> Check:
             WHERE ur.role_key = 'SECURITY_OFFICER' AND u.is_active
             ORDER BY u.email""").fetchall()
     n = len(rows)
-    # Agreed, not a bracketed plural: the register prints this as its
-    # evidence (README screenshot set review, 2026-09-23). The count stays
-    # first, because tests and operators both read it as the verdict.
+    # Agreed, not a bracketed plural: the register prints this as its evidence. The count stays first, because
+    # tests and operators read it as the verdict.
     evidence = count_of(n, "active SECURITY_OFFICER account",
                         "active SECURITY_OFFICER accounts")
     if n:
@@ -436,25 +280,12 @@ def _sys_admin_present(conn: psycopg.Connection) -> Check:
 
 
 def _totp_kek_set(conn: psycopg.Connection) -> Check:
-    """Calls `envelope._load_kek`, the reader every encrypt and every
-    decrypt already calls, so this check and the envelope cannot disagree
-    about what a usable KEK is. The evidence is the reader's own refusal.
+    """Calls `envelope._load_kek`, the reader every encrypt and decrypt calls, so this check and the envelope
+    cannot disagree about what a usable KEK is. The evidence is the reader's own refusal.
 
-    Until 2026-09-02 this check claimed exactly that and did not do it: it
-    kept a private copy of the rule and decoded with
-    `base64.b64decode(raw, validate=True)` while `envelope._load_kek`
-    decodes leniently. A KEK carrying a trailing newline -- what a Docker
-    or Kubernetes secret file and a copy-pasted `.env` line routinely hold
-    -- sealed and opened every TOTP secret in the product and was still
-    reported `ok=false, ready=false` with the evidence
-    "NOCTORNAL_TOTP_KEK is set but is not valid base64". That is a working
-    deployment reported as broken, with the wrong reason, which is the
-    defect this module exists to prevent, and it is why "one reader per
-    fact" above is a rule and not a preference. It was also the one entry
-    in the register no test ever flipped, which is how it survived.
-
-    Neither `_load_kek`'s messages nor this check quote the value, so the
-    KEK cannot leak into an operator's screenshot of the register.
+    A KEK with a trailing newline (as a Docker or Kubernetes secret file holds) works in the envelope, so it
+    must pass here. Neither `_load_kek`'s messages nor this check quote the value, so the KEK cannot leak into a
+    screenshot of the register.
     """
     from noctornal_api.security.envelope import _load_kek
 
@@ -465,11 +296,9 @@ def _totp_kek_set(conn: psycopg.Connection) -> Check:
     try:
         key = _load_kek()
     except (RuntimeError, ValueError) as exc:
-        # RuntimeError is `_load_kek`'s own refusal (unset, wrong length).
-        # ValueError catches binascii.Error, which it lets through
-        # unwrapped for a value even the lenient decoder cannot parse
-        # (bad padding) -- reporting that here rather than letting
-        # `_guarded` label it a crash keeps the operator's action right.
+        # RuntimeError is `_load_kek`'s own refusal (unset, wrong length). ValueError catches the binascii.Error
+        # it lets through for a value even the lenient decoder cannot parse (bad padding), so `_guarded` does
+        # not label it a crash.
         return Check("totp_kek_set", False, str(exc), action)
     return Check("totp_kek_set", True,
                  f"{_TOTP_KEK_ENV} is set and decodes to {len(key)} bytes")
@@ -478,26 +307,17 @@ def _totp_kek_set(conn: psycopg.Connection) -> Check:
 def _kek_ring_opens_stored_secrets(conn: psycopg.Connection) -> Check:
     """Does the ring open every key id the database actually holds?
 
-    `totp_kek_set` proves the active key DECODES. This proves the keys
-    OPEN things: up to `sealed.SAMPLE_ROWS` blobs per (table, key id)
-    across the five sealed columns (`security/sealed.SEALED_COLUMNS`),
-    through `envelope.can_open`, which is `decrypt` with the plaintext
-    thrown away -- and COUNTED, because before the ring every blob was
-    recorded under one id whatever key sealed it, so one row's verdict
-    is not a group's (`sealed.py` says how that was found). The distinction is the whole finding it exists for: until
-    2026-09-11 a KEK that had changed under a live database -- rotated,
-    or restored from the wrong backup -- left this register green while
-    every login answered 500, because the only KEK check there was asked
-    whether the value was 32 bytes.
+    `totp_kek_set` proves the active key decodes; this proves the keys open things: up to `sealed.SAMPLE_ROWS`
+    blobs per (table, key id) across the five sealed columns (`security/sealed.SEALED_COLUMNS`), through
+    `envelope.can_open`, counted because one row's verdict is not a group's. Without it a KEK changed under a
+    live database (rotated, or restored from the wrong backup) leaves the register green while every login
+    answers 500.
 
-    Failure evidence names the table, the row count and the key id, and
-    says which of the two faults it is: no key of that id in the ring, or
-    a key of that id that does not open the blob (the key changed and the
-    id did not). It never prints key material; ids are labels.
+    Failure evidence names the table, the row count and the key id, and says whether no key of that id is in
+    the ring or the key of that id does not open the blob. It never prints key material.
 
-    Not blocking. It is an operability failure -- nobody can sign in --
-    of the kind the tier note above says belongs to `sys_admin_present`'s
-    class, not to the decisions that cannot wait.
+    Not blocking: it is an operability failure (nobody can sign in), the class of `sys_admin_present`, not a
+    decision that cannot wait.
     """
     from noctornal_api.security import envelope
     from noctornal_api.security.sealed import inventory
@@ -531,27 +351,11 @@ def _kek_ring_opens_stored_secrets(conn: psycopg.Connection) -> Check:
 
 
 def _ingest_pepper_set(conn: psycopg.Connection) -> Check:
-    """Calls `ingest._pepper`, the reader every issued ingest key and
-    every victim-credential fingerprint already goes through, for the
-    reason `_totp_kek_set` gives at length: a check carrying its own copy
-    of "what counts as a usable pepper" is a check that can disagree with
-    the product it reports on.
+    """Calls `ingest._pepper`, the reader every issued ingest key and victim-credential fingerprint goes
+    through, so the check cannot disagree with the product (see `_totp_kek_set`).
 
-    Added 2026-09-10. Until then the pepper had no entry in this register
-    at all, so a deployment missing it passed every row and then failed
-    at the first ingest key operation -- an `IngestError` raised from
-    inside the issue path, which reads to whoever hits it as a bug in the
-    endpoint rather than as a variable nobody set. The register exists to
-    move that discovery from the first user to the operator.
-
-    NOT blocking. An unset pepper stops ingest keys and fingerprint
-    correlation and touches nothing else; refusing a collection poll over
-    it would be refusing the wrong thing, and a refusal that fires on an
-    unrelated fault is how a gate gets switched off wholesale.
-
-    The value is never quoted, only its length, so the pepper cannot
-    reach an operator's screenshot of the register -- the same rule
-    `_totp_kek_set` follows for the KEK.
+    Not blocking: an unset pepper stops ingest keys and fingerprint correlation and nothing else, and refusing a
+    collection poll over it would gate on an unrelated fault. The value is never quoted, only its length.
     """
     from noctornal_api.ingest import IngestError, _pepper
 
@@ -572,30 +376,17 @@ def _ingest_pepper_set(conn: psycopg.Connection) -> Check:
 
 
 def _credentials_not_published(conn: psycopg.Connection) -> Check:
-    """Does any credential this process holds carry a value somebody has
-    already published? (sec-dev-secrets-in-production, 2026-09-23)
+    """Does any credential this process holds carry a value somebody has already published?
 
-    The verdict is `config.published_credentials`', the reader a
-    production boot refuses on, so this row and the boot cannot disagree
-    about what "published" means. It is here as well as there because the
-    boot refuses only under `NOCTORNAL_ENV=production`, exactly spelt, and
-    config.py names the misspelling as the edge it cannot close: a
-    deployment that meant production and wrote `prod` starts on the
-    development password with nothing said. This row says it on every
-    process.
+    The verdict is `config.published_credentials`, the reader a production boot refuses on. The row exists as
+    well because the boot refuses only under `NOCTORNAL_ENV=production` exactly spelt: a deployment that wrote
+    `prod` would start on the development password silently.
 
-    It sees this process's environment and nothing else. The production
-    compose file hands every service the whole of secrets.env, so there
-    that is every credential the stack has; a Postgres or MinIO configured
-    somewhere this process cannot read is not covered, and the passing
-    evidence says so rather than claiming the store's own password.
+    It sees this process's environment only. A Postgres or MinIO configured somewhere this process cannot read
+    is not covered, and the passing evidence says so.
 
-    NOT blocking, and red on every development machine and in CI by
-    design, for the reason `app_db_role_not_owner` gives: a development
-    stack runs on the published password on purpose, and a refusal keyed
-    to a check that is red everywhere except production would be switched
-    off within a week. Values are never quoted, only variable names and
-    which published value each one carries.
+    Not blocking, and red on every development machine and in CI by design (see `app_db_role_not_owner`).
+    Values are never quoted, only variable names and which published value each carries.
     """
     from noctornal_api.config import ENV_VAR, PRODUCTION, is_production, published_credentials
 
@@ -625,38 +416,20 @@ def _credentials_not_published(conn: psycopg.Connection) -> Check:
 
 
 def _app_db_role_not_owner(conn: psycopg.Connection) -> Check:
-    """Can the role this process is connected as switch off the
-    append-only triggers?
+    """Can the role this process is connected as switch off the append-only triggers?
 
-    `audit.event` and `core.evidence_custody` are append-only because a
-    BEFORE UPDATE OR DELETE trigger says so, and `ALTER TABLE ... DISABLE
-    TRIGGER` is available to the table's OWNER and to any superuser. So
-    an API connected as the owner holds tamper-evidence it can turn off
-    from inside the request path in one statement -- which is exactly
-    what ten of this suite's own `*_pg` fixtures do, to write the
-    tampering the verifier is meant to catch. The guarantee was never
-    "the application code does not contain that statement"; it is "the
-    server refuses it", and that is a fact about which role the DSN
-    names, not about the code.
+    `audit.event` and `core.evidence_custody` are append-only because a BEFORE UPDATE OR DELETE trigger says so,
+    and `ALTER TABLE ... DISABLE TRIGGER` is available to the table's owner and any superuser. The guarantee is
+    that the server refuses it, which depends on the role the DSN names. The production compose file
+    (infra/production/compose.yml) creates `noctornal`, which owns the schema and runs Alembic under
+    NOCTORNAL_MIGRATION_DATABASE_URL, and `noctornal_app`, which is not the owner, not a member of it and not a
+    superuser, and is what DATABASE_URL names for the API.
 
-    Hence the two roles the production compose file creates
-    (infra/production/compose.yml): `noctornal` owns the schema and runs
-    Alembic under NOCTORNAL_MIGRATION_DATABASE_URL, and `noctornal_app`
-    -- not the owner, not a member of it, not a superuser -- is what
-    DATABASE_URL names for the API and every runtime process.
+    Membership is read as well as ownership (`pg_has_role`): a role that may `SET ROLE noctornal` is the owner
+    when it decides to be. `rolsuper` is read because a superuser may disable a trigger on any table.
 
-    Membership is read as well as ownership, because "is not the owner"
-    is where a naive reading stops: a role that may `SET ROLE noctornal`
-    is the owner the moment it decides to be, and `pg_has_role` is the
-    only thing that sees that. `rolsuper` is read for the same reason in
-    the other direction -- a superuser's ownership is irrelevant because
-    it may disable a trigger on any table in the cluster.
-
-    NOT blocking, and it is EXPECTED to fail on every developer machine
-    and in CI: the test suites must own the tables in order to disable
-    those triggers on purpose, so they connect as the owner. A refusal
-    keyed to a check that is red everywhere except production would be a
-    refusal that gets disabled the first week.
+    Not blocking, and expected to fail on developer machines and in CI, where the suites connect as the owner to
+    disable triggers on purpose.
     """
     action = (
         "point DATABASE_URL at the least-privilege role `noctornal_app` and "
@@ -724,35 +497,14 @@ def _app_db_role_not_owner(conn: psycopg.Connection) -> Check:
 
 
 def _sample_origin_configured(conn: psycopg.Connection) -> Check:
-    """docs/16 C9. Reads `samples.origin_split()` -- the one verdict
-    `samples.download()` refuses or serves on -- rather than the
-    environment variables directly.
+    """docs/16 C9. Reads `samples.origin_split()`, the one verdict `samples.download()` refuses or serves on,
+    not the environment variables directly.
 
-    Added 2026-09-02. C9 was the one register entry with a code-checkable
-    half that this module did not check, so `ready=true` was returned for
-    deployments where every sample download refuses outright (invariant
-    10) while the module docstring claimed to be the code-side half of the
-    register "in one place".
-
-    Rewritten 2026-09-09. Until then it passed on "the variable is set",
-    and the download itself compared that variable against the Host
-    header: a deployment whose sample origin was a second name for the
-    application origin passed this check and served hostile bytes from
-    the application, and one whose console could not reach the sample
-    origin at all (the UI CSP allowed only 'self') passed it too. The
-    check now fails on the same three deployment problems the download
-    refuses on -- unset, not an origin, equal to the application origin --
-    and, when the split is usable, says which of the two origins THIS
-    process is configured as, because a register that passed on the
-    application process was silent about whether anything served at the
-    sample origin.
-
-    Unset is reported as the control being OFF, in those words: there is
-    no origin split, every download refuses, and a reader of `ready`
-    must not be able to take a passing register as "invariant 10 holds".
-    What stays human (docs/16 C9, named in "What is deliberately NOT
-    here"): that the sample origin is served by a process configured as
-    it, and that the two hostnames are a real split and not a CNAME.
+    Fails on the three deployment problems the download refuses on (unset, not an origin, equal to the
+    application origin) and, when the split is usable, says which of the two origins this process is configured
+    as. Unset is reported as the control being OFF: every download refuses, and a passing register must not read
+    as "invariant 10 holds". What stays human: that the sample origin is served by a process configured as it,
+    and that the two hostnames are a real split and not a CNAME.
     """
     from noctornal_api.samples import origin_split, sample_origin
 
@@ -820,28 +572,16 @@ def _rate_limiting_enabled(conn: psycopg.Connection) -> Check:
 
 def _proxy_hops_declared(conn: psycopg.Connection) -> Check:
     """Does this process know how many proxies stand in front of it?
-    (docs/17 "a missing hop count", 2026-10-08)
 
-    `limits.client_ip` takes the client's address from the peer unless
-    `NOCTORNAL_TRUSTED_PROXY_HOPS` counts the proxies the operator runs, and
-    then from that far along `X-Forwarded-For`, counted from the right. The
-    peer is what uvicorn reports, and uvicorn reports the forwarded address
-    instead only when it is told to trust the proxy (`--forwarded-allow-ips`,
-    which `compose.yml` sets and a deployment of another shape may not). So an
-    unset count leaves the client's address to how the server was started:
-    where that is not right the peer is the proxy, every client is one subject
-    to the rate limiter, the sign-in audit names the proxy as the origin of
-    every login and every session is pinned to one address, and neither the
-    boot nor this register said so. The count is read by
-    `limits.trusted_proxy_hops`, the reader `client_ip` uses, so the row and
-    the code cannot differ.
+    `limits.client_ip` takes the client's address from the peer unless `NOCTORNAL_TRUSTED_PROXY_HOPS` counts the
+    proxies, and then from that far along `X-Forwarded-For`, counted from the right. With no count the peer is
+    whatever uvicorn reports, and unless it trusts the proxy (`--forwarded-allow-ips`, which `compose.yml` sets)
+    that is the proxy: every client is one subject to the rate limiter and the sign-in audit names the proxy as
+    the origin of every login. The count is read by `limits.trusted_proxy_hops`, the reader `client_ip` uses.
 
-    Outside production the row passes and says what it read: a development
-    stack has no proxy, and the peer is the right address there. In production
-    a count below one fails it. NOT blocking: it affects who the limiter and
-    the audit think a client is, not material a poll collects; and it is
-    deliberately not a boot refusal either, because a count cannot be told
-    from a deployment that really has no proxy in front of it.
+    Outside production the row passes and says what it read. In production a count below one fails it. Not
+    blocking: it affects who the limiter and the audit think a client is, not material a poll collects. Nor is
+    it a boot refusal, because a missing count cannot be told from a deployment that really has no proxy.
     """
     from noctornal_api.config import is_production
     from noctornal_api.http.limits import HOPS_ENV, trusted_proxy_hops
@@ -880,10 +620,9 @@ def _proxy_hops_declared(conn: psycopg.Connection) -> Check:
 
 
 def _redis_limiter_store(conn: psycopg.Connection) -> Check:
-    """Reachable, and not an evictor. An unknown policy is NOT ok: the
-    register is a list of things confirmed, and "the server would not
-    say" confirms nothing. The action tells the operator to confirm it by
-    other means, which is what docs/16 C8 already asks."""
+    """Reachable, and not an evictor. An unknown policy is NOT ok: the register lists things confirmed, and
+    "the server would not say" confirms nothing. The action tells the operator to confirm it by other means
+    (docs/16 C8)."""
     from noctornal_api.http.limits import redacted_url
     from noctornal_api.ratelimit_redis import (
         CONNECT_TIMEOUT_S,
@@ -914,8 +653,7 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
     if policy is None:
         return Check(
             "redis_limiter_store", False,
-            # INFO is asked first since the limiter's Redis ACL (2026-10-02),
-            # so UNKNOWN means neither answered, not CONFIG alone.
+            # INFO is asked first because of the limiter's Redis ACL, so UNKNOWN means neither answered, not CONFIG alone.
             f"Redis at {where} answers PING; maxmemory-policy is UNKNOWN because "
             f"neither INFO memory nor CONFIG GET reported it (managed Redis "
             f"usually disables CONFIG)",
@@ -923,12 +661,8 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
             "maxmemory-policy=noeviction, or point REDIS_URL at one whose INFO "
             "memory reports it (docs/16 C8)")
     if is_evicting_policy(policy):
-        # The bundled stack is named for what it runs now. The action said
-        # infra/docker-compose.yml sets allkeys-lru, which stopped being true
-        # when that file moved to noeviction (Alpha 6 pre-release check,
-        # 2026-09-23). An evicting policy seen here is an operator's own
-        # Redis, or a dev stack started from the older file and never
-        # recreated, so the action names the command that recreates it.
+        # An evicting policy seen here is an operator's own Redis, or a dev stack started from an older file and
+        # never recreated, so the action names the command that recreates it.
         return Check(
             "redis_limiter_store", False,
             f"Redis at {where} answers PING; maxmemory-policy={policy}, which "
@@ -948,61 +682,39 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
 
 
 # ---------------------------------------------------------------------------
-# The limiter's Redis, to itself (sec-redis-isolation, 2026-09-23)
+# The limiter's Redis, to itself
 # ---------------------------------------------------------------------------
 #
-# `noeviction` is half of docs/16 C8. The other half is that nothing else
-# lives in that Redis, and until 2026-09-23 the register said that half was
-# "a deployment fact the runtime cannot see". Part of it can be seen. A
-# cache, a queue or a session store sharing the instance leaves KEYS, and
-# the harm arrives through the memory those keys hold: `maxmemory` is per
-# instance, so under noeviction a co-tenant filling it makes every meter
-# write fail and every limit that fails closed refuse everyone, and under
-# an evicting policy the co-tenant's pressure is what deletes the meters.
+# `noeviction` is half of docs/16 C8; the other half is that nothing else lives in that Redis. A co-tenant's
+# keys hold memory, and `maxmemory` is per instance: under noeviction it makes every meter write fail and every
+# fail-closed limit refuse everyone, and under an evicting policy its pressure deletes the meters.
 #
-# So the check counts two things and reads no value. Key NAMES in the
-# limiter's own database, with SCAN, split by whether they sit under the
-# limiter's prefix; and the key COUNT of every other database on the
-# instance, from INFO keyspace, which carries no name at all. The evidence
-# holds counts and never a key name: another tenant's names can carry a
-# user id or an email, and this evidence goes into a screenshot.
+# The check counts and reads no value: key NAMES in the limiter's own database (SCAN), split by whether they
+# sit under the limiter's prefix, and the key COUNT of every other database (INFO keyspace). The evidence holds
+# counts and never a key name, because names can carry a user id or an email and the evidence goes into
+# screenshots.
 #
-# What it cannot see, said in its passing evidence: a tenant that holds no
-# keys at the moment it looks, and a second instance behind the same
-# address. A green row means "nothing else has left keys here", which is
-# the part of C8 a runtime can establish.
+# It cannot see a tenant that holds no keys at the moment, or a second instance behind the same address; the
+# passing evidence says so. A green row means nothing else has left keys here.
 
-#: SCAN page size, and the most keys one probe will walk before it stops
-#: and says it did not finish. A limiter holds one meter per live subject
-#: per limit, and each expires within its window, so a real deployment
-#: holds hundreds; the ceiling is there so a Redis that turns out to be a
-#: million-key cache is reported as shared quickly rather than walked.
+#: SCAN page size, and the most keys one probe walks before it stops and says it did not finish. A real
+#: deployment holds hundreds; the ceiling reports a Redis that is really a million-key cache as shared quickly.
 _CENSUS_PAGE = 1000
 _CENSUS_LIMIT = 100_000
 _CENSUS_BUDGET_S = 2.0
 
-#: Keys a managed Redis writes into database 0 for its own bookkeeping,
-#: matched by exact name and never by pattern. c24 (2026-09-24): AWS
-#: documents that ElastiCache adds `ElastiCacheMasterReplicationTimestamp`
-#: to every Valkey or Redis OSS cluster to measure replication lag, so a
-#: limiter alone on ElastiCache was reported SHARED on every call, with an
-#: action ("move whatever else writes to this one elsewhere") nobody could
-#: carry out. The service is not a co-tenant: the key is one small value
-#: it rewrites in place, nothing that grows towards `maxmemory`. The
-#: evidence counts these separately and still never prints a name.
+#: Keys a managed Redis writes into database 0 for its own bookkeeping, matched by exact name, never by
+#: pattern. AWS ElastiCache adds `ElastiCacheMasterReplicationTimestamp` to every cluster; it is one small
+#: value rewritten in place, not a co-tenant. The evidence counts these separately and never prints a name.
 _PROVIDER_BOOKKEEPING = frozenset({b"ElastiCacheMasterReplicationTimestamp"})
 
 
 def _limiter_prefix() -> bytes:
-    """The prefix every key the limiter writes starts with, meters and
-    audit throttles alike (`rl:<limit>:<subject>`, `rl:audit:...`).
+    """The prefix every key the limiter writes starts with, meters and audit throttles alike
+    (`rl:<limit>:<subject>`, `rl:audit:...`).
 
-    Read from `RateLimiter`'s own constructor default, which is the value
-    `http.limits.build_limiter` builds with, so this cannot drift from what
-    the limiter writes if the default ever changes. Through
-    `ratelimit_redis.limiter_key_prefix` since 2026-10-02, the reader the
-    production ACL's key pattern is built from, so the census and the ACL
-    mean the same prefix."""
+    Read through `ratelimit_redis.limiter_key_prefix`, the reader the production ACL's key pattern is built
+    from, so the census and the ACL mean the same prefix."""
     from noctornal_api.ratelimit_redis import limiter_key_prefix
 
     return limiter_key_prefix().encode()
@@ -1064,13 +776,10 @@ def _other_databases(client, own: int) -> dict[int, int] | None:
 def _census(client, prefix: bytes, *, clock=time.monotonic) -> _Census:
     """Walk the limiter's database with SCAN and count, never read.
 
-    SCAN, DBSIZE and INFO are the only commands sent: none of them returns
-    a value, and a key's name is compared with the prefix and dropped
-    (only the foreign ones are held, as a set, so a key SCAN returns twice
-    is counted once). SCAN rather than KEYS, because KEYS blocks the server
-    for the length of the walk and this Redis is on the request path.
-    The page, the ceiling and the budget are read at call time, so a test
-    can shrink them.
+    SCAN, DBSIZE and INFO are the only commands sent: none returns a value, and a key's name is compared with
+    the prefix and dropped (only foreign names are held, as a set, so a key SCAN returns twice is counted once).
+    SCAN rather than KEYS, because KEYS blocks the server and this Redis is on the request path. The page,
+    ceiling and budget are read at call time, so a test can shrink them.
     """
     page, limit = _CENSUS_PAGE, _CENSUS_LIMIT
     own = _limiter_db(client)
@@ -1088,9 +797,7 @@ def _census(client, prefix: bytes, *, clock=time.monotonic) -> _Census:
             scanned += 1
             if name.startswith(prefix):
                 continue
-            # Only in database 0, where the service writes it: the same
-            # name anywhere else was put there by somebody else (c24,
-            # 2026-09-24).
+            # Only in database 0, where the service writes it: the same name anywhere else was put there by somebody else.
             if own == 0 and name in _PROVIDER_BOOKKEEPING:
                 provider.add(name)
             else:
@@ -1106,28 +813,19 @@ def _census(client, prefix: bytes, *, clock=time.monotonic) -> _Census:
 
 # ---------------------------------------------------------------------------
 # The limiter's Redis ACL, read over the limiter's own connection
-# (the limiter's Redis ACL, 2026-10-02)
 # ---------------------------------------------------------------------------
 #
-# The census above can only report a co-tenant after it has written. Since
-# 2026-10-02 the production Redis prevents one: its ACL disables `default`
-# and gives the limiter a user that reads and writes under its prefix alone
-# and runs its own commands alone (ratelimit_redis.LIMITER_ACL_COMMANDS,
-# which says what three of them can still see). This reads that configuration
-# with ACL WHOAMI and ACL GETUSER over the connection REDIS_URL opens, and
-# nothing else: no probe that a correct ACL would refuse, because every
-# refusal lands in the server's ACL LOG, where a real attempt to get round
-# the ACL has to stand out.
+# The census can only report a co-tenant after it has written. The production Redis prevents one: its ACL
+# disables `default` and gives the limiter a user that reads and writes under its prefix alone and runs its own
+# commands alone (ratelimit_redis.LIMITER_ACL_COMMANDS). This reads that configuration with ACL WHOAMI and ACL
+# GETUSER over the connection REDIS_URL opens, and sends no probe a correct ACL would refuse, so every entry in
+# the server's ACL LOG is a real attempt to get round it.
 #
-# Production fails closed on what it reads: the limiter signed in as
-# `default`; `default` enabled, with a password or without one (open, the
-# shape every unauthenticated client is signed in as); the limiter's user
-# holding a key outside its prefix, a channel, a selector, a category or a
-# command it does not send; or an ACL it cannot read. A development Redis
-# has none of this, by design (infra/docker-compose.yml is unchanged), so
-# outside production the row says what it read and passes on the census.
-# What stays invisible is said in the passing evidence: another user the
-# ACL defines can still write here, and it would show only in the census.
+# Production fails closed on what it reads: the limiter signed in as `default`; `default` enabled, with or
+# without a password; the limiter's user holding a key outside its prefix, a channel, a selector, a category or
+# a command it does not send; or an ACL it cannot read. A development Redis has none of this by design, so
+# outside production the row says what it read and passes on the census. Another user the ACL defines can
+# still write here and would show only in the census.
 
 @dataclass(frozen=True)
 class _AclUser:
@@ -1268,9 +966,7 @@ def _acl_summary(posture: _AclPosture, prefix: str, faults: list[str]) -> str:
     sent = len(LIMITER_ACL_COMMANDS)
     commands = (f"the {sent} commands it sends" if granted == sent
                 else f"{granted} of the {sent} commands it sends")
-    # "Confines ... to keys under" read as more than the ACL does (review of
-    # 2026-10-02): reads and writes are confined, key NAMES, INFO and other
-    # users' rules are not, so the sentence says which.
+    # Reads and writes are confined; key NAMES, INFO and other users' rules are not, so the sentence says which.
     return (f"The server's ACL lets the limiter's user {posture.whoami} read and "
             f"write only keys under {prefix} and run only {commands}, and the "
             f"default user is disabled. That user can still list every key name "
@@ -1280,19 +976,15 @@ def _acl_summary(posture: _AclPosture, prefix: str, faults: list[str]) -> str:
 
 
 def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
-    """docs/16 C8, the half `redis_limiter_store` cannot answer: does the
-    limiter have its Redis to itself? See the block above for what is
-    counted, what is never read, and what stays invisible.
+    """docs/16 C8, the half `redis_limiter_store` cannot answer: does the limiter have its Redis to itself? See
+    the block above for what is counted, what is never read, and what stays invisible.
 
-    Not blocking, like the rest of C8: a shared Redis endangers the limits,
-    and refusing a collection poll over it would be refusing the wrong
-    thing. A walk that cannot finish, or a server that will not answer
-    SCAN or INFO, is NOT ok, on the rule `redis_limiter_store` states for
-    an unknown eviction policy: the register lists things confirmed.
+    Not blocking, like the rest of C8: a shared Redis endangers the limits, and refusing a collection poll over
+    it would refuse the wrong thing. A walk that cannot finish, or a server that will not answer SCAN or INFO,
+    is NOT ok, on the rule `redis_limiter_store` states for an unknown eviction policy.
 
-    Since 2026-10-02 it reads the server's ACL first (the block above
-    `_acl_posture`), and under NOCTORNAL_ENV=production a limiter the ACL
-    does not confine fails the row before the census runs.
+    It reads the server's ACL first (the block above `_acl_posture`), and under NOCTORNAL_ENV=production a
+    limiter the ACL does not confine fails the row before the census runs.
     """
     from noctornal_api.config import is_production
     from noctornal_api.http.limits import redacted_url
@@ -1382,11 +1074,8 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
     if shared:
         if (not census.foreign and census.db != 0 and set(others or {}) == {0}
                 and others[0] <= len(_PROVIDER_BOOKKEEPING)):
-            # The one shape a managed service's bookkeeping leaves when the
-            # limiter is on another database: INFO carries counts only, so
-            # the key in db0 cannot be recognised from here, and the way to
-            # let it be is to put the limiter where it can (c24,
-            # 2026-09-24).
+            # The one shape a managed service's bookkeeping leaves when the limiter is on another database: INFO
+            # carries counts only, so the key in db0 cannot be recognised from here.
             action += (
                 ". On AWS ElastiCache, database 0 always holds one key the "
                 "service writes for itself, which this check recognises only "
@@ -1415,8 +1104,7 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
                 f"{agree(census.total, 'and it is', 'all of them')} under the "
                 f"limiter's prefix {shown}")
     if census.provider:
-        # Said, not silently dropped: a reader comparing this row with
-        # DBSIZE should find every key accounted for (c24, 2026-09-24).
+        # Said, not silently dropped, so every key is accounted for when the row is compared with DBSIZE.
         bookkeeping = (
             f"{count_of(census.provider, 'key', 'keys')} the hosting service "
             f"writes for its own replication bookkeeping (AWS ElastiCache), "
@@ -1441,55 +1129,34 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
 
 
 # ---------------------------------------------------------------------------
-# Write-once, PROVEN rather than read (docs/17 F24, docs/16 C2)
+# Write-once, proven rather than read (docs/17 F24, docs/16 C2)
 # ---------------------------------------------------------------------------
 #
-# Until 2026-09-22 `evidence_bucket_object_lock` passed on
-# `get_object_lock_config` answering with a configuration. That is the
-# store's opinion of itself, and the owner's F24 decision (stay on the
-# pinned MinIO build, accepted in writing) rests on a store that actually
-# refuses. Research for that decision found why the opinion is not enough:
-# SeaweedFS accepts a COMPLIANCE retention and has let the delete succeed
-# anyway (seaweedfs issues 8350 and 11333, the second deleting the locked
-# version by its id), and Garage implements no object lock at all. Either
-# would satisfy a configuration read and hold nothing.
+# A configuration read (`get_object_lock_config`) is the store's opinion of itself, and some stores accept a
+# COMPLIANCE retention and let the delete succeed anyway (seaweedfs issues 8350 and 11333) or implement no
+# object lock at all (Garage). So each probe tries to destroy something. One canary object per bucket lives at
+# a fixed key, written under a short COMPLIANCE retention only when absent or about to expire. Every probe
+# issues a DELETE of THAT VERSION ID and passes only when the store refuses it for retention and the version is
+# still there afterwards. The version id is the whole test: on a versioned bucket a DELETE without one adds a
+# delete marker and succeeds, which proves nothing.
 #
-# So each probe tries to destroy something. One canary object per bucket
-# lives at a fixed key, written under a short COMPLIANCE retention only
-# when it is absent or about to expire, and every probe issues a DELETE of
-# THAT VERSION ID and passes only when the store refuses it for retention
-# and the version is still there afterwards. The version id is the whole
-# test: on a versioned bucket a DELETE without one adds a delete marker and
-# succeeds, which proves nothing (evidence.py measured exactly that on
-# 2026-08-10, and it is what seaweedfs 8350 reports as a failure).
+# A refusal proves something only when the credentials were ALLOWED to make the attempt. An `AccessDenied` is
+# the account's policy, not the lock, so a proof stopped by one says "denied" and never "proven" (the
+# preservation check then tries the one credential here that may delete, because the preservation account is
+# minted unable to).
 #
-# A refusal only proves something when the credentials making the attempt
-# were ALLOWED to make it. An `AccessDenied` is the account's policy
-# talking, not the lock, so a proof stopped by one says "denied" and never
-# "proven" (the preservation check below then tries the one credential here
-# that may delete, because the preservation account is minted unable to).
-#
-# The final review of 2026-09-23 found two claims the refusal did not back.
-# C10: a plain DELETE is refused under GOVERNANCE exactly as under
-# COMPLIANCE, and GOVERNANCE yields to anyone holding the bypass permission,
-# the root credential included. The probe asked for COMPLIANCE and never
-# looked at what the store recorded, so a store that recorded GOVERNANCE
-# passed with evidence naming the mode it had REQUESTED. The mode is now
-# read back, and anything but COMPLIANCE fails. C9: a preserved sample is
-# protected by a LEGAL HOLD and no retention, and a hold is a separate S3
-# mechanism that a store can record without enforcing, so the preservation
-# check also proves a hold (`_prove_hold`), written the way `preserve()`
-# writes every rejected sample.
+# The mode is read back and anything but COMPLIANCE fails: a plain DELETE is refused under GOVERNANCE as well,
+# and GOVERNANCE yields to anyone holding the bypass permission, root included. A preserved sample is protected
+# by a LEGAL HOLD and no retention, a separate S3 mechanism a store can record without enforcing, so the
+# preservation check also proves a hold (`_prove_hold`), written the way `preserve()` writes every rejected
+# sample.
 
 #: The one object each probed bucket carries for this. A fixed key, so
 #: repeated probes reuse one locked version instead of filling the bucket.
 WORM_CANARY_KEY = ".noctornal-worm-canary"
-#: The preservation bucket's second canary, for the mechanism its samples
-#: rely on: a legal hold and no retention (final review C9, 2026-09-23).
-#: Its own key and never WORM_CANARY_KEY, because a held version does not
-#: lapse, and `_tidy_canaries` would retry it on every probe and spend its
-#: `_TIDY_LIMIT` on it. One held version, kept for good: a hold has no
-#: expiry, so it costs one small object and no tidying.
+#: The preservation bucket's second canary, for the mechanism its samples rely on: a legal hold and no
+#: retention. Its own key, never WORM_CANARY_KEY, because a held version does not lapse and `_tidy_canaries`
+#: would retry it on every probe. One held version is kept for good: it costs one small object and no tidying.
 HOLD_CANARY_KEY = ".noctornal-hold-canary"
 #: How long a canary is locked. COMPLIANCE cannot be shortened by anyone,
 #: so a new canary version is written at most about once a day per bucket,
@@ -1500,12 +1167,9 @@ CANARY_RETENTION = timedelta(days=1)
 #: lock that lapses between the read and the delete cannot be reported as
 #: a store that does not enforce one.
 CANARY_MARGIN = timedelta(hours=1)
-#: The longest one CHECK's proof may take, every attempt included. Each
-#: store call keeps the 1s connect and 5s read timeouts above, but a proof
-#: is up to six calls where the configuration read it replaced was one, so
-#: a store that answers each call slowly could otherwise hold the register
-#: for most of a minute (verifier, 2026-09-22). Checked before every call:
-#: the worst case is this plus one read timeout.
+#: The longest one CHECK's proof may take, every attempt included. A proof is up to six store calls, so a slow
+#: store could otherwise hold the register for most of a minute. Checked before every call: the worst case is
+#: this plus one read timeout.
 _PROBE_BUDGET_S = 10.0
 #: Old canary versions one probe removes at most, so tidying up after an
 #: outage that left many cannot itself become the slow part.
@@ -1554,8 +1218,7 @@ class _OutOfTime(Exception):
 
 
 class _NotCompliance(Exception):
-    """The store recorded another mode than COMPLIANCE on a canary this
-    probe wrote under COMPLIANCE (final review C10, 2026-09-23)."""
+    """The store recorded another mode than COMPLIANCE on a canary this probe wrote under COMPLIANCE."""
 
     def __init__(self, version: str, mode: str | None, until: datetime | None):
         super().__init__(version)
@@ -1639,20 +1302,15 @@ def _utc(moment: datetime) -> datetime:
 
 
 def _live_canary(client, bucket: str, now: datetime):
-    """`(version_id, retain_until, how)` of a canary locked for long
-    enough to test, or None. Anything short of that (absent, a delete
-    marker on top, no retention, about to lapse) is None, and the caller
-    writes a fresh one. A failed HEAD other than "absent" raises, for the
-    caller to name, and so does a canary the store recorded under another
-    mode than COMPLIANCE (`_NotCompliance`, final review C10, 2026-09-23).
+    """`(version_id, retain_until, how)` of a canary locked for long enough to test, or None. Anything short of
+    that (absent, a delete marker on top, no retention, about to lapse) is None, and the caller writes a fresh
+    one. A failed HEAD other than "absent" raises, for the caller to name, and so does a canary the store
+    recorded under another mode than COMPLIANCE (`_NotCompliance`).
 
-    Credentials that may not READ a retention (`s3:GetObjectRetention`,
-    which nothing else in the product needs) get the canary's lock from
-    its write time instead: this probe is the only writer of the key and
-    always asks for `CANARY_RETENTION`. Until 2026-09-22 they got None, so
-    every probe wrote another locked version (verifier). The inference
-    picks WHICH version to test and never the verdict: if the store did
-    not in fact lock it, the delete below succeeds and the check fails.
+    Credentials that may not READ a retention (`s3:GetObjectRetention`, which nothing else in the product needs)
+    get the canary's lock from its write time: this probe is the only writer of the key and always asks for
+    `CANARY_RETENTION`. The inference picks WHICH version to test, never the verdict: if the store did not lock
+    it, the delete below succeeds and the check fails.
     """
     from minio.commonconfig import COMPLIANCE
     from minio.error import S3Error
@@ -1680,12 +1338,8 @@ def _live_canary(client, bucket: str, now: datetime):
         if retention is None:
             return None
         if retention.mode != COMPLIANCE:
-            # This probe is the key's only writer and always asks for
-            # COMPLIANCE, so another mode is the store's answer. Until the
-            # final review (C10, 2026-09-23) this returned None: every probe
-            # then wrote one more canary, the store locked it GOVERNANCE,
-            # the plain DELETE was refused and the check passed claiming
-            # COMPLIANCE, leaving a version per probe nobody could tidy.
+            # This probe is the key's only writer and always asks for COMPLIANCE, so another mode is the store's
+            # answer, not a reason to write another canary.
             raise _NotCompliance(stat.version_id, retention.mode,
                                  _utc(retention.retain_until_date))
         until, how = _utc(retention.retain_until_date), "read"
@@ -1698,20 +1352,14 @@ def _tidy_canaries(client, bucket: str, *, keep: str,
                    now: datetime) -> tuple[int, str]:
     """Remove canary versions whose day has passed; `(removed, problem)`.
 
-    Runs only after a proof passed, so on a store that has just shown it
-    refuses a locked delete. Touches nothing but `WORM_CANARY_KEY`, never
-    the version just tested, and only versions written more than
-    `CANARY_RETENTION` ago (plus any delete marker, which hides nothing and
-    whose removal destroys nothing). A version still locked, by clock skew
-    or a longer retention some other tool applied, is refused and kept.
+    Runs only after a proof passed. Touches nothing but `WORM_CANARY_KEY`, never the version just tested, and
+    only versions written more than `CANARY_RETENTION` ago (plus any delete marker, which hides nothing). A
+    version still locked, by clock skew or a longer retention some other tool applied, is refused and kept.
     Best effort: a failure here is reported beside a proof that stands.
 
-    "Any failure" means any: the probe's client retries nothing and reads
-    for five seconds at most, so a reset connection, a read timeout or a
-    proxy's HTML answer (urllib3 errors, minio's InvalidResponseError and
-    ServerError, none of them an S3Error) is ordinary here. Until the final
-    review (2026-09-23) only S3Error was caught, and one of those after
-    a passed proof turned the row red with "start the object store".
+    Any failure means any: the probe's client retries nothing and reads for five seconds at most, so a reset
+    connection, a read timeout or a proxy's HTML answer (urllib3 errors, minio's InvalidResponseError and
+    ServerError, none an S3Error) is ordinary here.
     """
     from minio.error import S3Error
 
@@ -1806,12 +1454,10 @@ def _prove_steps(client, bucket: str, now: datetime) -> _Proof:
                 "returned no version id, so the bucket is not versioned and "
                 "no lock can be holding it. A store that accepts a retention "
                 "it cannot enforce is the failure this probe exists to catch"))
-        # What the store RECORDED, not what was asked (final review C10,
-        # 2026-09-23). A plain DELETE is refused under GOVERNANCE too, so
-        # the refusal below cannot tell the two apart; only this read can.
-        # A permissions refusal is the account's policy and the proof goes
-        # on, saying the mode is requested and not confirmed. Any other
-        # answer is the store declining to name the lock, which fails.
+        # What the store RECORDED, not what was asked: a plain DELETE is refused under GOVERNANCE too, so only
+        # this read tells the modes apart. A permissions refusal is the account's policy and the proof goes on,
+        # saying the mode is requested and not confirmed. Any other answer is the store declining to name the
+        # lock, which fails.
         try:
             applied = client.get_object_retention(
                 bucket, WORM_CANARY_KEY, version_id=version)
@@ -1901,18 +1547,12 @@ def prove_write_once(client, bucket: str, *, now: datetime | None = None,
                      ) -> tuple[bool, str]:
     """Try to delete the canary's locked version; `(ok, evidence)`.
 
-    `ok` is True only when the store REFUSED a DELETE naming the version
-    id, the refusal is a retention refusal by `evidence.is_retention_refusal`
-    (the one classifier the purge uses, so a policy denial counts here
-    exactly as little as it counts on a tombstone), the version is still
-    readable afterwards, and the store has not reported a mode other than
-    COMPLIANCE on it (final review C10, 2026-09-23: GOVERNANCE refuses the
-    same plain DELETE, and yields to a bypass). Every answer the store
-    gives that is not that, a missing bucket included, is False with a
-    sentence saying which it was. A store that cannot be reached at all
-    raises, and the register reports it through `_guarded` as every other
-    down service is reported. `client` is anything shaped like a minio
-    client.
+    `ok` is True only when the store REFUSED a DELETE naming the version id, the refusal is a retention refusal
+    by `evidence.is_retention_refusal` (the classifier the purge uses, so a policy denial counts here as little
+    as on a tombstone), the version is still readable afterwards, and the store has not reported a mode other
+    than COMPLIANCE on it. Every other answer, a missing bucket included, is False with a sentence saying
+    which. A store that cannot be reached raises, and the register reports it through `_guarded`. `client` is
+    anything shaped like a minio client.
     """
     proof = _prove(client, bucket, now=now or datetime.now(timezone.utc),
                    deadline=clock() + _PROBE_BUDGET_S, clock=clock)
@@ -1922,20 +1562,14 @@ def prove_write_once(client, bucket: str, *, now: datetime | None = None,
 def _prove_hold(client, bucket: str, *, writer: str,
                 deleters: list[tuple[str, Callable[[], object]]],
                 deadline: float, clock: Callable[[], float]) -> _Proof:
-    """Prove a LEGAL HOLD holds (final review C9, 2026-09-23).
+    """Prove a LEGAL HOLD holds.
 
-    The COMPLIANCE proof above says nothing about a hold: they are separate
-    S3 headers, APIs and enforcement paths, and a store can refuse one
-    delete and let the other through. A preserved sample has a hold and no
-    retention, so the preservation check proves this too. The canary is
-    written by `client`, the account rejections are preserved with, the way
-    `PreservationStorage.preserve` writes (hold in the PUT, then read back
-    as ON), so a pass also shows that account can do what a rejection
-    needs. The DELETE goes to each of `deleters` in turn, `(variable,
-    client factory)`, moving on only when one is refused on its own
-    permissions, because the production preservation account may not
-    delete by design. The budget is the caller's, shared with the proof
-    above, so one check still has one budget.
+    The COMPLIANCE proof says nothing about a hold: they are separate S3 headers, APIs and enforcement paths.
+    The canary is written by `client`, the account rejections are preserved with, the way
+    `PreservationStorage.preserve` writes (hold in the PUT, then read back as ON), so a pass also shows that
+    account can do what a rejection needs. The DELETE goes to each of `deleters` in turn, `(variable, client
+    factory)`, moving on only when one is refused on its own permissions, because the production preservation
+    account may not delete by design. The budget is the caller's, shared with the proof above.
     """
     def budgeted(factory: Callable[[], object]) -> Callable[[], object]:
         return lambda: _Budgeted(factory(), deadline, clock)
@@ -2000,8 +1634,7 @@ def _prove_hold_steps(client, bucket: str, writer: str,
             if answer:
                 version, how = stat.version_id, "reused"
     if version is None:
-        # Absent, or its hold no longer reads ON (lifted by hand, or never
-        # kept): a fresh held version, and the old one stays where it is.
+        # Absent, or its hold no longer reads ON: a fresh held version, and the old one stays where it is.
         try:
             result = client.put_object(
                 bucket, HOLD_CANARY_KEY, io.BytesIO(_HOLD_CANARY_BODY),
@@ -2096,16 +1729,11 @@ def _first_env(*names: str) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class PreservationSettings:
-    """Where rejected samples are preserved, resolved exactly as
-    `samples.PreservationStorage.__init__` resolves it (group g04, 2026-09-22).
+    """Where rejected samples are preserved, resolved exactly as `samples.PreservationStorage.__init__`
+    resolves it.
 
-    One reader per fact would have this module ASK that class; it cannot
-    yet, because the class builds its client in its constructor with the
-    library's five-minute timeouts. So the rule is copied once, here, and
-    `test_readiness_worm_probe` holds the copy to the class whenever the
-    class is importable. Until 2026-09-22 this copy fell back to
-    MINIO_SECURE for TLS where the store falls back to false, so the probe
-    could pass over TLS while rejections connected in plain text (verifier).
+    The rule is copied here because that class builds its client in its constructor with the library's
+    five-minute timeouts, so this module cannot ask it; `test_readiness_worm_probe` holds the copy to the class.
     Each field is `(variable, value)` so the evidence can name a fallback.
     """
     endpoint: tuple[str, str]
@@ -2183,47 +1811,30 @@ def _evidence_bucket_object_lock(conn: psycopg.Connection) -> Check:
 
 
 def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
-    """docs/17 F2: rejected samples are preserved under a legal hold in
-    their own bucket, and a hold on a store that does not enforce it
-    preserves nothing. Two proofs, and both must pass: the evidence
-    bucket's COMPLIANCE proof, and a LEGAL HOLD proof (`_prove_hold`),
-    because the hold is what a preserved sample actually carries. Until
-    the final review (C9, 2026-09-23) only the first ran, and this
-    docstring said it proved the hold: a store that enforced a retention
-    and merely recorded a hold passed, while every held sample could be
-    deleted by version.
+    """docs/17 F2: rejected samples are preserved under a legal hold in their own bucket, and a hold on a store
+    that does not enforce it preserves nothing. Two proofs, and both must pass: the evidence bucket's COMPLIANCE
+    proof, and a LEGAL HOLD proof (`_prove_hold`), because the hold is what a preserved sample carries.
 
-    The store is addressed exactly as `samples.PreservationStorage`
-    addresses it (`preservation_store_settings`), and the evidence names
-    the variable that supplied each credential so a fallback in production
-    is visible. When the deployment declared `destroy`, nothing is
-    preserved and the bucket is not probed; an unrecognised disposition
-    fails here, because every rejection is refused until it is fixed.
+    The store is addressed exactly as `samples.PreservationStorage` addresses it
+    (`preservation_store_settings`), and the evidence names the variable that supplied each credential so a
+    fallback in production is visible. When the deployment declared `destroy`, nothing is preserved and the
+    bucket is not probed; an unrecognised disposition fails here, because every rejection is refused until it
+    is fixed.
 
     ## The preservation account may not delete, by design
 
-    infra/production/compose.yml mints PRESERVE_ACCESS_KEY with a policy
-    that can write, read and set a hold, and nothing that deletes or sets a
-    retention. That is the right account for rejections and the wrong one
-    for this proof: its refusal is `AccessDenied` whatever the store would
-    have done. So when the preservation account is refused on its own
-    permissions, and the MINIO_* credentials address the SAME endpoint, the
-    proof is made with those instead (in the shipped topology they are the
-    store's root, which may delete anything a lock does not stop), and the
-    evidence says so. Where no credential here may delete on that store,
-    the check fails and says the proof cannot be made from this process,
-    rather than passing on a refusal that proves nothing.
+    infra/production/compose.yml mints PRESERVE_ACCESS_KEY with a policy that can write, read and set a hold,
+    and nothing that deletes or sets a retention, so its refusal is `AccessDenied` whatever the store would do.
+    When it is refused on its own permissions and the MINIO_* credentials address the SAME endpoint, the proof
+    is made with those instead (in the shipped topology the store's root) and the evidence says so. Where no
+    credential here may delete on that store, the check fails and says the proof cannot be made from this
+    process, rather than passing on a refusal that proves nothing.
 
-    The one refusal that does NOT go to the second credential is the first
-    step's: an account that may not even read the bucket is not the
-    least-privilege preservation account, it is one whose policy does not
-    reach this bucket at all (the SAMPLE_* fallback, as the production
-    compose mints it). `PreservationStorage` writes with that account and
-    reads each held version back, so every rejection is refused, and a
-    green row proven with some other credential would hide exactly that.
-    The hold proof holds the same line for the two steps `preserve()`
-    itself takes, a held PUT and reading the hold back: those are always
-    the preservation account's, and only its DELETE may move to MINIO_*.
+    The one refusal that does NOT go to the second credential is the first step's: an account that may not even
+    read the bucket is not the least-privilege preservation account but one whose policy does not reach this
+    bucket (the SAMPLE_* fallback), and every rejection would be refused. The hold proof holds the same line:
+    the held PUT and the read-back of the hold are always the preservation account's, and only its DELETE may
+    move to MINIO_*.
     """
     name = "preservation_bucket_object_lock"
     disposition, raw = rejected_sample_disposition()
@@ -2239,9 +1850,8 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
             f"every rejection is refused until it is corrected",
             f"set {DISPOSITION_ENV} to preserve (the default) or destroy, as the "
             f"prohibited-content policy decides (docs/16 L1), and restart")
-    # F13: a HELD sample that matches a screening list is always
-    # preserved, whatever the disposition, so while a list is active the
-    # bucket is probed under destroy too.
+    # A HELD sample that matches a screening list is always preserved, whatever the disposition, so while a list
+    # is active the bucket is probed under destroy too.
     if disposition == "destroy" and not _screening_active(conn):
         return Check(
             name, True,
@@ -2339,21 +1949,16 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
 
 
 def _evidence_size_cap_declared(conn: psycopg.Connection) -> Check:
-    """Is the exhibit size cap a decision or a default -- and is the value
-    this process ENFORCES the one the environment now says?
+    """Is the exhibit size cap a decision or a default, and is the value this process ENFORCES the one the
+    environment now says?
 
-    Two facts, because either can be wrong on its own. The declaration
-    (docs/08): every accepted exhibit byte is locked under COMPLIANCE for
-    the retention period, so a cap left at the 256 MiB default is a
-    permanent commitment nobody here decided. And the enforced value: the
-    routers read the declaration ONCE, at import, so an operator who edits
-    the variable and does not restart has a register that would otherwise
-    report a cap the process is not applying. The check reads the routers'
-    own constants and says "restart" when they and the environment differ.
+    The declaration (docs/08) matters because every accepted exhibit byte is locked under COMPLIANCE for the
+    retention period, so a cap left at the 256 MiB default is a permanent commitment nobody decided. The routers
+    read the declaration once, at import, so the check reads their constants and says "restart" when they and
+    the environment differ.
 
-    Both caps are read through `config`, the reader the routers use, for
-    the reason `_totp_kek_set` gives at length. Not blocking: an exhibit
-    accepted under the default is expensive, not unlawful.
+    Both caps are read through `config`, the reader the routers use. Not blocking: an exhibit accepted under the
+    default is expensive, not unlawful.
     """
     from noctornal_api import samples
     from noctornal_api.config import (
@@ -2448,9 +2053,8 @@ def _smtp_configured(conn: psycopg.Connection) -> Check:
             f"STARTTLS negotiation falls back to sending in the clear",
             "unset SMTP_ALLOW_PLAINTEXT; it is for a development relay only "
             "(docs/07: never plaintext)")
-    # F8 A7 (2026-09-24). Email leaves only through the egress route
-    # "smtp" (docs/00 decision 68); a route that is missing or does not allow the
-    # relay HOLDS every email, so this row says so rather than the drain.
+    # Email leaves only through the egress route "smtp" (docs/00 decision 68); a route that is missing or does
+    # not allow the relay HOLDS every email, so this row says so rather than the drain.
     from noctornal_api import transports
     state = transports.route_state(transports.SMTP, conn)
     if not state.ok:
@@ -2464,25 +2068,21 @@ def _smtp_configured(conn: psycopg.Connection) -> Check:
                  f"{transports.route_line(state)}")
 
 
-# The compartment registry and the records written under older rules
-# (docs/00 decision 71, L1 and L2, 2026-09-24). Counts and column labels only: the
-# register's reader holds user.manage, not case content.
+# The compartment registry and the records written under older rules (docs/00 decision 71). Counts and column
+# labels only: the register's reader holds user.manage, not case content.
 
 def _labels(items: list[str]) -> str:
     return ", ".join(items)
 
 
 def _compartment_bindings_intact(conn: psycopg.Connection) -> Check:
-    """Every bound column this release knows has a readable, enabled
-    binding in the database, and the database binds nothing this release
-    does not know (docs/00 decision 71, 2026-09-24).
+    """Every bound column this release knows has a readable, enabled binding in the database, and the database
+    binds nothing this release does not know (docs/00 decision 71).
 
-    `iam.compartment_in_use` reads the bindings from the catalog and
-    refuses while any cannot be read, and `compartment_lifecycle`'s rename
-    and retire move and count the columns it lists; the two are held to
-    one set by test, and this watches them at runtime, which is how a
-    trigger dropped or disabled by hand in psql is noticed. One reader per
-    fact: `iam.compartment_bindings()` is the registry's own reading."""
+    `iam.compartment_in_use` reads the bindings from the catalog and refuses while any cannot be read, and
+    `compartment_lifecycle`'s rename and retire move and count the columns it lists. A test holds the two to
+    one set; this watches them at runtime, which notices a trigger dropped or disabled by hand in psql.
+    `iam.compartment_bindings()` is the registry's own reading."""
     from noctornal_api.compartment_lifecycle import BOUND_COLUMNS
     rows = conn.execute(
         """SELECT schema_name, table_name, column_name, kind, enabled,
@@ -2533,11 +2133,9 @@ def _compartment_bindings_intact(conn: psycopg.Connection) -> Check:
 
 
 def _captured_documents_compartmented(conn: psycopg.Connection) -> Check:
-    """Captured documents a compartmented case cites that carry no
-    compartment (L1, 2026-09-24): the captures 0071 could not label,
-    because no lock fits every case that cites them. And captures that
-    carry a compartment an ingest feed now uses for victim data. Always
-    passes: nothing here is refused, and the caveat keeps it in view."""
+    """Captured documents a compartmented case cites that carry no compartment (migration 0071 could not label
+    them, because no lock fits every case that cites them), and captures that carry a compartment an ingest feed
+    now uses for victim data. Always passes: nothing here is refused, and the caveat keeps it in view."""
     from noctornal_api.legacy_records import (
         unlabelled_captures_count,
         victim_data_captures_count,
@@ -2573,11 +2171,9 @@ def _captured_documents_compartmented(conn: psycopg.Connection) -> Check:
 
 
 def _triage_claims_within_labels(conn: psycopg.Connection) -> Check:
-    """ATTRIBUTE claims accepted from Triage before Alpha 6 that the accept
-    would now refuse (L2, 2026-09-24): readable below the label of what
-    they were found in, or attached to an entity in another case. Listed,
-    never moved: a claim's own columns are not written again (invariant 5),
-    and no verb raises an existing entity's label."""
+    """ATTRIBUTE claims accepted from Triage under older rules that the accept would now refuse: readable below
+    the label of what they were found in, or attached to an entity in another case. Listed, never moved: a
+    claim's own columns are not written again (invariant 5), and no verb raises an existing entity's label."""
     from noctornal_api.legacy_records import claim_counts
     counts = claim_counts(conn)
     n, k = counts["underlabelled"], counts["underlabelled_cases"]
@@ -2609,12 +2205,10 @@ def _triage_claims_within_labels(conn: psycopg.Connection) -> Check:
 
 
 def _triage_claims_dated(conn: psycopg.Connection) -> Check:
-    """Claims accepted from Triage before Alpha 6 that cite a document and
-    carry no observation date (L2, 2026-09-24). Always passes: a missing
-    date shortens First seen and Last seen and harms nothing else. Nothing
-    fills it: invariant 5 is not amended (docs/00 open question 11, settled
-    2026-10-02), and an analyst gives a claim its date by supersession, the
-    inspector's Date this claim."""
+    """Claims accepted from Triage that cite a document and carry no observation date. Always passes: a missing
+    date shortens First seen and Last seen and harms nothing else. Nothing fills it (invariant 5 is not
+    amended; docs/00 open question 11): an analyst gives a claim its date by supersession, the inspector's
+    Date this claim."""
     from noctornal_api.legacy_records import undated_count
     n = undated_count(conn)
     if not n:
@@ -2631,9 +2225,8 @@ def _triage_claims_dated(conn: psycopg.Connection) -> Check:
                 f"gives. An analyst gives a claim its date in the inspector "
                 f"(Date this claim), which supersedes it with a dated claim "
                 f"and leaves the old one on record."))
-# The network boundary (docs/20 section 6.4 and docs/00 decision 68,
-# 2026-09-24). Its PROXY branch is the route provider's own verdict, so the
-# egress proxy fills it without a line here.
+# The network boundary (docs/20 section 6.4, docs/00 decision 68). Its PROXY branch is the route provider's own
+# verdict, so the egress proxy fills it without a line here.
 _EGRESS_DEV_CAVEAT = (
     "The network boundary is not in force: outbound traffic leaves from this "
     "host's own address. That is acceptable in development only.")
@@ -2648,14 +2241,11 @@ def _joined(sentences: list[str]) -> str:
 def _egress_boundary(conn: psycopg.Connection) -> Check:
     """Whether outbound connections leave through the egress proxy.
 
-    Not blocking, and with no consequence entry: the failure is reversible
-    configuration and is refused where it matters, at route_for, by name
-    (the reasoning `sys_admin_present` gives for itself). Uses are stated,
-    never named: a readiness report is not the place a source's name or a
-    relay's host is shown to whoever can read it. The collection use is a
-    presence rather than a count, because a count would tell an
-    administrator below a source's label that the source exists
-    (2026-09-24)."""
+    Not blocking, and with no consequence entry: the failure is reversible configuration and is refused where
+    it matters, at route_for, by name (the reasoning `sys_admin_present` gives for itself). Uses are stated,
+    never named: a readiness report is not the place a source's name or a relay's host is shown. The collection
+    use is a presence rather than a count, because a count would tell an administrator below a source's label
+    that the source exists."""
     from noctornal_api import egress
     from noctornal_api.egress_policy import DECISION_REF
 
@@ -2708,11 +2298,9 @@ def _egress_boundary(conn: psycopg.Connection) -> Check:
         f"connections leaves from this host's own address, with no network "
         f"boundary in force ({DECISION_REF}).",
         f"Run the egress proxy and set {egress.PROXY_URL_ENV}.")
-# The egress proxy (S2, 2026-09-24). Two rows beside egress_boundary,
-# whose PROXY branch is the route provider's own probe.
-# Neither is blocking: each failure is refused where it matters, at
-# route_for and at the proxy, and none becomes irreversible once material
-# arrives, the bar BLOCKING_CHECKS states. Both state presence or counts of
+# The egress proxy: two rows beside egress_boundary, whose PROXY branch is the route provider's own probe.
+# Neither is blocking: each failure is refused where it matters, at route_for and at the proxy, and none
+# becomes irreversible once material arrives, the bar BLOCKING_CHECKS states. Both state presence or counts of
 # configuration, never a source's name or a count of sources.
 def _egress_routes_cover_sources(conn: psycopg.Connection) -> Check:
     """Whether every outbound use has a route to leave through: feeds a
@@ -2729,14 +2317,11 @@ def _egress_exits_open(conn: psycopg.Connection) -> Check:
     from noctornal_api import egress_routes
     ok, evidence, action, caveat = egress_routes.exits_open(conn)
     return Check("egress_exits_open", ok, evidence, action, caveat=caveat)
-# F1 roles (CONCOR), 2026-09-24. This row fails when role analysis runs
-# without its BLAS cap: numpy's OpenBLAS starts a thread per core, and four
-# worker processes each running a worst case took about
-# 50 s apiece uncapped against 6 s capped. threadpoolctl is not pinned, so
-# `blockmodel` caps through it when installed and otherwise through the
-# OpenBLAS numpy bundles; on a numpy with neither (Apple's Accelerate) the
-# cap does nothing, and this row says so instead of the analysis slowing
-# every worker unexplained.
+# This row fails when role analysis runs without its BLAS cap: numpy's OpenBLAS starts a thread per core, and
+# four worker processes each running a worst case took about 50 s apiece uncapped against 6 s capped.
+# threadpoolctl is not pinned, so `blockmodel` caps through it when installed and otherwise through the
+# OpenBLAS numpy bundles; on a numpy with neither (Apple's Accelerate) the cap does nothing, and this row says
+# so.
 def _role_analysis_thread_capped(conn: psycopg.Connection) -> Check:
     """Reads the cap back from `blockmodel`, which took it on import. Never
     blocking: an uncapped BLAS is slow, not unsafe."""
@@ -2749,19 +2334,14 @@ def _role_analysis_thread_capped(conn: psycopg.Connection) -> Check:
         "install threadpoolctl==3.7.0 with -c constraints.txt, or run on a "
         "numpy build that bundles OpenBLAS (the Linux and Windows wheels do), "
         "and restart the API")
-# The two-person policy (F9, 2026-09-24).
 def _dual_control_policy_changeable(conn: psycopg.Connection) -> Check:
-    """Whether two DIFFERENT people could change which operations need two
-    people: an active account that may propose a change, and an active
-    account that may countersign one without also being able to propose
-    it. An account holding both roles is one person and is never the
-    second one (2026-09-24), so the first-run account,
-    which holds SYS_ADMIN and SECURITY_OFFICER, cannot countersign what it
-    or anyone else proposes.
+    """Whether two DIFFERENT people could change which operations need two people: an active account that may
+    propose a change, and an active account that may countersign one without also being able to propose it. An
+    account holding both roles is one person and is never the second one, so the first-run account, which holds
+    SYS_ADMIN and SECURITY_OFFICER, cannot countersign what it or anyone else proposes.
 
-    Informative, not blocking, with no CONSEQUENCES entry: a policy nobody
-    can change is frozen in the safe direction, every operation keeping the
-    requirement it has. `dual_control.signers` is the one reader."""
+    Informative, not blocking, with no CONSEQUENCES entry: a policy nobody can change is frozen in the safe
+    direction, every operation keeping the requirement it has. `dual_control.signers` is the one reader."""
     from noctornal_api.dual_control import (
         DualControlPolicyService,
         readiness_evidence,
@@ -2783,8 +2363,7 @@ def _dual_control_policy_changeable(conn: psycopg.Connection) -> Check:
         "operations need two people, which is the safe direction: every "
         "operation keeps the requirement it has. Over the API: POST "
         "/admin/users/{user_id}/roles")
-# Comms (F10a and F10c, 2026-09-24). Neither is blocking and neither
-# has a console target: both are settled by configuration and a restart.
+# Neither is blocking and neither has a console target: both are settled by configuration and a restart.
 def _pgp_verifier(conn: psycopg.Connection) -> Check:
     """Whether a signature check made now could produce a verdict. With no
     gpg, or one below the version floor (pgp.MIN_GPG_VERSIONS), every
@@ -2853,15 +2432,14 @@ def _pgp_key_directory(conn: psycopg.Connection) -> Check:
                  action)
 
 
-# F11 and F12 (2026-09-24). Not blocking; no console target: both are
-# settled by configuration and by scheduling scripts/lab_triage.py.
+# Not blocking; no console target: both are settled by configuration and by scheduling scripts/lab_triage.py.
 
 #: How long the oldest queued run may wait, with nothing finishing, before
 #: the register says nothing is draining the queue. Five cron passes.
 _TRIAGE_STALE_MINUTES = 60
 
 
-#: F42 (2026-10-02): what an operator does to put analysis in the worker.
+#: What an operator does to put analysis in the worker.
 _WORKER_ACTION = ("run the analysis-worker service from "
                   "infra/production/compose.yml and set NOCTORNAL_ANALYSIS_SOCKET "
                   "on api, cron and lab-triage (infra/production/README.md, "
@@ -2869,16 +2447,12 @@ _WORKER_ACTION = ("run the analysis-worker service from "
 
 
 def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
-    """The isolated worker's own account, judged: (a failing Check or None,
-    the sentence for the evidence, a caveat). Readiness asks the worker
-    rather than trusting the compose file: its environment's names, how it
-    keeps its children apart, its capabilities, no-new-privileges, a
-    read-only root, its network interfaces, its parser versions and the
-    largest request it takes (F42, 2026-10-02), and since the verify round
-    (2026-10-03) its pids limit, the state a child could leave behind, any
-    slot it has retired and its children's task limit. Every one of those it
-    does not report, or reports wrong, fails the row: the F42 review found a
-    worker with a network interface, or with none reported, passed."""
+    """The isolated worker's own account, judged: (a failing Check or None, the sentence for the evidence, a
+    caveat). Readiness asks the worker rather than trusting the compose file: its environment's names, how it
+    keeps its children apart, its capabilities, no-new-privileges, a read-only root, its network interfaces, its
+    parser versions, the largest request it takes, its pids limit, the state a child could leave behind, any
+    slot it has retired and its children's task limit. Every one it does not report, or reports wrong, fails
+    the row."""
     from noctornal_api import analysis_runner, lab_triage
     from noctornal_api.analysis_worker import (
         CHILD_MAX_TASKS,
@@ -2921,9 +2495,8 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
                       "remove every env_file and variable from the "
                       f"analysis-worker service but its own ({own}), and "
                       "restart it"), "", "")
-    # F42 review (2026-10-02): the worker may be root (it gives each child
-    # a uid of its own, which needs setuid), so what is judged is whether
-    # its children are kept apart and what the worker itself may do.
+    # The worker may be root (it gives each child a uid of its own, which needs setuid), so what is judged is
+    # whether its children are kept apart and what the worker itself may do.
     children = status.get("children")
     children = children if isinstance(children, dict) else {}
     uids = children.get("uids")
@@ -2969,9 +2542,8 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
                       "writable, or it did not say.",
                       "set read_only: true on the analysis-worker service, as "
                       "infra/production/compose.yml does"), "", "")
-    # F42 verify round (2026-10-03): the worker's pids limit, the state a
-    # child could leave behind, a lost slot and the children's task limit
-    # were claimed in the report and the hello carried none of them.
+    # The worker must report its pids limit, the state a child could leave behind, a lost slot and the
+    # children's task limit.
     slots = status.get("concurrency")
     if isinstance(slots, bool) or not isinstance(slots, int) or slots < 1:
         return (Check(name, False,
@@ -3060,8 +2632,7 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
     tasks = children.get("max_tasks")
     if (isinstance(tasks, bool) or not isinstance(tasks, int)
             or not 1 <= tasks <= CHILD_MAX_TASKS):
-        # F42 verify round (2026-10-03): a worker reporting a limit of a
-        # million used to pass, and the evidence then repeated it.
+        # A limit above CHILD_MAX_TASKS fails, however large the worker says it is.
         return (Check(name, False,
                       f"The isolated analysis worker did not report a task "
                       f"limit for its children of at most {CHILD_MAX_TASKS}, "
@@ -3080,33 +2651,23 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
 
 
 def _sample_static_analysis(conn: psycopg.Connection) -> Check:
-    """Whether static triage and forum parsing can run here, where, under
-    which limits, and whether anything is draining the triage queue (F11
-    N; F42, 2026-10-02).
+    """Whether static triage and forum parsing can run here, where, under which limits, and whether anything is
+    draining the triage queue.
 
-    Where: in the isolated analysis worker when NOCTORNAL_ANALYSIS_SOCKET
-    names one, which must answer, hold no setting but its own, give each
-    child a user of its own, hold no capability but kill, setgid and
-    setuid, run with no-new-privileges and a read-only root, have no
-    network interface but loopback, run this process's parser versions
-    and take a request as large as the analysis maximum, run under a pids
-    limit that holds its slots and bounds the container, leave no state a
-    child could create behind it and have retired no slot, and whose child
-    must not reach the database host (F42 review, 2026-10-02; the pids
-    limit, the state and the slots, 2026-10-03); otherwise
-    in local child processes. Production with neither setting refuses
-    every analysis and fails here; production that chose the local child
-    (NOCTORNAL_ANALYSIS_LOCAL=1) fails here too, because the residual
-    docs/17 F42 names is then the deployment's, said out loud rather than
-    hidden in a caveat. Development's local child passes with a caveat for
-    what it can still reach (lab_static's docstring).
+    Where: in the isolated analysis worker when NOCTORNAL_ANALYSIS_SOCKET names one, which must answer, hold no
+    setting but its own, give each child a user of its own, hold no capability but kill, setgid and setuid, run
+    with no-new-privileges and a read-only root, have no network interface but loopback, run this process's
+    parser versions, take a request as large as the analysis maximum, run under a pids limit that holds its
+    slots and bounds the container, leave no state a child could create behind it, have retired no slot, and
+    have a child that must not reach the database host; otherwise in local child processes. Production with
+    neither setting refuses every analysis and fails here; production that chose the local child
+    (NOCTORNAL_ANALYSIS_LOCAL=1) fails too, because the residual docs/17 F42 names is then the deployment's.
+    Development's local child passes with a caveat for what it can still reach (lab_static's docstring).
 
-    Also fails on a settings problem, on a child that will not start or
-    whose selftest fails, and when the oldest queued run has waited an
-    hour with no run finishing in that hour ("nothing is running static
-    triage"); a large backfill that is draining does not fail it. Passes
-    with a caveat for platforms that cannot bound memory, and when YARA is
-    not installed."""
+    Also fails on a settings problem, on a child that will not start or whose selftest fails, and when the
+    oldest queued run has waited an hour with no run finishing in that hour ("nothing is running static
+    triage"); a large backfill that is draining does not fail it. Passes with a caveat for platforms that cannot
+    bound memory, and when YARA is not installed."""
     from urllib.parse import urlsplit
 
     from noctornal_api import analysis_runner, fuzzyhash, lab_static, lab_triage
@@ -3118,10 +2679,8 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
                      "correct the setting it names and restart")
     from noctornal_api.samples import origin_split
     if origin_split().serves_here:
-        # The sample origin serves downloads and parses nothing, and it is
-        # given no worker socket (compose.yml): a red row about a runner it
-        # never uses would teach an operator to read past this one (F42,
-        # 2026-10-02).
+        # The sample origin serves downloads and parses nothing, and is given no worker socket (compose.yml): a
+        # red row about a runner it never uses would teach an operator to read past this one.
         return Check(name, True,
                      "This process is the sample origin, which analyses "
                      "nothing; the application's register says where "
@@ -3188,8 +2747,7 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
                      f"in its environment",
                      "report this: the child's environment must hold no "
                      "credential")
-    # Any finished run proves a drainer ran: only lab_triage ends a run,
-    # SKIPPED and FAILED as much as DONE (2026-10-07).
+    # Any finished run proves a drainer ran: only lab_triage ends a run, SKIPPED and FAILED as much as DONE.
     depth, oldest, last_done = conn.execute(
         """SELECT count(*) FILTER (WHERE status = 'QUEUED'),
                   min(queued_at) FILTER (WHERE status = 'QUEUED'),
@@ -3221,17 +2779,15 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
         return Check(name, False, evidence, schedule)
     caveats = [worker_caveat] if worker_caveat else []
     reach = []
-    # In the worker, /proc/1/environ is the worker's own, which holds
-    # nothing (it refuses to start otherwise, and the hello says so), so
-    # only a local child's read of it is an exposure (F42, 2026-10-02).
+    # In the worker, /proc/1/environ is the worker's own, which holds nothing (it refuses to start otherwise),
+    # so only a local child's read of it is an exposure.
     if exposure.get("proc_environ_readable") and choice.mode == "local":
         reach.append("read the environment of processes running as this "
                      "user, which holds this deployment's secrets")
     if exposure.get("database_reachable"):
         reach.append("open a connection to the database host")
     if reach:
-        # F11 (2026-09-24): worded so the sentence agrees whether one
-        # exposure applies or both.
+        # Worded so the sentence agrees whether one exposure applies or both.
         caveats.append(
             "The analysis child can " + " and ".join(reach) + ", so a "
             "parser exploit in a hostile sample could do the same. Run the "
@@ -3244,9 +2800,8 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
         caveats.append("YARA is not installed, so static triage scans with no "
                        "rules: install noctornal-api[yara].")
     if explicit_local:
-        # Chosen out loud, and still not isolated: the row stays red so a
-        # green register never hides it (F42, 2026-10-02). A stale queue
-        # is said in the same action rather than hiding this one.
+        # Chosen out loud, and still not isolated: the row stays red so a green register never hides it. A stale
+        # queue is said in the same action rather than hiding this one.
         return Check(name, False, " ".join([evidence] + caveats),
                      _WORKER_ACTION + ", then unset NOCTORNAL_ANALYSIS_LOCAL "
                      "(docs/17 F42)" + (f"; and {schedule}" if stale_queue else ""))
@@ -3254,9 +2809,8 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
 
 
 def _yara_rules_active(conn: psycopg.Connection) -> Check:
-    """Whether every active YARA rule set has a build this host can load
-    (F12 M). Counts only: readiness has no caller, so it names no set and
-    no person."""
+    """Whether every active YARA rule set has a build this host can load. Counts only: readiness has no caller,
+    so it names no set and no person."""
     from noctornal_api.yara_rules import RulesetService, build_key
     name = "yara_rules_active"
     active = conn.execute(
@@ -3311,12 +2865,9 @@ def _yara_rules_active(conn: psycopg.Connection) -> Check:
                      caveat="No YARA rule set is active, so static triage "
                             "scans with none.")
     return Check(name, True, evidence)
-# The collection foundation (docs/00 decision 69, 2026-09-24). Two
-# informative rows, not blocking and with no CONSEQUENCES entry: what each
-# failure stops (a source the collector leaves alone) is said in its
-# evidence and action, and every refusal is enforced where it matters, by
-# the poll. Counts, never names: a readiness report is not the place a
-# source's name is shown to whoever can read it.
+# The collection foundation (docs/00 decision 69). Two informative rows, not blocking and with no CONSEQUENCES
+# entry: what each failure stops is said in its evidence and action, and the poll enforces every refusal.
+# Counts, never names: a readiness report is not the place a source's name is shown.
 _COLLECTION_IDLE = "No forum or Telegram source is active, so nothing is read from one."
 
 #: cause -> (one, many) for the configured row's evidence.
@@ -3460,12 +3011,10 @@ def _collection_authority_current(conn: psycopg.Connection) -> Check:
                  f"authority.", caveat=caveat)
 
 
-# The forum adapters (F3 and F4, 2026-09-24). Not
-# blocking, no CONSEQUENCES entry: the poll enforces every refusal the row
-# describes. Fails while NOCTORNAL_FORUM_ALLOW_DIRECT is set (a forum read
-# with no proxy leaves from this host) or while forum sources are active
-# and the parser is not installed; passes with a caveat while no retention
-# rule covers FORUM_POST or FORUM_MEMBER. Counts, never names.
+# The forum adapters. Not blocking, no CONSEQUENCES entry: the poll enforces every refusal the row describes.
+# Fails while NOCTORNAL_FORUM_ALLOW_DIRECT is set (a forum read with no proxy leaves from this host) or while
+# forum sources are active and the parser is not installed; passes with a caveat while no retention rule covers
+# FORUM_POST or FORUM_MEMBER. Counts, never names.
 def _forum_collection(conn: psycopg.Connection) -> Check:
     from noctornal_api import forum_adapters
 
@@ -3474,10 +3023,9 @@ def _forum_collection(conn: psycopg.Connection) -> Check:
 
 
 # ---------------------------------------------------------------------------
-# The similarity indexes (F6.1 and F6.2, 2026-09-24). Not
-# blocking. Neither row carries a count or a proportion: the register is
-# read by user.manage holders, who need not read collected documents, and
-# a deployment-wide count of what is indexed is a volume disclosure.
+# The similarity indexes. Not blocking. Neither row carries a count or a proportion: the register is read by
+# user.manage holders, who need not read collected documents, and a deployment-wide count of what is indexed
+# is a volume disclosure.
 # ---------------------------------------------------------------------------
 
 def _utc_words(moment) -> str:
@@ -3503,8 +3051,7 @@ def _embedding_wording_current(conn: psycopg.Connection) -> Check:
     active = service.active(E.ROLE_WORDING)
     building = service.building(E.ROLE_WORDING)
     if active is None and building is None and service.ever_registered(E.ROLE_WORDING):
-        # Only the first index registers itself; one an administrator
-        # retired stays retired (2026-09-25).
+        # Only the first index registers itself; one an administrator retired stays retired.
         return Check(name, False, "The similar wording index was retired and no new "
                      "one has been started.",
                      "rebuild it under Administration, Embeddings")
@@ -3654,20 +3201,16 @@ def _embedding_meaning_endpoint(conn: psycopg.Connection) -> Check:
     return Check(name, True, evidence, caveat=" ".join(caveats))
 
 
-# Outbound integrations (F8, F7 and F15.2, 2026-09-24). Not blocking: each
-# refuses at the point of use, and a blocking row would stop collection
-# polls for a feature nobody turned on.
-#: How long a due email or webhook may wait before the outbox row says no
-#: drain is reaching it.
+# Outbound integrations. Not blocking: each refuses at the point of use, and a blocking row would stop
+# collection polls for a feature nobody turned on.
+#: How long a due email or webhook may wait before the outbox row says no drain is reaching it.
 OUTBOX_OVERDUE_AFTER = timedelta(minutes=30)
 
 
 def _notify_outbox_draining(conn: psycopg.Connection) -> Check:
-    """Is anything draining the outbox? Over the email and webhook channels
-    that can send: Jira's backlog is jira_destination's business, and a
-    held channel (no route) is smtp_configured's and the Integrations
-    card's, so a Jira outage or a missing route is never reported as "no
-    drain is running" (F8 F)."""
+    """Is anything draining the outbox? Over the email and webhook channels that can send: Jira's backlog is
+    jira_destination's business, and a held channel (no route) is smtp_configured's and the Integrations
+    card's, so a Jira outage or a missing route is never reported as "no drain is running"."""
     from noctornal_api import transports
     from noctornal_api.wording import count_of
 
@@ -3707,8 +3250,7 @@ def _notify_outbox_draining(conn: psycopg.Connection) -> Check:
 
 
 def _jira_destination(conn: psycopg.Connection) -> Check:
-    """The Jira destination's own verdict (F7): its route, its
-    credential, its health and its backlog."""
+    """The Jira destination's own verdict: its route, its credential, its health and its backlog."""
     from noctornal_api import jira
 
     ok, evidence, action, caveat = jira.readiness_verdict(conn)
@@ -3717,8 +3259,7 @@ def _jira_destination(conn: psycopg.Connection) -> Check:
 
 
 def _outbound_lookup_providers(conn: psycopg.Connection) -> Check:
-    """The host switch and every enabled provider's key, route and adapter
-    (F15.2)."""
+    """The host switch and every enabled provider's key, route and adapter."""
     from noctornal_api import providers
 
     ok, evidence, action, caveat = providers.readiness_verdict(conn)
@@ -3726,10 +3267,9 @@ def _outbound_lookup_providers(conn: psycopg.Connection) -> Check:
                  caveat=caveat if ok else "")
 
 
-# Telegram collection (F5.3, 2026-09-24). Not blocking and with no
-# CONSEQUENCES entry: every refusal is enforced where it matters, by the
-# poll and the acts. The library, the enrolled sessions and the machine
-# locks only; the ceiling and the proxy are other rows'.
+# Telegram collection. Not blocking and with no CONSEQUENCES entry: every refusal is enforced where it matters,
+# by the poll and the acts. The library, the enrolled sessions and the machine locks only; the ceiling and the
+# proxy are other rows'.
 def _telegram_collection(conn: psycopg.Connection) -> Check:
     from noctornal_api import telegram_service
 
@@ -3737,11 +3277,10 @@ def _telegram_collection(conn: psycopg.Connection) -> Check:
     return Check("telegram_collection", ok, evidence, "" if ok else action)
 
 
-# The deployment-wide sweep of collected documents (docs/17 F30, 2026-10-02).
-# Not blocking and with no CONSEQUENCES entry: a late sweep is a duty
-# overdue, not a decision that has to be settled before material arrives, and
-# the sweep is a script an operator runs, so there is no console target. The
-# verdict, counts only, is `retention_sweep.readiness_verdict`'s.
+# The deployment-wide sweep of collected documents (docs/17). Not blocking and with no CONSEQUENCES entry: a
+# late sweep is a duty overdue, not a decision to settle before material arrives, and the sweep is a script an
+# operator runs, so there is no console target. The verdict, counts only, is
+# `retention_sweep.readiness_verdict`'s.
 def _retention_sweep_current(conn: psycopg.Connection) -> Check:
     from noctornal_api import retention_sweep
 
@@ -3750,10 +3289,9 @@ def _retention_sweep_current(conn: psycopg.Connection) -> Check:
 
 
 def _collector_split(conn: psycopg.Connection) -> Check:
-    """A collector process (2026-10-02): the API holds no persona key, a
-    collector drains the persona act queue, and every persona credential
-    is under the persona ring. Not blocking: the acts and polls a missing
-    collector stops are refused by name where they are asked for."""
+    """A collector process: the API holds no persona key, a collector drains the persona act queue, and every
+    persona credential is under the persona ring. Not blocking: the acts and polls a missing collector stops are
+    refused by name where they are asked for."""
     from noctornal_api import persona_acts
 
     ok, evidence, action = persona_acts.readiness_verdict(conn)
@@ -3761,8 +3299,8 @@ def _collector_split(conn: psycopg.Connection) -> Check:
 
 
 # ---------------------------------------------------------------------------
-# Prohibited-content screening (F13, 2026-09-24). Not blocking: holding
-# hash lists may itself be unlawful, so no list loaded must pass.
+# Prohibited-content screening. Not blocking: holding hash lists may itself be unlawful, so no list loaded
+# must pass.
 # ---------------------------------------------------------------------------
 
 def _screening_active(conn: psycopg.Connection) -> bool:
@@ -3781,16 +3319,13 @@ def _screening_clause(conn: psycopg.Connection) -> str:
 
 
 def _prohibited_content_screening(conn: psycopg.Connection) -> Check:
-    """Whether the hash lists held are held under a recorded authority,
-    whether every held sample has been screened against the newest, and
-    whether every matched sample's bytes have left the working store.
+    """Whether the hash lists held are held under a recorded authority, whether every held sample has been
+    screened against the newest, and whether every matched sample's bytes have left the working store.
 
-    No list loaded PASSES with the docs/16 C3 caveat: not holding lists is
-    the lawful default in most deployments, so it must not make the
-    register unreachable. The evidence says WHETHER samples wait or are
-    behind, never how many: this row is read by every holder of
-    user.manage, and the counts span every compartment;
-    the officer's section has the numbers."""
+    No list loaded PASSES with the docs/16 C3 caveat: not holding lists is the lawful default in most
+    deployments, so it must not make the register unreachable. The evidence says WHETHER samples wait or are
+    behind, never how many: this row is read by every holder of user.manage, and the counts span every
+    compartment; the officer's section has the numbers."""
     from noctornal_api import screening
     name = "prohibited_content_screening"
     now = screening.state(conn)
@@ -3808,8 +3343,7 @@ def _prohibited_content_screening(conn: psycopg.Connection) -> Check:
         f"{', '.join(x['algorithms'])})" for x in now.active_lists)
     last = (now.last_pass_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             if now.last_pass_at else "never")
-    # The worker's budget is stated, so an operator can see how long one
-    # pass may hold its loop (2026-09-24).
+    # The worker's budget is stated, so an operator can see how long one pass may hold its loop.
     evidence = (f"Active: {lists}. {authority}. Last screening pass {last}; "
                 f"the worker's pass budget {screening.PASS_BUDGET_S} seconds. "
                 f"{screening.EXACT_HASH_SENTENCE} "
@@ -3846,8 +3380,7 @@ def _prohibited_content_screening(conn: psycopg.Connection) -> Check:
 
 
 # ---------------------------------------------------------------------------
-# The sandbox (F14, 2026-09-24). Not blocking: with no sandbox
-# configured a detonation is recorded and nothing is sent.
+# The sandbox. Not blocking: with no sandbox configured a detonation is recorded and nothing is sent.
 # ---------------------------------------------------------------------------
 
 #: How long a QUEUED detonation may wait before the register says nothing
@@ -3955,10 +3488,9 @@ def _sandbox_integration(conn: psycopg.Connection) -> Check:
 
 
 # ---------------------------------------------------------------------------
-# Row-level security (S1, 2026-09-25). Not blocking, no console target,
-# and EXPECTED to fail on every developer machine and in the main CI suite
-# for app_db_role_not_owner's reason: they connect as the owner, which row
-# security never filters.
+# Row-level security. Not blocking, no console target, and EXPECTED to fail on every developer machine and in
+# the main CI suite for app_db_role_not_owner's reason: they connect as the owner, which row security never
+# filters.
 # ---------------------------------------------------------------------------
 
 _RLS_ACTION = (
@@ -4061,8 +3593,8 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("retention_rules_confirmed", _retention_rules_confirmed,
      "the retention table could not be read; run alembic upgrade head and "
      "then confirm each rule at POST /retention/rules/{category}"),
-    # F30, 2026-10-02. Beside its sibling: the rules say when a document
-    # expires, this says whether anything destroyed the ones that did.
+    # Beside its sibling: the rules say when a document expires, this says whether anything destroyed the ones
+    # that did.
     ("retention_sweep_current", _retention_sweep_current,
      "the collected documents could not be read; run alembic upgrade head"),
     ("security_officer_present", _security_officer_present,
@@ -4078,21 +3610,18 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "hold must be in the ring (NOCTORNAL_TOTP_KEK / _RETIRED)"),
     ("ingest_pepper_set", _ingest_pepper_set,
      f"set {_PEPPER_ENV} to a long random string, once, and keep it"),
-    # sec-dev-secrets-in-production, 2026-09-23.
     ("credentials_not_published", _credentials_not_published,
      "replace every credential that carries a published value with one "
      "generated for this deployment, and restart"),
     ("rate_limiting_enabled", _rate_limiting_enabled,
      "unset NOCTORNAL_RATELIMIT and restart the API"),
-    # docs/17 "a missing hop count" (2026-10-08). Not blocking, no console
-    # target: the count is settled in secrets.env.
+    # Not blocking, no console target: the count is settled in secrets.env.
     ("proxy_hops_declared", _proxy_hops_declared,
      "set NOCTORNAL_TRUSTED_PROXY_HOPS to the number of proxies in front of the "
      "API and restart"),
     ("redis_limiter_store", _redis_limiter_store,
      "fix REDIS_URL or start the Redis it names; run it with "
      "maxmemory-policy=noeviction (docs/16 C8)"),
-    # sec-redis-isolation, 2026-09-23.
     ("redis_limiter_isolated", _redis_limiter_isolated,
      "fix REDIS_URL or start the Redis it names; the limiter needs an "
      "instance of its own (docs/16 C8)"),
@@ -4113,15 +3642,13 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("app_db_role_not_owner", _app_db_role_not_owner,
      "the catalogue could not be read; the connected role should be "
      "`noctornal_app` (DATABASE_URL), never the schema owner `noctornal`"),
-    # S1, 2026-09-25. Beside its sibling rather than last: the two rows
-    # answer "what can this connection do to the data". Not blocking, no
-    # console target.
+    # Beside its sibling rather than last: the two rows answer "what can this connection do to the data". Not
+    # blocking, no console target.
     ("row_level_security_enforced", _row_level_security_enforced,
      "the catalogue could not be read; run alembic upgrade head as the owner"),
     ("smtp_configured", _smtp_configured,
      "set SMTP_HOST to a relay that speaks TLS (docs/07)"),
-    # The compartment registry, L1 and L2 (2026-09-24). Not blocking, no
-    # console target.
+    # The compartment registry. Not blocking, no console target.
     ("compartment_bindings_intact", _compartment_bindings_intact,
      "the catalogue could not be read; run alembic upgrade head"),
     ("captured_documents_compartmented", _captured_documents_compartmented,
@@ -4130,66 +3657,53 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "the claim tables could not be read; run alembic upgrade head"),
     ("triage_claims_dated", _triage_claims_dated,
      "the claim tables could not be read; run alembic upgrade head"),
-    # The network boundary (docs/00 decision 68, 2026-09-24). Not blocking.
+    # The network boundary (docs/00 decision 68). Not blocking.
     ("egress_boundary", _egress_boundary,
      "the collection tables could not be read; run alembic upgrade head"),
-    # F1 roles, 2026-09-24.
     ("role_analysis_thread_capped", _role_analysis_thread_capped,
      "numpy or the role analysis module could not be loaded; reinstall with "
      "-c constraints.txt and restart the API"),
-    # The two-person policy (F9, 2026-09-24).
     ("dual_control_policy_changeable", _dual_control_policy_changeable,
      "the role table could not be read; once it can, grant SECURITY_OFFICER "
      "to an active account that is not an administrator"),
-    # F11 and F12 (2026-09-24). Not blocking, no console target.
     ("sample_static_analysis", _sample_static_analysis,
      "the static triage tables could not be read; run alembic upgrade head"),
     ("yara_rules_active", _yara_rules_active,
      "the YARA rule set tables could not be read; run alembic upgrade head"),
-    # The collection foundation (docs/00 decision 69, 2026-09-24). Not
-    # blocking.
+    # The collection foundation (docs/00 decision 69). Not blocking.
     ("collection_sources_configured", _collection_sources_configured,
      "the collection tables could not be read; run alembic upgrade head"),
     ("collection_authority_current", _collection_authority_current,
      "the collection tables could not be read; run alembic upgrade head"),
-    # The egress proxy (S2, 2026-09-24). Not blocking.
     ("egress_routes_cover_sources", _egress_routes_cover_sources,
      "the egress tables could not be read; run alembic upgrade head"),
     ("egress_exits_open", _egress_exits_open,
      "the egress tables could not be read; run alembic upgrade head"),
-    # Comms (F10a and F10c, 2026-09-24). Not blocking, no console target.
     ("pgp_verifier", _pgp_verifier,
      "the gpg binary could not be run; install GnuPG 2.4.9 or later, or set "
      "NOCTORNAL_GPG to its full path, and restart"),
     ("pgp_key_directory", _pgp_key_directory,
      "the key lookup settings could not be read; check NOCTORNAL_WKD_CEILING "
      "and the integration route wkd"),
-    # The similarity indexes (F6.1 and F6.2, 2026-09-24). Not blocking.
     ("embedding_wording_current", _embedding_wording_current,
      "the similarity tables could not be read; run alembic upgrade head"),
     ("embedding_meaning_endpoint", _embedding_meaning_endpoint,
      "the similarity tables could not be read, or the model endpoint check "
      "failed; run alembic upgrade head and read the API log"),
-    # Outbound integrations (F8, F7 and F15.2, 2026-09-24). Not blocking.
     ("notify_outbox_draining", _notify_outbox_draining,
      "the delivery table could not be read; run alembic upgrade head"),
     ("jira_destination", _jira_destination,
      "the Jira tables could not be read; run alembic upgrade head"),
     ("outbound_lookup_providers", _outbound_lookup_providers,
      "the provider table could not be read; run alembic upgrade head"),
-    # Screening (F13, 2026-09-24). Not blocking, no console target.
     ("prohibited_content_screening", _prohibited_content_screening,
      "the screening tables could not be read; run alembic upgrade head"),
-    # The sandbox (F14, 2026-09-24). Not blocking, no console target.
     ("sandbox_integration", _sandbox_integration,
      "the detonation table could not be read; run alembic upgrade head"),
-    # The forum adapters (F3 and F4, 2026-09-24). Not blocking.
     ("forum_collection", _forum_collection,
      "the forum sources could not be read; run alembic upgrade head"),
-    # Telegram collection (F5.3, 2026-09-24). Not blocking.
     ("telegram_collection", _telegram_collection,
      "the collection tables could not be read; run alembic upgrade head"),
-    # A collector process (2026-10-02). Not blocking.
     ("collector_split", _collector_split,
      "the persona act queue could not be read; run alembic upgrade head"),
 )
@@ -4199,77 +3713,31 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
 #: are the same list.
 CHECK_NAMES: tuple[str, ...] = tuple(name for name, _, _ in _CHECKS)
 
-#: The four an operator must settle before real material enters this
-#: system. "Blocking" means one specific thing -- a caller may REFUSE on
-#: it -- so the bar is not "important" (everything in this register is
-#: important) but "a decision that has to be settled before real material
-#: arrives, and cannot sensibly be taken once it has".
+#: The checks an operator must settle before real material enters this system. "Blocking" means a caller may
+#: REFUSE on the check: it names a decision that has to be settled before real material arrives and cannot
+#: sensibly be taken once it has. Held in register order so `blocking_failures` and `report` name them in the
+#: order the pane lists them.
 #:
-#: For three of the four -- prohibited_content_policy,
-#: retention_rules_confirmed and security_officer_present -- what makes it
-#: unwaitable is that running anyway does harm nothing afterwards can
-#: undo: each leaves material in the building under a decision nobody
-#: took, and no amount of tidying up later puts it back. The fourth is
-#: reversible and says so in its own entry; the bar above is the one that
-#: is true of all four, and stating the irreversibility one as the bar
-#: (as this comment did until 2026-09-10) made the tier claim something
-#: a quarter of it did not meet, on the very list that decides what
-#: refuses. Each, and why:
+#: prohibited_content_policy (docs/16 L1): without a declared policy and a named person, the first piece of
+#:   prohibited material has nobody it goes to and no written rule for what happens to it. That is a
+#:   criminal-liability question about material already in the building.
+#: sample_origin_configured (docs/16 C9): the control is OFF, every sample download refuses, and invariant 10
+#:   is unmet. Unlike the others it is reversible; it blocks because an origin split decided in a hurry with
+#:   material waiting is done the cheap way, a second name for the application's own origin, which serves
+#:   hostile bytes from the console's origin. Refusing the poll settles it while it is free to settle.
+#: retention_rules_confirmed (docs/16 D3): the seeded periods are placeholders. Collecting under them holds
+#:   personal data to a number nobody chose, and the purge that follows is equally arbitrary; destroying early
+#:   is as irreversible as keeping too long.
+#: security_officer_present: break-glass refuses to grant while nobody can review it, and `audit.read` is held
+#:   by this role alone. With no active officer there is no emergency access and nobody who can read the
+#:   trail, so a covert collection would run unreviewable.
 #:
-#: prohibited_content_policy (docs/16 L1). Without a declared policy and a
-#:   named person, the first piece of prohibited material that arrives has
-#:   nobody it goes to and no written rule for what happens to it. That is
-#:   a criminal-liability question about material already in the building,
-#:   and it cannot be settled retrospectively.
-#: sample_origin_configured (docs/16 C9). The control is OFF: every sample
-#:   download refuses, so nothing collected into the Lab can be retrieved,
-#:   and no part of the deployment satisfies invariant 10. Alone among the
-#:   four this failure is REVERSIBLE -- setting the variable fixes it, and
-#:   nothing already collected is worse off for the delay -- so it blocks
-#:   on the first ground only. What it is settled by is a deployment
-#:   decision (a genuinely separate host, with its own cookie scope and
-#:   CSP), and a deployment decision taken in a hurry with material
-#:   already waiting is taken the cheap way: a second name for the
-#:   application's own origin, which serves hostile bytes from the
-#:   console's origin and is precisely what this check now fails on.
-#:   Refusing the poll settles it while it is still free to settle.
-#: retention_rules_confirmed (docs/16 D3). The seeded periods are
-#:   PLACEHOLDERS. Collecting under them holds personal data to a number
-#:   nobody chose, and the purge that eventually runs against it is
-#:   equally arbitrary -- destroying material early is exactly as
-#:   irreversible as keeping it too long.
-#: security_officer_present. Break-glass refuses to grant while nobody can
-#:   review it, and `audit.read` is held by this role alone. A deployment
-#:   with no active officer has no emergency access AND nobody who can
-#:   read the trail of what was collected, so a covert collection would
-#:   run unreviewable by construction.
-#:
-#: sys_admin_present is deliberately NOT here, and not because it matters
-#: less than the four. It is an OPERABILITY failure rather than a decision
-#: taken too late: with no active SYS_ADMIN accounts cannot be
-#: administered, but nothing about material already collected becomes
-#: unfixable, and `scripts/bootstrap.py` on the server closes it
-#: afterwards. Reversible alone would not exclude it --
-#: sample_origin_configured is reversible and blocks -- but there is no
-#: decision here that gets harder once material has arrived: granting the
-#: role is the same act on day ninety as on day one, where an origin split
-#: retrofitted under pressure is the one that gets done the cheap and
-#: wrong way. A refusal would also land on somebody who cannot act on it.
-#: `user.manage` is held by SYS_ADMIN alone and this register is gated on
-#: `user.manage`, so in the exact state this check reports there is nobody
-#: left who can open `/admin/readiness` and read the evidence the refusal
-#: sends them to -- a poll refused by name, with the report that explains
-#: the name unreadable, is a dead end rather than an instruction. (Note
-#: the asymmetry with the four above: the register's READER always holds
-#: user.manage, which is why `test_the_sys_admin_check_counts_the_caller_in`
-#: can say this check is never honestly false for whoever is looking at
-#: it; the caller a blocking check refuses is the COLLECTOR on the poll
-#: route, who holds `collection.run` and need not hold user.manage at all,
-#: so "the reader is always a SYS_ADMIN" is not on its own a reason a
-#: blocking entry could never fire.)
-#:
-#: Held in register order so `blocking_failures` and `report` name them
-#: in the order the pane lists them.
+#: sys_admin_present is deliberately not here. It is an operability failure, not a decision taken too late:
+#: `scripts/bootstrap.py` closes it afterwards, and granting the role is the same act on day ninety as on day
+#: one. A refusal would also land on somebody who cannot act on it: `user.manage` is held by SYS_ADMIN alone
+#: and gates this register, so with no SYS_ADMIN nobody could read the evidence the refusal points to. (The
+#: register's reader always holds user.manage, but the caller a blocking check refuses is the collector on the
+#: poll route, who holds `collection.run` and need not.)
 BLOCKING_CHECKS: tuple[str, ...] = (
     "prohibited_content_policy",
     "sample_origin_configured",
@@ -4278,14 +3746,10 @@ BLOCKING_CHECKS: tuple[str, ...] = (
 )
 
 
-#: What the product refuses while a BLOCKING check fails, beyond the
-#: collection poll that every one of them refuses (2026-09-23,
-#: ux16-admin:blocking-headline-understates-impact). The admin banner
-#: builds its headline from these, so it can no longer say "the poll
-#: route" while its own items say ingest, download and break-glass are
-#: refused too. Each is the refusal the check's own reader makes:
-#: `samples.policy_declared` gates ingest, `samples.origin_split` gates
-#: every download, and break-glass refuses to grant with no reviewer.
+#: What the product refuses while a BLOCKING check fails, beyond the collection poll that every one of them
+#: refuses. The admin banner builds its headline from these. Each is the refusal the check's own reader makes:
+#: `samples.policy_declared` gates ingest, `samples.origin_split` gates every download, and break-glass
+#: refuses to grant with no reviewer.
 CONSEQUENCES: dict[str, str] = {
     "prohibited_content_policy": "Sample ingest is refused.",
     "sample_origin_configured": "Every sample download is refused.",
@@ -4293,51 +3757,39 @@ CONSEQUENCES: dict[str, str] = {
         "Break-glass is refused, and nobody can read the audit trail.",
 }
 
-#: Where in the console a check is settled, as "tab/subtab" (2026-09-23,
-#: ux16-admin:readiness-actions-speak-api). A check absent from this map
-#: is settled by the API's configuration and a restart. Named by the
-#: console's own `data-tab` and `data-subtab` values, never by the
-#: labels, which the console owns.
+#: Where in the console a check is settled, as "tab/subtab". A check absent from this map is settled by the
+#: API's configuration and a restart. Named by the console's own `data-tab` and `data-subtab` values, never by
+#: the labels, which the console owns.
 UI_TARGETS: dict[str, str] = {
     "retention_rules_confirmed": "governance/retention",
     "security_officer_present": "admin/accounts",
     "sys_admin_present": "admin/accounts",
-    # The two-person policy (F9, 2026-09-24).
     "dual_control_policy_changeable": "admin/accounts",
-    # The collection foundation (docs/00 decision 69, 2026-09-24).
+    # The collection foundation (docs/00 decision 69).
     "collection_sources_configured": "feeds/sources",
     "collection_authority_current": "feeds/sources",
-    # Settled under Administration, Egress (S2, 2026-09-24).
     "egress_boundary": "admin/egress",
     "egress_routes_cover_sources": "admin/egress",
     "egress_exits_open": "admin/egress",
-    # The similarity indexes (F6.1 and F6.2, 2026-09-24).
     "embedding_wording_current": "admin/embeddings",
     "embedding_meaning_endpoint": "admin/embeddings",
-    # Outbound integrations (F8, F7 and F15.2, 2026-09-24).
     "notify_outbox_draining": "admin/integrations",
     "jira_destination": "admin/integrations",
     "outbound_lookup_providers": "admin/providers",
-    # The forum adapters (F3 and F4, 2026-09-24).
     "forum_collection": "feeds/sources",
-    # Telegram collection (F5.3, 2026-09-24).
     "telegram_collection": "feeds/sources",
-    # A collector process (2026-10-02).
     "collector_split": "feeds/sources",
 }
 
 
 def _register_facts(name: str, check: Check) -> Check:
-    """The register's facts about a row: its tier always, and what it
-    refuses and where it is settled while it fails. Also for a probe that
-    crashed, which never got to say anything about itself.
+    """The register's facts about a row: its tier always, and what it refuses and where it is settled while it
+    fails. Also for a probe that crashed, which never got to say anything about itself.
 
-    A passing row with a caveat gets its `ui_target` too (2026-09-23,
-    ux16-admin:security-officer-false-green): the lone officer's caveat
-    says to grant the role to a second person, and the console can take
-    the operator to where that is done. A caveat on a failed row is
-    dropped: its action already says what to do, and a row that said two
-    different things about itself would leave the operator to choose."""
+    A passing row with a caveat gets its `ui_target` too: the lone officer's caveat says to grant the role to a
+    second person, and the console can take the operator to where that is done. A caveat on a failed row is
+    dropped: its action already says what to do, and a row that said two different things about itself would
+    leave the operator to choose."""
     failing = not check.ok
     caveat = "" if failing else check.caveat
     return replace(check, blocking=name in BLOCKING_CHECKS,
@@ -4346,13 +3798,10 @@ def _register_facts(name: str, check: Check) -> Check:
                    caveat=caveat)
 
 
-#: The probes whose question is about the REQUEST connection itself: which
-#: role it is and whether row security filters it. Every other probe counts
-#: or reads across the deployment, and runs on a system connection (S1,
-#: 2026-09-25): taken as the request role under row-level security, a count
-#: of captured documents, claims, static runs or deliveries would describe
-#: only what the administrator reading the register may read, and a row
-#: would report health for everything they may not.
+#: The probes whose question is about the REQUEST connection itself: which role it is and whether row security
+#: filters it. Every other probe counts or reads across the deployment and runs on a system connection: taken
+#: as the request role under row-level security, a count would describe only what the administrator reading the
+#: register may read, and a row would report health for everything they may not.
 _REQUEST_CONNECTION_CHECKS = frozenset({"app_db_role_not_owner",
                                         "row_level_security_enforced"})
 
@@ -4397,14 +3846,11 @@ def _probe_connections(conn: psycopg.Connection
 
 
 def run_checks(conn: psycopg.Connection) -> list[Check]:
-    """Every check, in register order, each one guarded. `conn` is the
-    caller's autocommit connection, so a check whose query fails does not
-    leave an aborted transaction for the next check to trip over.
+    """Every check, in register order, each one guarded. `conn` is the caller's autocommit connection, so a
+    check whose query fails does not leave an aborted transaction for the next check.
 
-    The tier is stamped HERE rather than inside each probe, so
-    `BLOCKING_CHECKS` is the one place that decides what refuses --
-    including for a check that crashed, where `_guarded` built the Check
-    and the probe never ran at all.
+    The tier is stamped here rather than inside each probe, so `BLOCKING_CHECKS` is the one place that decides
+    what refuses, including for a check that crashed, where `_guarded` built the Check and the probe never ran.
     """
     # `blocking=name in BLOCKING_CHECKS` is spelled inside `_register_facts`.
     with _probe_connections(conn) as on:
@@ -4414,10 +3860,9 @@ def run_checks(conn: psycopg.Connection) -> list[Check]:
 
 
 def check(name: str, conn: psycopg.Connection) -> Check:
-    """ONE registered probe, guarded and stamped exactly as the register
-    stamps it, so a page that shows one row (Administration, Integrations)
-    and the register cannot disagree: one reader per fact (F8 E,
-    2026-09-24). KeyError for a name the register does not hold."""
+    """ONE registered probe, guarded and stamped exactly as the register stamps it, so a page that shows one row
+    (Administration, Integrations) and the register cannot disagree. KeyError for a name the register does not
+    hold."""
     for registered, probe, action in _CHECKS:
         if registered == name:
             with _probe_connections(conn) as on:
@@ -4429,22 +3874,14 @@ def check(name: str, conn: psycopg.Connection) -> Check:
 def blocking_failures(conn: psycopg.Connection) -> list[str]:
     """The blocking checks failing right now, in register order.
 
-    Public so a caller can refuse without rendering the register: it
-    wants four verdicts, not a paragraph of evidence per check, and it is
-    standing on a request path -- or in a cron pass with a due list
-    waiting -- while it asks. Both callers exist:
-    `POST /collection/sources/{id}/run` and `scripts/collection_poll.py`,
-    which calls this ONCE per pass, before it asks what is due.
+    Public so a caller can refuse without rendering the register: it wants the verdicts, not the evidence, and
+    is standing on a request path or in a cron pass. Callers: `POST /collection/sources/{id}/run` and
+    `scripts/collection_poll.py`, which calls this ONCE per pass, before it asks what is due.
 
-    Runs ONLY the blocking probes. The others include a Redis PING, two
-    object-store probes that each try a delete (the WORM proofs, which may
-    also write a canary) and an Alembic script scan, and making every
-    collection poll wait on the object store would turn a readiness
-    refusal into a latency bug -- a failure reported as the wrong thing,
-    which is the defect this module exists to prevent, aimed at the
-    request path instead of at the operator. Each probe is still
-    `_guarded`, so one that raises is a name in this list rather than a
-    500 in the caller.
+    Runs ONLY the blocking probes. The others include a Redis PING, two object-store probes that each try a
+    delete (the WORM proofs, which may also write a canary) and an Alembic script scan, and making every
+    collection poll wait on the object store would turn a readiness refusal into a latency bug. Each probe is
+    still `_guarded`, so one that raises is a name in this list rather than a 500 in the caller.
     """
     return [name for name, check in _blocking_rows(conn) if not check.ok]
 
@@ -4458,37 +3895,26 @@ def _blocking_rows(conn: psycopg.Connection) -> list[tuple[str, Check]]:
 
 
 def blocking_state(conn: psycopg.Connection) -> dict:
-    """`{failures, caveats}` from ONE run of the blocking probes, for the
-    console's badges (`GET /admin/access`). `failures` is exactly
-    `blocking_failures`; `caveats` names the blocking checks that pass
-    with a caveat (2026-09-23, ux16-admin:security-officer-false-green),
-    so the Readiness section can be marked while its passing rows say
-    something the operator has not read. Two separate calls could
-    disagree a few milliseconds apart; one run cannot."""
+    """`{failures, caveats}` from ONE run of the blocking probes, for the console's badges
+    (`GET /admin/access`). `failures` is exactly `blocking_failures`; `caveats` names the blocking checks that
+    pass with a caveat, so the Readiness section can be marked while its passing rows say something the
+    operator has not read. One run cannot disagree with itself; two calls could."""
     rows = _blocking_rows(conn)
     return {"failures": [name for name, check in rows if not check.ok],
             "caveats": [name for name, check in rows if check.caveat]}
 
 
 def report(conn: psycopg.Connection) -> dict:
-    """`{ready, checks, blocking_failures}`. `ready` is the conjunction of
-    `ok` and nothing else: an operator reading ready=true must be able to
-    trust that no row below it says otherwise, and a `ready` computed any
-    other way would be a second opinion dressed as a summary.
+    """`{ready, checks, blocking_failures}`. `ready` is the conjunction of `ok` and nothing else: an operator
+    reading ready=true must be able to trust that no row below it says otherwise.
 
-    `blocking_failures` is derived from THESE checks and not from a
-    second run of the blocking probes. Two runs a few milliseconds apart
-    can disagree -- somebody confirms the last retention rule between
-    them -- and a summary line that named a check the rows below it show
-    as passing is the two-internally-consistent-halves defect with the
-    operator standing in the middle of it.
+    `blocking_failures` is derived from THESE checks, not from a second run of the blocking probes: two runs a
+    few milliseconds apart can disagree (somebody confirms the last retention rule between them), and a summary
+    naming a check the rows below show as passing would mislead the operator.
     """
     checks = run_checks(conn)
-    # `checked_at` (2026-09-23, ux16-admin:readiness-stale-after-fix): with
-    # no time on it, a report taken before a fix, or before an API
-    # restart, could not be told from a fresh one, which is the stale
-    # report the console's own comments guard against. UTC, as every
-    # time the console shows is.
+    # `checked_at` lets a reader tell a report taken before a fix or an API restart from a fresh one. UTC, as
+    # every time the console shows is.
     return {"ready": all(c.ok for c in checks),
             "checks": [c.as_dict() for c in checks],
             "blocking_failures": [c.check for c in checks

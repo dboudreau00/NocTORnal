@@ -1,17 +1,13 @@
-"""The admin pane shows role NAMES, read from the server (2026-09-22).
+"""The admin pane shows role NAMES, read from the server.
 
-Migration 0062 renamed CASE_OWNER's display name to "Lead investigator"
-and kept the key. The admin pane had only ever shown keys (the account
-card's roles line, the grant picker, the revoke buttons and the create
-form), so without this the owner's decision would have reached the
-database and no person. These tests read the shipped console the way
-`test_ui_invariants.py` does. Pure: no database, no server.
+Migration 0062 renamed CASE_OWNER's display name to "Lead investigator" and kept the key. The admin pane
+shows names, not keys (the account card's roles line, the grant picker, the revoke buttons and the create
+form). These tests read the shipped console the way `test_ui_invariants.py` does. Pure: no database, no
+server.
 
-The names are not written into the console. A label table in app.js is a
-second copy of `iam.role`, and the copy is the one that goes stale; the
-role picker already shipped that defect once (six roles offered, ten
-granted), which is what `test_the_admin_pane_offers_exactly_the_roles_the_
-server_grants` guards.
+The names are not written into the console. A label table in app.js is a second copy of `iam.role`, and
+the copy goes stale; `test_the_admin_pane_offers_exactly_the_roles_the_server_grants` guards the role
+picker against that.
 """
 from __future__ import annotations
 
@@ -62,23 +58,20 @@ def test_the_account_card_shows_names_not_keys():
     assert not re.search(r"u\.roles \|\| \[\]\)\.join\(", row), (
         "the account card joins raw role keys again")
     assert "map(roleLabel)" in row
-    # The revoke buttons are on the card's removal row since 2026-09-23
-    # (ux16-admin authz-changes-one-click), apart from Grant.
+    # The revoke buttons are on the card's removal row, apart from Grant.
     removal = _function(_js(), "function removalRow(")
     assert "'Revoke ' + roleLabel(r)" in removal, (
         "the revoke buttons still say the key")
 
 
 def test_a_relabelled_option_still_submits_the_key():
-    """An <option> with no value attribute submits its TEXT. Relabelling
-    one to "Lead investigator (CASE_OWNER)" without pinning the value
-    first would send that string to POST /admin/users, which refuses it
+    """An <option> with no value attribute submits its TEXT, so relabelling one to "Lead investigator
+    (CASE_OWNER)" without pinning the value would send that string to POST /admin/users, which refuses it
     as an unknown role.
 
-    Since 2026-09-23 the create form's roles are checkboxes (ux16-admin
-    create-roles-multiselect) whose VALUE is the key in the markup, and the
-    name is written into a span beside it, never into the value. The grant
-    picker (`grantPair`) still builds options, each with its key as value.
+    The create form's roles are checkboxes whose VALUE is the key in the markup; the name is written into
+    a span beside it, never into the value. The grant picker (`grantPair`) builds options, each with its
+    key as value.
     """
     js = _js()
     relabel = _function(js, "function labelRoleChecks(")

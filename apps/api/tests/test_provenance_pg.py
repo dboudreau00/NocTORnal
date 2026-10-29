@@ -1,14 +1,10 @@
-"""Evidence at the point of claim, and retraction (enhancements E1-E3).
+"""Evidence at the point of claim, and retraction.
 
-The first real session of using this tool produced fourteen assertions and
-zero exhibits, in a product whose thesis is chain of custody. Not because
-the evidence path was broken -- it is tested end to end -- but because
-nothing in the interface ASKED for an exhibit at the moment a claim was
-made, and `assertion.evidence_id` had existed unused since Phase 1.
+The interface must ASK for an exhibit at the moment a claim is made: a product whose thesis is chain of
+custody should not produce assertions with no exhibit because `assertion.evidence_id` went unasked.
 
-Retraction had the mirror-image problem: the service method existed, was
-exposed nowhere, and the projection did not filter on live provenance, so
-retracting a source changed nothing an analyst could see.
+Retraction must change what an analyst sees: the projection filters on live provenance, so retracting a
+source removes its elements from the view.
 
 Env-gated on DATABASE_URL.
 """
@@ -34,13 +30,11 @@ def conn():
     yield c
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{EMAIL_LIKE}')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
-    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
-    # this teardown deleted them with the trigger stood down, which only
-    # ever took the chain's tail and so never tripped `custody_verify.py`
-    # -- the teardown in `test_evidence_pg.py` has the full account. What
-    # a custody row points at stays with it: the exhibit, its case, and
-    # the humans on the custody row, the exhibit and the case. NULL-guarded
-    # because one NULL in a NOT IN list silently deletes nothing.
+    # Custody rows stay and the chain trigger stays up: deleting them with the trigger stood down only
+    # takes the chain's tail and would never trip `custody_verify.py` (see the teardown in
+    # `test_evidence_pg.py`). What a custody row points at stays with it: the exhibit, its case, and the
+    # humans on the custody row, the exhibit and the case. NULL-guarded because one NULL in a NOT IN list
+    # silently deletes nothing.
     pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
     pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
     pinned_users = (
@@ -259,11 +253,8 @@ def test_retracting_an_already_retracted_assertion_is_refused(conn, world):
 
 
 def test_history_survives_retraction_for_temporal_replay(conn, world):
-    """The ROW and its history persist, stamped with who and why. The VIEW
-    does not: the projection's live-provenance leg has no as-of term, so a
-    retracted element is gone at every as-of position. (Until 2026-09-22
-    this docstring said an earlier `as_of` still showed it, the promise the
-    console's Retract prompt also made; ux05 retract-confirmation-wrong.)"""
+    """The ROW and its history persist, stamped with who and why. The VIEW does not: the projection's
+    live-provenance leg has no as-of term, so a retracted element is gone at every as-of position."""
     from datetime import datetime, timezone
     from noctornal_api.graph import GraphWriteService
     case_id, uid, _n1, _n2, edge = world
@@ -280,11 +271,9 @@ def test_history_survives_retraction_for_temporal_replay(conn, world):
 
 
 def test_a_retracted_element_is_gone_at_earlier_as_of_positions_too(conn, world):
-    """Pins what the console's Retract prompt now SAYS (`retractionWords`
-    in app.js, 2026-09-22): the element stays out at every as-of position,
-    earlier ones included. If the projection ever learns to replay a
-    retraction against as_of, this test fails, and that prompt has to change
-    in the same commit, or it goes back to describing the wrong product."""
+    """Pins what the console's Retract prompt says (`retractionWords` in app.js): the element stays out at
+    every as-of position, earlier ones included. If the projection ever replays a retraction against
+    as_of, this test fails and that prompt has to change in the same commit."""
     from datetime import datetime, timezone
     from noctornal_api.graph import GraphWriteService
     case_id, uid, _n1, _n2, edge = world

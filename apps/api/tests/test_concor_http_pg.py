@@ -1,13 +1,13 @@
-"""F1 over HTTP (2026-09-24): the role-analysis routes.
+"""The role-analysis routes over HTTP.
 
 - `/concor/latest` is a 404 before a run and the run afterwards, per depth.
 - A role run can be asked whether it still holds, alone and in a batch.
-- It is metered on its own bucket, `analytics.concor`, and a one-mode role
-  run spends `analytics.one_mode` too.
+- It is metered on its own bucket, `analytics.concor`, and a one-mode role run spends
+  `analytics.one_mode` too.
 - A depth outside 1 to 4 is FastAPI's 422.
 
-Borrows test_analytics_latest_pg's fixtures and helpers (teardown of `al-`
-accounts). Env-gated on DATABASE_URL.
+Borrows test_analytics_latest_pg's fixtures and helpers (teardown of `al-` accounts). Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 

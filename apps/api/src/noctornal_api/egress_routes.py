@@ -1,54 +1,35 @@
-"""The egress route provider: what each route may reach, and the token that
-proves a client may ask for it (S2, the egress proxy, 2026-09-24;
-docs/00 decisions 68 and 77, docs/20 section 7).
+"""The egress route provider: what each route may reach, and the token that proves a client may ask for it
+(docs/00 decisions 68 and 77, docs/20 section 7).
 
-## How it is found
-
-egress._route_provider() finds this module by NAME and checks
-PROVIDER_CONTRACT and the three functions below. Nothing registers it and
-app.py does not import it: its existence is the registration, so the API,
-the cron scripts and the host scripts all see the same provider. The pinned
-client (pinned_http) is still the only client in both modes; this module
-never dials, and development writes no ledger row (docs/20 section 10,
+egress._route_provider() finds this module by NAME and checks PROVIDER_CONTRACT and the three functions below.
+Nothing registers it and app.py does not import it: its existence is the registration, so the API, the cron
+scripts and the host scripts all see the same provider. The pinned client (pinned_http) is still the only
+client in both modes; this module never dials, and development writes no ledger row (docs/20 section 10,
 point 3).
 
-## One policy, used by both ends
+`policy_for` builds a route's RoutePolicy from its row, and the egress proxy calls the same function, so the
+policy a client checks names against and the policy the proxy resolves and admits under are one object built
+one way. Every destination decision is an egress_policy call; there is no second classifier here.
 
-`policy_for` builds a route's RoutePolicy from its row, and the egress
-proxy calls the same function, so the policy a client checks names against
-and the policy the proxy resolves and admits under are one object built
-one way. Every destination decision is an egress_policy call; there is no
-second classifier here.
-
-- A persona profile: a suffix rule per allowed host suffix and a network
-  rule per allowed network, each on the allowed ports; any public host
-  when the profile says so; onion only on a TOR profile; single-label and
+- A persona profile: a suffix rule per allowed host suffix and a network rule per allowed network, each on the
+  allowed ports; any public host when the profile says so; onion only on a TOR profile; single-label and
   special-use names refused by name.
-- The passive default: the same, from its row. In DEVELOPMENT with no
-  passive default, 'passive' is egress_policy.PUBLIC_POLICY with the
-  internal networks set: exactly what fetch has always enforced, so the
-  seeders and suites that poll a loopback feed keep working.
-- An integration route: its administrator's EXACT entries (NAME:PORTS,
-  NAME@CIDR:PORTS or CIDR:PORTS; no wildcard, no suffix), loopback only
-  outside production, and in production the proxy's `exits` network
-  treated as the deployment's own, so no integration entry can name a Tor
-  or VPN sidecar and leave through a persona exit (2026-09-24). The
-  `models` network is NOT: a local model server sits there precisely so
-  that an `embeddings` entry naming it (model@172.31.246.0/24:PORT) can
-  reach it (docs/20 section 9).
+- The passive default: the same, from its row. In DEVELOPMENT with no passive default, 'passive' is
+  egress_policy.PUBLIC_POLICY with the internal networks set, so the seeders and suites that poll a loopback
+  feed keep working.
+- An integration route: its administrator's EXACT entries (NAME:PORTS, NAME@CIDR:PORTS or CIDR:PORTS; no
+  wildcard, no suffix), loopback only outside production, and in production the proxy's `exits` network treated
+  as the deployment's own, so no integration entry can name a Tor or VPN sidecar and leave through a persona
+  exit. The `models` network is NOT: a local model server sits there precisely so that an `embeddings` entry
+  naming it (model@172.31.246.0/24:PORT) can reach it (docs/20 section 9).
 
-A caller's declared rules NARROW an administrator's route and never widen
-it; where no administrator row exists in development they are the whole
-allowlist, which is decision 68's development path.
+A caller's declared rules NARROW an administrator's route and never widen it; where no administrator row exists
+in development they are the whole allowlist, which is decision 68's development path.
 
-## Tokens
-
-A route's token is base64url (no padding) of HMAC-SHA256(K,
-b"noctornal-egress-route-v1" NUL route part), K the base64-decoded
-NOCTORNAL_EGRESS_CLIENT_KEY (32 bytes or more). The context is not in the
-MAC, so one token serves every run of a route; the proxy still demands a
-live run, authority or stop behind a persona route. The token and the key
-never appear in a log, an error, a ledger row or a response.
+A route's token is base64url (no padding) of HMAC-SHA256(K, b"noctornal-egress-route-v1" NUL route part), K the
+base64-decoded NOCTORNAL_EGRESS_CLIENT_KEY (32 bytes or more). The context is not in the MAC, so one token
+serves every run of a route; the proxy still demands a live run, authority or stop behind a persona route. The
+token and the key never appear in a log, an error, a ledger row or a response.
 """
 from __future__ import annotations
 
@@ -83,15 +64,12 @@ PROVIDER_CONTRACT = 1
 CLIENT_KEY_ENV = "NOCTORNAL_EGRESS_CLIENT_KEY"
 _TOKEN_DOMAIN = b"noctornal-egress-route-v1"
 
-#: The production compose network only the egress proxy (and a Tor or VPN
-#: sidecar) joins. Never reachable through an integration route, so no
-#: integration can leave through a persona's exit (2026-09-24).
+#: The production compose network only the egress proxy (and a Tor or VPN sidecar) joins. Never reachable through
+#: an integration route, so no integration can leave through a persona's exit.
 EXITS_NETWORK = ipaddress.ip_network("172.31.245.0/24")
-#: The network a local model server shares with the proxy alone. Unlike
-#: `exits` it IS reachable through an integration entry that names it
-#: (the embeddings route), which is why the model is kept off `exits`:
-#: an entry for the model must never be able to name a Tor or VPN sidecar
-#: (2026-09-25).
+#: The network a local model server shares with the proxy alone. Unlike `exits` it IS reachable through an
+#: integration entry that names it (the embeddings route), which is why the model is kept off `exits`: an entry
+#: for the model must never be able to name a Tor or VPN sidecar.
 MODELS_NETWORK = ipaddress.ip_network("172.31.246.0/24")
 
 #: Source kinds the passive route carries: feeds and plain web pages read
@@ -109,18 +87,17 @@ NETWORK_ROUTE: dict[str, str | None] = {
     "SMTP": "smtp",
     "JIRA": "jira",
     "WEBHOOK": "webhook",
-    "COLLECTION_TARGET": "persona",   # the forum and Telegram sources (F3 to F5)
-    "KEY_DIRECTORY": "wkd",           # Web Key Directory lookups (F10c)
-    "MODEL_HOST": "embeddings",       # the model endpoint (F6.2)
+    "COLLECTION_TARGET": "persona",   # the forum and Telegram sources
+    "KEY_DIRECTORY": "wkd",           # Web Key Directory lookups
+    "MODEL_HOST": "embeddings",       # the model endpoint
     "MODEL_REMOTE": "embeddings",
-    "LOOKUP": "lookup-",              # lookup providers, one route each (F15)
-    "SANDBOX": "sandbox",             # CAPEv2 (F14)
+    "LOOKUP": "lookup-",              # lookup providers, one route each
+    "SANDBOX": "sandbox",             # CAPEv2
 }
 
-#: The Telegram preset's ports. Its networks come from the Telegram adapter's
-#: module when it is installed, IPv4 only: Telethon connects over IPv4
-#: (use_ipv6 False), and Telegram's IPv6 blocks are /48 and /32, wider
-#: than egress_policy's /64 cap, so they would not save (2026-09-24).
+#: The Telegram preset's ports. Its networks come from the Telegram adapter's module when it is installed, IPv4
+#: only: Telethon connects over IPv4 (use_ipv6 False), and Telegram's IPv6 blocks are /48 and /32, wider than
+#: egress_policy's /64 cap, so they would not save.
 TELEGRAM_PORTS = (443, 80, 5222)
 
 
@@ -129,10 +106,8 @@ def presets() -> dict[str, dict]:
     Telegram module and its data-centre list are installed."""
     out: dict[str, dict] = {}
     try:
-        # Through sys.modules (F5.3, 2026-09-25). Once the Telegram
-        # module exists and was imported, `from noctornal_api import
-        # telegram` reads the package attribute and no longer sees a
-        # module a test stands in or takes away.
+        # By name, through sys.modules: `from noctornal_api import telegram` reads the package attribute, which no
+        # longer sees a module a test stands in or takes away once the real one was imported.
         import importlib
 
         telegram = importlib.import_module("noctornal_api.telegram")
@@ -296,11 +271,9 @@ def _refuse(code: str, sentence: str | None = None) -> RouteUnavailable:
 
 
 def integration_internal(internal, production: bool) -> tuple:
-    """The deployment's own networks for an integration route: in
-    production the proxy's exits network too, so no entry can name a Tor or
-    VPN sidecar there. The models network is left reachable: an embeddings
-    entry naming it is how the model sidecar is used at all (2026-09-25;
-    it was listed here once, which left the model unreachable)."""
+    """The deployment's own networks for an integration route: in production the proxy's exits network too, so no
+    entry can name a Tor or VPN sidecar there. The models network is left reachable: an embeddings entry naming
+    it is how the model sidecar is used at all."""
     internal = tuple(internal)
     if production and EXITS_NETWORK not in internal:
         internal = internal + (EXITS_NETWORK,)
@@ -313,9 +286,8 @@ def persona_policy(row: ProfileRow, *, internal, admission: str = "local") -> Ro
         rules = tuple(Rule(ports, suffix=s) for s in row.suffixes) + tuple(
             Rule(ports, network=c) for c in row.cidrs)
     except ValueError:
-        # A stored rule that no longer parses is refused, never skipped: a
-        # skipped rule is a silent narrowing today and a surprise widening
-        # when somebody "fixes" it.
+        # A stored rule that no longer parses is refused, never skipped: a skipped rule is a silent narrowing and a
+        # surprise widening when somebody "fixes" it.
         raise _refuse("config_error") from None
     return RoutePolicy("persona", rules, any_public=row.any_public_host,
                        any_public_ports=ports, onion=row.allow_onion,
@@ -336,8 +308,7 @@ def integration_policy(row: IntegrationRow, *, internal, production: bool,
 
 
 def development_passive_policy(internal, declared=()) -> RoutePolicy:
-    """The built-in development passive policy: PUBLIC_POLICY, the Alpha 6
-    behaviour of fetch, with the internal networks set."""
+    """The built-in development passive policy: PUBLIC_POLICY with the internal networks set."""
     return replace(PUBLIC_POLICY, internal=tuple(internal), narrow=tuple(declared))
 
 
@@ -628,9 +599,8 @@ def cover_sources(conn) -> tuple[bool, str, str, str]:
             else:
                 notes.append("Development: feeds use the built-in direct passive policy.")
         else:
-            # egress-rss-floor (2026-10-03): capped at AMBER, so a passive
-            # default an earlier upgrade set to RED no longer reads as
-            # covering a RED feed the collector refuses to poll.
+            # Capped at AMBER, so a passive default set to RED does not read as covering a RED feed the collector
+            # refuses to poll.
             above = conn.execute(
                 f"SELECT EXISTS (SELECT 1 FROM collect.source s WHERE {feed_filter} "
                 f"AND s.classification > least(%s::core.tlp, 'AMBER'::core.tlp))",

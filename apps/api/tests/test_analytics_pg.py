@@ -1,11 +1,10 @@
-"""Phase 3 analytics against Postgres: caching, persistence, clearance
-scoping and retraction (docs/03, docs/09).
+"""Analytics against Postgres: caching, persistence, clearance scoping and retraction (docs/03,
+docs/09).
 
-The unit tests in `test_analytics.py` prove the maths. These prove the
-things that only exist once a database is involved: that a cached run is
-never served across a clearance boundary, that a failed run is a queryable
-fact rather than a row stuck at RUNNING, and that retracting the evidence
-behind an element removes it from every metric.
+The unit tests in `test_analytics.py` prove the maths. These prove the things that only exist once a
+database is involved: that a cached run is never served across a clearance boundary, that a failed
+run is a queryable fact rather than a row stuck at RUNNING, and that retracting the evidence behind an
+element removes it from every metric.
 
 Env-gated on DATABASE_URL, like the other _pg suites.
 """
@@ -54,9 +53,8 @@ def conn():
 
 @pytest.fixture
 def world(conn):
-    """A network with enough structure to make every Phase 3 metric mean
-    something. The demo case is a 7-node star with no triangles at all, so
-    it cannot distinguish a correct betweenness from a broken one.
+    """A network with enough structure to make every metric mean something. The demo case is a 7-node
+    star with no triangles at all, so it cannot distinguish a correct betweenness from a broken one.
 
     Shape (all ties in the TRUST preset):
 
@@ -64,12 +62,11 @@ def world(conn):
         cluster 2: x - y - z, fully connected (a triangle)
         broker:    a - k - x    <- the only route between the clusters
 
-    So `k` has DEGREE 2 -- fewer ties than a or x -- but the HIGHEST
-    betweenness and the LOWEST constraint. That is docs/03's broker
-    signature, and it is the pattern the interface is supposed to teach.
+    So `k` has degree 2, fewer ties than a or x, but the highest betweenness and the lowest
+    constraint. That is docs/03's broker signature, and the pattern the interface is supposed to teach.
 
-    Signs give one BALANCED triad (a-b-c, all positive) and one UNBALANCED
-    triad (x-y-z, one accusation), which is docs/03's own example of a lead.
+    Signs give one balanced triad (a-b-c, all positive) and one unbalanced triad (x-y-z, one
+    accusation), which is docs/03's own example of a lead.
     """
     from noctornal_api.graph import AssertionInput, GraphWriteService
     uid = conn.execute(
@@ -114,11 +111,9 @@ def world(conn):
 
 def _svc(conn, uid, clearance="RED", compartments=frozenset()):
     from noctornal_api.analytics_runs import AnalyticsRunService
-    # Since 0059 every compartment column is bound to iam.compartment, and
-    # the run rows this service writes carry `visibility_compartments`.
-    # Register here, at the one place every caller passes through, so a
-    # test that names a compartment is not refused by the database for
-    # a key it never meant to invent.
+    # Every compartment column is bound to iam.compartment (0059), and the run rows this service writes
+    # carry `visibility_compartments`. Register here, at the one place every caller passes through, so
+    # a test that names a compartment is not refused by the database for a key it never meant to invent.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -164,7 +159,7 @@ def test_the_case_carries_one_balanced_and_one_unbalanced_triad(conn, world):
     assert {n["label"] for n in lead["nodes"]} == {"x", "y", "z"}
 
 
-# --- invariant 5 / decision 24: retraction dissolves an element ----------
+# Invariant 5 / decision 24: retraction dissolves an element.
 
 def test_retracting_the_only_assertion_removes_the_edge_from_every_metric(
         conn, world):

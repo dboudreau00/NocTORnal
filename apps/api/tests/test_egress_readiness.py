@@ -1,12 +1,10 @@
-"""The egress readiness rows (S2, 2026-09-24).
+"""The egress readiness rows.
 
-egress_boundary is THE boundary row; its PROXY branch is the route
-provider's boundary_probe, driven here against the contract cases' stub
-proxy (which answers the probe route as docs/20 section 8.5 (2) says) and
-against scripted answers. The two
-new rows, egress_routes_cover_sources and egress_exits_open, are read over
-the database. No probe sends a packet off this host, and none makes a DNS
-query: a fixed lookup would be a beacon.
+egress_boundary is THE boundary row; its PROXY branch is the route provider's boundary_probe, driven here
+against the contract cases' stub proxy (which answers the probe route as docs/20 section 8.5 (2) says) and
+against scripted answers. The rows egress_routes_cover_sources and egress_exits_open are read over the
+database. No probe sends a packet off this host, and none makes a DNS query: a fixed lookup would be a
+beacon.
 """
 from __future__ import annotations
 

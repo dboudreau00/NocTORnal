@@ -1,70 +1,46 @@
-"""The authenticated forum path: XenForo and MyBB boards read as a signed-in
-member (ROADMAP-REMAINING "the authenticated forum path", docs/16 L3,
-2026-10-02).
+"""The authenticated forum path: XenForo and MyBB boards read as a signed-in member (docs/16 L3).
 
-## What a member read is
+The public adapters (`forum_adapters`) read what a board shows anyone. These two read what it shows a member: the
+same walk over the same pages, after the persona bound to the source has signed in. Everything the collection
+foundation enforces for a public read holds here unchanged and more is asked:
 
-The public adapters (`forum_adapters`) read what a board shows anyone.
-These two read what it shows a member: the same walk over the same pages,
-after the persona bound to the source has signed in. Everything the
-collection foundation enforces for a public read holds here unchanged and
-more is asked:
+- the source is bound to a persona on the adapter's platform, with a browser identity recorded (`persona_http`),
+  read through the persona's own egress profile and the egress proxy only (`_route_for_source`, docs/00 decision
+  130: no forum read ever leaves from this server's own address);
+- the read runs only under a confirmed collection authority whose scope is MEMBER_READ, which the database
+  refuses to record without a member-access reference (0083): `authority_need` asks for it, `run_once` requires
+  it, and `fetch` refuses again at the last step;
+- the credential is taken from `PersonaVault.use()` through the run's lease, held only inside `fetch`, posted
+  once to the board's own sign-in form, and registered for redaction; the adapter never keeps it;
+- the session cookies the board answers with are a credential too: sealed in the vault's storage between runs
+  (`forum_session`) as one jar PER ORIGIN, so a persona that reads two boards never carries the first board's
+  session to the second, in memory only for the run, registered for redaction, never in a run row, a warning, a
+  document or a response; cleared by a sign-out, and by every stop of the persona (`PersonaVault`);
+- a board that reflects the password or a session cookie back into a page (a debug echo, a hostile board) does
+  not get it stored: both are removed, exactly, from every item's text, side data and raw markup while they are
+  still live secrets (`_scrub_item`);
+- the sign-in and the session travel over https, or over plain http to an onion address only (Tor encrypts that
+  hop): a clearnet address that would carry the persona's password and cookie in clear is refused by name before
+  a request is made;
+- the pages read are the authority's targets' own (the source's thread or board and what its walk reaches),
+  under the source's pacing and the persona's gap;
+- every post and profile read is stored as a collected document whose side row says MEMBER, names the persona
+  and the authority (0162).
 
-- the source is bound to a persona on the adapter's platform, with a
-  browser identity recorded (`persona_http`), read through the persona's
-  own egress profile and the egress proxy only (`_route_for_source`, docs/00
-  decision 130: no forum read ever leaves from this server's own address);
-- the read runs only under a confirmed collection authority whose scope is
-  MEMBER_READ, which the database refuses to record without a member-access
-  reference (0083): `authority_need` asks for it, `run_once` requires it,
-  and `fetch` refuses again at the last step (docs/16 L3 holds in the code
-  exactly as for the public path);
-- the credential is taken from `PersonaVault.use()` through the run's
-  lease, held only inside `fetch`, posted once to the board's own sign-in
-  form, and registered for redaction; the adapter never keeps it;
-- the session cookies the board answers with are a credential too: sealed
-  in the vault's storage between runs (`forum_session`) as one jar PER
-  ORIGIN, so a persona that reads two boards never carries the first
-  board's session to the second (2026-10-03), in
-  memory only for the run, registered for redaction, never in a run row, a
-  warning, a document or a response; cleared by a sign-out, and by every
-  stop of the persona (`PersonaVault`);
-- a board that reflects the password or a session cookie back into a page
-  (a debug echo, a hostile board) does not get it stored: both are removed,
-  exactly, from every item's text, side data and raw markup while they are
-  still live secrets (`_scrub_item`, 2026-10-07);
-- the sign-in and the session travel over https, or over plain http to an
-  onion address only (Tor encrypts that hop): a clearnet address that
-  would carry the persona's password and cookie in clear is refused by
-  name before a request is made (2026-10-03);
-- the pages read are the authority's targets' own (the source's thread or
-  board and what its walk reaches), under the source's pacing and the
-  persona's gap;
-- every post and profile read is stored as a collected document whose
-  side row says MEMBER, names the persona and the authority (0162).
+What it refuses, by name, and never does: a CAPTCHA or bot challenge at sign-in stops the run and records it
+(this product never solves or bypasses one). A second factor is never entered. A sign-in that wants JavaScript
+is not run. A forced password change is a person's act. A credential the board refuses locks the persona by the
+machine until a new one is enrolled (`PersonaSuspended`). A session the board ends mid-run is signed in again
+once; a second loss ends the run where it was. Nothing here posts, replies, reacts, messages, joins or buys: the
+two POSTs this module makes are the board's own sign-in and sign-out forms, and `test_forum_member.py` holds the
+module to that.
 
-## What it refuses, by name, and never does
-
-A CAPTCHA or bot challenge at sign-in stops the run and records it: this
-product never solves or bypasses one. A second factor is never entered. A
-sign-in that wants JavaScript is not run. A forced password change is a
-person's act. A credential the board refuses locks the persona by the
-machine until a new one is enrolled (`PersonaSuspended`). A session the
-board ends mid-run is signed in again once; a second loss ends the run
-where it was. Nothing here posts, replies, reacts, messages, joins or
-buys: the two POSTs this module makes are the board's own sign-in and
-sign-out forms, and `test_forum_member.py` holds the module to that.
-
-## Where it runs (the vault split, decision 174, merged 2026-10-03)
-
-Nothing here opens a credential: the lease is the run's, from the persona
-gate. These adapters run inside the collector as every persona adapter does
-(a scheduled poll is the collector's own child, and a Poll now of a member
-source is a persona act it runs), and `forum_session` seals and opens the
-sessions under the persona ring, never the TOTP ring, so the jars are
-opened only in the collector's process. The board's own sign-out on a stop
-is the persona act `FORUM_SIGN_OUT` (`persona_acts.py`), which calls
-`sign_out_persona` there.
+Nothing here opens a credential: the lease is the run's, from the persona gate. These adapters run inside the
+collector as every persona adapter does (a scheduled poll is the collector's own child, and a Poll now of a
+member source is a persona act it runs), and `forum_session` seals and opens the sessions under the persona
+ring (decision 174), never the TOTP ring, so the jars are opened only in the collector's process. The board's
+own sign-out on a stop is the persona act `FORUM_SIGN_OUT` (`persona_acts.py`), which calls `sign_out_persona`
+there.
 """
 from __future__ import annotations
 
@@ -244,10 +220,9 @@ class MemberSession:
                                       now, wall)
         except ParseAbandoned as exc:
             if exc.reason in analysis_runner.SANDBOX_FAILURES:
-                # The sandbox, not the board (the isolated analysis worker,
-                # F42, merged 2026-10-03): the run is BLOCKED with no failure
-                # counted and nothing stored, and the sign-in is not read as
-                # one the board answered in a way nobody could read.
+                # The sandbox, not the board (the isolated analysis worker): the run is BLOCKED with no failure
+                # counted and nothing stored, and the sign-in is not read as one the board answered in a way
+                # nobody could read.
                 raise AnalysisUnavailable(sandbox_sentence(exc.reason)) from None
             raise SourceBlocked(SIGN_IN_UNREADABLE) from None
 
@@ -599,13 +574,10 @@ class MemberForumAdapter(ForumAdapter):
         try:
             if (persona_id is not None and jar is not None and changed
                     and origin is not None):
-                # Nothing is sealed for a stopped persona, whatever cookies
-                # the board handed out on its way to refusing it (2026-10-03):
-                # a credential the board refused locks the persona, and so
-                # does a person's stop that lands during the run. Whether it
-                # is stopped is read by `seal_session` under the persona's
-                # row lock, so no stop can land between the check and the
-                # seal (2026-10-08).
+                # Nothing is sealed for a stopped persona, whatever cookies the board handed out on its way to
+                # refusing it: a credential the board refused locks the persona, and so does a person's stop that
+                # lands during the run. Whether it is stopped is read by `seal_session` under the persona's row
+                # lock, so no stop can land between the check and the seal.
                 forum_session.seal_session(conn, persona_id, origin, jar)
         finally:
             super().settle(conn, source_id=source_id, persona_id=persona_id,
@@ -683,21 +655,16 @@ def member_registry() -> dict:
 def sign_out_persona(conn: psycopg.Connection, persona_id: UUID, *,
                      actor_id: UUID | None, clearance: str | None,
                      compartments=None, fetcher=None, sleep=None) -> dict:
-    """Sign a forum persona out of every board it holds a session on and
-    clear its sealed sessions: a STOP, so it is always allowed (the persona
-    gate's stopping path: visible, on a forum platform, with an exit; no
-    authority, no hours, no usability), through the persona's own route
-    in a `stop` context. Each board is signed out with that board's OWN
-    cookies, once per origin (2026-10-03). The
-    sessions are cleared whatever the boards answer: a cookie this product
-    no longer holds is not one it can present again.
+    """Sign a forum persona out of every board it holds a session on and clear its sealed sessions: a STOP, so it
+    is always allowed (the persona gate's stopping path: visible, on a forum platform, with an exit; no authority,
+    no hours, no usability), through the persona's own route in a `stop` context. Each board is signed out with
+    that board's OWN cookies, once per origin. The sessions are cleared whatever the boards answer: a cookie this
+    product no longer holds is not one it can present again.
 
-    Called in the collector, by the `FORUM_SIGN_OUT` persona act that the
-    persona's stop route (`POST /collection/personas/{id}/status` to LOCKED
-    or BURNED) queues and waits for; `PersonaVault` clears the sealed
-    sessions itself on every stop, so a stop that does not reach a board
-    still leaves nothing sealed (2026-10-03). The notes name no
-    source: the caller's labels are the persona's gate, not each source's."""
+    Called in the collector, by the `FORUM_SIGN_OUT` persona act that the persona's stop route
+    (`POST /collection/personas/{id}/status` to LOCKED or BURNED) queues and waits for; `PersonaVault` clears the
+    sealed sessions itself on every stop, so a stop that does not reach a board still leaves nothing sealed. The
+    notes name no source: the caller's labels are the persona's gate, not each source's."""
     from noctornal_api.collection import PersonaContext, PersonaGate, _source_row
     from noctornal_api.collection_context import RunContext
 
@@ -751,9 +718,8 @@ def sign_out_persona(conn: psycopg.Connection, persona_id: UUID, *,
                         with context, session:
                             reached = session.sign_out()
                 except CollectionError as exc:
-                    # Redacted with the jar named again: the scope that made
-                    # its cookies live has ended, and the note goes into the
-                    # audit log, which no label gates (2026-10-07).
+                    # Redacted with the jar named again: the scope that made its cookies live has ended, and the
+                    # note goes into the audit log, which no label gates.
                     out["notes"].append(f"source {sid}: " + redact(
                         str(exc), secrets=tuple(v for v in jar.values() if v)))
                     continue

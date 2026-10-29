@@ -1,21 +1,15 @@
-"""Administrator-issued password reset, the must-change sign-in and the
-Account password change (gap-password-reset, 2026-09-23).
+"""Administrator-issued password reset, the must-change sign-in and the Account password change.
 
-There was no password reset anywhere: not in the console, not in the API,
-not in `scripts/bootstrap.py`. The owner decided it is administrator
-issued, with no email path. What these tests carry:
+The reset is administrator issued, with no email path. What these tests carry:
 
-- the reset is `user.manage` with step-up, refused for oneself, audited,
-  revokes every live session and clears the lockout, and the one-time
-  password it returns works exactly once and never opens a session;
-- sign-in with that password answers 403 with a machine-readable type and
-  mints NOTHING, and the same sign-in carrying a new password stores it,
-  clears the flag and signs in;
-- a new password is judged before any credential is, so a rule failure
-  costs no lockout attempt and spends no code;
-- a person changes their own password with the current one and a code,
-  a wrong current password counts toward the lockout like a wrong
-  sign-in, and every other session is signed out;
+- the reset is `user.manage` with step-up, refused for oneself, audited, revokes every live session and
+  clears the lockout, and the one-time password it returns works exactly once and never opens a session;
+- sign-in with that password answers 403 with a machine-readable type and mints nothing, and the same
+  sign-in carrying a new password stores it, clears the flag and signs in;
+- a new password is judged before any credential is, so a rule failure costs no lockout attempt and spends
+  no code;
+- a person changes their own password with the current one and a code, a wrong current password counts
+  toward the lockout like a wrong sign-in, and every other session is signed out;
 - `bootstrap.py reset-password` is the same reset from the shell.
 
 Email prefix `pwr-`, unique to this file. Env-gated on DATABASE_URL.
@@ -433,31 +427,30 @@ def test_the_way_in_tells_an_administrator_what_is_blocking(conn, client):
     assert body["user_manage"] is True
     assert body["blocking_failures"] == readiness.blocking_failures(conn), (
         "the badge and the register disagree about what is blocking")
-    # The officer check is the one probe that can pass with a caveat
-    # (security-officer-false-green, 2026-09-23), and the answer says so
-    # exactly when that probe does.
+    # The officer check is the one probe that can pass with a caveat, and the answer says so exactly when
+    # that probe does.
     lone = readiness._security_officer_present(conn).caveat
     assert body["readiness_caveats"] == (
         ["security_officer_present"] if lone else [])
     body = client.get("/api/v1/admin/access", headers=_auth(analyst_token)).json()
     assert body == {"user_manage": False, "break_glass_review": False,
                     "blocking_failures": [], "readiness_caveats": [],
-                    # The two-person policy (F9).
+                    # The two-person policy.
                     "dual_control_manage": False,
                     "dual_control_countersign": False,
                     "dual_control_awaiting": 0,
-                    # F12, the officer's YARA activations.
+                    # The officer's YARA activations.
                     "sample_yara_activate": False,
                     # The collection authorities an officer confirms.
                     "collection_authority_confirm": False,
-                    # S2, the Egress section's way in.
+                    # The Egress section's way in.
                     "egress_manage": False,
                     "egress_log_read": False,
-                    # F6.3, the similarity indexes.
+                    # The similarity indexes.
                     "embedding_manage": False,
                     # Integrations and Providers.
                     "integration_manage": False,
-                    # F13, prohibited-content screening.
+                    # Prohibited-content screening.
                     "sample_screening_review": False,
                     "sample_screening_manage": False}
 

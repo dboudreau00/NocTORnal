@@ -1,49 +1,29 @@
-"""K1: the original collection endpoints leaked RED sources to AMBER holders.
+"""Collection endpoints never leak a RED source to an AMBER holder.
 
-`collect.source.classification` (default AMBER) is stamped on every
-document `run_once` stores, and the read path added on 2026-08-10 filters
-documents and watch hits on it. The endpoints that predate the read path
-did not: GET /sources/due, /sources/unhealthy, /runs, /personas and
-/sources/{id}/egress returned a RED source's name, base_url, health and
-run history to any global `collection.read` (or
-`collection_account.manage`) holder, while the posts from that same
-source were correctly hidden. The NAME of a RED source is frequently the
-finding -- which forum, which channel, which vendor shop -- so hiding the
-posts and showing the masthead protected nothing.
+`collect.source.classification` (default AMBER) is stamped on every document `run_once` stores. Every
+listing filters on it: GET /sources/due, /sources/unhealthy, /runs, /personas and /sources/{id}/egress.
+The NAME of a RED source is frequently the finding (which forum, channel or vendor shop), so hiding the
+posts and showing the masthead protects nothing.
 
-`clearance=None` is the worker/scheduler path and applies NO filter, on
-purpose. The collector has no user, and a scheduler that inherited a NULL
-clearance and read it as "see nothing" would silently poll nothing --
-the inverse of the mistake `collection.py`'s read-path note already warns
-about (a worker that reads NULL as "see everything"). Both directions
-are tested here so neither can quietly become the default.
+`clearance=None` is the worker/scheduler path and applies NO filter, on purpose. The collector has no
+user, and a scheduler that read a NULL clearance as "see nothing" would silently poll nothing, the
+inverse of the mistake `collection.py`'s read-path note warns about (a worker that reads NULL as "see
+everything"). Both directions are tested so neither can quietly become the default.
 
-## The second pass (2026-09-02): what the first one exempted
+`/sources/{id}/run` is filtered too: a poll returns `error`, the redacted adapter failure, and the SSRF
+guard writes the source's HOST into that message; `redact` masks credential shapes, not hostnames. An
+AMBER caller who guessed a RED source's id would otherwise get `{"error": "cannot resolve
+red-forum.test"}` with a 200, and the 200-versus-400 split would confirm the id was real.
 
-The first pass filtered every listing and exempted `/sources/{id}/run`,
-writing the exemption into the router's module docstring as "neither
-returns a source's name or URL". That sentence was false, and it was
-load-bearing -- it was the stated reason a route was left unchecked. A
-poll returns `error`, which is the redacted adapter failure, and the SSRF
-guard writes the source's HOST into that message; `redact` masks
-credential shapes and does not touch hostnames. An AMBER caller who
-guessed a RED source's id got back
-`{"error": "cannot resolve red-forum.test"}` with a 200, and the
-200-versus-400 split confirmed the id was real before they read it.
+Also pinned: the hit writers are unwritable wherever the reader is blind and carry the reader's whole
+predicate; `documents()` and `SearchService.search` return the SOURCE's name and URL on every row, so
+they check the source's label as well as the document's; and `runs` answers `[]` where `egress`
+refuses.
 
-Three more places where the two sides of a claim disagreed are pinned
-here too: the hit writers claimed to be unwritable wherever the reader is
-blind and carried only half the reader's predicate; `documents()` and
-`SearchService.search` return the SOURCE's name and URL on every row and
-checked only the DOCUMENT's label, so raising a source to RED after
-collection hid nothing; and `runs` answers `[]` where `egress` refuses,
-which is defensible but was nowhere written down.
-
-Env-gated on DATABASE_URL. Users are `colk1-`, sources `test-srck1-`,
-egress profiles `test-egk1-`: `LIKE 'col-%'`, `LIKE 'test-src-%'` and
-`LIKE 'test-eg-%'` match none of them (the hyphen is literal), so this
-file's teardown and `test_collection_pg`'s cannot delete each other's rows.
-Cases are `OP-K1-` and are swept by owner, for the same reason.
+Env-gated on DATABASE_URL. Users are `colk1-`, sources `test-srck1-`, egress profiles `test-egk1-`:
+`LIKE 'col-%'`, `LIKE 'test-src-%'` and `LIKE 'test-eg-%'` match none of them (the hyphen is literal),
+so this file's teardown and `test_collection_pg`'s cannot delete each other's rows. Cases are `OP-K1-`
+and are swept by owner, for the same reason.
 """
 from __future__ import annotations
 
@@ -73,13 +53,9 @@ def conn():
     ssub = "(SELECT id FROM collect.source WHERE name LIKE 'test-srck1-%')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     with c.transaction():
-        # Foreign keys, not reading order: hits before watches and
-        # documents, documents and watches before sources, assignments
-        # before the case that owns them. `audit.event` is deliberately
-        # NOT swept: 0013 makes it append-only with a trigger, so a DELETE
-        # here would raise and take the whole teardown with it. It has no
-        # foreign keys either, so the rows these tests write are left
-        # where an audit ledger's rows belong.
+        # Foreign keys, not reading order: hits before watches and documents, documents and watches
+        # before sources, assignments before the case that owns them. `audit.event` is NOT swept: 0013
+        # makes it append-only with a trigger, so a DELETE would raise and take the teardown with it.
         c.execute(f"DELETE FROM collect.watch_hit WHERE watch_id IN "
                   f"(SELECT id FROM collect.watch WHERE source_id IN {ssub})")
         c.execute(f"DELETE FROM collect.watch WHERE source_id IN {ssub}")
@@ -136,29 +112,21 @@ def _user(conn, *, clearance, roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against. Unbound (no
+    address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
     is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. TOTP codes
+    are single-use, so two sign-ins for one account inside one 30-second step would fail on the code,
+    not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -268,10 +236,9 @@ def test_a_red_source_is_due_only_for_a_red_caller_and_for_the_worker(conn):
     would be the scheduler silently polling nothing."""
     from noctornal_api.collection import CollectionService
 
-    # egress-rss-floor (2026-10-03): a RED feed is never polled (invariant 8),
-    # so it is HELD with its sentence rather than due, and the caller's
-    # ceiling filters that list as it filters the due one. An AMBER feed is
-    # the one that is due, and it keeps the three readings.
+    # A RED feed is never polled (invariant 8), so it is HELD with its sentence rather than due, and
+    # the caller's ceiling filters that list as it filters the due one. An AMBER feed is the one that
+    # is due, and it keeps the three readings.
     amber_feed = _source(conn, classification="AMBER", due=True)
     red = _source(conn, classification="RED", due=True)
     svc = CollectionService(conn)
@@ -305,8 +272,7 @@ def test_a_red_sources_health_is_hidden_below_its_classification(conn):
 
 
 def test_a_red_sources_run_history_is_hidden_below_its_classification(conn):
-    """The run history was a raw SELECT on `collection_run` with no join,
-    so it could not have filtered even if somebody had wanted it to."""
+    """The run history is filtered on its source's classification like every other listing."""
     from noctornal_api.collection import CollectionService
 
     red = _source(conn, classification="RED")
@@ -370,8 +336,8 @@ def test_the_routers_pass_the_callers_own_ceiling_to_the_service(conn, client):
         assert r.status_code == 200, r.text
         return r.json()
 
-    # egress-rss-floor (2026-10-03): a RED feed is refused, so it is listed
-    # as held ("refused"), not due; the caller's ceiling filters that list.
+    # A RED feed is refused, so it is listed as held ("refused"), not due; the caller's ceiling filters
+    # that list.
     assert str(red) not in _ids(get("/sources/due", amber)["refused"])
     assert str(red) in _ids(get("/sources/due", red_hdr)["refused"])
 
@@ -397,19 +363,14 @@ def test_the_routers_pass_the_callers_own_ceiling_to_the_service(conn, client):
 # --- the route the ceiling pass exempted, and the reason it gave ---------
 
 def test_a_red_source_cannot_be_polled_below_its_classification(conn):
-    """`run_once` took no ceiling until 2026-09-02.
+    """`run_once` takes the caller's ceiling.
 
-    The router's module docstring exempted the poll route from the
-    clearance pass on the stated grounds that it "neither returns a
-    source's name or URL", and that was false: a fetch failure becomes
-    `RunResult.error`, the route returns it verbatim, and the SSRF guard
-    writes the HOST into it. So the exemption disclosed the one value
-    `due_sources` says the label protects.
+    A fetch failure becomes `RunResult.error`, the route returns it verbatim, and the SSRF guard writes
+    the HOST into it: the one value `due_sources` says the label protects.
 
-    Refused as `CollectionNotFound` rather than emptied or 400'd, so the
-    router answers with the same 404 an id that is not a source gets.
-    `None` stays the worker's reading and polls anything, as `due_sources`
-    does -- a collector has no user.
+    Refused as `CollectionNotFound` rather than emptied or 400'd, so the router answers with the same
+    404 an id that is not a source gets. `None` stays the worker's reading and polls anything, as
+    `due_sources` does: a collector has no user.
     """
     from noctornal_api.collection import (
         CollectionNotFound,
@@ -427,14 +388,10 @@ def test_a_red_source_cannot_be_polled_below_its_classification(conn):
 
 
 def test_the_redactor_does_not_touch_the_host_the_ssrf_guard_names(conn):
-    """The other half of the same defect, in one assertion.
+    """`redact` masks credential SHAPES; a bare hostname is not one.
 
-    `run_once` hands every adapter failure through `redact` before storing
-    it, and the exemption's reasoning rested on that being enough.
-    `redact` masks credential SHAPES; a bare hostname is not one. This
-    reads both sides -- the guard that writes the host into the message
-    and the redactor that was supposed to be removing it -- because that
-    is the pair whose disagreement made the docstring's claim false.
+    `run_once` passes every adapter failure through `redact` before storing it, so this reads both
+    sides: the guard that writes the host into the message and the redactor, which does not remove it.
     """
     from noctornal_api.collection import (
         CollectionError,
@@ -457,25 +414,16 @@ def test_the_run_route_refuses_a_source_above_the_ceiling(
         conn, client, monkeypatch):
     """Both halves of the poll contract in one test.
 
-    The service filter is worth nothing unless the ROUTE resolves the
-    caller's ceiling and passes it, and the router previously passed
-    none at all. Asserts the 404, that it is indistinguishable from the
-    answer for an id that is not a source, and -- the point of the whole
-    fix -- that the RED source's hostname appears nowhere in the response
-    the AMBER caller gets.
+    The service filter is worth nothing unless the ROUTE resolves the caller's ceiling and passes it.
+    Asserts the 404, that it is indistinguishable from the answer for an id that is not a source, and
+    that the RED source's hostname appears nowhere in the response the AMBER caller gets.
     """
-    # Since 2026-09-10 this route consults the readiness register first and
-    # answers 409 before the ceiling is resolved at all. Nothing in this
-    # file settles the four blocking checks -- two of them are database
-    # facts no development or CI database has arranged -- so without this
-    # stub every request below is answered by the gate and the ceiling is
-    # never asked. Stubbed rather than accommodated: relaxing the
-    # assertions to accept whichever refusal arrives first would turn a
-    # test of the CEILING into a test of the GATE, and the thing this one
-    # exists to prove -- that an over-ceiling source and an unknown id read
-    # alike -- would go unproven while the file stayed green. The gate's
-    # own behaviour is `test_readiness_blocking`'s, which stubs it the
-    # same way for the same reason.
+    # This route consults the readiness register first and answers 409 before the ceiling is resolved.
+    # Nothing in this file settles the four blocking checks (two are database facts no development or
+    # CI database has arranged), so the gate is stubbed. Accepting whichever refusal arrives first
+    # would turn a test of the CEILING into a test of the GATE, and an over-ceiling source and an
+    # unknown id reading alike would go unproven. The gate's own behaviour is
+    # `test_readiness_blocking`'s, which stubs it the same way.
     import noctornal_api.http.routers.collection as route_module
     monkeypatch.setattr(route_module, "blocking_failures", lambda conn: [])
 
@@ -488,10 +436,8 @@ def test_the_run_route_refuses_a_source_above_the_ceiling(
 
     r = client.post(f"{API}/sources/{red}/run", json={}, headers=amber)
     assert r.status_code == 404, r.text
-    # `_source` builds every source at https://red-forum.test/feed. Before
-    # 2026-09-02 the AMBER caller got 200 and this string in `error`,
-    # because the poll failed to resolve it and the route returned the
-    # guard's message verbatim.
+    # `_source` builds every source at https://red-forum.test/feed; a poll that fails to resolve it
+    # returns the guard's message, which carries the host.
     assert "red-forum.test" not in r.text, (
         "the poll route handed a RED source's host back to a caller "
         "below its classification")
@@ -504,9 +450,8 @@ def test_the_run_route_refuses_a_source_above_the_ceiling(
         "indistinguishable, or the 404 is an existence oracle wearing a "
         "different status code")
 
-    # The RED caller is past the gate. What the poll then does with an
-    # unresolvable host is the adapter's business, not this test's; all
-    # that is asserted is that the ceiling is no longer what stops them.
+    # The RED caller is past the gate. What the poll then does with an unresolvable host is the
+    # adapter's business; all that is asserted is that the ceiling is not what stops them.
     cleared = client.post(f"{API}/sources/{red}/run", json={},
                           headers=red_hdr)
     assert cleared.status_code != 404, cleared.text
@@ -516,13 +461,9 @@ def test_an_over_ceiling_source_id_reads_the_same_as_one_that_is_not_a_source(
         conn):
     """Pins the reason `runs` answers `[]` where `egress` refuses.
 
-    `CollectionService.runs` says an empty run history is the same answer
-    for a source that has never been polled, one above the caller's
-    ceiling, and an id that is not a source at all -- which is why it does
-    not need the 404 the egress check has. That is only true while the
-    three answers really are identical, so it is asserted rather than
-    restated. This is a pinning test, not a regression test: the
-    behaviour it describes is unchanged, only the reason for it is new.
+    `CollectionService.runs` treats an empty run history as the same answer for a source that has never
+    been polled, one above the caller's ceiling, and an id that is not a source at all, so it needs no
+    404. That holds only while the three answers are identical, so it is asserted.
     """
     from noctornal_api.collection import CollectionService
 
@@ -534,21 +475,18 @@ def test_an_over_ceiling_source_id_reads_the_same_as_one_that_is_not_a_source(
     assert svc.runs(source_id=red, clearance="RED") != []
 
 
-# --- the last write that took no ceiling (2026-09-09) --------------------
+# --- persona status writes take the ceiling too ---
 
 def test_a_persona_on_a_red_source_cannot_have_its_status_written_below_it(
         conn):
-    """`PersonaVault.set_status` was the last write in the collection
-    layer with no ceiling: the persona list withheld a RED source's
-    persona from an AMBER caller, and the same caller could burn it by
-    id. Gated on the same predicate the listing uses, so the read and the
-    write cannot disagree; refused as `CollectionNotFound`, the type the
-    router turns into the 404 an unknown id gets.
+    """`PersonaVault.set_status` takes the ceiling: the persona list withholds a RED source's persona
+    from an AMBER caller, and the same caller must not burn it by id. Gated on the same predicate the
+    listing uses, so the read and the write cannot disagree; refused as `CollectionNotFound`, the type
+    the router turns into the 404 an unknown id gets.
 
-    The three readings of `clearance` again: AMBER is refused and the row
-    is untouched, RED writes, and None -- the worker -- writes too. And a
-    persona bound to no source is writable at AMBER, for the reason it is
-    always listed: there is no label on that row to protect.
+    The three readings of `clearance`: AMBER is refused and the row is untouched, RED writes, and None
+    (the worker) writes too. A persona bound to no source is writable at AMBER, as it is always listed:
+    there is no label on that row to protect.
     """
     from noctornal_api.collection import (
         BURNED,
@@ -584,11 +522,9 @@ def test_a_persona_on_a_red_source_cannot_have_its_status_written_below_it(
 
 
 def test_an_unknown_persona_id_is_refused_not_written(conn):
-    """Until 2026-09-09 an unknown id ran an UPDATE that matched nothing,
-    wrote a PERSONA_<status> audit row for it, and returned: a write that
-    did not happen, reported as one that did. Refused with the SAME type
-    an over-ceiling persona gets, at every clearance including the
-    worker's, so no router mapping can tell the two apart."""
+    """An unknown id is refused, not written: an UPDATE that matches nothing must not audit a
+    PERSONA_<status> row. Refused with the SAME type an over-ceiling persona gets, at every clearance
+    including the worker's, so no router mapping can tell the two apart."""
     from noctornal_api.collection import BURNED, CollectionNotFound, PersonaVault
 
     missing = uuid4()
@@ -604,12 +540,9 @@ def test_an_unknown_persona_id_is_refused_not_written(conn):
 
 
 def test_the_status_route_refuses_a_persona_above_the_ceiling(conn, client):
-    """Both halves of the status-write contract in one test: the route
-    resolves the caller's ceiling and passes it, the service refuses, and
-    the answer is the 404 an id that is not a persona gets -- with the
-    same detail, so the status code is not an existence oracle. Before
-    2026-09-09 the AMBER caller got 200 and the RED persona was burnt;
-    the unknown id got 200 as well."""
+    """Both halves of the status-write contract in one test: the route resolves the caller's ceiling
+    and passes it, the service refuses, and the answer is the 404 an id that is not a persona gets, with
+    the same detail, so the status code is not an existence oracle."""
     red = _source(conn, classification="RED")
     persona = _persona(conn, red)
     roles = ("ANALYST", "COLLECTOR")  # COLLECTOR holds collection_account.manage
@@ -644,13 +577,10 @@ def test_the_status_route_refuses_a_persona_above_the_ceiling(conn, client):
 def test_a_hit_on_a_purged_document_is_unwritable_not_merely_hidden(conn):
     """The read path and the write path, read together.
 
-    `watch_hits` has always dropped hits whose document was purged, and
-    the comment above the hit writers claims "a row the caller may not see
-    is not merely hidden but unwritable". Until 2026-09-02 that was true
-    of the clearance predicate and false of the purge one: all three
-    writers omitted `d.purged_at IS NULL`, so a hit no list would ever
-    show could still be suppressed, unsuppressed and acknowledged, each
-    returning a 200 for a change nobody could observe.
+    `watch_hits` drops hits whose document was purged, and the hit writers claim "a row the caller may
+    not see is not merely hidden but unwritable". All three writers must carry `d.purged_at IS NULL`
+    as well as the clearance predicate, or a hit no list would ever show could still be suppressed,
+    unsuppressed and acknowledged, each returning a 200 for a change nobody could observe.
     """
     from noctornal_api.collection import (
         CollectionError,
@@ -687,14 +617,11 @@ def test_a_hit_on_a_purged_document_is_unwritable_not_merely_hidden(conn):
 def test_a_source_reclassified_red_takes_its_own_name_with_it(conn):
     """`_store_document` copies the source's label at INSERT and never again.
 
-    So a source collected while AMBER and later raised to RED left every
-    document it had already produced at AMBER -- and both read paths
-    return the SOURCE's identity on each of those rows: `documents()`
-    returns `source_name` and `external_url`, and `SearchService.search`
-    returns `source_name`. The reclassification that was meant to hide
-    the forum's name went on publishing it. Both halves are asserted in
-    one test because they are the same claim about the same row, and a
-    fix to one of them would otherwise look complete.
+    So a source collected while AMBER and later raised to RED leaves its existing documents at AMBER,
+    and both read paths return the SOURCE's identity on each row: `documents()` returns `source_name`
+    and `external_url`, and `SearchService.search` returns `source_name`. Both are checked against the
+    source's label as well as the document's, and asserted in one test because they are the same claim
+    about the same row.
     """
     from noctornal_api.collection import CollectionService
     from noctornal_api.curation import SearchService
@@ -724,15 +651,10 @@ def test_a_source_reclassified_red_takes_its_own_name_with_it(conn):
     assert str(doc) not in found(), (
         "search returns the SOURCE's name on every document row, so it "
         "needs the source's label as well as the document's")
-    # The WRITE half of the same ceiling. `set_document_triage` is the
-    # reader's verb -- an analyst triages what the list showed them -- so it
-    # has to refuse exactly what the list now hides. When the source join
-    # was added to `documents()` on 2026-09-02 this writer was left behind
-    # for the length of one commit, and a document hidden from the list
-    # stayed triageable: the 200-vs-404 split then answered "does this RED
-    # source have documents?" for a caller who could not see any of them.
-    # Asserted here rather than in a test of its own because the read and
-    # the write are one claim, and a fix to either alone looks complete.
+    # The WRITE half of the same ceiling. `set_document_triage` is the reader's verb (an analyst
+    # triages what the list showed them), so it must refuse exactly what the list hides, or the
+    # 200-vs-404 split answers "does this RED source have documents?" for a caller who sees none.
+    # Asserted here rather than in a test of its own because the read and the write are one claim.
     import pytest as _pytest
     from noctornal_api.collection import CollectionNotFound
     with _pytest.raises(CollectionNotFound):

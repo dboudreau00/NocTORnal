@@ -1,12 +1,8 @@
-"""Row-level security does what the gate does, as the request role (S1,
-2026-09-25).
+"""Row-level security does what the gate does, as the request role.
 
-Each test seeds as the owner and asserts what a
-connection SET ROLE to the request role and bound with a real session's
-proof can see and write. Each would pass on a database with no policy only
-if the policy were absent AND the assertion were wrong; the unbound test
-and the insert refusals fail outright without 0114, and the endpoint test
-fails without 0113.
+Each test seeds as the owner and asserts what a connection SET ROLE to the request role and bound with a
+real session's proof can see and write. The unbound test and the insert refusals fail outright without
+0114, and the endpoint test fails without 0113.
 """
 from __future__ import annotations
 

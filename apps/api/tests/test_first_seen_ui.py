@@ -1,12 +1,10 @@
 """The entity list and the inspector show the derived first and last seen.
 
-gap-first-seen (decided 2026-09-23): the server derives an entity's first
-and last seen from its live claims' observed times
-(`test_first_seen_pg.py`), so the entity list's First seen column fills
-and the inspector's line has dates to show. This pins the console half:
-the inspector says the window once, in one phrase, and says a lone
-sighting once rather than twice; the list's cell says where its date comes
-from. Pure: the `needs_node` tests EXECUTE the shipped functions.
+The server derives an entity's first and last seen from its live claims' observed times
+(`test_first_seen_pg.py`), so the entity list's First seen column fills and the inspector's line has dates
+to show. This pins the console half: the inspector says the window once, in one phrase, and says a lone
+sighting once rather than twice; the list's cell says where its date comes from. Pure: the `needs_node`
+tests EXECUTE the shipped functions.
 """
 from __future__ import annotations
 
@@ -55,7 +53,7 @@ def test_the_inspector_line_says_the_window_in_one_phrase():
 
 def test_the_entity_list_cell_says_where_its_date_comes_from():
     rows = _function("renderEntities")
-    # Still quiet when absent (README screenshot review, 2026-09-23).
+    # Still quiet when absent.
     assert "n.first_seen ? 'num' : 'num absent'" in rows
     assert "'The earliest observed time among its live claims'" in rows
     assert "'No live claim records when it was observed'" in rows
@@ -67,12 +65,10 @@ REPO = API.parents[3]
 
 
 def test_no_shipped_text_still_says_first_seen_is_never_filled():
-    """Verifier round on gap-first-seen, 2026-09-23. The showcase seeder's
-    "What is NOT here" still said that no service writes
-    `core.node.first_seen`, so the First seen column stays "not recorded".
-    The derivation made that false, and a seeder's docstring is the first
-    thing a reader copies. Whitespace is flattened so a phrase wrapped
-    across lines is still found."""
+    """No shipped text still says first seen is never filled. The showcase seeder's "What is NOT here" must
+    not say that no service writes `core.node.first_seen`, because the derivation makes that false, and a
+    seeder's docstring is the first thing a reader copies. Whitespace is flattened so a phrase wrapped across
+    lines is still found."""
     stale = ('First seen column stays "not recorded"',
              "no service writes it")
     paths = [*(REPO / "scripts").glob("*.py"), *API.rglob("*.py"), APP_JS,

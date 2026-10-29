@@ -1,17 +1,11 @@
-"""Regular equivalence by REGE: the Regular roles card (ROADMAP-REMAINING
-phase 3, "REGE, which is not built", 2026-10-02).
+"""Regular equivalence by REGE: the Regular roles card.
 
-CONCOR (`blockmodel.py`, decision 88) places entities with the same ties to
-the SAME others, so it finds the second money launderer only when both
-serve the same crew. Regular equivalence (White and Reitz 1983) asks the
-looser question an investigator usually means by a role: the same KINDS of
-ties to the same KINDS of others. Two launderers serving different crews,
-or two recruiters feeding different affiliates, share no contact at all and
-are still alike here.
+CONCOR (`blockmodel.py`, decision 88) places entities with the same ties to the SAME others. Regular
+equivalence (White and Reitz 1983) asks for the same KINDS of ties to the same KINDS of others, so two
+launderers serving different crews are alike here though they share no contact at all.
 
-The method is REGE, White's iterative procedure, in the form Borgatti and
-Everett (1993) describe and the classic `REGE` of Ziberna's blockmodeling
-package implements:
+The method is White's iterative REGE, in the form Borgatti and Everett (1993) describe and the classic `REGE`
+of Ziberna's blockmodeling package implements:
 
     M0(i, j)   = 1 for every pair
     M+1(i, j)  = [ sum over k of max over m of M(k, m) Match(i, j, k, m)
@@ -20,63 +14,39 @@ package implements:
     Match(i, j, k, m) = sum over relations of
                         min(x(i, k), x(j, m)) + min(x(k, i), x(m, j))
 
-For each of i's ties (to or from k) the best counterpart among j's ties is
-found, weighted by how alike k and that counterpart were the round before,
-and the same is done from j's side. The denominator is the most the two
-could have matched, so 1 means every tie of each has a full counterpart. A
-pair with no tie value at all is alike, as in that implementation. The
-relations are CONCOR's: positive, negative and ties with no valence,
-direction kept, so a vouch never matches an accusation and a tie given
-never matches one received; the counterpart must match in every relation at
-once (Wasserman and Faust's multi-relational form).
+For each of i's ties (to or from k) the best counterpart among j's ties is found, weighted by how alike k and
+that counterpart were the round before, and the same is done from j's side. The denominator is the most the
+two could have matched; a pair with no tie value at all is alike, as in that implementation. The relations are
+CONCOR's (positive, negative and ties with no valence, direction kept), so a vouch never matches an accusation
+and a tie given never matches one received; the counterpart must match in every relation at once (Wasserman
+and Faust's multi-relational form).
 
-Five rules shape it:
-
-- **An approximation, and it says so.** Every pair starts alike and each
-  round compares neighbourhoods one step further out. Three rounds, the
-  default of UCINET and of that package, stopping early once no
-  similarity moves by more than REGE_TOLERANCE. The payload reports the
-  rounds taken, whether they settled and the last change.
-- **Sensitive to the weighting, by the analyst's choice.** `presence`
-  counts each relation and direction between two entities as present or
-  absent; `weight` sums the ties' stored weights (a derived tie carries its
-  venue weighting), so a weak tie only partly matches a strong one. Decay
-  never moves a role, as it never moves a CONCOR position. Under `weight` a
-  tie with no positive weight counts as absent, and is counted; an entity
-  left with no counted tie is alike every other such entity, and the payload
+- **An approximation.** Three rounds (the UCINET default), stopping early once no similarity moves by more than
+  REGE_TOLERANCE. The payload reports the rounds taken, whether they settled and the last change.
+- **Sensitive to the weighting, by the analyst's choice.** `presence` counts each relation and direction
+  between two entities as present or absent; `weight` sums the stored weights, so a weak tie only partly
+  matches a strong one. Decay never moves a role. Under `weight` a tie with no positive weight counts as
+  absent, and is counted; an entity left with no counted tie is alike every other such entity, and the payload
   counts those too.
-- **Only actors hold roles.** As in CONCOR, a forum or wallet on a two-mode
-  view takes part in the similarities but is not placed.
-- **A deterministic cut.** Average linkage over the actors' similarities,
-  the most alike pair joined first and a tie broken by the vertices' order
-  (sorted by id), cut to at most the roles asked for. Entities joined at
-  the level the cut falls on are never split, and perfectly alike entities
-  always share a role, so fewer roles than asked is an answer, and the
-  payload says why.
-- **Refused before it allocates.** At most REGE_MAX_NODES entities with
-  ties, REGE_MAX_PAIRS tied pairs and REGE_MAX_TIES tie directions (the
-  distinct cells the relation matrices will hold: ties repeating one kind
-  and direction between two entities fill one), all counted from the tie
-  list before any matrix exists. `precheck` is what the service calls BEFORE
-  it writes a RUNNING row, with the number of roles and the weighting, so
-  every refusal known without computing leaves no run behind.
+- **Only actors hold roles.** A forum or wallet on a two-mode view takes part in the similarities but is not
+  placed.
+- **A deterministic cut.** Average linkage, the most alike pair joined first and a tie broken by vertex id
+  order, cut to at most the roles asked for. Entities joined at the cut level are never split, so fewer roles
+  than asked is an answer, and the payload says why.
+- **Refused before it allocates.** At most REGE_MAX_NODES entities with ties, REGE_MAX_PAIRS tied pairs and
+  REGE_MAX_TIES tie directions, counted from the tie list before any matrix exists. The service calls
+  `precheck` before it writes a RUNNING row, so every refusal known without computing leaves no run behind.
 
-A role is a hypothesis about how entities sit in this view, never an
-attribution: two entities in one role are not one person (invariant 2), and
-nothing here proposes or writes anything.
+A role is a hypothesis about how entities sit in this view, never an attribution: two entities in one role are
+not one person (invariant 2), and nothing here proposes or writes anything.
 
-Cost. A round compares every tie direction of i with every one of j for every
-pair, the square of the ordered tied pairs at most, done in chunks of numpy
-gathers and a segmented maximum. The pairs and directions caps together hold
-the dearest view to the measured budget in `REGE_MAX_PAIRS`'s comment; a cheaper
-view (ties counted as present, or tied in one direction) costs a fraction
-of that. Importing `blockmodel` caps numpy's BLAS to one thread per process
-on import (decision 88); the rounds here are elementwise and call no BLAS,
-so the cap is held for the process rather than needed by this module.
+A round compares every tie direction of i with every one of j for every pair, in chunks of numpy gathers and a
+segmented maximum; the pair and direction caps hold the dearest view to the measured budget in
+`REGE_MAX_PAIRS`'s comment. Importing `blockmodel` caps numpy's BLAS to one thread per process (decision 88);
+the rounds here are elementwise and call no BLAS.
 
-Pure and database-free, like `blockmodel.py`. Every value in the payload is
-a Python scalar rounded through `analytics._clean`, so NaN never reaches
-jsonb.
+Pure and database-free, like `blockmodel.py`. Every value in the payload is a Python scalar rounded through
+`analytics._clean`, so NaN never reaches jsonb.
 """
 from __future__ import annotations
 
@@ -85,9 +55,8 @@ import math
 import numpy
 from noctornal_ontology.definition import NODE_TYPES
 
-# Imported for the BLAS cap its import takes (decision 88) as well as for the
-# relations and the direction rule, so the two role cards share one reading
-# of a tie (2026-10-02).
+# Imported for the BLAS cap its import takes (decision 88) as well as for the relations and the direction rule,
+# so the two role cards share one reading of a tie.
 from noctornal_api import blockmodel
 from noctornal_api.analytics import (
     AnalyticsError,
@@ -99,51 +68,23 @@ from noctornal_api.analytics import (
 from noctornal_api.projections import Projection, Subgraph
 
 REGE_MAX_NODES = 1000
-#: Tied pairs, counted once however many ties join a pair, and tie directions
-#: (REGE_MAX_TIES): the distinct cells the relation matrices hold, one for each
-#: kind of tie (positive, negative, other) running from one entity to another.
-#: A tie with no direction fills two cells, one for each way it runs; ties
-#: repeating a cell fill it once; and counted by weight a tie with no positive
-#: weight fills none, as `build_values` has it. A round takes each distinct
-#: (entity, tie pattern) once, a pattern being the value of every relation in
-#: both directions between two entities, and compares it with every cell
-#: sharing one of its features, so the cost grows with BOTH numbers: the pairs
-#: set how many patterns and counterparts there can be, and the directions how
-#: many features each comparison reads. A cap on pairs alone left views of one
-#: size far apart (2026-10-02: at 2,500 pairs one relation
-#: tied both ways and counted as present took 0.4 s and every pair tied in
-#: three relations both ways, counted by weight with every weight its own,
-#: took 3.4 s), and the first calibration called one relation tied both ways
-#: the worst when it is among the cheapest.
+#: Tied pairs, counted once however many ties join a pair, and tie directions (REGE_MAX_TIES): the distinct
+#: cells the relation matrices hold, one for each kind of tie (positive, negative, other) running from one
+#: entity to another. A tie with no direction fills two cells; ties repeating a cell fill it once; counted by
+#: weight a tie with no positive weight fills none, as `build_values` has it. The cost grows with BOTH numbers:
+#: the pairs set how many patterns and counterparts there can be, and the directions how many features each
+#: comparison reads, so a cap on pairs alone left views of one size far apart.
 #:
-#: Directions are counted, not the ties behind them, because parallel ties
-#: collapse into one cell (a sum under `weight`, 1 under presence) before any
-#: round runs and so add nothing to what a round reads. Counting rows refused
-#: cheap views (2026-10-03: a one-mode view has one derived
-#: tie per pair and venue, so 40 entities all posting on 15 forums is 11,700
-#: derived ties and 23,400 slots, over the cap, though only 1,560 directions
-#: and about half a second of CPU by weight through the service). A view with
-#: no parallel ties counts the same either way, so every measurement below
-#: holds unchanged. The work before the matrices (the three passes over the
-#: ties, and the sums of parallel weights) is linear in the rows, about 6
-#: microseconds each here: a view at the caps whose every cell is repeated ten
-#: times (50,000 rows, the one-mode limit) took 1.8 s by weight where the
-#: unrepeated one took 1.5, and one repeated a hundred times (500,000 rows)
-#: 4.5 s, against the cost of reading that many rows into the projection in
-#: the first place.
+#: Directions are counted, not the ties behind them, because parallel ties collapse into one cell (a sum under
+#: `weight`, 1 under presence) before any round runs. Counting rows would refuse cheap views: a one-mode view
+#: has one derived tie per pair and venue, so 40 entities all posting on 15 forums is 11,700 derived ties. The
+#: work before the matrices is linear in the rows, about 6 microseconds each.
 #:
-#: Calibrated on the dearest views the two caps admit. Whole call, CPU
-#: seconds, best of three, 1,000 entities, three full rounds, with every
-#: core of the build host busy with other work (a quiet host is faster),
-#: counted by weight with every tie's weight its own: one relation tied both
-#: ways on 2,500 pairs 2.1 s; two relations in random directions on 2,100
-#: pairs (5,000 directions) 2.1; three, each tie in one direction, on 1,700
-#: pairs 1.7; three tied both ways on 833 pairs 0.9. Counted as present, 0.3 to
-#: 1.5. Peak memory 70 to 145 MB. Shape B, measured 2026-10-03 (three
-#: relations in random directions on 3,000 pairs and 10,600 ties) took 7.5 to
-#: 8.3 s; with a round reading only the rows of M it needs, the algorithm
-#: below takes 4.1 s on it and 5.1 s on every pair tied in all three
-#: relations both ways, and the caps refuse both.
+#: Calibrated on the dearest views the two caps admit. Whole call, CPU seconds, best of three, 1,000 entities,
+#: three full rounds, counted by weight with every tie's weight its own: one relation tied both ways on 2,500
+#: pairs 2.1 s; two relations in random directions on 2,100 pairs (5,000 directions) 2.1; three, each tie in
+#: one direction, on 1,700 pairs 1.7; three tied both ways on 833 pairs 0.9. Counted as present, 0.3 to 1.5.
+#: Peak memory 70 to 145 MB.
 REGE_MAX_PAIRS = 2500
 REGE_MAX_TIES = 5000
 REGE_MIN_ROLES = 2
@@ -160,10 +101,9 @@ WEIGHT_PRESENCE = "presence"
 WEIGHT_VALUE = "weight"
 WEIGHTINGS = (WEIGHT_PRESENCE, WEIGHT_VALUE)
 DEFAULT_WEIGHTING = WEIGHT_PRESENCE
-#: Elements per chunk of a round's comparison, about 4 MB of float64. A
-#: chunk is live several times over (the rows copied, the kernel, the match),
-#: so this sets the peak: 16 MB chunks peaked near 200 MB on the dearest view
-#: and 4 MB chunks near 160 MB at the same speed (2026-10-02).
+#: Elements per chunk of a round's comparison, about 4 MB of float64. A chunk is live several times over (the
+#: rows copied, the kernel, the match), so this sets the peak: 4 MB chunks peak near 160 MB on the dearest view,
+#: 16 MB chunks near 200 MB at the same speed.
 CHUNK_ELEMENTS = 1 << 19
 #: Above this many distinct tie patterns the kernel is computed per chunk
 #: rather than looked up in a table (a weighted view can have one pattern
@@ -199,17 +139,13 @@ def _relation_key(e: dict) -> str:
 
 def _usable(sub: Subgraph, weighting: str = DEFAULT_WEIGHTING
             ) -> tuple[set, list[dict], int, int]:
-    """Vertices with a tie to another vertex of the view, those ties, the
-    number of distinct tied pairs, and the number of tie directions, from the
-    tie list alone.
+    """Vertices with a tie to another vertex of the view, those ties, the number of distinct tied pairs, and the
+    number of tie directions, from the tie list alone.
 
-    A direction is one cell the relation matrices will hold: a kind of tie
-    running from one entity to another. A tie with no direction runs both
-    ways and fills two; ties repeating a cell (parallel ties, one derived tie
-    per shared venue, time-sliced edges) fill it once; and counted by weight a
-    tie with no positive weight fills none, because `build_values` leaves it
-    out (2026-10-03: the count was of tie rows, so a crew
-    sharing several forums was refused for a size it does not have)."""
+    A direction is one cell the relation matrices will hold: a kind of tie running from one entity to another.
+    A tie with no direction runs both ways and fills two; ties repeating a cell (parallel ties, one derived tie
+    per shared venue, time-sliced edges) fill it once; and counted by weight a tie with no positive weight
+    fills none, because `build_values` leaves it out."""
     ids = {n["id"] for n in sub.nodes}
     tied: set = set()
     usable: list[dict] = []
@@ -258,10 +194,8 @@ def precheck(sub: Subgraph, *, roles: int = REGE_DEFAULT_ROLES,
             f"regular equivalence is capped at {REGE_MAX_PAIRS} tied pairs; "
             f"this view has {pairs}. Narrow the view first.")
     if directions > REGE_MAX_TIES:
-        # The figure the analyst can check is the view's own tie count, which
-        # the card and the pane show, so it is named beside the directions
-        # they make (2026-10-03: "this view has 23400" matched
-        # nothing on screen for a view of 11,700 derived ties).
+        # The figure the analyst can check is the view's own tie count, which the card and the pane show, so it
+        # is named beside the directions they make.
         raise AnalyticsError(
             f"regular equivalence is capped at {REGE_MAX_TIES} tie directions (a tie "
             "with no direction runs both ways, and ties of one kind repeating one "
@@ -271,9 +205,8 @@ def precheck(sub: Subgraph, *, roles: int = REGE_DEFAULT_ROLES,
     if sum(1 for v in tied if types.get(v) in _ACTOR) < 2:
         raise AnalyticsError(
             "regular equivalence needs at least two entities with ties in this view")
-    # Counted by weight with no positive weight anywhere, every pair would
-    # have nothing to match and be called alike (the zero-denominator rule):
-    # one role that says nothing, so it is refused (2026-10-02).
+    # Counted by weight with no positive weight anywhere, every pair would have nothing to match and be called
+    # alike (the zero-denominator rule): one role that says nothing, so it is refused.
     if weighting == WEIGHT_VALUE and not any(_positive_weight(e) for e in usable_ties):
         raise AnalyticsError(
             "no tie in this view carries a positive weight; count ties as present "
@@ -353,23 +286,18 @@ def _kernel_table(patterns: numpy.ndarray) -> numpy.ndarray:
 class _Plan:
     """What every round compares, worked out once.
 
-    The ordered tied pairs (u, v) carry a feature vector: per relation, the
-    value u sends to v and the value v sends to u. Three refinements keep a
-    round near the measured budget without changing a single number:
+    The ordered tied pairs (u, v) carry a feature vector: per relation, the value u sends to v and the value v
+    sends to u. Three refinements keep a round near the measured budget without changing a single number:
 
-    - **The left side is deduplicated.** i's tie to k enters G only through
-      k and the tie's pattern, so the best counterpart is found once for
-      each distinct (k, pattern) and summed into every i that has it.
-    - **Only overlapping ties are compared.** Match is the sum, over the
-      features a tie has, of the smaller value, so a tie of one relation
-      and direction matches nothing of another. Each left pattern is
-      compared only with the ties sharing one of its features, and only
-      over those features. A pair left out would score 0, and every score
-      is at least 0, so the best counterpart is unchanged.
-    - **Only the rows of M a group reads are taken.** A group's left ties
-      name some of the entities as k, and only their rows of M meet the
-      counterparts; taking all n rows for each of up to 63 groups was most
-      of a round (2026-10-02)."""
+    - **The left side is deduplicated.** i's tie to k enters G only through k and the tie's pattern, so the
+      best counterpart is found once for each distinct (k, pattern) and summed into every i that has it.
+    - **Only overlapping ties are compared.** Match is the sum, over the features a tie has, of the smaller
+      value, so a tie of one relation and direction matches nothing of another. Each left pattern is compared
+      only with the ties sharing one of its features, and only over those features. A pair left out would
+      score 0, and every score is at least 0, so the best counterpart is unchanged.
+    - **Only the rows of M a group reads are taken.** A group's left ties name some of the entities as k, and
+      only their rows of M meet the counterparts; taking all n rows for each of up to 63 groups would dominate
+      a round."""
 
     def __init__(self, mats: list[numpy.ndarray]):
         n = mats[0].shape[0]
@@ -408,10 +336,9 @@ class _Plan:
                 kernel_r, kp = table[mine][:, pat[right]], local
             else:
                 kernel_r, kp = feat[right][:, cols], key_p[left]
-            # The rows of M this group reads are the distinct k of its left
-            # keys, not all n: taking every row for each of up to 63 masks
-            # was most of a round on a view with several relations in random
-            # directions (2.2 of 2.7 s, 2026-10-02).
+            # The rows of M this group reads are the distinct k of its left keys, not all n: taking every row
+            # for each of up to 63 masks dominated a round on a view with several relations in random
+            # directions.
             need, row_of = numpy.unique(key_k[left], return_inverse=True)
             self.groups.append((left, need, numpy.asarray(row_of).ravel(), kp,
                                 self.vs[right], has, starts, cols, kernel_r,
@@ -524,12 +451,10 @@ def average_linkage(sim: numpy.ndarray) -> list[tuple[int, int, float]]:
         size[a] = na + nb
         best[b] = -numpy.inf
         col = s[:, a]
-        # A row whose partner was `a` keeps it while the merged value still
-        # equals its best (a is still the first column reaching it); a row
-        # whose partner was `b` has lost it. Only those are searched again,
-        # in one call: with every similarity equal (one role, an undirected
-        # view) every row points at the pair just merged, and searching
-        # each in a loop made the cut cubic (2026-10-02).
+        # A row whose partner was `a` keeps it while the merged value still equals its best (a is still the
+        # first column reaching it); a row whose partner was `b` has lost it. Only those are searched again, in
+        # one call: with every similarity equal every row points at the pair just merged, and searching each in
+        # a loop would make the cut cubic.
         stale = alive & ((arg == b) | ((arg == a) & (col < best)))
         stale[a] = True
         rows = numpy.nonzero(stale)[0]
@@ -585,10 +510,8 @@ def _limits(weighting: str, rounds: int, converged: bool, change: float,
         out.append("Ties count by weight, so a weak tie only partly matches a strong "
                    "one: REGE is sensitive to how ties are weighted, and the roles can "
                    "change with the weighting.")
-        # An entity whose every tie carries no positive weight has nothing to
-        # match, and a pair with nothing to match is alike, so they are cut
-        # into one role of perfect cohesion (2026-10-02:
-        # the card counted the weightless ties and said nothing of this).
+        # An entity whose every tie carries no positive weight has nothing to match, and a pair with nothing to
+        # match is alike, so they are cut into one role of perfect cohesion.
         if weightless_entities == 1:
             out.append("1 entity has ties but none that count by weight, so it has nothing "
                        "to match: the role it falls in says nothing about how it sits in "
@@ -601,19 +524,16 @@ def _limits(weighting: str, rounds: int, converged: bool, change: float,
         out.append("Ties count as present or absent. REGE is sensitive to how ties are "
                    "weighted: counted by weight, a weak tie only partly matches a strong "
                    "one, and the roles can change.")
-    # The first wording named a label filter, which no view has, and left out
-    # two real reasons a tie is not compared: inferred ties unless the view
-    # opts in, and ties above the reader's clearance or compartments (2026-10-02).
+    # A tie is not compared when the view filters it, when it is inferred and the view does not opt in, or when
+    # it is above the reader's clearance or compartments.
     out.append("Only the ties this view admits are compared: a tie the view leaves out "
                "(by type, confidence, date or review state, or because it is inferred), "
                "or one above your clearance or compartments, shapes no role.")
     out.append("On ties of one kind with no direction, regular equivalence finds nearly "
                "every entity alike: read the direction and valence of the ties before "
                "the roles.")
-    # The cut is fixed for a graph but not by its structure alone: among
-    # equally good cuts the entities' order decides, and that order is their
-    # identifiers' (2026-10-02: a chain of seven entities
-    # cut two ways under 40 random identifier assignments).
+    # The cut is fixed for a graph but not by its structure alone: among equally good cuts the entities' order
+    # decides, and that order is their identifiers'.
     out.append("Where several cuts are equally good, or differ only in the last decimal "
                "places of a similarity, the one kept depends on the order of the "
                "entities' internal identifiers, not on the structure. The same graph "
@@ -640,9 +560,8 @@ def rege(sub: Subgraph, p: Projection, params: AnalyticsParams, *,
                             if by_id[v]["node_type"] not in _ACTOR})
 
     k = len(actors)
-    # Entities whose ties all carry no positive weight, counted by weight:
-    # nothing to match, so every pair of them is alike (the zero-denominator
-    # rule) and they come out as one role of cohesion 1 (2026-10-02). Only possible by
+    # Entities whose ties all carry no positive weight, counted by weight: nothing to match, so every pair of
+    # them is alike (the zero-denominator rule) and they come out as one role of cohesion 1. Only possible by
     # weight; by presence every tie counts.
     weightless_entities = 0
     if weighting == WEIGHT_VALUE:
@@ -744,9 +663,8 @@ def rege(sub: Subgraph, p: Projection, params: AnalyticsParams, *,
             "the node set was cut off at the projection limit: roles below are "
             "computed over a PARTIAL graph and may move once the omitted "
             "entities are in") if sub.truncated else None,
-        # The run service stores the TOP-LEVEL flag on the run row and in its
-        # audit event; the copy inside `rege` (CONCOR's layout) was the only
-        # one, so every REGE run was recorded as exact (2026-10-02).
+        # The run service stores the TOP-LEVEL flag on the run row and in its audit event, so it is set here as
+        # well as inside `rege`.
         "is_approximate": True,
         "review_scope": review_scope_block(p, sub),
         "one_mode": one_mode_block(sub),

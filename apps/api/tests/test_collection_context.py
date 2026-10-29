@@ -1,7 +1,5 @@
-"""RunContext: one poll's budgets, pacing, origin rule, redirects, 429s and
-custody log (the collection foundation, 2026-09-24). No database, no
-network: a fake fetcher stands in for collection.fetch_response, a fake
-clock for time.
+"""RunContext: one poll's budgets, pacing, origin rule, redirects, 429s and custody log. No database,
+no network: a fake fetcher stands in for collection.fetch_response, a fake clock for time.
 """
 from __future__ import annotations
 
@@ -449,10 +447,9 @@ def _fill(unit: bytes) -> bytes:
     return (unit * (_MIB // len(unit) + 1))[:_MIB]
 
 
-#: Each shape cost the first scrubber seconds per MiB (b"csrf-" about 6 s,
-#: measured 2026-09-25) because its patterns re-scanned a run of name
-#: characters from every position inside it. Every one ends in a real
-#: token, so no shape takes the fast path that skips a token-free fragment.
+#: Each shape is slow for a naive scrubber (b"csrf-" about 6 s per MiB) because its patterns re-scan a
+#: run of name characters from every position inside it. Every one ends in a real token, so no shape
+#: takes the fast path that skips a token-free fragment.
 _HOSTILE = {
     "a run of token names": _fill(b"csrf-"),
     "a run of name characters": _fill(b"a-") + b' csrf="x"',
@@ -544,8 +541,7 @@ def test_item_validation():
 
 @pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "get", ""])
 def test_a_method_the_seam_does_not_allow_is_refused_before_anything_is_sent(method):
-    """2026-10-03: the seam took any pinned_http method for
-    every adapter, so only a regex over one module held "nothing posts,
+    """The seam allows GET or POST only, for every adapter, which is what holds "nothing posts,
     replies, reacts, messages or buys"."""
     fetcher = Fetcher()
     ctx = _context(fetcher)

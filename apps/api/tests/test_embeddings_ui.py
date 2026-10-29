@@ -1,12 +1,10 @@
-"""The console's similarity (F6.3 and F6.4, embeddings, 2026-09-24).
+"""The console's similarity.
 
-The Match modes in the Search pane, offered only when the deployment has
-them; a similarity query POSTed with the text in the body, never in a
-URL; a Similar control on every document hit, collected document, exhibit
-and live claim; no number ever printed (a band, a position and what the
-texts share instead); the standing sentence that similar text is not the
-same author; and Administration, Embeddings last in its row. The helpers
-run under Node against stubs (skipped where Node is absent).
+The Match modes in the Search pane, offered only when the deployment has them; a similarity query POSTed
+with the text in the body, never in a URL; a Similar control on every document hit, collected document,
+exhibit and live claim; no number ever printed (a band, a position and what the texts share instead); the
+standing sentence that similar text is not the same author; and Administration, Embeddings last in its row.
+The helpers run under Node against stubs (skipped where Node is absent).
 
 Pure: the shipped static assets.
 """
@@ -28,7 +26,6 @@ NEW_FUNCTIONS = ("loadEmbeddingStatus", "searchMode", "paintSearchModes",
                  "embReason", "rebuildQuestion", "embAct", "embRebuild",
                  "embActivate", "embRetire", "embRecheck", "embPass",
                  "loadEmbeddingGaps", "embGapRow",
-                 # 2026-09-25.
                  "noIndexText", "retireQuestion", "embGapsEmptyText")
 
 
@@ -110,9 +107,8 @@ def test_every_new_string_is_in_house_style():
 
 
 def test_no_new_function_shadows_another():
-    """A second top-level function of one name silently replaces the first
-    for the whole console: coverageLine was one, and the graph's coverage
-    line broke until this was renamed similarCoverageLine."""
+    """A second top-level function of one name silently replaces the first for the whole console, so each
+    new name is defined once."""
     js = _js()
     for name in NEW_FUNCTIONS:
         defined = re.findall(r"(?m)^(?:async )?function " + re.escape(name) + r"\(", js)
@@ -205,7 +201,7 @@ console.log(JSON.stringify([remote, host, rebuildQuestion('WORDING')]));
 
 
 # ---------------------------------------------------------------------------
-# Coverage, gap-list and retire wording (2026-09-25)
+# Coverage, gap-list and retire wording
 # ---------------------------------------------------------------------------
 
 @needs_node

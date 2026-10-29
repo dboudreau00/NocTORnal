@@ -1,15 +1,12 @@
-"""A recovery code checked at sign-in and spent only when the sign-in goes
-ahead (2026-09-24). Unit tests, no database.
+"""A recovery code checked at sign-in and spent only when the sign-in goes ahead. Unit tests, no
+database.
 
-Sign-in's must-change and no-change-pending refusals answer after the
-credentials are checked, and `authenticate` used to spend a recovery code
-on the way, so a refusal cost the person a single-use code for nothing.
-`authenticate(spend_recovery=False)` now checks the code and hands its hash
-back, and `AuthService.spend` removes it atomically when the session is
-about to be minted. What must still hold: a code works once, the loser of
-a race is a failure that counts, and the hash never reaches a repr.
-`routers/auth.py` login is exercised end to end in
-test_issued_password_signin_pg.py.
+Sign-in's must-change and no-change-pending refusals answer after the credentials are checked, so
+spending a recovery code on the way would cost the person a single-use code for a refusal.
+`authenticate(spend_recovery=False)` checks the code and hands its hash back, and `AuthService.spend`
+removes it atomically when the session is about to be minted. What must hold: a code works once, the
+loser of a race is a failure that counts, and the hash never reaches a repr. `routers/auth.py` login
+is exercised end to end in test_issued_password_signin_pg.py.
 """
 from __future__ import annotations
 

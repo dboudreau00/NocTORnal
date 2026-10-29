@@ -1,49 +1,39 @@
-"""Sending a sample to a self-hosted CAPEv2 sandbox (F14, 2026-09-24).
+"""Sending a sample to a self-hosted CAPEv2 sandbox.
 
-docs/11: do not build a sandbox, integrate with one. This is the
-integration: a detonation request can be SENT to one operator-configured
-CAPEv2 instance. What leaves is the same ZIP_INFECTED archive a download
-produces, through the one outbound client on the egress route
-`integration:sandbox` (docs/00 decisions 68 and 72, docs/20 section 9),
-after the invariant-8 gate (`egress.Destination.SANDBOX`: AMBER_STRICT, RED and
-compartmented material never leave, and the target's declared ceiling
-binds), and, where the target is exposed or the sample's network route or
-analysis machine is live, after a sign-off a SECOND person gives in the
-product. A cron worker sends (scripts/sandbox_dispatch.py); no request
-path does. Results come back as a machine SANDBOX analysis, and selectors
-reach a case only through the proposal path. Record-only requests stay
-exactly as they were and are never sent.
+docs/11: do not build a sandbox, integrate with one. A detonation request can be sent to one
+operator-configured CAPEv2 instance. What leaves is the same ZIP_INFECTED archive a download produces,
+through the one outbound client on the egress route `integration:sandbox` (docs/00 decisions 68 and 72,
+docs/20 section 9), after the invariant-8 gate (`egress.Destination.SANDBOX`: AMBER_STRICT, RED and
+compartmented material never leave, and the target's declared ceiling binds) and, where the target is
+exposed or the sample's network route or analysis machine is live, after a sign-off a second person gives
+in the product. A cron worker sends (scripts/sandbox_dispatch.py); no request path does. Results come back
+as a machine SANDBOX analysis, and selectors reach a case only through the proposal path. Record-only
+requests are never sent.
 
 ## Configuration (every variable unset means no sandbox: offline first)
 
 - NOCTORNAL_SANDBOX_PROVIDER: empty or "capev2".
-- NOCTORNAL_SANDBOX_URL: the https base URL of the CAPE web service, no
-  user name, query or fragment; "/apiv2" is appended for the API.
+- NOCTORNAL_SANDBOX_URL: the https base URL of the CAPE web service, no user name, query or fragment;
+  "/apiv2" is appended for the API.
 - NOCTORNAL_SANDBOX_TOKEN: the API token, never echoed.
 - NOCTORNAL_SANDBOX_NAME: default "cape"; the target's name.
-- NOCTORNAL_SANDBOX_EXPOSURE: NONE, VENDOR or PUBLIC, REQUIRED, no default:
-  the operator's docs/16 D5 determination about this target.
-- NOCTORNAL_SANDBOX_CEILING: CLEAR, GREEN or AMBER, REQUIRED.
-- NOCTORNAL_SANDBOX_NETWORK: the CIDR a LAN CAPE sits in. Required when the
-  URL's host is a private address; with it the egress rule is host@network,
-  the only way a named private destination is reachable.
-- NOCTORNAL_SANDBOX_NETWORK_ROUTES: CAPE network routes a request may pick,
-  default "none". none, drop and inetsim are ISOLATED; anything else
-  (internet, tor, a VPN, socks) is LIVE.
+- NOCTORNAL_SANDBOX_EXPOSURE: NONE, VENDOR or PUBLIC, required, no default: the operator's docs/16 D5
+  determination about this target.
+- NOCTORNAL_SANDBOX_CEILING: CLEAR, GREEN or AMBER, required.
+- NOCTORNAL_SANDBOX_NETWORK: the CIDR a LAN CAPE sits in. Required when the URL's host is a private
+  address; with it the egress rule is host@network, the only way a named private destination is reachable.
+- NOCTORNAL_SANDBOX_NETWORK_ROUTES: CAPE network routes a request may pick, default "none". none, drop and
+  inetsim are ISOLATED; anything else (internet, tor, a VPN, socks) is LIVE.
 - NOCTORNAL_SANDBOX_DEFAULT_NETWORK_ROUTE: default "none", in the list.
-- NOCTORNAL_SANDBOX_MACHINES: optional "name:ISOLATED,name:LIVE" list of
-  the analysis machines a request may name; a machine with a bridged or
-  physical interface is LIVE and needs the sign-off.
+- NOCTORNAL_SANDBOX_MACHINES: optional "name:ISOLATED,name:LIVE" list of the analysis machines a request
+  may name; a machine with a bridged or physical interface is LIVE and needs the sign-off.
 - NOCTORNAL_SANDBOX_CA_FILE: optional PEM bundle for a private CA.
-- NOCTORNAL_SANDBOX_TIMEOUT_S (30 to 1200, default 180),
-  NOCTORNAL_SANDBOX_MAX_REPORT_BYTES (default 16 MiB),
-  NOCTORNAL_SANDBOX_MIN_INTERVAL_S (default 30; CAPE's filecreate limit is
-  2 a minute), NOCTORNAL_SANDBOX_GIVE_UP_AFTER_S (default 21600),
-  NOCTORNAL_SANDBOX_PASS_BUDGET_S (default 240),
+- NOCTORNAL_SANDBOX_TIMEOUT_S (30 to 1200, default 180), NOCTORNAL_SANDBOX_MAX_REPORT_BYTES (default
+  16 MiB), NOCTORNAL_SANDBOX_MIN_INTERVAL_S (default 30; CAPE's filecreate limit is 2 a minute),
+  NOCTORNAL_SANDBOX_GIVE_UP_AFTER_S (default 21600), NOCTORNAL_SANDBOX_PASS_BUDGET_S (default 240),
   NOCTORNAL_SANDBOX_AUTOPROPOSE (off, or config).
 
-There is no setting to submit the raw sample: only the encrypted archive
-ever leaves (invariant 10).
+There is no setting to submit the raw sample: only the encrypted archive ever leaves (invariant 10).
 """
 from __future__ import annotations
 
@@ -108,15 +98,11 @@ MIB = 1 << 20
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _PACKAGE = re.compile(r"^[a-z0-9_]{1,32}$")
 
-#: lab-1 (2026-10-03). With no machine named the worker omits CAPE's
-#: `machine` field and CAPE's scheduler may pick ANY free machine, the live
-#: one included, while the row records no machine and so no sign-off. Once
-#: the operator lists a live machine, EVERY send names its machine (a send
-#: that already needs a second person for its route or exposure too, as found
-#: on verification), so the live one is reachable only through the sign-off
-#: and the sign-off is for the machine it names (0103 pins signoff_required
-#: to the recorded machine_class, so an unnamed row cannot simply be marked
-#: as needing one).
+#: With no machine named the worker omits CAPE's `machine` field and CAPE's scheduler may pick any free
+#: machine, the live one included, while the row records no machine and so no sign-off. Once the operator
+#: lists a live machine, every send names its machine, so the live one is reachable only through the
+#: sign-off and the sign-off is for the machine it names (0103 pins signoff_required to the recorded
+#: machine_class, so an unnamed row cannot be marked as needing none).
 _UNNAMED_ON_LIVE = ("this sandbox has a live analysis machine, so a send names "
                     "the machine it runs on. Pick one: a live machine needs a "
                     "second person's sign-off.")
@@ -325,10 +311,9 @@ def production_problems(env: Mapping[str, str], *, sends: bool = True) -> list[s
     if settings is None:
         return []
     out = []
-    # docs/00 decision 68: production refuses outbound integrations with no
-    # proxy. The start refusal (egress_routes.enforce_production_egress)
-    # reads egress.outbound_uses, which lists the sandbox too; this line
-    # names the variable.
+    # docs/00 decision 68: production refuses outbound integrations with no proxy. The start refusal
+    # (egress_routes.enforce_production_egress) reads egress.outbound_uses, which lists the sandbox too;
+    # this line names the variable.
     if sends and not egress.proxy_problem(env) and egress.proxy_settings(env) is None:
         out.append(
             f"a sandbox is configured ({PROVIDER_ENV}) and "
@@ -416,8 +401,8 @@ def eligibility(conn: psycopg.Connection, sample_id: UUID,
             return False, ("an unscreened sample is never sent to a third party: "
                            + screening.SAMPLE_MAY_LEAVE_SENTENCES[why])
     elif not screening.bytes_may_move(conn, sample_id):
-        # lab-2 (2026-10-03): a list imported since the last pass binds a
-        # NONE sandbox too, answered as a sample that is not there.
+        # A list imported since the last pass binds a NONE sandbox too, answered as a sample that is
+        # not there.
         return False, "no such sample"
     return True, "eligible"
 
@@ -508,9 +493,8 @@ class SandboxService:
         signoff = (settings.exposure != "NONE" or route_class == LIVE
                    or machine_class == LIVE)
         if machine is None and LIVE in settings.machine_classes.values():
-            # Whatever else the send needs a second person for (lab-1, gap
-            # found 2026-10-03): the row would record no machine, CAPE may
-            # pick the live one, and the authoriser's card would not say so.
+            # Whatever else the send needs a second person for: the row would record no machine, CAPE
+            # may pick the live one, and the authoriser's card would not say so.
             raise SandboxError(_UNNAMED_ON_LIVE)
         note = (note or "").strip() or None
         if signoff:
@@ -786,8 +770,8 @@ def _target_changed(row: dict, settings: SandboxSettings) -> str | None:
     if row["machine"] and settings.machine_classes.get(row["machine"]) != row["machine_class"]:
         return "the analysis machine is no longer offered as it was"
     if not row["machine"] and LIVE in settings.machine_classes.values():
-        # lab-1 (2026-10-03): queued, signed off or not, before a live machine
-        # was listed; the approval was for a send that named no machine.
+        # Queued, signed off or not, before a live machine was listed: the approval was for a send that
+        # named no machine.
         return _UNNAMED_ON_LIVE
     return None
 
@@ -1022,10 +1006,9 @@ def _send_due(conn, samples, client, settings, state: Pass, ends: float) -> None
         payload = archive(plaintext, sha_hex)
         del plaintext
         archive_sha = hashlib.sha256(payload).digest()
-        # The record of a copy leaving exists BEFORE the bytes can leave,
-        # and the last eligibility check is made in the same transaction,
-        # under a share lock that waits for (and is waited on by) a
-        # screening isolation (F13).
+        # The record of a copy leaving exists before the bytes can leave, and the last eligibility check
+        # is made in the same transaction, under a share lock that waits for (and is waited on by) a
+        # screening isolation.
         with conn.transaction():
             locked = conn.execute(
                 "SELECT state::text, screening_outcome FROM lab.sample "
@@ -1194,10 +1177,8 @@ def _poll(conn, samples, client, settings, state: Pass, ends: float) -> None:
             if done == _ENDED:
                 continue
             throttled = done == _THROTTLED
-            # The report could not be fetched this pass. It is retried on
-            # the next, and given up like any other wait: until 2026-09-24
-            # this `continue`d past the age check, so a report that could
-            # never be fetched was retried for ever.
+            # The report could not be fetched this pass. It is retried on the next and given up like any
+            # other wait, so a report that can never be fetched is not retried for ever.
             waiting_for = f"its report could not be fetched ({why})"
         elif status in FAILED_STATUSES:
             _end(conn, row, status="FAILED", expect=("SUBMITTED",),
@@ -1227,15 +1208,13 @@ _ENDED, _RETRY, _THROTTLED = "ended", "retry", "throttled"
 def _report(conn, samples, client, settings, row: dict, state: Pass
             ) -> tuple[str, str | None]:
     """Fetch, reduce and record the report as a machine SANDBOX analysis.
-    The raw report is not stored; its digest, size and a summary are.
 
-    (_ENDED, None) when the row reached an end (REPORTED, or FAILED for a
-    report nothing can record); (_RETRY, why) when the report could not be
-    fetched this pass, which the caller gives up on after GIVE_UP_AFTER;
-    (_THROTTLED, why) on CAPE's 429. A report whose JSON and IOC summary
-    are both over the cap fails at once, naming the setting: fetching 2 x
-    16 MiB every minute for six hours to learn the same thing is traffic,
-    not a retry."""
+    The raw report is not stored; its digest, size and a summary are. Returns (_ENDED, None) when the row
+    reached an end (REPORTED, or FAILED for a report nothing can record); (_RETRY, why) when the report
+    could not be fetched this pass, which the caller gives up on after GIVE_UP_AFTER; (_THROTTLED, why) on
+    CAPE's 429. A report whose JSON and IOC summary are both over the cap fails at once, naming the
+    setting: fetching 2 x 16 MiB every minute for six hours to learn the same thing is traffic, not a
+    retry."""
     from noctornal_api.pinned_http import HttpStatusError, OutboundError, ResponseTooLarge
     from noctornal_api.samples import PROPOSAL_ORIGINS, SampleError
     from noctornal_api.sandbox_capev2 import _short, extract
@@ -1269,9 +1248,8 @@ def _report(conn, samples, client, settings, row: dict, state: Pass
         reduced = extract(fetched.data, sample_sha256=bytes(sha_row[0]).hex(),
                           network_route=row["network_route"], name=settings.name)
     except Exception:  # noqa: BLE001 - a report never poisons the pass
-        # extract() is total by construction; this is the belt. Without
-        # it one report the reader cannot survive would stop every later
-        # pass at the same row (2026-09-24).
+        # extract() is total by construction; this is the belt. Without it one report the reader cannot
+        # survive would stop every later pass at the same row.
         log.warning("reading the report of detonation %s failed", row["id"],
                     exc_info=True)
         _end(conn, row, status="FAILED", expect=("SUBMITTED",),

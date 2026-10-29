@@ -1,15 +1,13 @@
-"""ACT tunnels are judged target by target (S2, 2026-09-25).
+"""ACT tunnels are judged target by target.
 
-An act (enrolment, resolution, a join) once needed only SOME live authority
-of the persona that met the recorded-and-confirmed-after rule, and then
-opened the site of ANY source bound under any live target. So one fresh
-authority for forum two opened forum one although forum one's authority
-predated a widening, and a source moved to a new host opened there although
-its target named the old one. Both went round the two-person control that
-the same tunnel as a RUN refuses. Now each target is judged as a run's is.
+An act (enrolment, resolution, a join) opens a site only under a live authority of the persona that met the
+recorded-and-confirmed-after rule for that target. Judging against SOME authority would let one fresh
+authority for forum two open forum one although forum one's authority predated a widening, and let a source
+moved to a new host open there although its target named the old one, going round the two-person control
+that the same tunnel as a RUN refuses. Each target is judged as a run's is.
 
-A real proxy on an ephemeral loopback port, the fake chained exit and fake
-resolver of test_egress_proxy_pg. Env-gated on DATABASE_URL.
+A real proxy on an ephemeral loopback port, the fake chained exit and fake resolver of
+test_egress_proxy_pg. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -204,9 +202,8 @@ def test_an_address_in_the_profiles_networks_needs_one_passing_target(
 
 def test_a_persona_with_no_target_yet_reaches_only_its_profiles_networks(
         conn, people, loopback_public, resolver, proxy, upstream):
-    """Enrolment and a chat lookup come before any source of the persona
-    has a target: the profile's own networks open under a live authority
-    of the persona, and a name does not (2026-09-25)."""
+    """Enrolment and a chat lookup come before any source of the persona has a target: the profile's own
+    networks open under a live authority of the persona, and a name does not."""
     pid, persona, sid, aid = _world(conn, people, 443, source_kind="TELEGRAM",
                                     host=None, cidrs=("127.0.0.0/24",),
                                     upstream=upstream.port)

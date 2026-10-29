@@ -1,65 +1,43 @@
-"""Retention and purge (Phase 6, docs/08).
+"""Retention and purge (docs/08).
 
-    Purge writes a tombstone to the audit log: what was destroyed, under
-    what authority, by whom. The record of destruction survives the data.
-
-That sentence is the design. A purge that leaves nothing behind is
-indistinguishable from data that was never collected and from data somebody
-deleted to hide it, and in a system whose premise is that "who did what" is
-answerable, that ambiguity is the failure.
+Purge writes a tombstone to the audit log: what was destroyed, under what authority, by whom. The record of
+destruction survives the data: a purge that leaves nothing behind is indistinguishable from data that was never
+collected and from data somebody deleted to hide it.
 
 ## Four rules
 
-**1. Legal hold beats everything, at three levels.** Case, exhibit and
-document each carry one, because a court naming a single exhibit should not
-require freezing a whole case. Purge checks all three and refuses on any.
+**1. Legal hold beats everything, at three levels.** Case, exhibit and document each carry one, because a court
+naming a single exhibit should not require freezing a whole case. Purge checks all three and refuses on any.
 
-**2. A category clock may only ever be SHORTER than the case's.** A stealer
-log inside a two-year case is third-party personal data belonging to
-thousands of people who are not the subject; it must not inherit that
-case's authority. A rule that could EXTEND would let an ingest category
-quietly outlive the basis the case was opened under, so `effective_deadline`
-takes the earlier of the two and there is a test that it cannot be talked
-out of it.
+**2. A category clock may only ever be SHORTER than the case's.** A stealer log inside a two-year case is
+third-party personal data belonging to thousands of people who are not the subject; it must not inherit that
+case's authority. A rule that could EXTEND would let an ingest category outlive the basis the case was opened
+under, so `effective_deadline` takes the earlier of the two and a test holds it to that.
 
-**3. Out-of-schedule purge needs four eyes.** docs/08 says so and
-`evidence.purge` was registered as an unconditional dual-control operation
-in decision 44. This is that mechanism's first real user: the approval is
-consumed inside the purge transaction, so a crash cannot leave a spent
-approval with nothing destroyed or a destruction with a reusable approval.
+**3. Out-of-schedule purge needs four eyes.** docs/08 says so and `evidence.purge` is an unconditional
+dual-control operation (decision 44). The approval is consumed inside the purge transaction, so a crash cannot
+leave a spent approval with nothing destroyed or a destruction with a reusable approval.
 
-**4. What actually happened to the bytes is recorded, not assumed.**
-Evidence sits in MinIO COMPLIANCE-mode object lock, which cannot be deleted
-before its retention expires **even to satisfy a deletion order**. That is a
-real, unresolved tension between two obligations (docs/16 C2), and the
-honest response is a `storage_outcome` on the tombstone rather than a purge
-that reports success because the database row changed. `LOCKED_UNTIL_RETENTION`
-means: the schedule says destroy, the object store refused, and somebody
-needs to know that before they tell a court otherwise. Since 2026-09-02 a
-refused exhibit is also NOT marked purged. On the SCHEDULED path that
-means it stays due, and the sweep after the lock expires destroys it and
-writes its own DELETED record. On `purge_out_of_schedule` there is no such
-sweep -- `due()` only ever returns evidence whose case retention has
-expired, and that path is for exhibits whose retention has not -- so it
-warns instead that nothing will retry the row and that the four-eyes
-approval has been spent. Before all this the row was marked on the
-refusal and dropped out of every sweep, so the bytes outlived the lock
-under a tombstone saying they were locked; and the purge asked the store
-with a keyless delete that a versioned bucket answers with a delete
-marker and success, so the tombstone said DELETED while every byte stayed
-retrievable by version id.
+**4. What actually happened to the bytes is recorded, not assumed.** Evidence sits in MinIO COMPLIANCE-mode
+object lock, which cannot be deleted before its retention expires even to satisfy a deletion order (docs/16
+C2). So the tombstone carries a `storage_outcome` rather than reporting success because the database row
+changed. `LOCKED_UNTIL_RETENTION` means the schedule says destroy, the object store refused, and somebody needs
+to know that before they tell a court otherwise. A refused exhibit is NOT marked purged. On the SCHEDULED path
+it stays due, and the sweep after the lock expires destroys it and writes its own DELETED record. On
+`purge_out_of_schedule` there is no such sweep (`due()` returns only evidence whose case retention has
+expired), so it warns that nothing will retry the row and that the four-eyes approval has been spent. A
+keyless delete on a versioned bucket answers with a delete marker and success while every byte stays
+retrievable, so the purge deletes by version id.
 
-The counts that go with it (`storage_deleted` / `storage_locked` /
-`storage_failed`) are EXHIBIT ROWS, the unit the tombstone's
-`object_count` and the governance router speak, and they add up to what
-was attempted. Per-key object VERSION counts live in the warnings.
+The counts that go with it (`storage_deleted` / `storage_locked` / `storage_failed`) are EXHIBIT ROWS, the unit
+the tombstone's `object_count` and the governance router speak, and they add up to what was attempted. Per-key
+object VERSION counts live in the warnings.
 
 ## What this module will not do
 
-It does not run itself. There is no scheduler here, following decision 30's
-precedent — `due()` reports what is expired and `purge_due()` acts, and both
-are called by an operator, a cron entry or a test. A purge job that runs
-itself on a timer nobody watches is how data disappears on a Sunday.
+It does not run itself. There is no scheduler here (decision 30): `due()` reports what is expired and
+`purge_due()` acts, and both are called by an operator, a cron entry or a test. A purge job on a timer nobody
+watches is how data disappears on a Sunday.
 """
 from __future__ import annotations
 
@@ -87,21 +65,15 @@ STORAGE_FAILED = "FAILED"
 STORAGE_NA = "NOT_APPLICABLE"
 
 def _is_retention_refusal(exc: Exception) -> bool:
-    """Is this exception the store saying "the object is under a retention
-    lock" -- and nothing else?
+    """Is this exception the store saying "the object is under a retention lock", and nothing else?
 
-    One classifier, shared with `EvidenceStorage.delete_all_versions`; the
-    rule and its live measurement are on `evidence.is_retention_refusal`.
-    Kept under this name because it is the purge's half of a contract that
+    One classifier, shared with `EvidenceStorage.delete_all_versions`; the rule and its live measurement are on
+    `evidence.is_retention_refusal`. Kept under this name because it is the purge's half of a contract that
     `tests/test_evidence_lock_live_pg.py` reads from both sides.
 
-    What was wrong until 2026-09-02: this module kept its own set of codes,
-    returned True on a bare `AccessDenied` or `InvalidRequest`, and listed
-    `ObjectLockConfigurationNotFoundError` -- which means the bucket has NO
-    lock configuration -- as a lock. A read-only key, or a bucket policy
-    denying `s3:DeleteObject`, was therefore written into an append-only
-    tombstone as LOCKED_UNTIL_RETENTION: the specific claim that the bytes
-    will become deletable when a retention expires, which they will not.
+    A bare `AccessDenied` or `InvalidRequest`, or `ObjectLockConfigurationNotFoundError` (the bucket has NO lock
+    configuration), is not a lock: writing one into an append-only tombstone as LOCKED_UNTIL_RETENTION would
+    claim the bytes become deletable when a retention expires, which they will not.
     """
     return is_retention_refusal(exc)
 
@@ -110,42 +82,27 @@ def _is_retention_refusal(exc: Exception) -> bool:
 class _StorageOutcome:
     """Per-EXHIBIT-ROW counts, not one verdict for a batch.
 
-    `outcome` keeps the single string the tombstone column takes, and the
-    counts are what the caller reports -- so a partial refusal stops being
-    indistinguishable from a total one. Every row lands in exactly one of
-    the three, so `deleted + locked + failed == len(rows)`: rows is the
-    unit the tombstone's `object_count` and the governance router already
-    speak, and a counter that does not add up to the batch cannot tell an
-    operator whether the rest went or were never tried.
+    `outcome` keeps the single string the tombstone column takes, and the counts are what the caller reports,
+    so a partial refusal is distinguishable from a total one. Every row lands in exactly one of the three, so
+    `deleted + locked + failed == len(rows)`: rows is the unit the tombstone's `object_count` and the governance
+    router speak, and a counter that does not add up to the batch cannot tell an operator whether the rest went
+    or were never tried. Summing `versions_removed` / `versions_locked` across keys instead would report an
+    object destroyed for an exhibit that was intact and still readable.
 
-    Between two commits on 2026-09-02 `deleted` and `locked` were sums of
-    `versions_removed` / `versions_locked` across keys instead. One
-    exhibit with one version removed and one refused then answered
-    `evidence_purged: 1, storage_deleted: 1, storage_locked: 1` with zero
-    rows marked purged -- an operator-facing claim that an object was
-    destroyed for an exhibit that was entirely intact and still readable.
-    That is this module's signature defect, "a failure reported as the
-    wrong thing", restated in a different unit.
-
-    `warnings` (added 2026-09-02) names the keys the store had nothing
-    under, refused for a reason that is not a lock, or refused under a
-    lock -- and carries the VERSION counts, which belong in prose beside
-    the key they describe rather than in a counter published next to a row
-    count. A bare count of failures does not tell an operator WHICH
-    exhibit the store disagrees about.
+    `warnings` names the keys the store had nothing under, refused for a reason that is not a lock, or refused
+    under a lock, and carries the VERSION counts, which belong in prose beside the key they describe rather than
+    in a counter published next to a row count.
     """
     outcome: str
     deleted: int = 0
     locked: int = 0
     failed: int = 0
     warnings: tuple[str, ...] = ()
-    #: The exhibit each warning above is about, in the same order, so a
-    #: warning can be left out of an answer to a caller who may not know of
-    #: that exhibit (2026-10-08).
+    #: The exhibit each warning above is about, in the same order, so a warning can be left out of an answer to
+    #: a caller who may not know of that exhibit.
     warning_about: tuple = ()
-    #: Exhibits that came under a legal hold, their own or their case's,
-    #: between the sweep and the purge's row locks, and were not touched
-    #: (evidence-purge-hold-race, 2026-10-03). Not in the three counts.
+    #: Exhibits that came under a legal hold, their own or their case's, between the sweep and the purge's row
+    #: locks, and were not touched. Not in the three counts.
     held: tuple = ()
     #: Exhibits another purge destroyed first, found under the same locks.
     gone: tuple = ()
@@ -171,10 +128,9 @@ _WAITED_NOUNS = {
 
 
 def _waited_sentence(waited: dict[str, int]) -> str:
-    """What a case hold says when a purge destroyed something while the hold
-    waited for it (2026-10-08). The hold stands from here on and cannot bring
-    back what had gone, and a purge reads the hold again for everything it
-    has not reached."""
+    """What a case hold says when a purge destroyed something while the hold waited for it. The hold stands from
+    here on and cannot bring back what had gone, and a purge reads the hold again for everything it has not
+    reached."""
     parts = [count_of(waited[kind], *_WAITED_NOUNS[kind])
              for kind in WAITED_KINDS if waited.get(kind)]
     said = (", ".join(parts[:-1]) + " and " + parts[-1]) if len(parts) > 1 \
@@ -186,9 +142,8 @@ def _waited_sentence(waited: dict[str, int]) -> str:
             f"everything not yet reached is kept.")
 
 
-#: The most exhibits one out-of-schedule purge may name. Its rows and their
-#: case stay locked while the object store deletes them one by one
-#: (evidence-purge-stalls-audit-chain, 2026-10-03).
+#: The most exhibits one out-of-schedule purge may name. Its rows and their case stay locked while the object
+#: store deletes them one by one.
 MAX_OUT_OF_SCHEDULE = 200
 
 
@@ -196,12 +151,9 @@ class RetentionError(Exception):
     pass
 
 
-#: The clock an ingest record gets when its category has NO rule at all.
-#: `ingest.py:_retain_until` stamps it; the retention panel names it, so a
-#: category running on a period nobody chose is on screen beside the rules
-#: somebody did (ux15-report:unruled-categories-invisible, 2026-09-23).
-#: Until then the fallback was a literal in ingest.py and no screen said
-#: IOC_FEED and RANSOM_LEAK_POST material was on it.
+#: The clock an ingest record gets when its category has NO rule at all. `ingest.py:_retain_until` stamps it;
+#: the retention panel names it, so a category running on a period nobody chose is on screen beside the rules
+#: somebody did.
 UNRULED_RETAIN_DAYS = 365
 
 
@@ -235,69 +187,50 @@ class DueItem:
     rule: str | None
     held: bool = False
     hold_reason: str | None = None
-    #: The ingest or document category whose rule set the deadline. The
-    #: due list printed "ingest_record, id 3f2a91bc", which told nobody
-    #: what was about to go (ux15-report:due-list-no-forward-view-no-names,
-    #: 2026-09-23). Exhibits carry none: their deadline is the case's.
+    #: The ingest or document category whose rule set the deadline, so the due list can say what is about to go.
+    #: Exhibits carry none: their deadline is the case's.
     category: str | None = None
 
 
 @dataclass
 class PurgeResult:
     tombstones: list[UUID] = field(default_factory=list)
-    #: Exhibits the purge ATTEMPTED, not the number destroyed. Since
-    #: 2026-09-02 only a row whose object the store confirmed removed is
-    #: marked `purged_at`; `storage_deleted` is that number, and the two
-    #: differ by exactly `storage_locked + storage_failed`. Kept as the
-    #: attempt count because the evidence tombstones' `object_count`s, one
-    #: per storage outcome, add up to the attempt too, and the two must
-    #: agree.
+    #: Exhibits the purge ATTEMPTED, not the number destroyed. Only a row whose object the store confirmed
+    #: removed is marked `purged_at`; `storage_deleted` is that number, and the two differ by exactly
+    #: `storage_locked + storage_failed`. Kept as the attempt count because the evidence tombstones'
+    #: `object_count`s, one per storage outcome, add up to the attempt too, and the two must agree.
     evidence_purged: int = 0
     documents_purged: int = 0
-    #: Ingest, added 2026-07-25 (docs/17 F17(a)). Counted SEPARATELY rather
-    #: than folded into a total: an exhibit and a partner's raw record have
-    #: different authority behind their destruction, and a single number
-    #: would hide which of the two an operator just destroyed.
+    #: Ingest (docs/17 F17(a)). Counted SEPARATELY rather than folded into a total: an exhibit and a partner's
+    #: raw record have different authority behind their destruction, and a single number would hide which of the
+    #: two an operator just destroyed.
     records_purged: int = 0
     dead_letters_purged: int = 0
     held_back: int = 0
-    #: EXHIBIT ROWS the store refused because at least one version of the
-    #: object is under a retention lock -- the same unit as
-    #: `evidence_purged`, not object versions. This is the refusal count;
-    #: it used to be the batch size, so one refusal in a hundred and a
-    #: hundred refusals wrote the same number into an append-only
-    #: tombstone. It was briefly a version count on 2026-09-02, which
-    #: broke the arithmetic above; the per-key version detail is in
-    #: `warnings`.
+    #: EXHIBIT ROWS the store refused because at least one version of the object is under a retention lock: the
+    #: same unit as `evidence_purged`, not object versions. The per-key version detail is in `warnings`.
     storage_locked: int = 0
-    #: EXHIBIT ROWS that failed to delete for a reason that is NOT a
-    #: retention lock. Previously collapsed into `storage_locked` by a bare
-    #: `except Exception`, which turned "the store did not answer" into the
-    #: specific and defensible claim "the object is under a lock".
+    #: EXHIBIT ROWS that failed to delete for a reason that is NOT a retention lock, kept apart from
+    #: `storage_locked` so "the store did not answer" is not reported as "the object is under a lock".
     storage_failed: int = 0
-    #: EXHIBIT ROWS the store confirmed it removed -- exactly the rows this
-    #: purge marked `purged_at`. Reported so the three add up to what was
-    #: attempted: without it an operator reading `evidence_purged: 100,
-    #: storage_locked: 3` cannot tell whether the other 97 went or were
-    #: never tried. Never counts a row whose object was partly refused:
-    #: a version removed from a key whose other version is locked destroys
-    #: nothing, because the exhibit is still readable.
+    #: EXHIBIT ROWS the store confirmed it removed: exactly the rows this purge marked `purged_at`. Reported so
+    #: the three add up to what was attempted: without it an operator reading `evidence_purged: 100,
+    #: storage_locked: 3` cannot tell whether the other 97 went or were never tried. Never counts a row whose
+    #: object was partly refused: a version removed from a key whose other version is locked destroys nothing,
+    #: because the exhibit is still readable.
     storage_deleted: int = 0
-    # F15.3 and F15.4 (2026-09-24): lookups, their answers
-    # and batches, emptied by the case clock and never deleted. Counted
-    # apart, like records: a vendor's answer and an exhibit have different
-    # authority behind them.
+    # Lookups, their answers and batches, emptied by the case clock and never deleted. Counted apart, like
+    # records: a vendor's answer and an exhibit have different authority behind them.
     lookups_purged: int = 0
     lookup_results_purged: int = 0
     lookup_batches_purged: int = 0
-    #: Lab samples of an expired case taken out of the working store the way
-    #: the deployment disposes of a rejected sample (lab-4, 2026-10-03).
+    #: Lab samples of an expired case taken out of the working store the way the deployment disposes of a
+    #: rejected sample.
     samples_purged: int = 0
     warnings: list[str] = field(default_factory=list)
-    #: The objects each count above stands for, by the count's name, so an
-    #: answer to a caller who may know of only some of them is drawn from
-    #: these and not from the totals (`governance._answer_over`,
-    #: 2026-10-08). Counted with `count`; never serialised.
+    #: The objects each count above stands for, by the count's name, so an answer to a caller who may know of
+    #: only some of them is drawn from these and not from the totals (`governance._answer_over`). Counted with
+    #: `count`; never serialised.
     members: dict[str, list[UUID]] = field(default_factory=dict)
     #: The warnings that are about particular objects, by their index in
     #: `warnings`: how to say it for n of them (and n of the batch it counts
@@ -321,22 +254,18 @@ class PurgeResult:
 
 
 # ---------------------------------------------------------------------------
-# Collected documents: what cites them, what holds them (2026-09-24;
-# docs/00 decision 74)
+# Collected documents: what cites them, what holds them (docs/00 decision 74)
 # ---------------------------------------------------------------------------
 #
-# The collector now writes `collect.document.retain_until` for documents whose
-# category has a retention rule, which arms the document leg of the purge for
-# the first time. Decision 74: no code arms it without honouring legal hold on the
-# document AND its case. A collected document has no case_id, so its cases
-# are the cases that CITE it, through the foreign keys below. One registry,
-# so the due list and the purge read the same predicate, and a catalogue test
-# (test_collected_document_retention_pg.py) fails on any foreign key onto
-# collect.document, or onto a run or a source from a case table, that is in
-# none of these maps.
+# The collector writes `collect.document.retain_until` for documents whose category has a retention rule, which
+# arms the document leg of the purge. Decision 74: no code arms it without honouring legal hold on the
+# document AND its case. A collected document has no case_id, so its cases are the cases that CITE it, through
+# the foreign keys below. One registry, so the due list and the purge read the same predicate, and a catalogue
+# test (test_collected_document_retention_pg.py) fails on any foreign key onto collect.document, or onto a run
+# or a source from a case table, that is in none of these maps.
 #
-# A hold on, or a citation of, ANY version of a post holds every version: a
-# court naming a post names its history.
+# A hold on, or a citation of, ANY version of a post holds every version: a court naming a post names its
+# history.
 
 #: (foreign key, SELECT document_id, case_id, pins). `pins` is true for a
 #: citation that pins the document whatever the holds say: an assertion that
@@ -366,11 +295,9 @@ DOCUMENT_CITATIONS: tuple[tuple[str, str], ...] = (
      "JOIN collect.watch w ON w.id = d2.watch_id WHERE w.case_id IS NOT NULL"),
 )
 
-#: Foreign keys onto a RUN or a SOURCE from a table that has a case_id, which
-#: cite every document that run or source produced. Each is ALSO a leg of the
-#: hold (2026-09-24): registered and not followed was a hold
-#: that silently missed the documents of a run a held case cites as evidence
-#: the day something writes the column. APPEND-ONLY, marked.
+#: Foreign keys onto a RUN or a SOURCE from a table that has a case_id, which cite every document that run or
+#: source produced. Each is ALSO a leg of the hold: a registered key that is not followed would silently miss
+#: the documents of a run a held case cites as evidence. APPEND-ONLY, marked.
 DOCUMENT_RUN_AND_SOURCE_CITATIONS: dict[str, str] = {
     "core.evidence.collection_run_id": (
         "SELECT d3.id, e.case_id, false FROM core.evidence e "
@@ -400,16 +327,13 @@ DOCUMENT_REFERENCES_NOT_CASE_MATERIAL: dict[str, str] = {
     "collect.document.supersedes_id": "the version chain itself",
     "collect.extraction.document_id": (
         "machine output about the document; it names no case"),
-    # F6.1 (2026-09-25).
     "collect.document_embedding.document_id": (
         "the document's similarity vectors; they name no case"),
-    # F3 and F4 (2026-09-24).
     "collect.forum_post.document_id": (
         "a forum post's signature, the posts it quotes and its reactions; "
         "they name no case"),
     "collect.forum_member.document_id": (
         "a forum member's profile fields; they name no case"),
-    # F5.3 (telegram, 2026-09-24).
     "collect.telegram_message.document_id": (
         "the capture record of a Telegram message; it names no case"),
 }
@@ -423,20 +347,17 @@ DOCUMENT_PURGE_SCRUBS: dict[str, str] = {
     # document's personal data restated.
     "collect.extraction.document_id":
         "DELETE FROM collect.extraction WHERE document_id = ANY(%(ids)s)",
-    # F6.1 (2026-09-25). The vectors are derived from the content,
-    # so they go with it. The trigger on purged_at has already removed them
-    # in this transaction; this states it where the rule is read.
+    # The vectors are derived from the content, so they go with it. The trigger on purged_at has already removed
+    # them in this transaction; this states it where the rule is read.
     "collect.document_embedding.document_id":
         "DELETE FROM collect.document_embedding WHERE document_id = ANY(%(ids)s)",
-    # F3 and F4 (2026-09-24). A signature, reactor names and profile
-    # fields are the author's personal data, so they go with the text.
+    # A signature, reactor names and profile fields are the author's personal data, so they go with the text.
     "collect.forum_post.document_id":
         "DELETE FROM collect.forum_post WHERE document_id = ANY(%(ids)s)",
     "collect.forum_member.document_id":
         "DELETE FROM collect.forum_member WHERE document_id = ANY(%(ids)s)",
-    # F5.3 (telegram, 2026-09-24). The typed ids and names of the
-    # people a message names: its guard (0106) allows exactly this, and
-    # only for a purged document. The capture record itself stays.
+    # The typed ids and names of the people a message names: its guard (0106) allows exactly this, and only for
+    # a purged document. The capture record itself stays.
     "collect.telegram_message.document_id":
         "UPDATE collect.telegram_message SET sender_uid = NULL, "
         "sender_handle_at_capture = NULL, post_author = NULL, "
@@ -535,10 +456,9 @@ class RetentionService:
         # document is purged. None refuses a purge whose documents carry
         # markup, rather than recording a destruction that did not happen.
         self._document_raw = document_raw
-        # lab-4 (2026-10-03): a zero-argument callable returning (sample
-        # store, preservation store or None), called only when a purge has
-        # samples to dispose of, so a case without any needs no sample
-        # credentials. None leaves due samples due, and says so.
+        # A zero-argument callable returning (sample store, preservation store or None), called only when a purge
+        # has samples to dispose of, so a case without any needs no sample credentials. None leaves due samples
+        # due, and says so.
         self._sample_stores = sample_stores
 
     # -- rules -------------------------------------------------------------
@@ -605,19 +525,15 @@ class RetentionService:
             unattached_only: bool = False) -> list[DueItem]:
         """Everything past its retention, INCLUDING what is held.
 
-        Held items are returned flagged rather than filtered out, because
-        "nothing is due" and "eleven things are due and all of them are
-        frozen by a court order" are different answers and an operator
-        needs the second one.
+        Held items are returned flagged rather than filtered out, because "nothing is due" and "eleven things
+        are due and all of them are frozen by a court order" are different answers and an operator needs the
+        second one.
 
-        `unattached_only` (F55, 2026-10-08) leaves out everything that
-        belongs to a case: the exhibits, lookups, answers, batches and
-        samples, which all have one, and the ingest records attached to one.
-        What is left is what no case's clock or hold governs: collected
-        documents, dead letters and the records attached to no case, which
-        is the deployment-wide sweep's. The filter is in the query and not
-        applied after it, so a backlog of case records cannot fill the limit
-        and starve the records that have none.
+        `unattached_only` leaves out everything that belongs to a case: the exhibits, lookups, answers, batches
+        and samples, which all have one, and the ingest records attached to one. What is left is what no case's
+        clock or hold governs: collected documents, dead letters and the records attached to no case, which is
+        the deployment-wide sweep's. The filter is in the query and not applied after it, so a backlog of case
+        records cannot fill the limit and starve the records that have none.
         """
         now = as_of or datetime.now(timezone.utc)
         items: list[DueItem] = []
@@ -641,21 +557,16 @@ class RetentionService:
                 held=bool(row[3] or row[5]),
                 hold_reason=row[4] or ("case-level legal hold" if row[5] else None)))
 
-        # `collect.document` has NO case_id -- a document hangs off a source
-        # and is material in however many cases cite it. So a case-scoped
-        # sweep must not touch documents AT ALL: the query took no case
-        # filter, so `purge_due(case_id=X)` counted and would have destroyed
-        # deployment-wide documents and written the tombstone under case X.
-        # That is precisely the cross-case destruction the out-of-schedule
-        # router refuses by name, arriving through the scheduled path.
+        # `collect.document` has NO case_id: a document hangs off a source and is material in however many cases
+        # cite it. So a case-scoped sweep must not touch documents AT ALL, or `purge_due(case_id=X)` would
+        # destroy deployment-wide documents and write the tombstone under case X, the cross-case destruction the
+        # out-of-schedule router refuses by name.
         #
-        # Decision 74 (2026-09-24): a due document is HELD when any
-        # version of it carries a document-level hold, is cited by a case
-        # under legal hold, or supports an assertion that has not been
-        # retracted (`_DOCUMENT_HELD_SQL`, the one predicate the purge
-        # rechecks under its locks). Held ones are ordered AFTER the unheld,
-        # so a backlog of held documents cannot fill the limit and starve
-        # the sweep; purge_due counts them with a query of its own.
+        # Decision 74: a due document is HELD when any version of it carries a document-level hold, is cited by
+        # a case under legal hold, or supports an assertion that has not been retracted (`_DOCUMENT_HELD_SQL`,
+        # the one predicate the purge rechecks under its locks). Held ones are ordered AFTER the unheld, so a
+        # backlog of held documents cannot fill the limit and starve the sweep; purge_due counts them with a
+        # query of its own.
         if case_id is None:
             documents = self._c.execute(
                 f"""SELECT d.id, d.retain_until, d.category, held.reason
@@ -673,27 +584,16 @@ class RetentionService:
                     held=row[3] is not None, hold_reason=row[3],
                     category=row[2]))
 
-        # Ingest. docs/17 F17(a): `ingest.record.retain_until` has carried a
-        # clock since migration 0033 and `ingest.dead_letter.retain_until`
-        # since 0040, and until now NOTHING read either. The labels and the
-        # gating shipped; the expiry did not. The 90-day dead-letter default
-        # was chosen precisely because unassessed third-party victim data
-        # deserves the shortest rule, and a clock nobody reads delivers the
-        # longest possible one instead.
+        # Ingest. docs/17 F17(a): `ingest.record.retain_until` (migration 0033) and
+        # `ingest.dead_letter.retain_until` (0040) carry the clock. The 90-day dead-letter default is the
+        # shortest rule because unassessed third-party victim data deserves it.
         #
-        # A case legal hold covers ingest records attached to that case: a
-        # hold that stopped at the schema boundary would be a hold with a
-        # gap in it, and the material on the ingest side is the material
-        # most likely to be the subject of one.
+        # A case legal hold covers ingest records attached to that case: a hold that stopped at the schema
+        # boundary would have a gap, and the ingest side is the material most likely to be the subject of one.
         #
-        # A category clock only ever SHORTENS (rule 2 above): a record
-        # attached to a case falls due at the earlier of its category stamp
-        # and the case's own retention instant, 00:00 UTC on that day.
-        # evidence-category-clock-outlives-case (2026-10-03): the sweep read
-        # the stamp alone and the stamp was the rule alone, so a CHAT_EXPORT
-        # in a case kept two more months was held 670 days past it. Read
-        # here, so a record attached later, or a case whose date is brought
-        # forward, is covered too.
+        # A category clock only ever SHORTENS (rule 2 above): a record attached to a case falls due at the
+        # earlier of its category stamp and the case's own retention instant, 00:00 UTC on that day. Read here,
+        # so a record attached later, or a case whose date is brought forward, is covered too.
         records = self._c.execute(
             """SELECT r.id, r.case_id, d.deadline, r.category,
                       coalesce(c.legal_hold, false),
@@ -739,9 +639,8 @@ class RetentionService:
                     held=False,
                     hold_reason=None if row[2] else
                     "predates the redactor: still verbatim on disk"))
-        # F15.3 and F15.4 (2026-09-24): lookups, answers and batches
-        # follow the CASE clock and the case's legal hold, as exhibits do.
-        # A provider test (no case) is never selected.
+        # Lookups, answers and batches follow the CASE clock and the case's legal hold, as exhibits do. A
+        # provider test (no case) is never selected.
         for object_type, table in (() if unattached_only else (
                 ("lookup", "ingest.lookup"),
                 ("lookup_result", "ingest.lookup_result"),
@@ -766,11 +665,9 @@ class RetentionService:
 
     def _due_samples(self, case_id: UUID | None, now: datetime,
                      limit: int) -> list[DueItem]:
-        """Lab samples still in the working store whose case's retention has
-        expired, held ones flagged. lab-4 (2026-10-03): docs/11 says a record
-        case's sample leaves only through the retention purge, and nothing
-        here selected one, so a purged case's live malware stayed
-        downloadable for ever. A sample with no case has no case clock."""
+        """Lab samples still in the working store whose case's retention has expired, held ones flagged. docs/11:
+        a record case's sample leaves only through the retention purge. A sample with no case has no case
+        clock."""
         rows = self._c.execute(
             """SELECT s.id, s.case_id, c.retention_until, s.legal_hold,
                       c.legal_hold
@@ -798,32 +695,25 @@ class RetentionService:
                   unattached_only: bool = False) -> PurgeResult:
         """Destroy what is expired and not held, and write the tombstone.
 
-        `authority` is mandatory and free text: the schedule, the policy
-        reference, the instruction. A destruction whose authority nobody
-        recorded cannot be defended later, and "the job ran" is not an
+        `authority` is mandatory and free text: the schedule, the policy reference, the instruction. A
+        destruction whose authority nobody recorded cannot be defended later, and "the job ran" is not an
         authority.
 
-        `kinds` (F30, 2026-10-02) narrows the sweep to the named
-        `DueItem.object_type` values and nothing else; None, the default,
-        is every family exactly as before. It exists for
-        `retention_sweep.py`, which must reach collected documents (the one
-        family no case-scoped route can) without also destroying every
-        case's exhibits under a tombstone that names no case.
+        `kinds` narrows the sweep to the named `DueItem.object_type` values and nothing else; None, the default,
+        is every family. It exists for `retention_sweep.py`, which must reach collected documents (the one
+        family no case-scoped route can) without also destroying every case's exhibits under a tombstone that
+        names no case.
 
-        `unattached_only` (F55, 2026-10-08) is the same sweep's other half:
-        a record attached to a case is that case's, with its clock and its
-        hold, and a deployment-wide run must not reach it, so only what no
-        case governs is considered (`due`). Dead letters and the records
-        attached to no case are in that set; both carry a clock and neither
-        can be held.
+        `unattached_only` is the same sweep's other half: a record attached to a case is that case's, with its
+        clock and its hold, and a deployment-wide run must not reach it, so only what no case governs is
+        considered (`due`). Dead letters and the records attached to no case are in that set; both carry a clock
+        and neither can be held.
 
-        The exhibits go first, each in a transaction of its own that marks
-        it destroyed as soon as the store has deleted it, and the tombstone
-        for the batch is written after them in another (C5): the store's
-        delete cannot be rolled back, so nothing that fails later may take
-        a mark back. The documents, records, dead letters and lookups then
-        share one transaction, in which every case they belong to has its
-        hold read again under a share lock (C8).
+        The exhibits go first, each in a transaction of its own that marks it destroyed as soon as the store has
+        deleted it, and the tombstone for the batch is written after them in another: the store's delete cannot
+        be rolled back, so nothing that fails later may take a mark back. The documents, records, dead letters
+        and lookups then share one transaction, in which every case they belong to has its hold read again under
+        a share lock.
         """
         if not authority or not authority.strip():
             raise RetentionError(
@@ -840,25 +730,18 @@ class RetentionService:
                     f"days) and has never been confirmed by a human. Confirm "
                     f"it on the Records pane, under Retention.")
 
-        # A purge that reports `documents_purged: 0` without saying why is
-        # reporting a gap in the wiring as a fact about the data. Until the
-        # collection foundation (2026-09-24) nothing wrote
-        # `collect.document.retain_until` at all.
-        # Since then the collector sets it at insert, and only for a
-        # document whose adapter keeps a clock and whose category has a
-        # retention rule; RSS items and documents of an unruled category
-        # still have none, and a rule added later does not reach documents
-        # collected before it (a backfill is a destruction decision,
-        # docs/17). Deliberately NOT derived here: that would arm a
-        # destruction path over every document already collected, on the
-        # one code path whose mistakes are irreversible.
+        # A purge that reports `documents_purged: 0` without saying why would report a gap in the wiring as a
+        # fact about the data. The collector sets `retain_until` at insert, and only for a document whose adapter
+        # keeps a clock and whose category has a retention rule; RSS items and documents of an unruled category
+        # have none, and a rule added later does not reach documents collected before it (a backfill is a
+        # destruction decision, docs/17). Deliberately NOT derived here: that would arm a destruction path over
+        # every document already collected, on the one code path whose mistakes are irreversible.
         unclocked = self._c.execute(
             "SELECT count(*) FROM collect.document "
             "WHERE purged_at IS NULL AND retain_until IS NULL").fetchone()[0]
         if unclocked:
-            # Counts and pronouns agreed rather than a bracketed plural;
-            # every warning in this module is printed to the operator
-            # verbatim (README screenshot set review, 2026-09-23).
+            # Counts and pronouns agree rather than use a bracketed plural; every warning in this module is
+            # printed to the operator verbatim.
             one = unclocked == 1
             result.warnings.append(
                 f"{count_of(unclocked, 'collected document', 'collected documents')} "
@@ -891,34 +774,21 @@ class RetentionService:
                       if i.object_type == "ingest_record"]
         dead_ids = [i.object_id for i in actionable
                     if i.object_type == "dead_letter"]
-        # F15.3 and F15.4, and F7's Jira warning.
+        # Lookups, their answers and batches.
         lookup_ids = [i.object_id for i in actionable if i.object_type == "lookup"]
         result_ids = [i.object_id for i in actionable
                       if i.object_type == "lookup_result"]
         batch_ids = [i.object_id for i in actionable
                      if i.object_type == "lookup_batch"]
-        # lab-4 (2026-10-03).
         sample_ids = [i.object_id for i in actionable
                       if i.object_type == "sample"]
         touched = ([case_id] if case_id else
                    [i.case_id for i in actionable if i.case_id is not None])
 
         if dry_run:
-            # THE COUNTS ARE THE WHOLE POINT OF A DRY RUN. This used to
-            # return here with every counter still at zero, having done the
-            # full sweep and thrown the answer away -- so a preview of a
-            # case with twelve exhibits about to be destroyed was
-            # byte-identical to a preview of a case with nothing due, and
-            # the pane rendered both as "Nothing would be destroyed."
-            #
-            # `held_back` was the only non-zero number a dry run could
-            # produce, which made it worse than silent: the sole figure on
-            # screen counted the items being SPARED.
-            #
-            # This is the control whose entire purpose is to be read before
-            # an irreversible action, and `dry_run` defaults to TRUE
-            # precisely because the router treats destruction-by-default as
-            # the thing to design against.
+            # The counts are the whole point of a dry run: it does the full sweep and reports the figures, so a
+            # preview of twelve exhibits about to be destroyed differs from a preview of a case with nothing due.
+            # `dry_run` defaults to TRUE because destruction by default is what the router is designed against.
             result.evidence_purged = len(evidence_ids)
             result.documents_purged = len(document_ids)
             result.records_purged = len(record_ids)
@@ -932,14 +802,11 @@ class RetentionService:
             return result
         if not actionable:
             return result
-        # BEFORE the transaction, and before the evidence leg asks the
-        # object store to delete anything (2026-09-25): the
-        # document leg's refusal used to come after `_purge_evidence` had
-        # already deleted exhibit bytes in the same transaction, and its
-        # rollback would unmark rows whose bytes were gone. Every due
-        # document is asked, held or not, so the refusal cannot depend on
-        # a race it has not seen yet; the document leg keeps its own check
-        # under its locks.
+        # BEFORE the transaction, and before the evidence leg asks the object store to delete anything: a
+        # refusal from the document leg after `_purge_evidence` had deleted exhibit bytes in the same transaction
+        # would roll back and unmark rows whose bytes were gone. Every due document is asked, held or not, so the
+        # refusal cannot depend on a race it has not seen yet; the document leg keeps its own check under its
+        # locks.
         if document_ids and self._document_raw is None:
             keyed = self._c.execute(
                 """SELECT count(*) FROM collect.document
@@ -948,22 +815,17 @@ class RetentionService:
             if keyed:
                 raise RetentionError(_NO_DOCUMENT_RAW_STORE)
 
-        # The exhibits first, each in a transaction of its own (C5, C6).
+        # The exhibits first, each in a transaction of its own.
         if evidence_ids:
             self._purge_evidence_leg(evidence_ids, result, case_id=case_id,
                                      authority=authority, actor_id=actor_id)
 
         with self._c.transaction():
-            # The case hold, read under a share lock on the case's row, for
-            # every case whose records, lookups or samples this sweep is
-            # about to empty: a hold placed since the sweep keeps what the
-            # case clock governs, and one placed after this waits for the
-            # purge to commit (evidence-purge-hold-race,
-            # evidence-case-hold-unreachable, 2026-10-03). Per case and not
-            # only for the case a caller named, so a sweep that names none
-            # does not destroy what a hold committed since `due()` read
-            # (2026-10-07). The exhibits were claimed
-            # above, each reading its case's hold under its own locks.
+            # The case hold, read under a share lock on the case's row, for every case whose records, lookups or
+            # samples this sweep is about to empty: a hold placed since the sweep keeps what the case clock
+            # governs, and one placed after this waits for the purge to commit. Per case and not only for the
+            # case a caller named, so a sweep that names none does not destroy what a hold committed since
+            # `due()` read. The exhibits were claimed above, each reading its case's hold under its own locks.
             by_case = {i.object_id: i.case_id for i in actionable}
             clocked = (record_ids + lookup_ids + result_ids + batch_ids
                        + sample_ids)
@@ -997,29 +859,22 @@ class RetentionService:
                 result_ids = [i for i in result_ids if i not in kept_ids]
                 batch_ids = [i for i in batch_ids if i not in kept_ids]
             if document_ids:
-                # The row survives; the CONTENT does not. Keeping the row
-                # is what lets a later question about coverage be answered
-                # ("we held 40 documents from that source and destroyed
-                # them on this date") without holding the documents.
-                # `body_text` is NOT NULL (0011), so it is emptied rather
-                # than nulled, and `purged_at` is what marks it destroyed.
-                # Since 2026-09-24 the holds are rechecked under locks,
-                # the raw markup and the identities of uninvolved people go
-                # with the content, and the tombstone says what happened to
-                # the markup (`_purge_documents`).
+                # The row survives; the CONTENT does not. Keeping the row lets a later question about coverage
+                # be answered ("we held 40 documents from that source and destroyed them on this date") without
+                # holding the documents. `body_text` is NOT NULL (0011), so it is emptied rather than nulled,
+                # and `purged_at` marks it destroyed. The holds are rechecked under locks, the raw markup and
+                # the identities of uninvolved people go with the content, and the tombstone says what happened
+                # to the markup (`_purge_documents`).
                 self._purge_documents(document_ids, authority=authority,
                                       actor_id=actor_id, result=result)
-                # No `embedding = NULL` (F6.1, 2026-09-24): migration 0094
-                # drops that column. The vectors live in
-                # collect.document_embedding, whose trigger deletes them in
-                # the purge's own transaction when purged_at changes.
+                # No `embedding = NULL`: migration 0094 drops that column. The vectors live in
+                # collect.document_embedding, whose trigger deletes them in the purge's own transaction when
+                # purged_at changes.
 
-            # Ingest records. The PAYLOAD goes; the row stays, exactly as
-            # for a document. Keeping the row is what lets "we held 4,000
-            # records from that feed and destroyed them on this date" be
-            # answered without holding them -- and the victim credentials
-            # attached to the record have to go with it, or the payload is
-            # destroyed and the credential it named is not.
+            # Ingest records. The PAYLOAD goes; the row stays, as for a document, so "we held 4,000 records from
+            # that feed and destroyed them on this date" can be answered without holding them. The victim
+            # credentials attached to the record go with it, or the payload is destroyed and the credential it
+            # named is not.
             if record_ids:
                 self._c.execute(
                     "DELETE FROM ingest.victim_credential "
@@ -1037,11 +892,9 @@ class RetentionService:
                     rule="retention_rule", storage_outcome=STORAGE_NA)
 
             if dead_ids:
-                # `raw_fragment` is NOT NULL (0033), so it is replaced
-                # rather than blanked -- and `redacted` is set true in the
-                # same statement, because migration 0040's CHECK is
-                # re-evaluated on every UPDATE and a pre-redactor row would
-                # otherwise be the ONE thing a purge cannot destroy.
+                # `raw_fragment` is NOT NULL (0033), so it is replaced rather than blanked, and `redacted` is set
+                # true in the same statement, because migration 0040's CHECK is re-evaluated on every UPDATE and a
+                # pre-redactor row would otherwise be the ONE thing a purge cannot destroy.
                 self._c.execute(
                     """UPDATE ingest.dead_letter
                           SET purged_at = now(),
@@ -1061,10 +914,8 @@ class RetentionService:
                                 case_id=case_id, authority=authority,
                                 actor_id=actor_id)
         if sample_ids:
-            # After the transaction, each sample in its own: the disposition
-            # is a network copy and delete, and must not run while this
-            # purge's audit rows hold the chain's global lock (lab-4,
-            # 2026-10-03).
+            # After the transaction, each sample in its own: the disposition is a network copy and delete, and
+            # must not run while this purge's audit rows hold the chain's global lock.
             self._purge_samples(sample_ids, authority=authority,
                                 actor_id=actor_id, case_id=case_id,
                                 result=result)
@@ -1074,27 +925,20 @@ class RetentionService:
     def _purge_evidence_leg(self, evidence_ids: list[UUID], result: PurgeResult, *,
                             case_id: UUID | None, authority: str,
                             actor_id: UUID) -> None:
-        """The exhibits `purge_due` found due: destroyed one at a time, each
-        in a transaction of its own (`_purge_evidence_each`), then the
-        counts, the warnings and the tombstone.
+        """The exhibits `purge_due` found due: destroyed one at a time, each in a transaction of its own
+        (`_purge_evidence_each`), then the counts, the warnings and the tombstone.
 
-        This ran inside the transaction that also emptied the documents,
-        records and lookups, and held every exhibit and the case until it
-        committed. The object store's delete cannot be rolled back, so a
-        failure anywhere after a delete (a later exhibit, a later leg, the
-        tombstone, the commit) left objects destroyed, their rows unmarked,
-        an integrity alarm on each of them and every later sweep reporting
-        "no object found" (2026-10-07). And a case hold
-        entered during the first delete waited for ALL of it and then landed
-        on destroyed exhibits with no word (C6): now it waits for the exhibit
-        in flight, and every exhibit after that reads it and is kept."""
+        They are not in the transaction that empties the documents, records and lookups: the object store's
+        delete cannot be rolled back, so a failure after a delete (a later exhibit, a later leg, the tombstone,
+        the commit) would leave objects destroyed, their rows unmarked and every later sweep reporting "no
+        object found". A case hold entered during a delete waits only for the exhibit in flight, and every
+        exhibit after that reads it and is kept."""
         storage = self._purge_evidence_each(evidence_ids, actor_id=actor_id,
                                             rule="case.retention_until")
         outcome = storage.outcome
         if storage.held:
-            # Reread under the rows' locks (evidence-purge-hold-race,
-            # 2026-10-03): a hold placed since the sweep keeps its
-            # exhibit, and is never acknowledged on one destroyed.
+            # Reread under the rows' locks: a hold placed since the sweep keeps its exhibit, and is never
+            # acknowledged on one destroyed.
             kept = len(storage.held)
             result.held_back += kept
             result.count("held_back", [("evidence", i) for i in storage.held])
@@ -1117,11 +961,8 @@ class RetentionService:
             evidence_ids = [i for i in evidence_ids if i not in gone]
         result.evidence_purged = len(evidence_ids)
         result.count("evidence_purged", evidence_ids)
-        # All three counts, always. Until 2026-09-02 `storage_failed`
-        # was only copied when the batch verdict was FAILED, so a
-        # batch with one lock and one transport failure reported the
-        # lock and lost the failure -- the verdict is the WORST
-        # outcome, not the only one.
+        # All three counts, always: the batch verdict is the WORST outcome, not the only one, so a batch with one
+        # lock and one transport failure reports both.
         result.storage_deleted = storage.deleted
         result.storage_locked = storage.locked
         result.storage_failed = storage.failed
@@ -1164,20 +1005,10 @@ class RetentionService:
                     f"as a completed destruction."),
                 storage.failed_ids, evidence_ids)
         if outcome == STORAGE_NA:
-            # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller
-            # has to be told. `RetentionService(conn)` takes
-            # `storage=None` and the HTTP routers construct it that
-            # way, so every purge through the API marks the rows
-            # purged and never reaches the bytes. The tombstone
-            # records NOT_APPLICABLE, which is honest, but the
-            # RESPONSE said `evidence_purged: N`, `storage_locked:
-            # 0` and nothing else -- which reads as "destroyed, no
-            # problems" to anyone who is not reading tombstones.
-            #
-            # This is the same class of lie the LOCKED branch below
-            # already guards against, and the more dangerous one:
-            # LOCKED at least says the store disagreed. This said
-            # nothing.
+            # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller has to be told. `RetentionService(conn)`
+            # takes `storage=None` and the HTTP routers construct it that way, so every purge through the API
+            # marks the rows purged and never reaches the bytes. The tombstone records NOT_APPLICABLE, which is
+            # honest, but the response must say so too, or `evidence_purged: N` reads as "destroyed, no problems".
             result.warnings.append(
                 "evidence rows are marked purged but NO OBJECT "
                 "STORE WAS CONFIGURED for this purge, so the bytes "
@@ -1186,20 +1017,17 @@ class RetentionService:
                 "as a destruction.")
 
         if evidence_ids:
-            # In a transaction of its own, after the marks are committed:
-            # a tombstone that cannot be written must not take back the
-            # `purged_at` of objects the store has already deleted. Said
-            # loudly instead, because these exhibits are no longer due and a
-            # second purge will not record them.
+            # In a transaction of its own, after the marks are committed: a tombstone that cannot be written must
+            # not take back the `purged_at` of objects the store has already deleted. Said loudly instead, because
+            # these exhibits are no longer due and a second purge will not record them.
             try:
                 with self._c.transaction():
                     self._evidence_tombstones(
                         result, storage, case_id=case_id, authority=authority,
                         actor_id=actor_id, rule="case.retention_until")
             except Exception as exc:
-                # `from None`: a router replaces the message of an error
-                # chained to a database error (`safe_detail`), and this one
-                # has to reach the operator. The cause is logged.
+                # `from None`: a router replaces the message of an error chained to a database error
+                # (`safe_detail`), and this one has to reach the operator. The cause is logged.
                 log.error("exhibits were destroyed and marked purged but "
                           "their tombstone could not be written", exc_info=exc)
                 raise RetentionError(
@@ -1254,19 +1082,13 @@ class RetentionService:
                              actor_id: UUID, rule: str,
                              approval_request_id: UUID | None = None,
                              ) -> None:
-        """One evidence tombstone per storage outcome, each counting the
-        exhibits that had it: DELETED, then LOCKED_UNTIL_RETENTION, then
-        FAILED, and none for an outcome no exhibit had.
+        """One evidence tombstone per storage outcome, each counting the exhibits that had it: DELETED, then
+        LOCKED_UNTIL_RETENTION, then FAILED, and none for an outcome no exhibit had.
 
-        2026-10-07. One tombstone per batch carried the WORST outcome and
-        counted the whole batch, which was right while a batch was all or
-        nothing. Since each exhibit is destroyed on its own answer, a sweep in
-        which some locks had ended and some had not (the usual case: a lock
-        runs a year from lodging, so exhibits lodged in a case's last year
-        are still locked when it falls due) wrote one LOCKED record for every
-        exhibit, the destroyed ones included, and the refused ones were
-        counted again by the sweep that later destroyed them. The record of
-        destruction said nothing was destroyed."""
+        Each exhibit is destroyed on its own answer, so a sweep can have some locks ended and some not (a lock
+        runs a year from lodging, so exhibits lodged in a case's last year are still locked when it falls due).
+        One tombstone carrying the worst outcome for the whole batch would record the destroyed exhibits as
+        locked, and the refused ones would be counted again by the sweep that later destroys them."""
         for outcome, ids in ((STORAGE_DELETED, storage.deleted_ids),
                              (STORAGE_LOCKED, storage.locked_ids),
                              (STORAGE_FAILED, storage.failed_ids)):
@@ -1283,12 +1105,10 @@ class RetentionService:
                               evidence_ids: list[UUID]) -> PurgeResult:
         """Destroy specific exhibits BEFORE their retention expires.
 
-        docs/08 requires dual control for this, and decision 44 registered
-        `evidence.purge` as an unconditional four-eyes operation. The
-        approval is consumed INSIDE this transaction: split them and a
-        crash leaves either a spent approval with nothing destroyed, or a
-        destruction with a reusable approval still outstanding. The second
-        is the bad direction.
+        docs/08 requires dual control for this, and `evidence.purge` is an unconditional four-eyes operation
+        (decision 44). The approval is consumed INSIDE this transaction: split them and a crash leaves either a
+        spent approval with nothing destroyed, or a destruction with a reusable approval still outstanding. The
+        second is the bad direction.
         """
         from noctornal_api.approvals import ApprovalError, ApprovalService
 
@@ -1319,19 +1139,12 @@ class RetentionService:
         result = PurgeResult()
         try:
             with self._c.transaction():
-                # The order is the fix for two findings (2026-10-03).
-                # evidence-purge-hold-race: the rows and their case are
-                # locked and the holds reread before any byte is destroyed,
-                # and a hold that arrived since the check above refuses the
-                # whole purge. evidence-purge-stalls-audit-chain: the
-                # approval used to be spent FIRST, and spending it writes an
-                # audit row, which holds the chain's global lock to COMMIT,
-                # so every audited write in the deployment waited out the
-                # store deletes. Now the approval is checked and locked
-                # without an audit row, the bytes go, and the spend and the
-                # tombstone, the only audited writes, come last. The spend
-                # still commits with the destruction, and cannot fail once
-                # its row is locked.
+                # The order matters. The rows and their case are locked and the holds reread before any byte is
+                # destroyed, and a hold that arrived since the check above refuses the whole purge. The approval
+                # is checked and locked without an audit row, the bytes go, and the spend and the tombstone, the
+                # only audited writes, come last: an audit row holds the chain's global lock to COMMIT, so
+                # spending first would make every audited write in the deployment wait out the store deletes. The
+                # spend still commits with the destruction, and cannot fail once its row is locked.
                 self._lock_approval(approval_request_id, actor_id=actor_id,
                                     case_id=case_id, payload=payload)
                 storage = self._purge_evidence(evidence_ids, refuse_held=True,
@@ -1341,62 +1154,65 @@ class RetentionService:
                     approval_request_id, actor_id=actor_id,
                     operation="evidence.purge", case_id=case_id,
                     payload=payload)
+                # Every count and every warning about an exhibit is registered against it, so the route can
+                # answer a caller over only the exhibits they may know of: a warning names the storage key,
+                # which carries the exhibit's digest.
                 if storage.gone:
                     gone = set(storage.gone)
-                    result.warnings.append(
-                        f"{count_of(len(gone), 'exhibit was', 'exhibits were')} "
-                        f"already destroyed by another purge and "
-                        f"{agree(len(gone), 'was', 'were')} skipped.")
+                    result.warn_about(
+                        lambda n, _u: (
+                            f"{count_of(n, 'exhibit was', 'exhibits were')} "
+                            f"already destroyed by another purge and "
+                            f"{agree(n, 'was', 'were')} skipped."),
+                        storage.gone)
                     evidence_ids = [i for i in evidence_ids if i not in gone]
                 result.evidence_purged = len(evidence_ids)
+                result.count("evidence_purged", evidence_ids)
                 # Refusal counts, not the batch size -- and on the one path
                 # that writes an out-of-schedule tombstone, which is the
                 # most consequential record this module produces.
                 result.storage_locked = storage.locked
                 result.storage_failed = storage.failed
                 result.storage_deleted = storage.deleted
-                result.warnings.extend(storage.warnings)
+                result.count("storage_deleted", storage.deleted_ids)
+                result.count("storage_locked", storage.locked_ids)
+                result.count("storage_failed", storage.failed_ids)
+                if len(storage.warning_about) == len(storage.warnings):
+                    for text, about in zip(storage.warnings,
+                                           storage.warning_about, strict=True):
+                        result.warn_about(text, (about,))
+                else:
+                    result.warnings.extend(storage.warnings)
                 if storage.locked or storage.failed:
-                    # THIS PATH HAS NO NEXT SWEEP. `_purge_evidence` leaves
-                    # a refused row unmarked and `purge_due` tells the
-                    # operator it "stays due, so the sweep after the lock
-                    # expires finishes the job". That is true of the
-                    # scheduled path and FALSE here: `due()` gates evidence
-                    # on `case.retention_until <= now`, and an
-                    # out-of-schedule purge is by definition of exhibits
-                    # whose retention has NOT expired.
-                    #
-                    # Until 2026-09-02 this path copied `purge_due`'s counts
-                    # and its per-key warnings but not its "the rows are NOT
-                    # marked purged" warning, so a court-ordered early
-                    # destruction refused by a COMPLIANCE lock returned
-                    # `evidence_purged: 1, storage_locked: N, warnings: []`,
-                    # left every byte in the bucket, left the row visible
-                    # and off every sweep, and consumed the four-eyes
-                    # approval -- changing nothing while reporting a purge.
-                    # Before the row-marking change it was at least marked;
-                    # the change altered what this response means and said
-                    # nothing on this path.
-                    kept = storage.locked + storage.failed
-                    one = kept == 1
-                    result.warnings.append(
-                        f"{kept} of "
-                        f"{count_of(len(evidence_ids), 'exhibit', 'exhibits')} "
-                        f"still {'has its' if one else 'have their'} "
-                        f"bytes in the object store, so "
-                        f"{'that row is' if one else 'those rows are'} NOT "
-                        f"marked purged. Unlike the scheduled sweep, nothing "
-                        f"will retry {'it' if one else 'them'}: `due()` "
-                        f"returns only evidence whose case retention has "
-                        f"expired, and this purge is out of schedule, so "
-                        f"{'that exhibit is' if one else 'those exhibits are'} "
-                        f"not due and will not come back due when the lock "
-                        f"lifts. "
-                        f"The four-eyes approval has been CONSUMED and "
-                        f"cannot be reused: a second attempt needs a new "
-                        f"one. A tombstone recording the refusal was "
-                        f"written. Do not report this as a completed "
-                        f"destruction.")
+                    # THIS PATH HAS NO NEXT SWEEP. `_purge_evidence` leaves a refused row unmarked, and
+                    # `purge_due` tells the operator it stays due so the sweep after the lock expires finishes
+                    # the job. That is false here: `due()` gates evidence on `case.retention_until <= now`, and an
+                    # out-of-schedule purge is by definition of exhibits whose retention has NOT expired. So a
+                    # court-ordered early destruction refused by a COMPLIANCE lock must say that every byte
+                    # remains, the row is visible and on no sweep, and the four-eyes approval is spent.
+                    def kept_warning(kept: int, total: int) -> str:
+                        one = kept == 1
+                        return (
+                            f"{kept} of "
+                            f"{count_of(total, 'exhibit', 'exhibits')} "
+                            f"still {'has its' if one else 'have their'} "
+                            f"bytes in the object store, so "
+                            f"{'that row is' if one else 'those rows are'} NOT "
+                            f"marked purged. Unlike the scheduled sweep, nothing "
+                            f"will retry {'it' if one else 'them'}: `due()` "
+                            f"returns only evidence whose case retention has "
+                            f"expired, and this purge is out of schedule, so "
+                            f"{'that exhibit is' if one else 'those exhibits are'} "
+                            f"not due and will not come back due when the lock "
+                            f"lifts. "
+                            f"The four-eyes approval has been CONSUMED and "
+                            f"cannot be reused: a second attempt needs a new "
+                            f"one. A tombstone recording the refusal was "
+                            f"written. Do not report this as a completed "
+                            f"destruction.")
+                    result.warn_about(
+                        kept_warning,
+                        storage.locked_ids + storage.failed_ids, evidence_ids)
                 if evidence_ids:
                     self._evidence_tombstones(
                         result, storage, case_id=case_id, authority=authority,
@@ -1404,8 +1220,7 @@ class RetentionService:
                         approval_request_id=approval_request_id)
         except ApprovalError as exc:
             raise RetentionError(str(exc)) from exc
-        # F7: the early destruction most likely
-        # to follow a court order says what Jira keeps too.
+        # The early destruction most likely to follow a court order says what Jira keeps too.
         self._jira_note(result, [case_id], actor_id=actor_id, dry_run=False)
         return result
 
@@ -1413,19 +1228,16 @@ class RetentionService:
 
     def _jira_note(self, result: PurgeResult, case_ids, *, actor_id: UUID,
                    dry_run: bool) -> None:
-        """F7 (2026-09-24): Jira issues outlive NocTORnal's retention.
-        When the cases a purge touched have issues there, the purge says so
-        (dry runs included) and a real purge records it."""
+        """Jira issues outlive NocTORnal's retention. When the cases a purge touched have issues there, the purge
+        says so (dry runs included) and a real purge records it."""
         from noctornal_api import jira
         note = jira.purge_note(self._c, case_ids, actor_id=actor_id, dry_run=dry_run)
         if note:
             result.warnings.append(note)
 
     def _case_held_now(self, case_id: UUID) -> bool:
-        """The case's legal hold, read under a share lock on its row: a hold
-        written before this waited for nobody and is seen, one written after
-        waits for the caller's transaction to commit (evidence-purge-hold-race,
-        2026-10-03). Only inside a transaction."""
+        """The case's legal hold, read under a share lock on its row: a hold written before this is seen, one
+        written after waits for the caller's transaction to commit. Only inside a transaction."""
         row = self._c.execute(
             'SELECT legal_hold FROM core."case" WHERE id = %s FOR SHARE',
             (case_id,)).fetchone()
@@ -1433,13 +1245,11 @@ class RetentionService:
 
     def _lock_approval(self, request_id: UUID, *, actor_id: UUID,
                        case_id: UUID, payload: dict) -> None:
-        """The out-of-schedule approval, verified and locked FOR UPDATE
-        without spending it, so nothing is destroyed on an approval that
-        would then fail to spend, and no audit row (and so no chain lock) is
-        written before the store deletes (evidence-purge-stalls-audit-chain,
-        2026-10-03). A request that does not qualify is handed to `consume`,
-        which refuses with its one sentence and records why on a connection
-        of its own: this transaction has audited nothing yet."""
+        """The out-of-schedule approval, verified and locked FOR UPDATE without spending it, so nothing is
+        destroyed on an approval that would then fail to spend, and no audit row (and so no chain lock) is
+        written before the store deletes. A request that does not qualify is handed to `consume`, which refuses
+        with its one sentence and records why on a connection of its own: this transaction has audited nothing
+        yet."""
         from noctornal_api.approvals import ApprovalService, payload_hash
 
         row = self._c.execute(
@@ -1460,16 +1270,12 @@ class RetentionService:
     def _purge_samples(self, sample_ids: list[UUID], *, authority: str,
                        actor_id: UUID, case_id: UUID | None,
                        result: PurgeResult) -> None:
-        """lab-4 (2026-10-03): an expired case's samples leave the working
-        store the way this deployment disposes of a rejected sample
-        (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`: preserved under a legal
-        hold by default, or destroyed), through `SampleService.reject`, the
-        one path that disposes of a sample, which rereads every hold under
-        the sample's row lock. Its refusal for a read-only case does not
-        apply here: docs/11 names this purge as the way a closed case's
-        material leaves. A sample that cannot be disposed of stays due and
-        is named in a warning; one tombstone per disposition records the
-        rest."""
+        """An expired case's samples leave the working store the way this deployment disposes of a rejected
+        sample (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`: preserved under a legal hold by default, or destroyed),
+        through `SampleService.reject`, the one path that disposes of a sample, which rereads every hold under
+        the sample's row lock. Its refusal for a read-only case does not apply here: docs/11 names this purge as
+        the way a closed case's material leaves. A sample that cannot be disposed of stays due and is named in a
+        warning; one tombstone per disposition records the rest."""
         from noctornal_api.samples import (
             DESTROY,
             SampleError,
@@ -1532,10 +1338,9 @@ class RetentionService:
 
     def _purge_lookups(self, result: PurgeResult, lookup_ids, result_ids, batch_ids,
                        *, case_id, authority: str, actor_id: UUID) -> None:
-        """F15.3 and F15.4 (2026-09-24). A lookup still waiting or queued
-        is first cancelled, so an emptied row can never be sent; a SENDING
-        row is left until it settles. Values, notes and bodies go; every
-        row, fingerprint and attempt stays, with one tombstone per type."""
+        """Lookups, answers and batches of an expired case. A lookup still waiting or queued is first cancelled,
+        so an emptied row can never be sent; a SENDING row is left until it settles. Values, notes and bodies
+        go; every row, fingerprint and attempt stays, with one tombstone per type."""
         if lookup_ids:
             self._c.execute(
                 """UPDATE ingest.lookup SET state = 'CANCELLED', refusal = 'purged'
@@ -1593,108 +1398,63 @@ class RetentionService:
                         rule: str | None = None) -> "_StorageOutcome":
         """Ask the object store, then mark ONLY the rows whose bytes went.
 
-        ## The holds are reread under locks (evidence-purge-hold-race, 2026-10-03)
+        ## The holds are reread under locks
 
-        The holds were read once, by `due()` or the out-of-schedule check,
-        before this ran; then every object was deleted and the rows marked,
-        and a hold placed in between was acknowledged to the officer and
-        destroyed anyway. Now each exhibit is locked FOR UPDATE, with its
-        case FOR SHARE, and its holds are reread under those locks BEFORE its
-        delete (`_claim_for_destruction`): a hold already written keeps its
-        exhibit (returned in `held`, or the whole call refused when
-        `refuse_held`), and a hold written later waits for this transaction
-        and then finds the exhibit destroyed (`set_legal_hold` refuses a
-        purged row; 0142 refuses it in the database too). The document leg
-        has done the same since decision 74. The transaction is the caller's:
-        `purge_due` calls this once per exhibit (`_purge_evidence_each`), so
-        a hold waits for one exhibit and not for the sweep, and the exhibit's
-        mark is committed before the next is touched; `purge_out_of_schedule`
-        calls it once for the whole batch, because the approval is spent
-        with the destruction.
+        Each exhibit is locked FOR UPDATE, with its case FOR SHARE, and its holds are reread under those locks
+        BEFORE its delete (`_claim_for_destruction`): a hold already written keeps its exhibit (returned in
+        `held`, or the whole call refused when `refuse_held`), and a hold written later waits for this
+        transaction and then finds the exhibit destroyed (`set_legal_hold` refuses a purged row; 0142 refuses it
+        in the database too). The document leg does the same (decision 74). The transaction is the caller's:
+        `purge_due` calls this once per exhibit (`_purge_evidence_each`), so a hold waits for one exhibit and not
+        for the sweep, and the exhibit's mark is committed before the next is touched; `purge_out_of_schedule`
+        calls it once for the whole batch, because the approval is spent with the destruction.
 
-        Until 2026-09-02 this marked every row `purged_at` up front and
-        then asked the store, on the theory that the store's answer
-        belonged on the tombstone and the row was the database's business.
-        Two things were wrong with that at once:
+        ## Only confirmed rows are marked
 
-        1. The store was asked through `EvidenceStorage.delete()`, a
-           keyless delete. The evidence bucket is versioned (forced by
-           `--with-lock`), so a keyless delete inserts a delete marker and
-           returns success with every version still retrievable by version
-           id. The tombstone said DELETED; the bytes were all there.
-           `delete_all_versions()` -- which enumerates the versions and
-           reports a refusal as a refusal -- existed, was verified live,
-           and had a test asserting that nothing called it. It is what
-           this calls now, whenever the store offers it.
+        1. The store is asked through `delete_all_versions()`, which enumerates the versions and reports a
+           refusal as a refusal. The evidence bucket is versioned (forced by `--with-lock`), so a keyless
+           `delete()` inserts a delete marker and returns success with every version still retrievable by
+           version id; it is used only for a store without `delete_all_versions` (the test stubs; nothing in
+           production).
 
-        2. A row marked purged on a REFUSAL vanished from every read path
-           and from `due()`, so nothing ever retried it: the lock expired
-           and the bytes sat in the bucket forever under a tombstone saying
-           LOCKED_UNTIL_RETENTION. Now only a row whose object the store
-           confirmed removed is marked.
+        2. A row marked purged on a REFUSAL would vanish from every read path and from `due()`, so nothing would
+           retry it and the bytes would sit in the bucket forever under a tombstone saying
+           LOCKED_UNTIL_RETENTION. So only a row whose object the store confirmed removed is marked. When the
+           caller is `purge_due`, a refused or failed row stays due, and the sweep after the lock expires
+           finishes the job and writes its own DELETED record. That is not true of `purge_out_of_schedule`:
+           `due()` gates evidence on `case.retention_until <= now`, and that purge exists for exhibits whose
+           retention has NOT expired, so a row it leaves unmarked is on no sweep, and that path says so in a
+           warning of its own.
 
-           WHEN THE CALLER IS `purge_due`, a refused or failed row stays
-           due, and the sweep after the lock expires finishes the job and
-           writes its own DELETED record. That is not true of
-           `purge_out_of_schedule`, the other caller: `due()` gates
-           evidence on `case.retention_until <= now`, and an
-           out-of-schedule purge exists precisely for exhibits whose
-           retention has NOT expired, so a row it leaves unmarked is on no
-           sweep at all and nothing will retry it. That path says so in a
-           warning of its own -- added 2026-09-02, because for one commit
-           it inherited this justification without the fact that makes it
-           true.
+        The COUNTS are per EXHIBIT ROW, and are mapped, never `VersionedDeleteResult.outcome`: that property
+        says DESTROYED / NOTHING_TO_DELETE, and the tombstone CHECK (migration 0032) takes only the `STORAGE_*`
+        words in this module. A key with any locked version is locked (the exhibit is still readable, so
+        nothing was destroyed for it however many other versions went); a key with nothing locked and nothing
+        removed is failed, because a row that says an exhibit was written while the store has nothing is a
+        disagreement to investigate, not a destruction to record; a key the store emptied is deleted, and only
+        those rows are marked. Anything `delete_all_versions` raises is a failure it did not recognise as a
+        lock, and is counted as one. Every row lands in exactly one counter, so the three add up to the batch.
+        The version counts are kept in the warning that names the key they belong to.
 
-        The COUNTS are per EXHIBIT ROW, and are mapped, never
-        `VersionedDeleteResult.outcome`: that property says DESTROYED /
-        NOTHING_TO_DELETE, and the tombstone CHECK (migration 0032) takes
-        only the `STORAGE_*` words in this module. A key with any locked
-        version -> locked (the exhibit is still readable, so nothing was
-        destroyed for it however many other versions went); a key with
-        nothing locked and nothing removed -> failed, because "the row says
-        an exhibit was written and the store has nothing" is a disagreement
-        to investigate, not a destruction to record; a key the store
-        emptied -> deleted, and only those rows are marked. Anything
-        `delete_all_versions` raises is a failure it did not recognise as a
-        lock, and is counted as one. Every row lands in exactly one
-        counter, so the three add up to the batch -- the arithmetic
-        `PurgeResult.evidence_purged` and the governance router both state
-        in prose, and which summing object VERSIONS into `deleted` and
-        `locked` broke for one commit on 2026-09-02. The version counts
-        are kept, in the warning that names the key they belong to.
-
-        A store without `delete_all_versions` (the test stubs; nothing in
-        production) is asked through `delete()`, and its exception, if any,
-        is classified by `_is_retention_refusal`.
+        A store without `delete_all_versions` is asked through `delete()`, and its exception, if any, is
+        classified by `_is_retention_refusal`.
         """
         if self._storage is None and ids:
-            # REFUSE. NOT_APPLICABLE is a lie for evidence.
-            # (`and ids`: with nothing to destroy there is nothing to
-            # lie about, and the caller already guards on a non-empty
-            # list — but a refusal for a no-op would be its own small
-            # confusion.)
+            # REFUSE. NOT_APPLICABLE would be a lie for evidence. (`and ids`: with nothing to destroy there is
+            # nothing to lie about, and a refusal for a no-op would be its own confusion.)
             #
-            # `core.evidence.storage_key` is NOT NULL and `EvidenceService
-            # .ingest` commits a row only with its bytes stored, so every
-            # exhibit HAS an object and the question always applies. This
-            # branch used to `return STORAGE_NA`, and because both
-            # governance routers construct `RetentionService(conn)` with no
-            # storage, that was 100% of production purges: rows marked
-            # `purged_at`, exhibit gone from every read path, bytes intact
-            # in MinIO, and the tombstone — the record designed to outlive
-            # the data — asserting the object store was not applicable.
+            # `core.evidence.storage_key` is NOT NULL and `EvidenceService.ingest` commits a row only with its
+            # bytes stored, so every exhibit HAS an object and the question always applies. Both governance
+            # routers construct `RetentionService(conn)` with no storage, so returning STORAGE_NA would mark rows
+            # `purged_at`, hide the exhibit from every read path, leave the bytes intact in MinIO, and have the
+            # tombstone, the record designed to outlive the data, assert the object store was not applicable.
             #
-            # NOT_APPLICABLE remains correct for documents, ingest records
-            # and dead letters further down, whose content is nulled in the
-            # database and never had an object. That is why the wrong value
-            # did not look wrong.
+            # NOT_APPLICABLE is correct for documents, ingest records and dead letters further down, whose
+            # content is nulled in the database and never had an object.
             #
-            # Refusing rather than degrading follows `ingest.py:_with_raw`,
-            # which 503s when the raw store is missing instead of accepting
-            # bytes it will drop. `rawstore.py`'s docstring records that
-            # exact bug being found and fixed once on the ingest side; this
-            # is the same shape on the destructive side, where the cost is
-            # a false record of destruction rather than lost intake.
+            # Refusing rather than degrading follows `ingest.py:_with_raw`, which 503s when the raw store is
+            # missing instead of accepting bytes it will drop; here the cost would be a false record of
+            # destruction rather than lost intake.
             raise RetentionError(
                 "no evidence object store is configured, so the exhibit "
                 "bytes cannot be destroyed. Refusing rather than marking "
@@ -1707,18 +1467,11 @@ class RetentionService:
         gone_ids: list[UUID] = []
         rows = self._claim_for_destruction(ids, refuse_held=refuse_held,
                                            held=held_ids, gone=gone_ids)
-        # COUNTED, not collapsed. This loop used to set a single verdict for
-        # the whole batch and the caller then recorded
-        # `storage_locked = len(evidence_ids)` -- the BATCH SIZE. One refusal
-        # in a hundred wrote "100 objects locked" into an append-only
-        # tombstone, and a hundred refusals wrote the same number, so the
-        # figure could not distinguish them and could not be corrected
-        # afterwards.
-        #
-        # The bare `except Exception` also mapped every failure class to
-        # LOCKED_UNTIL_RETENTION, which is a specific and defensible claim
-        # about a retention lock. A connection reset is not that claim, and
-        # STORAGE_FAILED existed for it and was dead code.
+        # COUNTED, not collapsed: a single verdict for the batch would record `storage_locked =
+        # len(evidence_ids)`, so one refusal in a hundred and a hundred refusals would write the same number into
+        # an append-only tombstone that cannot be corrected afterwards. A bare `except Exception` mapped to
+        # LOCKED_UNTIL_RETENTION would also claim a retention lock for a connection reset; STORAGE_FAILED is for
+        # that.
         deleted = locked = failed = 0
         destroyed_ids: list[UUID] = []
         locked_ids: list[UUID] = []
@@ -1731,13 +1484,10 @@ class RetentionService:
                 try:
                     r = self._storage.delete_all_versions(key)
                 except Exception as exc:  # noqa: BLE001 - counted, not hidden
-                    # Not a lock (the method returns those as a count) and
-                    # not a deletion: an unrecognised refusal or a store
-                    # that did not answer. The key is named because on the
-                    # scheduled path the next sweep will retry it and
-                    # somebody should know why -- and on the out-of-schedule
-                    # path nothing will, which is worse and is why that
-                    # caller adds a warning of its own.
+                    # Not a lock (the method returns those as a count) and not a deletion: an unrecognised
+                    # refusal or a store that did not answer. The key is named because on the scheduled path the
+                    # next sweep will retry it and somebody should know why; on the out-of-schedule path nothing
+                    # will, which is why that caller adds a warning of its own.
                     failed += 1
                     failed_ids.append(evidence_id)
                     warned.append(evidence_id)
@@ -1748,20 +1498,12 @@ class RetentionService:
                         f"marked purged")
                     continue
                 if r.versions_locked:
-                    # Bytes remain, so this ROW is a refusal whatever else
-                    # went: locked wins over removed. Between two commits
-                    # on 2026-09-02 `deleted += r.versions_removed` ran
-                    # BEFORE this check, so an exhibit with one version
-                    # removed and one refused reported
-                    # `storage_deleted: 1` beside `evidence_purged: 1`
-                    # while its row stayed unpurged and every byte stayed
-                    # readable -- "one object deleted" for an exhibit that
-                    # is entirely intact.
+                    # Bytes remain, so this ROW is a refusal whatever else went: locked wins over removed, or an
+                    # exhibit with one version removed and one refused would report `storage_deleted: 1` while
+                    # its row stays unpurged and every byte stays readable.
                     #
-                    # The VERSION counts are not lost, they are put where
-                    # they are honest: in a warning naming the key, rather
-                    # than in a counter the router publishes next to a row
-                    # count.
+                    # The VERSION counts go in a warning naming the key, not in a counter the router publishes
+                    # next to a row count.
                     locked += 1
                     locked_ids.append(evidence_id)
                     warned.append(evidence_id)
@@ -1809,23 +1551,18 @@ class RetentionService:
             deleted += 1
             destroyed_ids.append(evidence_id)
         if destroyed_ids:
-            # ONLY these. A row marked purged while its bytes are in the
-            # bucket is the false record this method exists to end. A row
-            # left unmarked is simply due again on the next SCHEDULED
-            # sweep; `purge_out_of_schedule` has no such sweep behind it
-            # and warns instead, because `due()` will never return an
-            # exhibit whose case retention has not expired.
+            # ONLY these. A row marked purged while its bytes are in the bucket is the false record this method
+            # exists to end. A row left unmarked is due again on the next SCHEDULED sweep;
+            # `purge_out_of_schedule` has no such sweep behind it and warns instead, because `due()` never
+            # returns an exhibit whose case retention has not expired.
             self._c.execute(
                 "UPDATE core.evidence SET purged_at = now() WHERE id = ANY(%s)",
                 (destroyed_ids,))
             if actor_id is not None:
-                # The exhibit's own custody trail ends with its destruction,
-                # in the transaction that marks it (2026-10-07): it ended
-                # at the last read, so "who touched this exhibit, and when"
-                # did not say who destroyed it, and the only per-exhibit
-                # record was a column. The tombstone counts the batch; this
-                # names the exhibit. Written after every delete, so the
-                # chain's lock is not held while the store answers.
+                # The exhibit's own custody trail ends with its destruction, in the transaction that marks it, so
+                # "who touched this exhibit, and when" says who destroyed it. The tombstone counts the batch;
+                # this names the exhibit. Written after every delete, so the chain's lock is not held while the
+                # store answers.
                 self._c.execute(
                     """INSERT INTO core.evidence_custody
                            (evidence_id, action, actor_id, detail)
@@ -1851,31 +1588,23 @@ class RetentionService:
 
     def _claim_for_destruction(self, ids: list[UUID], *, refuse_held: bool,
                                held: list, gone: list):
-        """Yield `(id, storage_key)` for each exhibit that may be destroyed
-        now, having locked it and its case and read its holds under those
-        locks (evidence-purge-hold-race, 2026-10-03). The caller destroys
-        what it is handed before asking for the next, so every delete is
-        preceded by a read of the holds that nobody can change until the
-        transaction ends: a hold already written is seen and keeps its
-        exhibit, one written after waits for the transaction and then finds
-        the exhibit destroyed (`set_legal_hold` refuses a purged row, and
-        0142 refuses it in the database).
+        """Yield `(id, storage_key)` for each exhibit that may be destroyed now, having locked it and its case
+        and read its holds under those locks. The caller destroys what it is handed before asking for the next,
+        so every delete is preceded by a read of the holds that nobody can change until the transaction ends: a
+        hold already written is seen and keeps its exhibit, one written after waits for the transaction and then
+        finds the exhibit destroyed (`set_legal_hold` refuses a purged row, and 0142 refuses it in the
+        database).
 
-        Scheduled sweep (`refuse_held` False): one exhibit at a time, in id
-        order, each in a transaction of its own (`_purge_evidence_each`). A
-        court order entered while the sweep is part way through lands at once
-        on every exhibit the sweep has not reached, and is honoured there; it
-        waits only on the exhibit in flight. So does a case hold, which
-        takes the case row FOR UPDATE: it is read by every exhibit after the
-        one being destroyed (2026-10-07).
+        Scheduled sweep (`refuse_held` False): one exhibit at a time, in id order, each in a transaction of its
+        own (`_purge_evidence_each`). A court order entered while the sweep is part way through lands at once on
+        every exhibit the sweep has not reached; it waits only on the exhibit in flight. So does a case hold,
+        which takes the case row FOR UPDATE: it is read by every exhibit after the one being destroyed.
 
-        Out-of-schedule purge (`refuse_held` True): every row and case
-        locked first, in the same order, and the whole batch refused if any
-        of it came under a hold since the check that preceded the approval,
-        so nothing is destroyed and the approval is not spent. Case rows
-        before exhibit rows, each in id order, so two transactions never
-        take them in opposite orders. `core.evidence.case_id` is fixed once
-        lodged (0140), so reading it unlocked to find the cases is safe."""
+        Out-of-schedule purge (`refuse_held` True): every row and case locked first, in the same order, and the
+        whole batch refused if any of it came under a hold since the check that preceded the approval, so
+        nothing is destroyed and the approval is not spent. Case rows before exhibit rows, each in id order, so
+        two transactions never take them in opposite orders. `core.evidence.case_id` is fixed once lodged
+        (0140), so reading it unlocked to find the cases is safe."""
         wanted = sorted(set(ids))
         batches = [wanted] if refuse_held else [[i] for i in wanted]
         for batch in batches:
@@ -1904,7 +1633,7 @@ class RetentionService:
                 if not r[2] and not r[3]:
                     yield r[0], r[1]
 
-    # -- collected documents (2026-09-24; docs/00 decision 74) --------------
+    # -- collected documents (docs/00 decision 74) --------------
 
     def _held_document_count(self, now: datetime) -> int:
         """Due documents that a hold keeps, counted on their own rather than
@@ -1919,18 +1648,14 @@ class RetentionService:
 
     def document_backlog(self, as_of: datetime | None = None
                          ) -> tuple[int, int, datetime | None]:
-        """(collected documents past their clock, how many of those no hold
-        keeps, the oldest deadline among those), counts and a date only
-        (F30, 2026-10-02).
+        """(collected documents past their clock, how many of those no hold keeps, the oldest deadline among
+        those), counts and a date only.
 
-        The hold is `_DOCUMENT_HELD_SQL`, the one predicate `due()` and the
-        purge's recheck read, so what the sweep's dry run and the readiness
-        row report is what the sweep would act on: a second statement of the
-        rule could drift from it, and a count that disagrees with the act is
-        the failure this module is written against. Uncapped on purpose (a
-        LIMITed list would hide a backlog in its limit); the predicate is
-        evaluated only for rows already past their clock, so a deployment
-        with nothing due pays for one index range scan."""
+        The hold is `_DOCUMENT_HELD_SQL`, the one predicate `due()` and the purge's recheck read, so what the
+        sweep's dry run and the readiness row report is what the sweep would act on: a second statement of the
+        rule could drift from it. Uncapped on purpose (a LIMITed list would hide a backlog in its limit); the
+        predicate is evaluated only for rows already past their clock, so a deployment with nothing due pays for
+        one index range scan."""
         now = as_of or datetime.now(timezone.utc)
         row = self._c.execute(
             f"""SELECT count(*), count(*) FILTER (WHERE held.reason IS NULL),
@@ -1943,16 +1668,13 @@ class RetentionService:
 
     def unattached_backlog(self, as_of: datetime | None = None
                            ) -> tuple[int, int, datetime | None]:
-        """(dead letters past their clock, ingest records attached to no
-        case past theirs, the oldest deadline of the two), counts and a date
-        only (F55, 2026-10-08).
+        """(dead letters past their clock, ingest records attached to no case past theirs, the oldest deadline
+        of the two), counts and a date only.
 
-        The other half of what the deployment-wide sweep reaches. Neither
-        can be held (a case hold reaches a record only through its case, and
-        a dead letter has none), so every one counted here is one a sweep
-        would destroy. Counted by the predicates `due` selects them with, on
-        the connection this service runs on, uncapped for the reason
-        `document_backlog` gives."""
+        The other half of what the deployment-wide sweep reaches. Neither can be held (a case hold reaches a
+        record only through its case, and a dead letter has none), so every one counted here is one a sweep
+        would destroy. Counted by the predicates `due` selects them with, on the connection this service runs
+        on, uncapped for the reason `document_backlog` gives."""
         now = as_of or datetime.now(timezone.utc)
         row = self._c.execute(
             """SELECT (SELECT count(*) FROM ingest.dead_letter dl
@@ -2025,7 +1747,8 @@ class RetentionService:
                 WHERE d.id = ANY(%s) AND d.body_html_key IS NOT NULL""",
             (unheld,)).fetchall()
         failed_ids: set[UUID] = set()
-        deleted = failed = shared = 0
+        deleted_ids: set[UUID] = set()
+        shared = 0
         if keys and self._document_raw is None:
             raise RetentionError(_NO_DOCUMENT_RAW_STORE)
         for document_id, key in keys:
@@ -2039,9 +1762,8 @@ class RetentionService:
                 continue
             try:
                 self._document_raw.delete(key)
-                deleted += 1
+                deleted_ids.add(document_id)
             except Exception as exc:  # noqa: BLE001 - counted, and the row kept
-                failed += 1
                 failed_ids.add(document_id)
                 result.warnings.append(
                     f"the object store refused to delete collected markup "
@@ -2084,34 +1806,32 @@ class RetentionService:
                 WHERE h.document_id = ANY(%s)
                   AND jsonb_typeof(h.matched_on) = 'array'""", (purged,))
         result.documents_purged += len(purged)
-        outcome = (STORAGE_FAILED if failed else STORAGE_DELETED if deleted
-                   else STORAGE_NA)
-        self._stone(
-            result, case_id=None, object_type="document", ids=purged,
-            authority=authority, actor_id=actor_id, rule="retention_rule",
-            storage_outcome=outcome)
+        # One tombstone per outcome, as for exhibits: a refused sibling is not purged and so is in neither, and
+        # a document whose markup is shared or absent had no object of its own to destroy.
+        removed = [i for i in purged if i in deleted_ids]
+        no_object = [i for i in purged if i not in deleted_ids]
+        for outcome, stone_ids in ((STORAGE_DELETED, removed),
+                                   (STORAGE_NA, no_object)):
+            if stone_ids:
+                self._stone(
+                    result, case_id=None, object_type="document",
+                    ids=stone_ids, authority=authority, actor_id=actor_id,
+                    rule="retention_rule", storage_outcome=outcome)
 
     def set_document_legal_hold(self, document_id: UUID, *, actor_id: UUID,
                                 on: bool, reason: str | None, clearance: str,
                                 compartments: frozenset[str] = frozenset()
                                 ) -> dict:
-        """A hold a person places on a collected document, and every earlier
-        version of it. The named document must be unpurged and within
-        the caller's labels, on its own label, its source's and its
-        compartments, or it is RetentionNotFound (a 404 indistinguishable
-        from a missing id): a document the caller may not see is not merely
-        hidden but unholdable. When any version is above the caller, nothing
-        is written (409): labels gate writes too. Placing OR lifting needs a
-        reason, and the audit keeps the prior reason and placer.
+        """A hold a person places on a collected document, and every earlier version of it. The named document
+        must be unpurged and within the caller's labels, on its own label, its source's and its compartments, or
+        it is RetentionNotFound (a 404 indistinguishable from a missing id): a document the caller may not see is
+        not merely hidden but unholdable. When any version is above the caller, nothing is written (409): labels
+        gate writes too. Placing OR lifting needs a reason, and the audit keeps the prior reason and placer.
 
-        Every version is locked FOR UPDATE, in the purge's order, BEFORE
-        the named document is read and before anything is written
-        (2026-09-25). A hold that waited on a purge's version locks
-        used to go on to write, and report, a hold on the row the purge had
-        just destroyed: the answer said held and the audit said applied on
-        content that no longer existed. Read after the wait, a destroyed
-        document is the same 404 as a missing one, and only unpurged
-        versions are written or counted."""
+        Every version is locked FOR UPDATE, in the purge's order, BEFORE the named document is read and before
+        anything is written. A hold that waited on a purge's version locks would otherwise write, and report, a
+        hold on the row the purge had just destroyed. Read after the wait, a destroyed document is the same 404
+        as a missing one, and only unpurged versions are written or counted."""
         reason = (reason or "").strip()
         if len(reason) < 5:
             raise RetentionError(
@@ -2126,11 +1846,9 @@ class RetentionService:
     def _document_hold_locked(self, document_id: UUID, *, actor_id: UUID,
                               on: bool, reason: str, clearance: str,
                               held: list[str]) -> dict:
-        # The versions this caller could write, locked: the compartments are
-        # the reader's (L1), and a version outside them is left unlocked
-        # because the count below refuses the whole write over it. Nothing
-        # is returned from here; the label checks below decide what the
-        # caller is told.
+        # The versions this caller could write, locked: the compartments are the reader's, and a version outside
+        # them is left unlocked because the count below refuses the whole write over it. Nothing is returned from
+        # here; the label checks below decide what the caller is told.
         self._c.execute(
             """SELECT v.id FROM collect.document v
                 WHERE v.compartments <@ %(held)s::text[]
@@ -2245,19 +1963,12 @@ class RetentionService:
 
     def set_legal_hold(self, evidence_id: UUID, *, actor_id: UUID,
                        on: bool, reason: str | None) -> None:
-        """A hold overrides all deletion, everywhere. Lifting one is as
-        consequential as applying one: it is what makes a later purge
-        lawful. So both need a reason, as a document hold does, and the
-        audit keeps the reason it replaces.
+        """A hold overrides all deletion, everywhere. Lifting one is as consequential as applying one, since it
+        is what makes a later purge lawful, so both need a reason, as a document hold does, and the audit keeps
+        the reason it replaces. The route gates a lift on the exhibit's labels, so a lead cleared below an
+        exhibit cannot release a court hold on it.
 
-        evidence-hold-lift-below-label (2026-10-03): a lift needed no reason
-        at all, and the route did not look at the exhibit's own labels, so a
-        lead cleared below an exhibit could release a court hold on it in
-        one request. The route now gates a lift on the exhibit's labels;
-        this refuses a lift without a reason.
-
-        evidence-purge-hold-race (2026-10-03): the row is locked first, so a
-        hold sent while a purge holds the row waits for it, and a destroyed
+        The row is locked first, so a hold sent while a purge holds the row waits for it, and a destroyed
         exhibit is refused rather than reported held."""
         reason = (reason or "").strip()
         if len(reason) < 5:
@@ -2274,20 +1985,15 @@ class RetentionService:
                 "UPDATE core.evidence SET legal_hold = %s, legal_hold_reason = %s "
                 "WHERE id = %s AND purged_at IS NULL",
                 (on, reason if on else None, evidence_id))
-            # A hold that changed no row is refused, never audited as
-            # applied (S1, 2026-09-25). Under row-level security a blind
-            # UPDATE on a row the connection cannot see changes nothing and
-            # reports nothing; the route now runs this on a system
-            # connection, and this check is what keeps "held" from ever
-            # being said of an exhibit that is not, or that a purge has
-            # destroyed.
+            # A hold that changed no row is refused, never audited as applied. Under row-level security a blind
+            # UPDATE on a row the connection cannot see changes nothing and reports nothing; this check keeps
+            # "held" from being said of an exhibit that is not, or that a purge has destroyed.
             if cur.rowcount != 1:
                 raise RetentionError(
                     "no such exhibit, or it has been destroyed, so no legal "
                     "hold was placed or lifted")
-            # `object_id` names the exhibit (2026-10-08): the row carried
-            # none, and `/audit/events` does not return `detail`, so an
-            # officer reading the log could not tell which exhibit was held.
+            # `object_id` names the exhibit: `/audit/events` does not return `detail`, so an officer reading the
+            # log could not otherwise tell which exhibit was held.
             self._audit(prior[0], actor_id,
                         "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
                         {"evidence_id": str(evidence_id), "reason": reason,
@@ -2299,40 +2005,27 @@ class RetentionService:
                             on: bool, reason: str | None,
                             lifter_ceiling: tuple | None = None,
                             document_ceiling: tuple | None = None) -> dict:
-        """Hold, or release, everything a case governs: its exhibits (those
-        lodged later too), the ingest records attached to it, its lookups,
-        answers and batches, its samples, and the collected documents it
+        """Hold, or release, everything a case governs: its exhibits (those lodged later too), the ingest
+        records attached to it, its lookups, answers and batches, its samples, and the collected documents it
         cites. Every leg of the purge already reads `core.case.legal_hold`.
 
-        evidence-case-hold-unreachable (2026-10-03): nothing in the product
-        wrote the column, so a preservation order covering a case could not
-        be honoured; only the tests set it. A reason is required both ways,
-        the audit keeps the one replaced, and the row is locked first, so a
-        hold sent while a purge of the case runs waits for the exhibit the
-        purge is destroying at that moment (each is claimed in a transaction
-        of its own, holding the case row FOR SHARE) and every exhibit after
-        that is read as held and kept. The exhibit already being destroyed
-        is destroyed: a hold cannot reach back into a delete in flight
-        (2026-10-07).
+        A reason is required both ways, the audit keeps the one replaced, and the row is locked first, so a hold
+        sent while a purge of the case runs waits for the exhibit the purge is destroying at that moment (each is
+        claimed in a transaction of its own, holding the case row FOR SHARE) and every exhibit after that is read
+        as held and kept. The exhibit already being destroyed is destroyed: a hold cannot reach back into a
+        delete in flight.
 
-        PLACING a hold is open to whoever holds `retention.manage` on the
-        case: preservation never waits for a clearance. LIFTING one is what
-        makes everything under it destroyable, so `lifter_ceiling`, the
-        lifter's (clearance, compartments) on this case, must cover
-        everything the case holds; with none given, or with anything above
-        it, the hold stays and nothing is changed. Otherwise a lead cleared
-        below an exhibit could release a court hold on it through the case,
-        which is what evidence-hold-lift-below-label closed for the exhibit
-        itself. The refusal says the same thing whatever lies above the
+        PLACING a hold is open to whoever holds `retention.manage` on the case: preservation never waits for a
+        clearance. LIFTING one is what makes everything under it destroyable, so `lifter_ceiling`, the lifter's
+        (clearance, compartments) on this case, must cover everything the case holds; with none given, or with
+        anything above it, the hold stays and nothing is changed. Otherwise a lead cleared below an exhibit could
+        release a court hold on it through the case. The refusal says the same thing whatever lies above the
         lifter, and names nothing of it.
 
-        case-hold-lift-documents (2026-10-03): the collected documents
-        the case cites are held only through the case, and carry labels of
-        their own, so they count too. `document_ceiling` is the lifter's
-        ceiling OUTSIDE this case (no case-scoped break-glass grant): a
-        collected document is read under the account's own clearance, never
-        the case's, so a grant scoped to this case must not let somebody
-        release a document they cannot open. Left out it is the case
+        The collected documents the case cites are held only through the case, and carry labels of their own, so
+        they count too. `document_ceiling` is the lifter's ceiling OUTSIDE this case (no case-scoped break-glass
+        grant): a collected document is read under the account's own clearance, never the case's, so a grant
+        scoped to this case must not let somebody release a document they cannot open. Left out it is the case
         ceiling, which can only be the wider of the two."""
         reason = (reason or "").strip()
         if len(reason) < 5:
@@ -2342,9 +2035,8 @@ class RetentionService:
         refused = False
         waited: dict[str, int] = {}
         with self._c.transaction():
-            # What the case has had destroyed, counted before the wait and
-            # again once the lock is ours: the difference is what a purge
-            # destroyed while this hold stood behind it (2026-10-08).
+            # What the case has had destroyed, counted before the wait and again once the lock is ours: the
+            # difference is what a purge destroyed while this hold stood behind it.
             before = (self._destroyed_so_far(case_id, lifter_ceiling)
                       if on else {})
             prior = self._c.execute(
@@ -2372,10 +2064,9 @@ class RetentionService:
                             "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
                             detail, object_type="case", object_id=case_id)
         if refused:
-            # Recorded, as an exhibit's lift below its label is (the gate's
-            # AUTHZ_DENIED row): an attempt to release a hold over material
-            # above the lifter is what an officer looks for, and it left no
-            # row at all (2026-10-07). Names nothing above the lifter.
+            # Recorded, as an exhibit's lift below its label is (the gate's AUTHZ_DENIED row): an attempt to
+            # release a hold over material above the lifter is what an officer looks for. Names nothing above the
+            # lifter.
             self._audit(case_id, actor_id, "LEGAL_HOLD_LIFT_REFUSED",
                         {"case_id": str(case_id), "scope": "case",
                          "reason": reason}, outcome="DENIED",
@@ -2431,12 +2122,10 @@ class RetentionService:
         return dict(zip(WAITED_KINDS, row, strict=True))
 
     def _lift_refusal(self, case_id: UUID) -> str:
-        """What a refused lift says. Under NONE (0030) it says nothing about
-        why: "cleared for everything the case holds" tells a lead that
-        something above them exists, which that case has chosen not to say
-        (2026-10-07). Under PRESENCE and COUNT the
-        sentence is the one it always was. A mode that cannot be read is
-        NONE."""
+        """What a refused lift says. Under NONE (0030) it says nothing about why: "cleared for everything the
+        case holds" tells a lead that something above them exists, which that case has chosen not to say. Under
+        PRESENCE and COUNT it says the lead is not cleared for everything the case holds. A mode that cannot be
+        read is NONE."""
         row = self._c.execute(
             "SELECT withheld_disclosure FROM iam.case_facts(%s)",
             (case_id,)).fetchone()
@@ -2451,22 +2140,16 @@ class RetentionService:
 
     def _ceiling_covers_case(self, case_id: UUID, ceiling: tuple | None,
                              document_ceiling: tuple | None = None) -> bool:
-        """Whether a (clearance, compartments) ceiling covers every live
-        exhibit, ingest record, sample, lookup and lookup answer the case
-        holds, and `document_ceiling` (the ceiling when none is given) every
-        live collected document it cites. Read on the connection this
-        service runs on, which is a system connection: the point is to see
-        what is above the lifter. No ceiling is False (fail closed).
+        """Whether a (clearance, compartments) ceiling covers every live exhibit, ingest record, sample, lookup
+        and lookup answer the case holds, and `document_ceiling` (the ceiling when none is given) every live
+        collected document it cites. Read on the connection this service runs on, which is a system connection:
+        the point is to see what is above the lifter. No ceiling is False (fail closed).
 
-        case-hold-lift-documents (2026-10-03): the documents were left
-        out ("held through the case that cites them, not by labels here"),
-        so a lead cleared below a RED document lifted the case hold alone and
-        the deployment-wide document sweep could then destroy it. A document
-        counts when the case cites it through any registered citation
-        (`_citations_sql`, the one list the hold predicate reads) or cites
-        another version of it: a citation of any version holds them all
-        (`_versions_sql`). Cited and not above the ceiling, or already
-        purged, is not counted."""
+        Documents count, or a lead cleared below a RED document could lift the case hold alone and the
+        deployment-wide document sweep could then destroy it. A document counts when the case cites it through
+        any registered citation (`_citations_sql`, the one list the hold predicate reads) or cites another
+        version of it: a citation of any version holds them all (`_versions_sql`). Cited and not above the
+        ceiling, or already purged, is not counted."""
         if ceiling is None:
             return False
         clearance, held = _ceiling_parts(ceiling)

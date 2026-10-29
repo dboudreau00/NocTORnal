@@ -1,13 +1,10 @@
-"""Invariant 3: machines propose, analysts dispose (docs/01, Phase 4).
+"""Invariant 3: machines propose, analysts dispose (docs/01).
 
     Extractors and inference jobs write to `proposal`. They never write to
     `node` or `edge` directly.
 
-Until now this invariant was true by accident: `collect.proposal` had
-existed since Phase 0 and nothing wrote it, because nothing extracts yet.
-These tests make it true by construction instead — the extractor-facing
-class cannot reach the graph, and the only path from a proposal into the
-graph goes through a human reviewer.
+The extractor-facing class cannot reach the graph, and the only path from a proposal into the graph goes
+through a human reviewer.
 
 Env-gated on DATABASE_URL.
 """

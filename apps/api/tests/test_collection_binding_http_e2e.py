@@ -1,11 +1,9 @@
-"""Personas, exits and bindings over HTTP (the collection foundation,
-2026-09-24).
+"""Personas, exits and bindings over HTTP.
 
-POST /collection/personas creates a persona with no credential on a
-platform some parser reads through; GET /collection/egress-profiles is the
-one exit picker; POST /collection/sources/{id}/binding says who reads a
-source and through which exit, with both permissions and a fresh second
-factor. DATABASE_URL-gated.
+POST /collection/personas creates a persona with no credential on a platform some parser reads
+through; GET /collection/egress-profiles is the one exit picker; POST /collection/sources/{id}/binding
+says who reads a source and through which exit, with both permissions and a fresh second factor.
+DATABASE_URL-gated.
 """
 from __future__ import annotations
 

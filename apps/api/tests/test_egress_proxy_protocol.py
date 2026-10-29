@@ -1,11 +1,9 @@
-"""The egress proxy's wire handling, with the decision and the ledger stubbed
-(S2, 2026-09-24; docs/20 sections 8.1 to 8.4).
+"""The egress proxy's wire handling, with the decision and the ledger stubbed (docs/20 sections 8.1 to 8.4).
 
-Pure asyncio on loopback: no database. `authorise` is replaced by a
-function answering one decision (an integration route to a loopback
-origin), and ledger writes are captured, so these cases hold the listener's
-parsing, its caps and its splice to the contract without the persona
-machinery. The decisions themselves are test_egress_proxy_pg.py's.
+Pure asyncio on loopback: no database. `authorise` is replaced by a function answering one decision (an
+integration route to a loopback origin), and ledger writes are captured, so these cases hold the
+listener's parsing, its caps and its splice to the contract without the persona machinery. The decisions
+themselves are test_egress_proxy_pg.py's.
 """
 from __future__ import annotations
 

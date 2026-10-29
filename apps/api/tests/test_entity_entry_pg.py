@@ -1,27 +1,20 @@
-"""Add entity asks before it creates: is this already here, and is this a
-selector the index can hold?
+"""Add entity asks before it creates: is this already here, and is this a selector the index can hold?
 
-ux06-entry:no-duplicate-check-on-create and ux06-entry:selector-entities-
-bypass-normalisation (2026-09-23). `POST /nodes` inserted whatever it was
-given: "Harrow_Skua2" beside an existing "harrow_skua2" made a second
-persona that split the actor's ties, and a Selector, Comms account or
-Crypto wallet entity kept its raw label, so a bare Telegram id the Comms
-pane refuses went in, the selector index never heard of it, and the same
-selector seen elsewhere never correlated.
+`POST /nodes` must not insert whatever it is given: "Harrow_Skua2" beside an existing "harrow_skua2" would
+make a second persona that splits the actor's ties, and a Selector, Comms account or Crypto wallet entity
+must not keep its raw label, or a bare Telegram id the Comms pane refuses goes in, the selector index never
+hears of it, and the same selector seen elsewhere never correlates.
 
 Held here, over HTTP against a real database:
 
-- `POST .../graph/nodes/check` finds same-type entities whose label
-  matches once case and whitespace are folded, and never one the caller
-  cannot see, a merged-away one or another type;
-- for a selector type it returns the canonical form, or the ontology's own
-  refusal, and the entity the index already holds it against;
-- `POST .../nodes` with `selector_type` records the selector against the
-  new entity in the same transaction, refuses a label that reduces to
-  nothing (and creates nothing), and reports a selector already held by
-  another entity as a merge lead.
+- `POST .../graph/nodes/check` finds same-type entities whose label matches once case and whitespace are
+  folded, and never one the caller cannot see, a merged-away one or another type;
+- for a selector type it returns the canonical form, or the ontology's own refusal, and the entity the
+  index already holds it against;
+- `POST .../nodes` with `selector_type` records the selector against the new entity in the same
+  transaction, refuses a label that reduces to nothing (and creates nothing), and reports a selector
+  already held by another entity as a merge lead.
 
-Every test fails on 245cb57, where neither the route nor the field exists.
 Email prefix `eent-`, unique to this file. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
@@ -137,7 +130,7 @@ def _create(client, conn, w, body, who="analyst"):
 # ---------------------------------------------------------------------------
 
 def test_a_folded_label_of_the_same_type_is_found(conn, client, world):
-    """The review's own reproduction: 'Harrow_Skua2' for 'harrow_skua2'."""
+    """'Harrow_Skua2' is found for 'harrow_skua2'."""
     w = world
     existing = w["node"]("harrow_skua2")
     w["node"]("harrow_skua2", node_type="PERSON")      # another type
@@ -269,9 +262,8 @@ def test_a_selector_already_held_is_a_merge_lead(conn, client, world):
 # ---------------------------------------------------------------------------
 
 def test_the_entity_count_is_what_the_caller_can_see(conn, client, world):
-    """ux06-entry:entity-list-no-find: the list said "1000 of 1000" on a
-    larger case. The count is the list's rows without the page, and never
-    counts what the caller cannot see."""
+    """The entity count is the list's rows without the page, so a larger case does not read "1000 of 1000",
+    and it never counts what the caller cannot see."""
     w = world
     w["node"]("eent_one")
     w["node"]("eent_two")
@@ -291,11 +283,9 @@ def test_the_entity_count_is_what_the_caller_can_see(conn, client, world):
 
 def test_the_relationship_count_is_the_tie_list_without_its_page(
         conn, client, world):
-    """The count line's "N relationships in the case" was the length of the
-    1000-row `/edges` page (the 2026-09-23 verifier), so a larger case read
-    "1000 relationships". The count is what `GET /edges` would list for the
-    caller with no page: a tie above them, or at an entity above them, is
-    not counted, and neither is a retired one."""
+    """The count line's "N relationships in the case" is not the length of the 1000-row `/edges` page. The
+    count is what `GET /edges` would list for the caller with no page: a tie above them, or at an entity
+    above them, is not counted, and neither is a retired one."""
     from datetime import datetime, timezone
     w = world
     one, two = w["node"]("eent_one"), w["node"]("eent_two")
@@ -325,8 +315,8 @@ def test_the_relationship_count_is_the_tie_list_without_its_page(
 
 
 def test_the_ontology_gives_inverse_names_and_selector_types(conn, client, world):
-    """ux06-entry:edge-type-note-stale reads a type both ways; the entity
-    form's selector picker is built from the ontology's own list."""
+    """The ontology gives each edge type both ways; the entity form's selector picker is built from the
+    ontology's own list."""
     w = world
     body = client.get(f"/api/v1/cases/{w['case']}/ontology",
                       headers=_auth(conn, w["analyst"])).json()
@@ -338,8 +328,7 @@ def test_the_ontology_gives_inverse_names_and_selector_types(conn, client, world
 
 
 def test_a_selectors_dates_travel_with_its_count(conn, client, world):
-    """ux05-inspector:first-last-seen-always-dash: "observed 3 times" came
-    with no date although the selector row keeps both."""
+    """"observed 3 times" comes with its first and last seen dates, which the selector row keeps."""
     from datetime import datetime, timezone
 
     from noctornal_api.selectors import SelectorStore

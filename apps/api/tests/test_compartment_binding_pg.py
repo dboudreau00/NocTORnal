@@ -1,36 +1,26 @@
 """Migration 0059: every compartment column is bound to `iam.compartment`.
 
-0057 created the registry and made two SERVICE write sites check it. The
-columns themselves stayed raw `text[]` (seventeen arrays and the scalar
-`ingest.api_key.forced_compartment`), so until 2026-09-09 a psql typo, a
-direct UPDATE, or a stealer-log key issued under an unregistered
-compartment all succeeded, and every one of them was the silent
-no-access the registry exists to end. Reproduced before this file was
-written: `UPDATE iam.app_user SET compartments = '{OP-KESTRAL}'` was
-accepted at 0058.
+The registry is the closed vocabulary: a psql typo, a direct UPDATE, or a stealer-log key issued under
+an unregistered compartment must be refused, because each would otherwise be the silent no-access the
+registry exists to end.
 
-Each test here reads BOTH sides of a contract that crosses a file:
+Each test reads BOTH sides of a contract that crosses a file:
 
-- the DATABASE refuses the write, and the FIRST LINE of its refusal --
-  the only line `http/errors.safe_detail` forwards -- names the key, the
-  column and the registration route;
-- the registration route the message names EXISTS in the FastAPI route
-  table, and the live trigger function's source carries the same text as
-  the migration module's constant, so neither can drift from the other;
-- the catalog's set of compartment columns equals the bound columns at
-  head (the migration's `BOUND_COLUMNS` and every later
-  `ADDED_BOUND_COLUMNS`, docs/00 decision 71, 2026-09-24) and every one
-  carries the trigger, so a future column cannot be added unbound;
-- the refusal reaches an HTTP client with the STATUS the service's own
-  check produces (400 for a case or an ingest key, 409 for a read-in),
-  which is the fact the migration relies on when it keeps the service
-  checks as the readable error rather than the guarantee;
-- the upgrade's refusal message is executable and, once run, lets the
-  upgrade proceed -- proved on the real `alembic` command against the
-  test database, not on a paraphrase.
+- the DATABASE refuses the write, and the FIRST LINE of its refusal (the only line
+  `http/errors.safe_detail` forwards) names the key, the column and the registration route;
+- the registration route the message names EXISTS in the FastAPI route table, and the live trigger
+  function's source carries the same text as the migration module's constant, so neither can drift;
+- the catalog's set of compartment columns equals the bound columns at head (the migration's
+  `BOUND_COLUMNS` and every later `ADDED_BOUND_COLUMNS`, docs/00 decision 71) and every one carries the
+  trigger, so a future column cannot be added unbound;
+- the refusal reaches an HTTP client with the STATUS the service's own check produces (400 for a case
+  or an ingest key, 409 for a read-in), which the migration relies on when it keeps the service checks
+  as the readable error rather than the guarantee;
+- the upgrade's refusal message is executable and, once run, lets the upgrade proceed, proved on the
+  real `alembic` command against the test database.
 
-Env-gated on DATABASE_URL. Email prefix `bind-`; registry keys `BIND-T9-`.
-The round-trip test is last because it moves the schema.
+Env-gated on DATABASE_URL. Email prefix `bind-`; registry keys `BIND-T9-`. The round-trip test is last
+because it moves the schema.
 """
 from __future__ import annotations
 
@@ -89,9 +79,8 @@ def conn():
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{EMAIL_LIKE}')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     with c.transaction():
-        # Rows that carry a BIND-T9 key go first: since 0059 the registry
-        # refuses to drop a key that is still in use, so a teardown in the
-        # wrong order would be refused by the thing it is cleaning up after.
+        # Rows that carry a BIND-T9 key go first: the registry refuses to drop a key that is still in
+        # use, so a teardown in the wrong order would be refused by the thing it is cleaning up after.
         c.execute(f"DELETE FROM ingest.api_key WHERE owner_user_id IN {sub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
@@ -151,29 +140,21 @@ def _user(conn, *global_roles, clearance="AMBER", compartments=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against. Unbound (no
+    address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
     is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. TOTP codes
+    are single-use, so two sign-ins for one account inside one 30-second step would fail on the code,
+    not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -327,16 +308,12 @@ def test_a_direct_write_of_an_unregistered_key_is_refused_on_every_named_column(
 
 
 def test_every_compartment_column_in_the_catalog_carries_the_binding(conn):
-    """Two halves that must agree: the catalog's compartment columns and
-    the bound columns at head (0059's tuple plus every later migration's
-    `ADDED_BOUND_COLUMNS`, docs/00 decision 71, 2026-09-24). A column in
-    the catalog the list does not name is a column a later migration added
-    unbound (the hole re-opened), and a list entry with no column is a
-    claim the schema does not back. The catalog side is every text column NAMED like
-    a compartment, not only the three names 0059 knew, so a differently
-    named copy is caught too. Then every bound column carries the trigger,
-    installed BEFORE the write and only on writes of that column, and
-    the registry carries its own guard."""
+    """Two halves that must agree: the catalog's compartment columns and the bound columns at head
+    (0059's tuple plus every later migration's `ADDED_BOUND_COLUMNS`, docs/00 decision 71). A column in
+    the catalog the list does not name was added unbound, and a list entry with no column is a claim the
+    schema does not back. The catalog side is every text column NAMED like a compartment, so a
+    differently named copy is caught too. Then every bound column carries the trigger, installed BEFORE
+    the write and only on writes of that column, and the registry carries its own guard."""
     from test_compartment_contract_pg import (
         UNBOUND_BY_DESIGN,
         bound_columns_at_head,
@@ -467,16 +444,10 @@ def test_the_refusal_names_a_registration_route_that_exists(conn):
 
 
 def test_the_three_readable_refusals_name_the_same_route_and_it_exists(conn):
-    """One rule, three authored refusals -- the trigger's,
-    `CaseService._require_registered`'s and
-    `IamAdminService.set_compartments`'s -- each telling the operator
-    where to register the key. Until 2026-09-09 the two service messages
-    said `POST /compartments`, a path that exists nowhere (the router is
-    mounted under `/api/v1`), while the trigger said
-    `POST /api/v1/compartments`: two readable refusals for one rule that
-    disagreed about the fix, and one of them wrong. Each message's route
-    is held to the migration's constant AND to the OpenAPI route table,
-    so neither service can drift from the trigger, or from the router,
+    """One rule, three authored refusals (the trigger's, `CaseService._require_registered`'s and
+    `IamAdminService.set_compartments`'s), each telling the operator where to register the key. Each
+    message's route is held to the migration's constant AND to the OpenAPI route table (the router is
+    mounted under `/api/v1`), so neither service can drift from the trigger, or from the router,
     without failing here."""
     from noctornal_api.cases import CaseError, CaseService
     from noctornal_api.http.app import create_app
@@ -516,17 +487,14 @@ def test_the_three_readable_refusals_name_the_same_route_and_it_exists(conn):
 
 def test_the_database_refusal_reaches_the_client_with_the_service_status(
         conn, client, monkeypatch):
-    """The migration keeps the application-level checks as the readable
-    error and calls the trigger the guarantee. That is only honest if the
-    guarantee, when it is the one that fires, produces the same STATUS the
-    check would have -- not a 500. Three services, three halves each:
-    the service exception, the HTTP status, and the key named in both.
+    """The migration keeps the application-level checks as the readable error and calls the trigger
+    the guarantee. That is only honest if the guarantee, when it is the one that fires, produces the
+    same STATUS the check would have, not a 500. Three services, three halves each: the service
+    exception, the HTTP status, and the key named in both.
 
-    For `cases` and `iam_admin` the service check is bypassed on purpose,
-    which models the check drifting or being skipped by a future writer.
-    For `ingest.issue_key` there is no service check at all: a stealer-log
-    key under an unregistered compartment reached the INSERT, and before
-    2026-09-09 that INSERT succeeded; today it is refused, and the
+    For `cases` and `iam_admin` the service check is bypassed on purpose, which models the check
+    drifting or being skipped by a future writer. For `ingest.issue_key` there is no service check: a
+    stealer-log key under an unregistered compartment reaches the INSERT, which refuses it, and the
     refusal has to arrive as a 400 naming the key.
     """
     from noctornal_api.cases import CaseService
@@ -704,13 +672,8 @@ def _version(conn) -> str:
 
 
 def _chain_head() -> str:
-    """The head Alembic would upgrade to, read from the scripts.
-
-    The round trip below used to name 0059 as the place it returns to.
-    That is the revision it was written against, not the thing it is
-    testing, and 0060 made the literal wrong -- the test skipped, and
-    the build fails on a skip.
-    """
+    """The head Alembic would upgrade to, read from the scripts, so the round trip below does not name
+    a revision that a later migration makes wrong (a skip fails the build)."""
     from alembic.script import ScriptDirectory
 
     return ScriptDirectory.from_config(_alembic()).get_current_head()
@@ -726,11 +689,10 @@ def _binding_count(conn) -> int:
               AND NOT tgisinternal""").fetchone()[0]
 
 
-#: Rows a later migration's downgrade refuses to drop while they exist,
-#: which the round trip below clears before going down to 0058 and puts
-#: back after coming up to head: (table, key column, column, the cleared
-#: value as SQL). APPEND-ONLY, one entry per migration, under a comment
-#: naming it (docs/05, "Binding a compartment column", rule 8).
+#: Rows a later migration's downgrade refuses to drop while they exist, which the round trip below
+#: clears before going down to 0058 and puts back after coming up to head: (table, key column,
+#: column, the cleared value as SQL). APPEND-ONLY, one entry per migration, under a comment naming it
+#: (docs/05, "Binding a compartment column", rule 8).
 ROUND_TRIP_STASH: list[tuple[str, str, str, str]] = [
     # 0070 refuses to drop collect.document.compartments while any
     # document carries one (it would declassify them).
@@ -762,28 +724,18 @@ def _unstash(conn, saved: dict) -> None:
 def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
     """The real `alembic` command, both directions, on the test database.
 
-    On the way back up, the refusal is exercised for real rather than by
-    running its pieces: at 0058 the old hole is open again, so a user is
-    read into an unregistered key by direct UPDATE (which succeeds, as it
-    did before 2026-09-09), the upgrade is asked to run, and it must stop
-    with the message that names the value and the column and prints the
-    statement that fixes it. That statement is then run, and the upgrade
-    completes.
+    On the way back up, the refusal is exercised for real rather than by running its pieces: at 0058
+    the hole is open, so a user is read into an unregistered key by direct UPDATE, the upgrade is asked
+    to run, and it must stop with the message that names the value and the column and prints the
+    statement that fixes it. That statement is then run, and the upgrade completes.
 
-    Guarded so a failure cannot leave the schema behind: it runs only
-    when the database is AT THE CHAIN HEAD -- wherever that is, so a new
-    migration does not switch this off -- and only when the pre-check is
-    already empty (otherwise the upgrade would refuse for reasons this
-    test did not create). The `finally` puts the schema back to head
-    whatever happened in between.
+    Guarded so a failure cannot leave the schema behind: it runs only when the database is AT THE CHAIN
+    HEAD (wherever that is, so a new migration does not switch this off) and only when the pre-check is
+    already empty (otherwise the upgrade would refuse for reasons this test did not create). The
+    `finally` puts the schema back to head whatever happened in between.
 
-    It used to demand exactly 0059 and skip otherwise, on the reasoning
-    that a later migration's test owns its own round trip. That is not a
-    rule that holds: what is exercised here is 0059's refusal across
-    0058's boundary, which no later migration inherits, and the skip
-    fails the build anyway because CI refuses a skipped test. Migration
-    0060 is what proved it, by turning this green test into a red
-    pipeline that named neither.
+    It does not demand exactly 0059 and skip otherwise: what is exercised is 0059's refusal across
+    0058's boundary, which no later migration inherits, and CI refuses a skipped test.
     """
     from alembic import command
 

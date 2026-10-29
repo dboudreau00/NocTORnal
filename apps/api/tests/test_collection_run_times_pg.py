@@ -1,9 +1,6 @@
-"""Run start times and their order (roadmap F5.4 (a), 2026-09-24). Built
-by the collection foundation (runs()'s ordering, index
-collection_run_started_idx); these hold it: every run records when it
-started, the listing is newest first with the runs whose start was never
-recorded last, and the unfiltered listing is read through the start index
-rather than sorted whole. DATABASE_URL-gated.
+"""Run start times and their order (runs()'s ordering, index collection_run_started_idx): every run
+records when it started, the listing is newest first with the runs whose start was never recorded last,
+and the unfiltered listing is read through the start index rather than sorted whole. DATABASE_URL-gated.
 """
 from __future__ import annotations
 

@@ -1,28 +1,20 @@
-"""Social-engineering evidence: phishing captures, BEC email, vishing calls.
+"""Social-engineering evidence: phishing captures, BEC email, vishing calls (docs/19).
 
-docs/19. Three subsystems, one shape — a provenance row that points at WORM
-exhibits, never bytes in a column — and three rules that this module exists
-to enforce rather than document:
+Three subsystems, one shape (a provenance row that points at WORM exhibits, never bytes in a
+column), and three rules this module enforces rather than documents:
 
-1. **A captured page is attacker-authored code.** Invariant 10 generalised.
-   DOM, HAR and `.eml` bytes are marked hostile at ingest and are
-   download-only from the separate sample origin. Screenshots may render,
-   and only after their type is re-derived from the magic bytes, because
-   `media_type` on `core.evidence` is whatever the uploading client said.
+1. A captured page is attacker-authored code (invariant 10 generalised). DOM, HAR and `.eml` bytes
+   are marked hostile at ingest and are download-only from the separate sample origin. Screenshots
+   may render, only after their type is re-derived from the magic bytes, because `media_type` on
+   `core.evidence` is whatever the uploading client said.
+2. The displayed identifier is the spoofed one (invariant 9 generalised). `presented_number` never
+   becomes a selector, `header_from` never becomes an identity, and a DKIM domain is an identity
+   only if DKIM *passed*.
+3. The Received chain is trustworthy inwards only. Everything above the receiving organisation's own
+   MTA is attacker-writable, so `seq` is stored recipient-first and the boundary is marked.
 
-2. **The displayed identifier is the spoofed one.** Invariant 9 generalised.
-   `presented_number` never becomes a selector. `header_from` never becomes
-   an identity. A DKIM domain is an identity only if DKIM *passed*.
-
-3. **The Received chain is trustworthy inwards only.** Everything above the
-   receiving organisation's own MTA is attacker-writable. `seq` is stored
-   recipient-first and the boundary is marked, so no consumer has to
-   remember which end to believe.
-
-Nothing here writes to `core.node` or `core.edge`. Extraction produces
-proposals (invariant 3); what this module returns are *candidates*, and the
-caller routes them through the proposal machinery like every other machine
-output.
+Nothing here writes to `core.node` or `core.edge`. Extraction produces *candidates*, which the
+caller routes through the proposal machinery like every other machine output (invariant 3).
 """
 from __future__ import annotations
 
@@ -57,23 +49,20 @@ def _utcnow() -> datetime:
 # Hostile bytes (invariant 10, migration 0046)
 # ---------------------------------------------------------------------------
 
-#: Media types whose bytes are attacker-authored markup or code. Kept
-#: deliberately broad: over-marking costs an analyst one extra click,
-#: under-marking costs a stored-XSS in an authenticated analyst session on
-#: the case system. `image/svg+xml` is here because an SVG is a script
-#: container that happens to draw — the one "image" type that must never
-#: reach a render path.
+#: Media types whose bytes are attacker-authored markup or code. Deliberately broad: over-marking
+#: costs an analyst one extra click, under-marking costs a stored XSS in an authenticated analyst
+#: session on the case system. `image/svg+xml` is here because an SVG is a script container that
+#: happens to draw, the one "image" type that must never reach a render path.
 HOSTILE_MEDIA_TYPES = frozenset({
     "text/html", "application/xhtml+xml", "image/svg+xml",
     "application/xml", "text/xml", "message/rfc822", "application/mbox",
     "text/x-mail", "application/x-har", "application/json+har",
 })
 
-#: Raster image types the screenshot path may serve inline, keyed by the
-#: magic bytes that PROVE it. Typed by structure, never by the declared
-#: media type — `samples.file_type_of` makes the same call for the same
-#: reason, and here the stakes are higher because this is the only path in
-#: the platform that hands an exhibit to the browser to interpret.
+#: Raster image types the screenshot path may serve inline, keyed by the magic bytes that PROVE it.
+#: Typed by structure, never by the declared media type, as `samples.file_type_of` does and for the
+#: same reason; the stakes are higher here because this is the only path in the platform that hands
+#: an exhibit to the browser to interpret.
 _RASTER_MAGIC: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -100,15 +89,13 @@ def is_hostile_media_type(media_type: str | None) -> bool:
 def raster_type_of(data: bytes) -> str | None:
     """The image type these bytes actually are, or None.
 
-    None means "do not serve this inline", and every caller must treat it
-    that way. `media_type` on `core.evidence` comes from
-    `UploadFile.content_type`, which is client-supplied: an attacker-analyst
-    or a compromised upload path can label an HTML document `image/png`. A
+    None means "do not serve this inline", and every caller must treat it that way. `media_type` on
+    `core.evidence` comes from `UploadFile.content_type`, which is client-supplied: an
+    attacker-analyst or a compromised upload path can label an HTML document `image/png`, and a
     render path that trusted the column would execute it.
 
-    WebP and AVIF are deliberately absent. Both are container formats whose
-    decoders have a materially worse CVE history than PNG/JPEG, and neither
-    is needed to look at a screenshot.
+    WebP and AVIF are deliberately absent: both are container formats whose decoders have a
+    materially worse CVE history than PNG/JPEG, and neither is needed to look at a screenshot.
     """
     for magic, media_type in _RASTER_MAGIC:
         if data.startswith(magic):
@@ -131,15 +118,11 @@ _BARE_DOT = re.compile(r"(?<!\[)\.(?!\])")
 #: A second URL INSIDE the first: an open redirect's `?u=https://...`, a
 #: tracker's `/r/https://...`. The authority stops at the first `/ ? # &`.
 _EMBEDDED_SCHEME = re.compile(r"(h)tt(ps?://)([^/?#\s&]*)", re.I)
-#: An embedded URL under any other scheme (`ftp://`, `ftps://`, `sftp://`)
-#: gets its host bracketed like a leading one does: those schemes have no
-#: `hxx` form, and a linkifier that knows the scheme links the host. An
-#: embedded `ftp://` host was only ever bracketed by accident of the
-#: `parts[0]` bug below, and the fix for that bug briefly left `ftps://`
-#: live in a bare host's query (final review C5, 2026-09-23). The
-#: lookbehind starts a scheme only where a run of scheme characters starts,
-#: so a long run with no `://` in it is scanned once, not once per letter.
-#: Re-bracketing an `hxxps://` host already done above is a no-op.
+#: An embedded URL under any other scheme (`ftp://`, `ftps://`, `sftp://`) gets its host bracketed
+#: like a leading one does: those schemes have no `hxx` form, and a linkifier that knows the scheme
+#: links the host. The lookbehind starts a scheme only where a run of scheme characters starts, so a
+#: long run with no `://` in it is scanned once, not once per letter. Re-bracketing an `hxxps://`
+#: host already done above is a no-op.
 _EMBEDDED_OTHER = re.compile(
     r"(?<![A-Za-z0-9+.\-])([A-Za-z][A-Za-z0-9+.\-]*://)([^/?#\s&]*)")
 _EMBEDDED_WWW = re.compile(r"(?<![\w.\-\[])(www\.[^/?#\s&]*)", re.I)
@@ -155,54 +138,38 @@ def _bracket(host: str) -> str:
 def defang(value: str) -> str:
     """`https://evil.com/x` -> `hxxps://evil[.]com/x`.
 
-    Not decoration. A live URL in an analyst's browser is one mis-click
-    from a drive-by AND from telling the actor, from the investigating
-    organisation's IP, that they are being looked at (docs/19 §5). The UI
-    also renders these non-clickable; this is the belt to that pair of
-    braces, and it is applied server-side so an API consumer that is not
-    the UI gets it too.
+    Not decoration. A live URL in an analyst's browser is one mis-click from a drive-by AND from
+    telling the actor, from the investigating organisation's IP, that they are being looked at
+    (docs/19 section 5). The UI also renders these non-clickable; this is applied server-side too,
+    so an API consumer that is not the UI gets it as well.
     """
     if not value:
         return value
-    # `https` -> `hxxps`: keep the leading h, replace the two t's, keep
-    # the rest. Slicing from [2] rather than taking [-1] is the difference
-    # between `hxxps` and `hxxs` — a defanged URL that has quietly lost a
-    # character is no longer the URL, which matters when an analyst copies
-    # it into a report.
+    # `https` -> `hxxps`: keep the leading h, replace the two t's, keep the rest. Slicing from [2]
+    # rather than taking [-1] is the difference between `hxxps` and `hxxs`: a defanged URL that has
+    # lost a character is no longer the URL, which matters when an analyst copies it into a report.
     out = _SCHEME_RE.sub(lambda m: m.group(1) + "xx" + m.group(2)[2:] + m.group(3), value)
-    # Only the authority is bracketed. Dots in a path are not navigable and
-    # bracketing them makes long URLs unreadable for no gain.
+    # Only the authority is bracketed. Dots in a path are not navigable and bracketing them makes
+    # long URLs unreadable for no gain.
     #
-    # `parts[1] == ""` is the load-bearing half of this test, and it was
-    # missing. `split("/", 3)` puts the authority at index 2 ONLY when a
-    # `scheme://` occupied indices 0 and 1. Without a scheme —
-    # `paypal-secure.example/login` — index 2 is a PATH segment, so the
-    # authority was never bracketed and, since no scheme matched either,
-    # the function returned the string untouched. A live host, from a
-    # helper whose whole job is that it is not one.
+    # `parts[1] == ""` is load-bearing. `split("/", 3)` puts the authority at index 2 ONLY when a
+    # `scheme://` occupied indices 0 and 1. Without a scheme (`paypal-secure.example/login`, which a
+    # victim report routinely gives, since `requested_url` and `final_url` are free text) index 2 is
+    # a PATH segment, so the authority would never be bracketed and the function would return a live
+    # host.
     #
-    # That form is not exotic: `requested_url` and `final_url` are free
-    # text and a victim report routinely omits the scheme, and
-    # `GET /deception/defang` is documented as safe for a report.
+    # `parts[0]` must also be a scheme (or empty, for `//host/x`). A bare host with a doubled slash
+    # in its path, `www.evil.example//login`, would otherwise put a PATH segment at index 2 and
+    # leave the host live; the body defanger (`defang_text`) feeds this scheme-less `www.` hosts. "A
+    # scheme" means the WHOLE of `parts[0]` is one: `evil.example?next=https://google.com` splits
+    # with a `parts[0]` of `evil.example?next=https:`, which an `endswith(":")` test would accept,
+    # bracketing only the embedded host and leaving the actor's live under a run marked defanged.
+    # Anything that is not a scheme takes the branch below, which brackets the whole head up to the
+    # first `/`, query and fragment included.
     #
-    # `parts[0]` must also be a scheme (or empty, for `//host/x`). A bare
-    # host with a doubled slash in its path, `www.evil.example//login`,
-    # otherwise put a PATH segment at index 2 and left the host live. The
-    # body defanger (`defang_text`) feeds this scheme-less `www.` hosts, so
-    # the gap stopped being theoretical on 2026-09-22.
-    #
-    # "A scheme" means the WHOLE of `parts[0]` is one. The test was
-    # `parts[0].endswith(":")`, which a bare host with a URL in its query
-    # also passes: `evil.example?next=https://google.com` splits with
-    # `parts[0] = "evil.example?next=https:"`, so only the embedded host
-    # was bracketed and the leading one, the actor's, stayed live under a
-    # run marked defanged (final review C5, 2026-09-23). Anything that is
-    # not a scheme now takes the branch below, which brackets the whole
-    # head up to the first `/`, query and fragment included.
-    #
-    # `parts[0]` is bracketed as well even when it is a scheme: a real one
-    # has no dots, so that is a no-op, and a dotted "scheme" such as
-    # `evil.example://x` is more likely a host than an exotic protocol.
+    # `parts[0]` is bracketed even when it is a scheme: a real one has no dots, so that is a no-op,
+    # and a dotted "scheme" such as `evil.example://x` is more likely a host than an exotic
+    # protocol.
     parts = out.split("/", 3)
     if (len(parts) >= 3 and parts[1] == "" and parts[2]
             and (parts[0] == "" or _URL_SCHEME.fullmatch(parts[0]))):
@@ -214,41 +181,32 @@ def defang(value: str) -> str:
         # where a bare host lives, and leave any path alone.
         head, sep, tail = out.partition("/")
         out = _bracket(head) + sep + tail
-    # A URL carried inside this one is a URL too. An open redirect puts the
-    # real destination in the query, `hxxps://www[.]google[.]com/url?q=`
-    # `https://evil.example/x`, and a linkifier finds the inner `https://`
-    # on its own: a paste of the "defanged" form into a ticket was still a
-    # working link to the actor. The leading scheme is already `hxx`, so
-    # these patterns only ever meet the embedded ones. Found while fixing
-    # ux14-deception:body-url-not-defanged (2026-09-22), because the body
-    # defanger hands this function whole redirect URLs.
+    # A URL carried inside this one is a URL too. An open redirect puts the real destination in the
+    # query, `hxxps://www[.]google[.]com/url?q=https://evil.example/x`, and a linkifier finds the
+    # inner `https://` on its own, so a paste of the "defanged" form into a ticket would still be a
+    # working link to the actor. The leading scheme is already `hxx`, so these patterns only ever
+    # meet the embedded ones. The body defanger hands this function whole redirect URLs.
     out = _EMBEDDED_SCHEME.sub(
         lambda m: m.group(1) + "xx" + m.group(2) + _bracket(m.group(3)), out)
     out = _EMBEDDED_OTHER.sub(lambda m: m.group(1) + _bracket(m.group(2)), out)
     return _EMBEDDED_WWW.sub(lambda m: _bracket(m.group(1)), out)
 
 
-#: What the BODY defanger looks for. Wider than `_URL_RE`, which decides
-#: what is EXTRACTED as a URL: display has to catch everything a mail client
-#: or a chat window auto-links when an analyst pastes the text into a
-#: ticket. The character class is `_URL_RE`'s, so an http(s) URL is cut at
-#: exactly the place the extracted list cut it and the two views never
-#: disagree about where a URL ends.
+#: What the BODY defanger looks for. Wider than `_URL_RE`, which decides what is EXTRACTED as a URL:
+#: display has to catch everything a mail client or a chat window auto-links when an analyst pastes
+#: the text into a ticket. The character class is `_URL_RE`'s, so an http(s) URL is cut at exactly
+#: the place the extracted list cut it and the two views never disagree about where a URL ends.
 #:
 #: Three shapes, each a URL by any reading:
-#:   * a scheme, WITHOUT `_URL_RE`'s leading `\b`: `click_https://...` and
-#:     `1https://...` have no word boundary before the `h`, so they stayed
-#:     live, and a linkifier finds the `https://` inside them regardless;
+#:   * a scheme, WITHOUT `_URL_RE`'s leading `\b`: `click_https://...` and `1https://...` have no
+#:     word boundary before the `h`, and a linkifier finds the `https://` inside them regardless;
 #:   * a `www.` host, for the same reason unanchored;
-#:   * a bare host followed by a path, port, query or fragment,
-#:     `secure-billing.example/verify`, which carries no scheme and no
-#:     `www.` and which every chat client links.
-#: Both scheme-less gaps were found by the verifier of the 2026-09-22 fix.
-#: A bare hostname with nothing after it is deliberately NOT matched: it is
-#: a hostname and not a URL, and this pane shows hostnames as written (the
-#: sending host, the Received chain, the Message-ID host), while matching
-#: every dotted word would bracket `invoice.pdf` and `Node.js` in the
-#: sender's prose.
+#:   * a bare host followed by a path, port, query or fragment, `secure-billing.example/verify`,
+#:     which carries no scheme and no `www.` and which every chat client links.
+#: A bare hostname with nothing after it is deliberately NOT matched: it is a hostname and not a
+#: URL, and this pane shows hostnames as written (the sending host, the Received chain, the
+#: Message-ID host), while matching every dotted word would bracket `invoice.pdf` and `Node.js` in
+#: the sender's prose.
 _BODY_URL_RE = re.compile(
     r"(?:https?|ftp)://[^\s<>\"'\)\]]{3,2048}"
     r"|www\.[^\s<>\"'\)\]]{3,2048}"
@@ -265,23 +223,17 @@ def defang_text(text: str | None) -> list[dict]:
       {"text": "hxxps://portal[.]evil[.]example/verify", "defanged": True},
       ...]`
 
-    ux14-deception:body-url-not-defanged (2026-09-22). The detail card put
-    `body_text` in a <pre> verbatim, so the one block an analyst is most
-    likely to select and paste into a report held the attacker's working
-    URL, directly above a list that showed the same URL defanged. docs/19
-    §5 says the UI shows extracted plain text WITH URLS DEFANGED.
+    The block an analyst is most likely to select and paste into a report must not hold the
+    attacker's working URL: docs/19 section 5 says the UI shows extracted plain text WITH URLS
+    DEFANGED.
 
-    Runs rather than one string because the UI marks each substituted span
-    the way it marks the URL list, so a reader can see which characters
-    are the defanger's and which are the sender's. Joining the `text` of
-    every run gives the defanged body for any consumer that wants a string.
-    Trailing sentence punctuation is left outside the URL, as the
-    extractor does.
+    Runs rather than one string because the UI marks each substituted span the way it marks the URL
+    list, so a reader can see which characters are the defanger's and which are the sender's.
+    Joining the `text` of every run gives the defanged body for any consumer that wants a string.
+    Trailing sentence punctuation is left outside the URL, as the extractor does.
 
-    Not only for bodies. Analyst notes on captures and calls go through it
-    too (`note_segments`): once the notes were rendered, a note recording
-    the link the victim clicked put that link on screen live, under help
-    text promising every URL in the pane is defanged.
+    Not only for bodies: analyst notes on captures and calls go through it too (`note_segments`),
+    since a note recording the link the victim clicked would otherwise put that link on screen live.
     """
     if not text:
         return []
@@ -317,6 +269,7 @@ _RECEIVED_FROM = re.compile(r"\bfrom\s+([^\s;()]+)", re.I)
 _RECEIVED_BY = re.compile(r"\bby\s+([^\s;()]+)", re.I)
 _RECEIVED_WITH = re.compile(r"\bwith\s+([A-Za-z0-9/]+)", re.I)
 _RECEIVED_IP = re.compile(r"[\[(]\s*(?:IPv6:)?([0-9a-fA-F:.]{3,45})\s*[\])]")
+_HELO_MARK = re.compile(r"\bhelo\s*=?\s*$", re.I)
 _TLS_HINT = re.compile(r"\b(ESMTPS|ESMTPSA|TLS|SSL|version=TLS)\b", re.I)
 
 
@@ -337,17 +290,14 @@ class Hop:
     tls_used: bool | None
     received_at: datetime | None
     is_trusted_boundary: bool = False
-    #: True when the boundary is the seq-0 DEFAULT rather than a hop whose
-    #: `by` host was actually recognised as the recipient's.
+    #: True when the boundary is the seq-0 DEFAULT rather than a hop whose `by` host was actually
+    #: recognised as the recipient's.
     #:
-    #: The distinction is not cosmetic. An assumed boundary means nobody
-    #: told this system which MTAs are ours, so hop 0 is "the first line in
-    #: the file" and not "a machine we control" — and its `from_ip` is
-    #: therefore an address INSIDE the victim's network, not an
-    #: observation of the sender. It lives on the hop rather than being
-    #: re-derived from the environment by each consumer, because a
-    #: consumer that re-read `NOCTORNAL_TRUSTED_MTA_HOSTS` could disagree
-    #: with the parse that produced these hops.
+    #: An assumed boundary means nobody told this system which MTAs are ours, so hop 0 is "the first
+    #: line in the file" and not "a machine we control", and its `from_ip` is an address INSIDE the
+    #: victim's network, not an observation of the sender. It lives on the hop rather than being
+    #: re-derived from the environment by each consumer, because a consumer that re-read
+    #: `NOCTORNAL_TRUSTED_MTA_HOSTS` could disagree with the parse that produced these hops.
     boundary_is_assumed: bool = False
 
 
@@ -362,28 +312,32 @@ def trusted_mta_suffixes() -> tuple[str, ...]:
     return tuple(h.strip().lower().lstrip(".") for h in raw.split(",") if h.strip())
 
 
+def _connecting_ip(flat: str, by_at: int) -> str | None:
+    """The address the receiving MTA saw connect, from the part of the hop before `by`.
+
+    An address after `by` is the receiving MTA's own. Before it, Postfix and Exchange put the sender's
+    EHLO literal first and the peer last, and Exim and qmail mark the EHLO literal with `helo`, so the
+    peer is the last address that is not marked as the sender's EHLO argument."""
+    found = None
+    for match in _RECEIVED_IP.finditer(flat, 0, by_at):
+        if not _HELO_MARK.search(flat, max(0, match.start() - 12), match.start()):
+            found = match.group(1)
+    return found
+
+
 def parse_received_chain(headers: list[str],
                          trusted: tuple[str, ...] | None = None) -> list[Hop]:
     """Parse `Received:` headers into hops, RECIPIENT-FIRST.
 
-    ## The flip, done once, here
+    Each MTA *prepends* its `Received` header, so in the file the newest (closest to the recipient)
+    is FIRST. That is the order this function wants, so the incoming list is used as-is; the reverse
+    assumption is the classic error, and it attributes a BEC to whatever originating IP the attacker
+    typed into a forged upstream hop.
 
-    Each MTA *prepends* its `Received` header, so in the file the newest
-    (closest to the recipient) is FIRST. That happens to be the order this
-    function wants, so the incoming list is used as-is — but it is stated
-    explicitly because the reverse assumption is the classic error, and it
-    is the error that attributes a BEC to whatever originating IP the
-    attacker typed into a forged upstream hop.
-
-    ## Where trust stops
-
-    Walking from `seq = 0` upward, a hop stays trusted while its `by` host
-    is one of ours. The LAST such hop is the boundary. If no trusted
-    suffixes are configured, the boundary is `seq = 0` — the conservative
-    answer, and the only defensible one when the platform has not been told
-    which MTAs belong to the recipient.
-
-    Nothing above the boundary is evidence of anything, and the extractor
+    Walking from `seq = 0` upward, a hop stays trusted while its `by` host is one of ours. The LAST
+    such hop is the boundary. If no trusted suffixes are configured, the boundary is `seq = 0`: the
+    conservative answer, and the only defensible one when the platform has not been told which MTAs
+    belong to the recipient. Nothing above the boundary is evidence of anything, and the extractor
     refuses to propose infrastructure from up there.
     """
     if trusted is None:
@@ -399,7 +353,6 @@ def parse_received_chain(headers: list[str],
                 received_at = parsedate_to_datetime(flat.rsplit(";", 1)[1].strip())
             except (ValueError, TypeError, IndexError):
                 received_at = None      # invariant 12: recorded as absent
-        ip_match = _RECEIVED_IP.search(flat)
         from_match = _RECEIVED_FROM.search(flat)
         by_match = _RECEIVED_BY.search(flat)
         with_match = _RECEIVED_WITH.search(flat)
@@ -407,7 +360,7 @@ def parse_received_chain(headers: list[str],
             seq=seq,
             raw=raw[:4000],
             from_host=from_match.group(1).lower() if from_match else None,
-            from_ip=ip_match.group(1) if ip_match else None,
+            from_ip=_connecting_ip(flat, by_match.start() if by_match else len(flat)),
             by_host=by_match.group(1).lower() if by_match else None,
             protocol=with_match.group(1).upper() if with_match else None,
             tls_used=bool(_TLS_HINT.search(flat)) or None,
@@ -554,14 +507,13 @@ def _header_str(msg: EmailMessage, name: str) -> str | None:
 def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedEmail:
     """Parse an RFC 5322 message into forensic fields.
 
-    Never renders, never fetches, never executes. The HTML body is recorded
-    as *present* and its text extracted; the markup itself stays in the
-    exhibit, where invariant 10 keeps it (docs/19 §5 — rendering it fires
-    the actor's tracking pixel from the investigator's IP).
+    Never renders, never fetches, never executes. The HTML body is recorded as *present* and its
+    text extracted; the markup itself stays in the exhibit, where invariant 10 keeps it (rendering
+    it fires the actor's tracking pixel from the investigator's IP, docs/19 section 5).
 
-    Malformed input degrades into `gaps` rather than raising, because a BEC
-    exhibit is by definition attacker-authored and "the parser crashed" is
-    not an acceptable answer to "what does this mail say".
+    Malformed input degrades into `gaps` rather than raising, because a BEC exhibit is by definition
+    attacker-authored and "the parser crashed" is not an acceptable answer to "what does this mail
+    say".
     """
     if len(data) > MAX_EML_BYTES:
         raise DeceptionError(
@@ -604,43 +556,30 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
     try:
         auth_headers = msg.get_all("Authentication-Results") or []
     except Exception as exc:                                  # noqa: BLE001
-        # NOT the same as having none, and the `else` branch below said it
-        # was: "no Authentication-Results header ... so their absence is
-        # not a failure" is a reassurance, and it was being given for a
-        # message whose headers we could not read. A defect in the parser
-        # was reported as a fact about the mail.
+        # NOT the same as having none: the `else` branch below reassures that "no
+        # Authentication-Results header ... so their absence is not a failure", which would be false
+        # for a message whose headers could not be read. A parser defect must not be reported as a
+        # fact about the mail.
         auth_headers, auth_unreadable = [], f"{type(exc).__name__}: {exc}"
     if auth_headers:
-        # ONLY THE FIRST HEADER IS EVIDENCE. The rest are recorded and not
-        # believed.
+        # ONLY THE FIRST HEADER IS EVIDENCE. The rest are recorded and not believed.
         #
-        # Found by an adversarial pass, 2026-07-26, and it was the same
-        # mistake this module gets RIGHT for `Received` and then made in
-        # the inverse direction here. An MTA PREPENDS, so index 0 is the
-        # receiving organisation's own verdict and anything the sender put
-        # in the message they wrote is LAST. `_apply_auth_results` built a
-        # dict comprehension over the joined string, which is last-wins —
-        # so an attacker appending their own `Authentication-Results:
-        # dkim=pass header.d=microsoft.com` had it override the real
-        # `dkim=fail`, and `microsoft.com` came out as a **durable,
-        # cryptographically authenticated** DOMAIN selector.
+        # An MTA PREPENDS, so index 0 is the receiving organisation's own verdict and anything the
+        # sender put in the message they wrote is LAST (the same rule this module applies to
+        # `Received`). A last-wins dict over the joined string would let an attacker appending their
+        # own `Authentication-Results: dkim=pass header.d=microsoft.com` override the real
+        # `dkim=fail`, and `microsoft.com` would come out as a durable, cryptographically
+        # authenticated DOMAIN selector. That defeats rule 2 and invariant 9 using bytes the
+        # attacker typed, and the `email_dkim_domain_needs_pass` CHECK cannot catch it: a constraint
+        # defends against the application forgetting to check, never against it checking a forged
+        # input (docs/17, the forged PGP verdict).
         #
-        # That defeats this module's own rule 2 and invariant 9 using
-        # bytes the attacker typed. The `email_dkim_domain_needs_pass`
-        # CHECK could not catch it either: the parser made the result and
-        # the domain agree on the forged value, which is exactly the
-        # shape of the Phase 7 forged-PGP-verdict defect (docs/17) — a
-        # constraint defends against the application forgetting to check,
-        # never against it checking a forged input.
-        #
-        # The whole set is still stored in `auth_results_raw`, because a
-        # message carrying two of these is itself a finding.
+        # The whole set is still stored in `auth_results_raw`, because a message carrying two of
+        # these is itself a finding.
         out.auth_results_raw = " | ".join(str(a) for a in auth_headers)[:8000]
-        # http_ui-007 (2026-10-03): the FIRST header is the only candidate,
-        # and it is believed only when a trusted MTA wrote it. A message the
-        # receiving server stamped nothing on (forwarded, exported) carries
-        # only the sender's own header, and the sender picks which domain it
-        # says passed.
+        # The FIRST header is the only candidate, and it is believed only when a trusted MTA wrote
+        # it. A message the receiving server stamped nothing on (forwarded, exported) carries only
+        # the sender's own header, and the sender picks which domain it says passed.
         believed, why_not = _auth_results_believed(msg, str(auth_headers[0]), trusted)
         if believed:
             _apply_auth_results(out, str(auth_headers[0]))
@@ -664,10 +603,8 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
     elif auth_unreadable is not None:
         out.gaps.append({
             "step": "authentication_results",
-            # A bracketed plural hedged a count nobody has: the read
-            # failed, so how many headers there are is unknown, and the
-            # sentence says that in words (README screenshot set review,
-            # 2026-09-23).
+            # A bracketed plural would hedge a count nobody has: the read failed, so how many
+            # headers there are is unknown, and the sentence says that in words.
             "reason": "the Authentication-Results headers, however many "
                       "the message carries, could not be READ "
                       f"({auth_unreadable}). Whether this message was "
@@ -716,12 +653,11 @@ _NUL_STANDIN = chr(0xFFFD)
 def _scrub_unstorable(out: ParsedEmail) -> ParsedEmail:
     """Replace every NUL in what was parsed, and say so in a gap.
 
-    http_ui-009 (2026-10-03): one NUL in a Subject, a Message-ID or a display
-    name (raw, or RFC 2047 encoded as `=?utf-8?b?d2kAcmU=?=`) reached a text
-    column and the route answered 500 after the exhibit was lodged, and every
-    retry the same: the sender chose whether their mail could be analysed.
-    Every string the record is made from is cleaned here, the one place they
-    all pass, so nothing is dropped (invariant 12) and nothing is guessed."""
+    One NUL in a Subject, a Message-ID or a display name (raw, or RFC 2047 encoded as
+    `=?utf-8?b?d2kAcmU=?=`) would reach a text column and the route would answer 500 after the
+    exhibit was lodged, on every retry: the sender would choose whether their mail could be
+    analysed. Every string the record is made from is cleaned here, the one place they all pass, so
+    nothing is dropped (invariant 12) and nothing is guessed."""
     replaced: list[str] = []
 
     def clean(value, where: str):
@@ -786,19 +722,16 @@ def _auth_results_believed(msg: EmailMessage, value: str,
 
     Three things must hold, and each is a refusal when it does not:
 
-    1. Its authserv-id (the name before the first `;`) is a host of a
-       trusted MTA (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the same list the
-       Received chain's boundary is read from. With none declared nothing
-       can be attributed to the recipient's own server, which is the answer
-       the infrastructure selectors already give ("unconfigured means
-       unknown").
-    2. The topmost Received header was written by a trusted MTA: the last
-       server to handle the message is ours, so what sits above its Received
-       line was added by it, after it took the message.
-    3. The header sits ABOVE every Received header. An MTA prepends, so a
-       header below one was written before that hop saw the message: by the
-       sender, or by a relay the sender chose. The authserv-id alone is no
-       defence here, because a forger writes the victim organisation's own
+    1. Its authserv-id (the name before the first `;`) is a host of a trusted MTA
+       (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the same list the Received chain's boundary is read from.
+       With none declared nothing can be attributed to the recipient's own server ("unconfigured
+       means unknown").
+    2. The topmost Received header was written by a trusted MTA: the last server to handle the
+       message is ours, so what sits above its Received line was added by it, after it took the
+       message.
+    3. The header sits ABOVE every Received header. An MTA prepends, so a header below one was
+       written before that hop saw the message, by the sender or a relay the sender chose. The
+       authserv-id alone is no defence here, because a forger writes the victim organisation's own
        name into it.
 
     Anything else is the sender's claim and is not read as a verdict."""
@@ -838,37 +771,22 @@ def _auth_results_believed(msg: EmailMessage, value: str,
 def _apply_auth_results(out: ParsedEmail, raw: str) -> None:
     """Read SPF/DKIM/DMARC verdicts out of `Authentication-Results`.
 
-    ## A domain is recorded only when the method PASSED
+    A domain is recorded only when the method PASSED. This is the invariant-9 rule in its email
+    form, and the DB enforces the DKIM half (`email_dkim_domain_needs_pass`):
+    `header.d=microsoft.com` on a FAILING signature is a claim by the attacker, not an identity, and
+    recording it would invite every downstream reader and report to treat a forgery as
+    authenticated.
 
-    This is the invariant-9 rule in its email form and the DB enforces the
-    DKIM half (`email_dkim_domain_needs_pass`). `header.d=microsoft.com`
-    on a FAILING signature is a claim by the attacker, not an identity —
-    recording it would invite every downstream reader, and every report,
-    to treat a forgery as authenticated.
-
-    ## The result and the domain are decided TOGETHER, per method
-
-    A message may legitimately carry more than one signature for the same
-    method — a mailing list or a forwarder re-signs, so
-    `dkim=pass header.d=acme.example; dkim=fail header.d=list.example` is
-    ordinary mail, not an attack.
-
-    The previous version read the RESULT from a last-wins dict over the
-    whole string and the DOMAIN from whichever clause passed, so that
-    input produced `dkim_result = FAIL` alongside
-    `dkim_domain = acme.example`. That combination violates
-    `email_dkim_domain_needs_pass`, and the violation surfaced as a raw
-    `CheckViolation` — a 500 — AFTER `EvidenceService.ingest` had already
-    committed the WORM exhibit in its own transaction. Net result: an
-    object-locked, retention-committed exhibit with no `email_message`
-    describing it and nothing in the dead letter. `parse_eml`'s own
-    docstring says the parser must not crash on hostile input; it was
-    crashing on *well-formed* input.
-
-    So each method is resolved once, over its own clauses:
-    **any PASS wins, and carries its own domain.** That is also the
-    correct reading — one valid signature is a valid signature — and it
-    makes the constraint satisfiable by construction rather than by luck.
+    The result and the domain are decided TOGETHER, per method. A message may legitimately carry
+    more than one signature for the same method (a mailing list or forwarder re-signs), so
+    `dkim=pass header.d=acme.example; dkim=fail header.d=list.example` is ordinary mail. Reading the
+    RESULT from a last-wins dict over the whole string and the DOMAIN from whichever clause passed
+    would give `dkim_result = FAIL` beside `dkim_domain = acme.example`, which violates the CHECK;
+    the raw `CheckViolation` would be a 500 AFTER `EvidenceService.ingest` had committed the WORM
+    exhibit in its own transaction, leaving a retention-committed exhibit with no `email_message`
+    describing it. So each method is resolved once, over its own clauses: any PASS wins and carries
+    its own domain. That is also the correct reading (one valid signature is a valid signature) and
+    makes the constraint satisfiable by construction.
     """
     known = {"spf": {"PASS", "FAIL", "SOFTFAIL", "NEUTRAL", "NONE",
                      "TEMPERROR", "PERMERROR"},
@@ -928,23 +846,14 @@ def _walk_parts(msg: EmailMessage, out: ParsedEmail) -> None:
             continue
 
         if disposition == "attachment" or (filename and ctype != "text/plain"):
-            # An attachment we could not decode is NOT a zero-byte
-            # attachment, and this recorded it as one.
-            #
-            # `payload = b""` on failure gave `byte_size: 0` and
-            # `sha256: NULL` — which is a statement about the MESSAGE ("the
-            # attacker attached an empty file", itself a finding worth
-            # noting) standing in for a statement about the PARSER ("the
-            # base64 was malformed and nobody knows what this was"). An
-            # analyst triaging a phish reads a 0-byte attachment as a decoy
-            # or a delivery failure and moves on; the actual payload may
-            # have been a loader.
-            #
-            # Both columns are nullable, so "unknown" is representable and
-            # was simply not being used. This is the module's own stated
-            # rule from `ParsedEmail` — a NULL result reads as "it did not
-            # pass", a recorded gap reads as "nobody checked" — applied to
-            # the one field where it had been forgotten.
+            # An attachment we could not decode is NOT a zero-byte attachment. `byte_size: 0` with
+            # `sha256: NULL` would state something about the MESSAGE ("the attacker attached an
+            # empty file") in place of something about the PARSER ("the base64 was malformed and
+            # nobody knows what this was"), and an analyst triaging a phish reads a 0-byte
+            # attachment as a decoy or a delivery failure while the real payload may have been a
+            # loader. Both columns are nullable, so "unknown" is representable: a NULL result reads
+            # as "it did not pass", a recorded gap as "nobody checked" (the rule stated on
+            # `ParsedEmail`).
             decode_failed = None
             try:
                 payload = part.get_payload(decode=True)
@@ -1002,26 +911,20 @@ def _walk_parts(msg: EmailMessage, out: ParsedEmail) -> None:
 # ---------------------------------------------------------------------------
 
 def selector_candidates_for_call(call: dict) -> list[dict]:
-    """Selector proposals from a call record — DELIBERATELY not including
-    the presented number.
+    """Selector proposals from a call record, DELIBERATELY not including the presented number.
 
-    The number the victim's handset showed is chosen by the attacker.
-    Minting a strong `PHONE` selector from it puts a real subscriber's
-    number on a criminal actor's node with confidence, which attributes a
-    crime to whoever the attacker picked out of the air. That is the
-    fund-losing bug of this subsystem and it is prevented here, in the one
-    function that decides what becomes a selector, rather than by asking
-    every caller to remember.
+    The number the victim's handset showed is chosen by the attacker. Minting a strong `PHONE`
+    selector from it puts a real subscriber's number on a criminal actor's node with confidence,
+    attributing a crime to whoever the attacker picked out of the air. That is the fund-losing bug
+    of this subsystem, so it is prevented here, in the one function that decides what becomes a
+    selector, rather than by asking every caller to remember.
 
-    `p_asserted_identity` is set by the trusted network. `originating_trunk`
-    is what actually offered the call. Those are durable. The presented
-    number is returned nowhere.
-
-    A STIR/SHAKEN attestation of A, and only when actually verified, is the
-    one case where the presented number has been vouched for by the
-    originating carrier — and even then it is offered as a WEAK candidate,
-    because an attestation says "this caller may use this number", not
-    "this caller is that person".
+    `p_asserted_identity` is set by the trusted network and `originating_trunk` is what actually
+    offered the call; those are durable. The presented number is returned nowhere. A STIR/SHAKEN
+    attestation of A, and only when actually verified, is the one case where the presented number
+    has been vouched for by the originating carrier, and even then it is offered as a WEAK
+    candidate: an attestation says "this caller may use this number", not "this caller is that
+    person".
     """
     out: list[dict] = []
     pai = (call.get("p_asserted_identity") or "").strip()
@@ -1029,8 +932,8 @@ def selector_candidates_for_call(call: dict) -> list[dict]:
         kind = "SIP_URI" if pai.lower().startswith(("sip:", "sips:", "tel:")) else "PHONE"
         out.append({"selector_type": kind, "value": pai, "strength": "durable",
                     "why": "P-Asserted-Identity is set by the trusted network"})
-    # The field in words: the reason is shown on the call row, and a raw
-    # column name there read as developer speak (2026-09-23).
+    # The field in words: the reason is shown on the call row, where a raw column name would read as
+    # jargon.
     for uri_field, words in (("sip_from_uri", "the SIP From URI"),
                              ("sip_to_uri", "the SIP To URI")):
         value = (call.get(uri_field) or "").strip()
@@ -1083,20 +986,13 @@ def selector_candidates_for_email(parsed: ParsedEmail) -> list[dict]:
                     "strength": "weak",
                     "why": "attacker-generated: fingerprints the sending kit, "
                            "never the sender"})
-    # Infrastructure ONLY from at-or-below the trust boundary — and ONLY
-    # when a boundary was actually established.
-    #
-    # With no `NOCTORNAL_TRUSTED_MTA_HOSTS` configured, the boundary
-    # defaults to seq 0. That default is right for what to EXCLUDE, and it
-    # was silently wrong for what to include: hop 0 is the receiving
-    # organisation's own MTA, so its `from_ip` is a machine INSIDE the
-    # victim's network. This function was therefore offering
-    # `10.1.2.3` — the victim's internal relay — as durable infrastructure
-    # to attach to the criminal actor, while suppressing the attacker's
-    # real sending IP one hop above it. Precisely inverted.
-    #
-    # Unconfigured means unknown, and the honest output for unknown is
-    # nothing. An operator who sets the variable gets the real answer.
+    # Infrastructure ONLY from at-or-below the trust boundary, and ONLY when a boundary was actually
+    # established. With no `NOCTORNAL_TRUSTED_MTA_HOSTS` configured the boundary defaults to seq 0,
+    # which is right for what to EXCLUDE but wrong for what to include: hop 0 is the receiving
+    # organisation's own MTA, so its `from_ip` is a machine INSIDE the victim's network, and
+    # offering `10.1.2.3` (the victim's internal relay) as durable infrastructure for the criminal
+    # actor while suppressing the attacker's real sending IP one hop above it would be precisely
+    # inverted. Unconfigured means unknown, and the honest output for unknown is nothing.
     if parsed.hops and all(h.boundary_is_assumed for h in parsed.hops):
         out.append({"selector_type": None, "value": None, "strength": "none",
                     "why": "no infrastructure proposed: no trusted MTA was "
@@ -1129,14 +1025,11 @@ def _boundary_seq(hops: list[Hop]) -> int:
 
 
 def merge_candidates(candidates: list[dict]) -> list[dict]:
-    """Selector candidates de-duplicated by `(selector_type, value)`, the
-    reasons merged in order.
+    """Selector candidates de-duplicated by `(selector_type, value)`, the reasons merged in order.
 
-    ux14-deception:calls-vouched-and-tooltip-only (2026-09-23). A call
-    whose `sip_from_uri` and P-Asserted-Identity carry the same URI listed
-    it twice, so a reader could not tell two selectors from three. One row
-    per selector, every reason it was offered on that row, and the
-    strongest strength any reason gave it.
+    A call whose `sip_from_uri` and P-Asserted-Identity carry the same URI would otherwise list it
+    twice, so a reader could not tell two selectors from three. One row per selector, every reason
+    it was offered on that row, and the strongest strength any reason gave it.
     """
     out: list[dict] = []
     seen: dict[tuple, dict] = {}
@@ -1156,26 +1049,17 @@ def merge_candidates(candidates: list[dict]) -> list[dict]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Across the three channels (ux14-deception:ecrime-no-cross-channel-pivot)
-# ---------------------------------------------------------------------------
+# Across the three channels. The case this pane serves is one actor running a phishing kit, a BEC
+# mail and a spoofed bank call from one VPS within an hour; without a pivot the pane shows three
+# silos and an analyst has to copy the shared address between sub-tabs by hand to notice. docs/19
+# calls cross-channel reuse the question this platform exists to answer. Each record says where else
+# in the case its hosts and addresses were seen, computed over what the caller may see.
 #
-# The case this pane was built for is one actor running a phishing kit, a
-# BEC mail and a spoofed bank call from one VPS within an hour, and the pane
-# showed three silos: the shared address was on the capture's last hop, the
-# message's trusted Received hop and the call's source, and an analyst had
-# to copy it between sub-tabs by hand to notice (the call's never showed at
-# all). docs/19 calls cross-channel reuse "precisely the question this
-# platform exists to answer". Each record now says where else in the case
-# its hosts and addresses were seen, computed over what the caller may see.
-#
-# What takes part is what the infrastructure recorded, and what the sender
-# typed is named as such: the hosts in the message's Return-Path and
-# Message-ID are the sender's, and a Received hop below the boundary is
-# never used at all (it is a claim, and matching on it is the classic BEC
-# attribution error). The sending address takes part only when the boundary
-# is confirmed, for `selector_candidates_for_email`'s reason: at an assumed
-# hop 0 it can be the recipient's own relay.
+# What takes part is what the infrastructure recorded, and what the sender typed is named as such:
+# the hosts in the message's Return-Path and Message-ID are the sender's, and a Received hop below
+# the boundary is never used at all (it is a claim, and matching on it is the classic BEC
+# attribution error). The sending address takes part only when the boundary is confirmed, for
+# `selector_candidates_for_email`'s reason: at an assumed hop 0 it can be the recipient's own relay.
 
 def _host_of(value: str | None) -> str | None:
     """The host of a URL, a bare host, or None. Lower case, no trailing
@@ -1274,15 +1158,10 @@ def cross_channel(observed: dict) -> dict[tuple[str, str], list[dict]]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# In case search (ux14-deception:ecrime-no-cross-channel-pivot)
-# ---------------------------------------------------------------------------
-#
-# The finding's last part: "index deception hosts, IPs and URLs in case
-# search". Search found the entity and the exhibit that named an address and
-# never the phishing page, the message or the call it sat on, because
-# nothing searched these tables. The same observables `cross_channel` reads,
-# whole URLs included, matched by fragment over what the caller may see.
+# In case search: deception hosts, IPs and URLs. The same observables `cross_channel` reads, whole
+# URLs included, are matched by fragment over what the caller may see, so a search finds the
+# phishing page, the message or the call an address sat on, not only the entity and the exhibit that
+# name it.
 
 #: Fewer characters than this match nearly every address in a case, which
 #: is a list, not an answer. The Search pane's own floor is the same.
@@ -1338,32 +1217,23 @@ def search_observed(observed: dict, needle: str
 CHANNEL_PATHS = {"capture": "captures", "email": "emails", "call": "calls"}
 
 
-# ---------------------------------------------------------------------------
-# Proposals from a record's durable fields
-# ---------------------------------------------------------------------------
-#
-# The per-row action the review asked for, so an overlap reaches the graph
-# through the normal proposal path rather than by an analyst retyping it.
-# Candidates are DERIVED here from the stored record and the caller names
-# one by its key: `routers/proposals.py` refuses caller-authored proposals,
-# and the same rule holds for these. INFRA for hosts and addresses, LURE for
-# the pretext. The presented caller ID never appears (invariant 9), and a
-# sending address appears only when the boundary is confirmed.
+# Proposals from a record's durable fields. Candidates are DERIVED here from the stored record and
+# the caller names one by its key: `routers/proposals.py` refuses caller-authored proposals, and the
+# same rule holds for these. INFRA for hosts and addresses, LURE for the pretext. The presented
+# caller ID never appears (invariant 9), and a sending address appears only when the boundary is
+# confirmed.
 
 def _ip_selector(ip: str) -> str:
     return "IPV6" if ":" in ip else "IPV4"
 
 
-#: The SIP fields that name the VICTIM's end of a call, by its direction.
-#: Never proposed as the actor's infrastructure and never an "also seen
-#: in" overlap, for the reason the called number is kept out of the
-#: search label: on a vishing call (INBOUND_TO_VICTIM) the To URI is the
-#: callee, so its host is the victim's own PBX or carrier, and two calls
-#: to two employees of one company read as calls sharing infrastructure,
-#: with that PBX one Triage click from the actor's graph (final review
-#: u17, 2026-09-24). When the victim placed the call the ends swap: From
-#: and P-Asserted-Identity name the victim. When the direction is not
-#: known, To is left out too, and From stays, as it always has.
+#: The SIP fields that name the VICTIM's end of a call, by its direction. Never proposed as the
+#: actor's infrastructure and never an "also seen in" overlap, for the reason the called number is
+#: kept out of the search label: on a vishing call (INBOUND_TO_VICTIM) the To URI is the callee, so
+#: its host is the victim's own PBX or carrier, and two calls to two employees of one company would
+#: read as calls sharing infrastructure, with that PBX one Triage click from the actor's graph. When
+#: the victim placed the call the ends swap: From and P-Asserted-Identity name the victim. When the
+#: direction is not known, To is left out too, and From stays.
 _VICTIM_SIP_FIELDS = {
     "OUTBOUND_FROM_VICTIM": frozenset({"sip_from_uri", "p_asserted_identity"}),
 }
@@ -1485,13 +1355,11 @@ _CALL_Q = ", ".join("x." + c.strip() for c in _CALL_COLUMNS.split(","))
 def _labels_clause(alias: str = "x") -> str:
     """The composed-label filter every read in this module uses.
 
-    Composed, not the row's own: an element can be classified ABOVE its
-    case (so the case gate alone is insufficient) and a case reclassified
-    upward after the fact must take its contents with it (so the row's own
-    labels alone are insufficient). Written once and interpolated, for the
-    same reason `notifications.readable_predicate` exists — F19 found three
-    separate label holes that all shared the root "the rule was enforced in
-    one place and absent in the second".
+    Composed, not the row's own: an element can be classified ABOVE its case (so the case gate alone
+    is insufficient) and a case reclassified upward after the fact must take its contents with it
+    (so the row's own labels alone are insufficient). Written once and interpolated, as
+    `notifications.readable_predicate` is, because a rule enforced in one place is absent in the
+    second.
     """
     return f"""
         greatest({alias}.classification,
@@ -1503,11 +1371,10 @@ def _labels_clause(alias: str = "x") -> str:
 class DeceptionService:
     """Reads and writes for phishing captures, BEC email and vishing calls.
 
-    Every read composes the element's labels with its case's; every write
-    raises the element to the case floor before inserting, which the
-    `enforce_tlp_floor` trigger then backstops. Both halves, because F19
-    established that a rule living only in application code holds exactly
-    until somebody writes the second caller.
+    Every read composes the element's labels with its case's; every write raises the element to the
+    case floor before inserting, which the `enforce_tlp_floor` trigger then backstops. Both halves,
+    because a rule that lives only in application code holds exactly until somebody writes the
+    second caller.
     """
 
     def __init__(self, conn: psycopg.Connection, *, now=_utcnow):
@@ -1531,11 +1398,10 @@ class DeceptionService:
                        **extra) -> UUID:
         """Record one capture and its redirect chain, atomically.
 
-        The chain is inserted in the same transaction as the capture. A
-        capture row whose hops are missing because a second call failed
-        would read as "this URL redirected nowhere", which is a finding —
-        and a false one. Invariant 12's principle: an absence with no
-        reason is indistinguishable from an observation.
+        The chain is inserted in the same transaction as the capture. A capture row whose hops are
+        missing because a second call failed would read as "this URL redirected nowhere", which is a
+        finding, and a false one (invariant 12: an absence with no reason is indistinguishable from
+        an observation).
         """
         from noctornal_ontology.normalisers import url_norm
 
@@ -1606,11 +1472,9 @@ class DeceptionService:
                  ORDER BY x.captured_at DESC LIMIT %s""",
             (case_id, clearance, list(compartments), limit)).fetchall()
         out = [_capture_row(r) for r in rows]
-        # The chain rides on the list row too, in one query for the page:
-        # the row's "also seen in" and its proposals are drawn from the
-        # hops, and a row that could not say where its final hop resolved
-        # hid the address the three channels share (ux14-deception:
-        # ecrime-no-cross-channel-pivot, 2026-09-23).
+        # The chain rides on the list row too, in one query for the page: the row's "also seen in"
+        # and its proposals are drawn from the hops, and a row that could not say where its final
+        # hop resolved would hide the address the three channels share.
         chains = self._hops_for([r["id"] for r in out])
         for row in out:
             row["hops"] = chains.get(row["id"], [])
@@ -1736,13 +1600,11 @@ class DeceptionService:
                  ORDER BY x.recorded_at DESC LIMIT %s""",
             (case_id, clearance, list(compartments), divergent_only,
              limit)).fetchall()
-        # The sending host rides on the LIST row, not only on the detail.
-        # ux14-deception:email-durable-origin-missing (2026-09-22): the row
-        # showed From, display name and Reply-To, every one of them typed
-        # by the sender, and the one observation the recipient's own relay
-        # made about who connected lived only in the detail card. One query
-        # for the page, not one per row; the partial unique index on the
-        # boundary makes it an index read.
+        # The sending host rides on the LIST row, not only on the detail. The row's From, display
+        # name and Reply-To are all typed by the sender, and the one observation the recipient's own
+        # relay made about who connected would otherwise live only in the detail card. One query for
+        # the page, not one per row; the partial unique index on the boundary makes it an index
+        # read.
         hops = {}
         if rows:
             hops = {h[0]: h[1:] for h in self._c.execute(
@@ -1777,22 +1639,19 @@ class DeceptionService:
                  FROM deception.email_hop
                 WHERE message_id = %s ORDER BY seq""",
             (message_id,)).fetchall()
-        # The boundary is a property of the CHAIN, so it is resolved once
-        # here rather than by a correlated subquery per row. Absent a
-        # marked boundary the answer is seq 0 — the same conservative
-        # default `parse_received_chain` applies, and the two must agree
-        # or the UI would draw the line in a different place from the
-        # extractor.
+        # The boundary is a property of the CHAIN, so it is resolved once here rather than by a
+        # correlated subquery per row. Absent a marked boundary the answer is seq 0, the same
+        # conservative default `parse_received_chain` applies; the two must agree or the UI would
+        # draw the line in a different place from the extractor.
         boundary = next((h[0] for h in hop_rows if h[7]), 0)
         out["trusted_boundary_seq"] = boundary
         at_boundary = next((h for h in hop_rows if h[0] == boundary), None)
         out["sending_host"] = _sending_host(
             (at_boundary[0], at_boundary[1], at_boundary[2], at_boundary[3],
              at_boundary[6], at_boundary[7]) if at_boundary else None)
-        # The body as the UI may show it. `body_text` stays in the payload,
-        # fanged, beside `extracted_urls`, for a consumer that needs the
-        # exact bytes; the console renders only these runs (a static test
-        # holds it to that). ux14-deception:body-url-not-defanged.
+        # The body as the UI may show it. `body_text` stays in the payload, fanged, beside
+        # `extracted_urls`, for a consumer that needs the exact bytes; the console renders only
+        # these runs (a static test holds it to that).
         out["body_segments"] = defang_text(out["body_text"])
         out["body_text_defanged"] = (
             "".join(s["text"] for s in out["body_segments"]) or None)
@@ -1805,11 +1664,10 @@ class DeceptionService:
              # Stated per-row so the UI does not have to re-derive the
              # rule, and cannot re-derive it wrongly.
              "is_attacker_writable": h[0] > boundary,
-             # The forms the console draws. `from` is whatever the sender
-             # said in HELO, and every line above the boundary is the
-             # sender's outright, so either can be `pay.evil.example/verify`
-             # (2026-09-23). A plain hostname comes back
-             # unchanged; only a URL-shaped one is defanged.
+             # The forms the console draws. `from` is whatever the sender said in HELO, and every
+             # line above the boundary is the sender's outright, so either can be
+             # `pay.evil.example/verify`. A plain hostname comes back unchanged; only a URL-shaped
+             # one is defanged.
              "from_host_defanged": _defanged_str(h[1]),
              "by_host_defanged": _defanged_str(h[3])}
             for h in hop_rows]
@@ -1903,21 +1761,18 @@ class DeceptionService:
                      compartments: frozenset[str], *,
                      with_urls: bool = False,
                      victim_side: bool = False) -> dict:
-        """Every host and address each record in the case carries, filed
-        by value, over the records THIS caller may see: an overlap with a
-        record above their labels must not be announced by a pointer to
-        it. See `cross_channel` for what takes part and why.
+        """Every host and address each record in the case carries, filed by value, over the records
+        THIS caller may see: an overlap with a record above their labels must not be announced by a
+        pointer to it. See `cross_channel` for what takes part and why.
 
-        `with_urls` files each whole URL too, under kind `url`, for
-        `search`: an analyst pastes a URL as often as a host. Left out of
-        `cross_channel`, where two records sharing a host already says
-        what two sharing a URL would.
+        `with_urls` files each whole URL too, under kind `url`, for `search`: an analyst pastes a
+        URL as often as a host. Left out of `cross_channel`, where two records sharing a host
+        already says what two sharing a URL would.
 
-        `victim_side` files the SIP hosts that name the victim's end of a
-        call (`_victim_sip_fields`), also for `search` alone: finding the
-        calls made to one company's PBX is a fair question, but two calls
-        to it are not two calls sharing the actor's infrastructure (final
-        review u17, 2026-09-24)."""
+        `victim_side` files the SIP hosts that name the victim's end of a call
+        (`_victim_sip_fields`), also for `search` alone: finding the calls made to one company's PBX
+        is a fair question, but two calls to it are not two calls sharing the actor's
+        infrastructure."""
         bucket: dict = {}
         labels = (case_id, clearance, list(compartments))
         joined = 'LEFT JOIN core."case" c ON c.id = x.case_id'
@@ -2079,23 +1934,19 @@ class DeceptionService:
 
     def first_lure(self, case_id: UUID, *, clearance: str,
                    compartments: frozenset[str]) -> dict | None:
-        """The earliest message or call in the case the caller may see:
-        what a capture's certificate date is read against.
+        """The earliest message or call in the case the caller may see: what a capture's certificate
+        date is read against.
 
-        ux14-deception:web-durable-ids-missing (2026-09-23): a certificate
-        issued five days before the first lure is one of the two strongest
-        phishing signals docs/19 names, and nothing showed the issue date
-        at all.
+        A certificate issued five days before the first lure is one of the two strongest phishing
+        signals docs/19 names.
 
-        A message is dated by the time on its trust-boundary Received hop
-        (the marked boundary, or hop 0 when none is marked, as everywhere
-        in this module), which the recipient's own relay wrote, and failing
-        that by when it was recorded here. Never by its Date header: the
-        sender writes that, this pane calls it a claim everywhere else, and
-        a backdated or forward-dated one moved the "issued N days before
-        the first lure" finding wherever the sender liked (the verifier,
-        2026-09-23). `basis` says which time was used: `received`,
-        `recorded` or, for a call, `started`, as the network recorded it."""
+        A message is dated by the time on its trust-boundary Received hop (the marked boundary, or
+        hop 0 when none is marked, as everywhere in this module), which the recipient's own relay
+        wrote, and failing that by when it was recorded here. Never by its Date header: the sender
+        writes that, this pane calls it a claim everywhere else, and a backdated or forward-dated
+        one would move the "issued N days before the first lure" finding wherever the sender liked.
+        `basis` says which time was used: `received`, `recorded` or, for a call, `started`, as the
+        network recorded it."""
         labels = (case_id, clearance, list(compartments))
         joined = 'LEFT JOIN core."case" c ON c.id = x.case_id'
         rows = self._c.execute(
@@ -2124,35 +1975,27 @@ class DeceptionService:
 
     def propose(self, case_id: UUID, channel: str, record: dict, key: str,
                 *, clearance: str, compartments: frozenset[str]) -> dict:
-        """Put one candidate from `proposal_candidates` into the case's
-        triage queue. The record is the one the router fetched under the
-        caller's labels; `key` picks a candidate and nothing else.
+        """Put one candidate from `proposal_candidates` into the case's triage queue. The record is
+        the one the router fetched under the caller's labels; `key` picks a candidate and nothing
+        else.
 
-        Refused on a closed or archived case (read-only for content), and
-        for a record carrying a compartment its case does not, because an
-        accepted proposal is written at the case's compartments and would
-        shed that restriction. Already queued, or already an entity, is
+        Refused on a closed or archived case (read-only for content), and for a record carrying a
+        compartment its case does not, because an accepted proposal is written at the case's
+        compartments and would shed that restriction. Already queued, or already an entity, is
         answered as that rather than queued twice.
 
-        "Already an entity" only for an entity the caller may see
-        (`clearance`, `compartments`: the same ceiling the record was read
-        under). It returned the id of ANY node with that label, so a case
-        member below a RED node's labels learnt that it existed and got
-        its id by proposing a value from a record they could see (the
-        verifier, 2026-09-23). A node above the caller's labels is treated
-        as absent and the proposal is queued at the record's own labels:
-        whoever reviews it, and may see both, decides whether they are one
-        thing.
+        "Already an entity" only for an entity the caller may see (`clearance`, `compartments`: the
+        same ceiling the record was read under). Matching ANY node with that label would tell a case
+        member below a RED node's labels that it existed and give them its id. A node above the
+        caller's labels is treated as absent and the proposal is queued at the record's own labels:
+        whoever reviews it, and may see both, decides whether they are one thing.
 
-        "Already proposed" on the same terms, for a proposal the caller's
-        Triage queue would show them (`proposals._READABLE`, the queue's
-        own predicate). The queue is filtered per reader, so a proposal
-        raised from a RED capture is not an AMBER member's to see, and
-        this lookup matched it anyway: they learnt that RED material
-        carried the host, got its id and its review state, and their own
-        AMBER suggestion was never queued, for good once the RED one was
-        rejected (final review c20, 2026-09-24). One above them is treated
-        as absent, and theirs is queued beside it."""
+        "Already proposed" on the same terms, for a proposal the caller's Triage queue would show
+        them (`proposals._READABLE`, the queue's own predicate). The queue is filtered per reader,
+        so a proposal raised from a RED capture is not an AMBER member's to see; matching it anyway
+        would tell them RED material carried the host, give them its id and review state, and never
+        queue their own AMBER suggestion once the RED one was rejected. One above them is treated as
+        absent, and theirs is queued beside it."""
         from noctornal_api.proposals import (
             _READABLE,
             _SOURCE_FROM,
@@ -2288,9 +2131,8 @@ def _capture_row(r) -> dict:
         "note_segments": defang_text(r[27]),
         "classification": r[28], "compartments": sorted(r[29] or []),
         "legal_hold": r[30],
-        # Who wrote the note, by name. ux14-deception:notes-never-rendered
-        # (2026-09-22): a note is only worth showing attributed, and a UUID
-        # is not an attribution a reader can act on.
+        # Who wrote the note, by name: a note is only worth showing attributed, and a UUID is not an
+        # attribution a reader can act on.
         "captured_by_name": r[31] if len(r) > 31 else None,
     }
 
@@ -2310,22 +2152,18 @@ def _hop_row(h) -> dict:
 def _sending_host(hop) -> dict | None:
     """The host that connected to the recipient's last trusted relay.
 
-    `hop` is `(seq, from_host, from_ip, by_host, received_at,
-    is_trusted_boundary)` for the boundary hop, or None when the message
-    has no Received chain. This is docs/19's "first trusted Received hop":
-    the one line of the chain written by a machine the recipient controls
-    about who connected to it, so the only origin claim in a message the
-    sender did not write.
+    `hop` is `(seq, from_host, from_ip, by_host, received_at, is_trusted_boundary)` for the boundary
+    hop, or None when the message has no Received chain. This is docs/19's "first trusted Received
+    hop": the one line of the chain written by a machine the recipient controls about who connected
+    to it, so the only origin claim in a message the sender did not write.
 
-    `boundary_confirmed` is three-valued on purpose (invariant 12). True
-    when the boundary sits above hop 0, which the parser only ever does
-    after recognising hop 0's `by` host as the recipient's
-    (`parse_received_chain`). None when it sits AT hop 0, because the
-    stored chain cannot say whether an operator named that MTA or the
-    parser fell back to its default with nothing configured. In the second
-    case hop 0's `from` can be the recipient's own internal relay, which is
-    the inversion `selector_candidates_for_email` refuses to propose. The
-    UI says "not confirmed" rather than guessing either way.
+    `boundary_confirmed` is three-valued on purpose (invariant 12). True when the boundary sits
+    above hop 0, which the parser only ever does after recognising hop 0's `by` host as the
+    recipient's (`parse_received_chain`). None when it sits AT hop 0, because the stored chain
+    cannot say whether an operator named that MTA or the parser fell back to its default with
+    nothing configured. In that case hop 0's `from` can be the recipient's own internal relay, which
+    is the inversion `selector_candidates_for_email` refuses to propose. The UI says "not confirmed"
+    rather than guessing either way.
     """
     if hop is None:
         return None
@@ -2333,11 +2171,10 @@ def _sending_host(hop) -> dict | None:
     return {
         "seq": seq, "host": host, "ip": str(ip) if ip else None,
         "observed_by": by_host,
-        # What the console shows, on the list row and the detail alike.
-        # The host is the HELO name the sender chose, recorded faithfully
-        # by the relay, and `_RECEIVED_FROM` keeps a `/` in it: EHLO
-        # `pay.evil.example/verify` was drawn live under "What the
-        # infrastructure proved" (2026-09-23).
+        # What the console shows, on the list row and the detail alike. The host is the HELO name
+        # the sender chose, recorded faithfully by the relay, and `_RECEIVED_FROM` keeps a `/` in
+        # it: EHLO `pay.evil.example/verify` must not be drawn live under "What the infrastructure
+        # proved".
         "host_defanged": _defanged_str(host),
         "observed_by_defanged": _defanged_str(by_host),
         "received_at": received_at.isoformat() if received_at else None,
@@ -2350,15 +2187,13 @@ def _email_row(r) -> dict:
     return {
         "id": str(r[0]), "case_id": str(r[1]), "evidence_id": str(r[2]),
         "message_id": r[3], "message_id_norm": r[4],
-        # The kit's fingerprint, surfaced on the row: in the demo BEC the
-        # Message-ID, the Return-Path and the first trusted hop all name the
-        # same VPS, and a reader had to open three things to see that.
-        # Attacker-generated like every header, so it is a pivot and never
-        # an identity (`selector_candidates_for_email` offers it weak).
+        # The kit's fingerprint, surfaced on the row: in the demo BEC the Message-ID, the
+        # Return-Path and the first trusted hop all name the same VPS, and a reader would otherwise
+        # open three things to see that. Attacker-generated like every header, so it is a pivot and
+        # never an identity (`selector_candidates_for_email` offers it weak).
         "message_id_domain": _domain_of(r[3]),
         # `_domain_of` keeps everything after the last `@`, so the kit's
-        # `<a@pay.evil.example/verify>` gives a URL, not a domain (2026-09-23). The console
-        # shows this form only.
+        # `<a@pay.evil.example/verify>` gives a URL, not a domain. The console shows this form only.
         "message_id_domain_defanged": _defanged_str(_domain_of(r[3])),
         "header_from": r[5], "header_from_display": r[6],
         # The display name and subject are the sender's prose, and a lure

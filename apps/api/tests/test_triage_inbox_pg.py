@@ -1,30 +1,18 @@
-"""Triage, the inbox and dual control, held to what the 2026-09-22 review
-found in them (the ux08-triage findings) and the owner's gap decision on
-capture classification.
+"""Triage, the inbox and dual control.
 
-Each test fails on the base of 2026-09-23 and names the finding it holds:
-
-- accept-downgrades-classification and gap-capture-classification: a
-  capture's classification reaches every proposal it raises, Accept writes
-  at it (never below the case), a lower label is refused, and the queue
-  shows a reader only what their clearance reaches.
-- graph-says-unreviewed-triage-says-nothing: the sociogram's ring is the
-  queue's `pending_by_node`, and it clears when the proposal is decided.
-- attribute-proposal-no-label-no-value: the queue names the entities a
-  claim is about, for the ones the reader may see.
-- source-document-not-reachable: a proposal carries its document and the
-  source route returns the captured text with the match marked.
-- stale-badges-and-list: a proposal write is announced on the live channel.
-- approval-row-uuids-no-requester and approval-reach-warning-dropped: the
-  listing names a merge's entities and says how many approvers were told.
-- urgent-read-vs-ack-invisible: urgent and unacknowledged is counted apart
-  from unread, pinned first, kept by "needs action", and says when it
-  escalates.
-- notifications-no-path-to-object: PROPOSAL_QUEUED names its queue, and an
-  integrity alarm names its exhibit by title.
-- no-work-waiting-at-sign-in: `/notifications/waiting` counts, per case,
-  proposals to triage and requests this person could sign.
-- quiet-hours-utc-not-local: the zone is saved with the window.
+- A capture's classification reaches every proposal it raises, Accept writes at it (never below the
+  case), a lower label is refused, and the queue shows a reader only what their clearance reaches.
+- The sociogram's ring is the queue's `pending_by_node`, and it clears when the proposal is decided.
+- The queue names the entities a claim is about, for the ones the reader may see.
+- A proposal carries its document and the source route returns the captured text with the match
+  marked.
+- A proposal write is announced on the live channel.
+- The approvals listing names a merge's entities and says how many approvers were told.
+- Urgent and unacknowledged notifications are counted apart from unread, pinned first, kept by "needs
+  action", and say when they escalate.
+- PROPOSAL_QUEUED names its queue, and an integrity alarm names its exhibit by title.
+- `/notifications/waiting` counts, per case, proposals to triage and requests this person could sign.
+- The quiet-hours zone is saved with the window.
 
 Email prefix `ti4-`, document titles `ti4-`, unique to this file.
 Env-gated on DATABASE_URL; the exhibit leg also needs MINIO_ENDPOINT.
@@ -173,10 +161,6 @@ def _queue(client, conn, case_id, user, state="PROPOSED"):
     return r.json()
 
 
-# ---------------------------------------------------------------------------
-# accept-downgrades-classification, gap-capture-classification
-# ---------------------------------------------------------------------------
-
 def test_a_capture_carries_its_classification_into_every_proposal(conn):
     owner = _user(conn, "RED")
     case_id = _case(conn, owner)
@@ -257,10 +241,8 @@ def test_the_queue_shows_a_reader_only_what_their_clearance_reaches(conn, client
     assert r.status_code == 404, r.text
     r = client.get(f"/api/v1/cases/{case_id}/proposals/{hidden}/source", headers=h)
     assert r.status_code == 404, r.text
-    # Accept is the same 404, whatever label is asked for. Asking for one
-    # below the capture's was checked first and answered 409 "this proposal
-    # came from RED material", naming the label the queue had hidden
-    # (verifier's fix round, 2026-09-23).
+    # Accept is the same 404 whatever label is asked for, so the reply never names a label the queue
+    # has hidden.
     for asked in ({}, {"classification": "GREEN"}, {"classification": "RED"}):
         r = client.post(f"/api/v1/cases/{case_id}/proposals/{hidden}/accept",
                         headers=h, json=asked)
@@ -396,9 +378,8 @@ def test_the_approvals_listing_names_the_merge_and_its_reach(conn, client):
                  "reason": "renamed", "basis_selector_id": None},
         justification="same crew, renamed", requested_by=owner)
     assert req.approvers_notified == 1
-    # A request that names an entity above the analyst is not listed to them
-    # at all, rather than listed with that entity as None (beta review
-    # http_ui-011, 2026-10-03); test_review_g42_merge_visibility_pg holds it.
+    # A request that names an entity above the analyst is not listed to them at all, rather than
+    # listed with that entity as None; test_merge_visibility_pg holds it.
     ApprovalService(conn).request(
         operation="node.merge", case_id=case_id,
         payload={"source_node_id": str(a), "target_node_id": str(red),
@@ -580,8 +561,7 @@ def test_the_quiet_window_is_saved_with_its_zone(conn, client):
     assert r.status_code == 200, r.text
     assert r.json()["timezone"] == "America/New_York"
     pref = NotificationService(conn).preferences(owner)["SMTP"]
-    # 23:30 in New York is 03:30 UTC the next day: inside the window there,
-    # outside it in UTC, which is where the console's words used to put it.
+    # 23:30 in New York is 03:30 UTC the next day: inside the window there, outside it in UTC.
     now = datetime(2026, 9, 24, 3, 30, tzinfo=timezone.utc)
     due = deliver_after(NORMAL, pref, now)
     assert due.astimezone(timezone.utc).time() == time(11, 0), due

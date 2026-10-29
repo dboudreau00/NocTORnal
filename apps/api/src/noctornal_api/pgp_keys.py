@@ -1,41 +1,30 @@
-"""Vendor keys a case holds, and the one way one is fetched (F10b, F10c,
-comms, 2026-09-24; docs/10).
+"""Vendor keys a case holds, and the one way one is fetched (docs/10).
 
-A vendor's public key used to be pasted into a verification and thrown
-away, so nothing recorded which key a check used, where it came from, or
-who compared its fingerprint with the one the actor published. docs/16 C11
-item 3 calls that provenance "a HUMAN step, and an unrecorded one weakens
-the whole chain". This module records it.
+A vendor's public key is recorded rather than pasted into a verification and thrown away, so the
+record shows which key a check used, where it came from, and who compared its fingerprint with the
+one the actor published. docs/16 C11 item 3 calls that provenance "a HUMAN step, and an unrecorded
+one weakens the whole chain".
 
-What holds here, and why:
+- Keys are case-scoped records of what was obtained and from where. An acquisition (the bytes, their
+  digest, how they came in, the source reference) is immutable and never deleted; each primary key
+  gpg read from it is a row of its own. A key is never born confirmed: a person compares its
+  fingerprint with a published one (a contact block line, or a publication named by reference) and
+  the comparison is recorded with their name.
+- Labels run block <= key <= binding. An acquisition is filed at the floor of what it cites, and
+  only from what the caller can see (a hidden citation is the same 404 as an unknown id, so the
+  floor is no classification oracle). A key is confirmed only against a block within its labels, and
+  a binding only with a key and a block within the binding's. The triggers hold the same rules.
+- Nothing here writes the graph. Machines propose, analysts dispose: a key found in a directory
+  proposes nothing and still needs a person's confirmation.
+- This module makes no network request of its own. A Web Key Directory lookup is off by default and
+  sent only through the integration route `wkd` (docs/00 decision 68, docs/20 section 9), to a
+  directory an administrator listed on that route, after a SECOND person approves (docs/00 decision
+  75), with the record and the SENT audit committed before the first packet. Only the hash leaves
+  (no `?l=`), no redirect is followed and no User-Agent is sent.
 
-- **Keys are case-scoped records of what was obtained and from where.**
-  An acquisition (the bytes, their digest, how they came in, the source
-  reference) is immutable and never deleted; each primary key gpg read
-  from it is a row of its own. A key is never born confirmed: a person
-  compares its fingerprint with a published one (a contact block line, or
-  a publication named by reference) and the comparison is recorded with
-  their name.
-- **Labels run block <= key <= binding.** An acquisition is filed at the
-  floor of what it cites, and only from what the caller can see (a
-  hidden citation is the same 404 as an unknown id, so the floor is no
-  classification oracle). A key is confirmed only against a block within
-  its labels, and a binding is confirmed only with a key and a block
-  within the binding's. The triggers hold the same rules.
-- **Nothing here writes the graph.** Machines propose, analysts dispose:
-  a key found in a directory proposes nothing and still needs a person's
-  confirmation.
-- **This module makes no network request of its own.** A Web Key
-  Directory lookup (F10c) is off by default and sent only through the
-  integration route `wkd` (docs/00 decision 68, docs/20 section 9),
-  to a directory an administrator listed on that route, after a SECOND
-  person approves (docs/00 decision 75), with the record and the SENT
-  audit committed before the first packet. Only the hash leaves (no
-  `?l=`), no redirect is followed and no User-Agent is sent.
-
-gpg reads every key, in an ephemeral keyring with no agent and one time
-budget (pgp.py `_EphemeralGpg`), after the packet walker has refused
-secret material and anything that is not public key framing.
+gpg reads every key, in an ephemeral keyring with no agent and one time budget (pgp.py
+`_EphemeralGpg`), after the packet walker has refused secret material and anything that is not
+public key framing.
 """
 from __future__ import annotations
 
@@ -221,13 +210,10 @@ def _usable_gpg() -> str:
 def inspect_keys(data: bytes) -> list[InspectedKey]:
     """Every primary key in `data`, as gpg reads it, or a refusal.
 
-    The walker refuses secret material and anything that is not public
-    key framing before any subprocess; gpg then imports in an ephemeral
-    keyring with no agent (so it cannot take secret material either) and
-    one budget covers the import, the listing and every export. IMPORT_RES
-    reporting any secret key read is refused as well: a third line, from
-    gpg's own count (the old list-secret-keys run could never fire with
-    no agent)."""
+    The walker refuses secret material and anything that is not public key framing before any
+    subprocess; gpg then imports in an ephemeral keyring with no agent (so it cannot take secret
+    material either) and one budget covers the import, the listing and every export. IMPORT_RES
+    reporting any secret key read is refused as well: a third line, from gpg's own count."""
     if not data:
         raise PgpError("there is no key material here")
     if len(data) > MAX_KEY_BYTES:
@@ -863,9 +849,7 @@ class PgpKeyService:
              Json(detail)))
 
 
-# ---------------------------------------------------------------------------
-# Web Key Directory lookups (F10c)
-# ---------------------------------------------------------------------------
+# Web Key Directory lookups.
 
 #: CLEAR, GREEN or AMBER: the highest classification a lookup may carry.
 #: Unset means lookups are off. Anything else, AMBER_STRICT and RED
@@ -904,7 +888,7 @@ GPG_LOST = ("No usable gpg, so the key the directory sent could not be read. "
 
 
 def _utc_text(moment: datetime) -> str:
-    """An instant as the console writes one: "2026-09-25 14:05 UTC"."""
+    """An instant as the console writes one: "YYYY-MM-DD HH:MM UTC"."""
     return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 

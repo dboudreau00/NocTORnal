@@ -1,4 +1,4 @@
-"""Detached signatures in the console (F10a, comms, 2026-09-24).
+"""Detached signatures in the console (comms).
 
 Pure: reads the shipped static assets, and runs `bytesToBase64` under node
 when node is installed, so the padding defect (a btoa per slice puts '='
@@ -113,11 +113,10 @@ def test_the_markup_has_both_forms_and_no_inline_style():
 
 
 def test_the_radio_rule_is_scoped_to_the_pgp_choices():
-    """The PGP choices style their radios and no others. A bare
-    input[type="radio"] rule restyled every radio in the console (the case
-    status dialog, the ACH stance and decision), outside the Comms pane
-    (F10a, 2026-09-24). Every PGP radio sits in a .pgp-choice
-    fieldset, so the scoped rule reaches all of them and nothing else."""
+    """The PGP choices style their radios and no others. A bare input[type="radio"] rule would restyle
+    every radio in the console (the case status dialog, the ACH stance and decision) outside the Comms
+    pane. Every PGP radio sits in a .pgp-choice fieldset, so the scoped rule reaches all of them and
+    nothing else."""
     css = (STATIC / "app.css").read_text(encoding="utf-8")
     bare = [line for line in css.splitlines()
             if re.match(r'\s*input\[type="radio"\]', line)
@@ -126,9 +125,8 @@ def test_the_radio_rule_is_scoped_to_the_pgp_choices():
     assert ('.pgp-choice input[type="radio"] { width: auto; '
             'accent-color: var(--accent-dim); }') in css
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    # The PGP radios (name="comms-pgp..."); other panes' radios, such as
-    # the collection authority form's scope (2026-09-25), are styled
-    # by their own scoped rules, and the bare-rule check above covers them.
+    # The PGP radios (name="comms-pgp..."); other panes' radios, such as the collection authority form's
+    # scope, are styled by their own scoped rules, and the bare-rule check above covers them.
     radios = [m.start() for m in re.finditer(r'<input\b[^>]*>', html)
               if 'type="radio"' in m.group(0) and 'name="comms-pgp' in m.group(0)]
     assert radios

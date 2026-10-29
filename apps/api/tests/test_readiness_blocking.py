@@ -1,30 +1,19 @@
 """The blocking tier of the readiness register, on all three sides.
 
-Until 2026-09-10 `readiness.py` had one tier and one verdict: eleven
-checks, a `ready` boolean that was their conjunction, and NOTHING in the
-tree that refused on either -- `GET /admin/readiness` served the report
-and the admin pane drew it, and that was the entire consequence. An
-operator could leave the prohibited-content
-policy undeclared, the retention periods on their seeded placeholders,
-no security officer and no sample origin, and the product would still
-poll a real forum with a covert persona on request -- because the entire
-consequence of a failed check was a red row on a pane nobody had to
-open. A control that reports rather than refuses is a quiet green.
+A control that reports rather than refuses is a quiet green: an operator could leave the
+prohibited-content policy undeclared, the retention periods on their seeded placeholders, no security
+officer and no sample origin, and still poll a real forum with a covert persona on request, if a failed
+check were only a red row on a pane nobody had to open.
 
-Four checks now BLOCK (`readiness.BLOCKING_CHECKS`) and
-`POST /collection/sources/{id}/run` answers 409 while any of them fails.
-That makes the tier a cross-file contract in the shape this codebase has
-shipped wrong three times already (the co-participation keys, the
-approvals operation key, the watch-hit `matched_on` list): the service
-decides the tier, the wire carries it, the console renders it and a
-route refuses on it, and every pair of those can be internally
-consistent while disagreeing with the rest. So they are read from one
-place, here.
+So some checks BLOCK (`readiness.BLOCKING_CHECKS`) and `POST /collection/sources/{id}/run` answers 409
+while any of them fails. That makes the tier a cross-file contract of the kind that is easy to ship wrong
+(the co-participation keys, the approvals operation key, the watch-hit `matched_on` list): the service
+decides the tier, the wire carries it, the console renders it and a route refuses on it, and every pair
+of those can be internally consistent while disagreeing with the rest. So they are read from one place,
+here.
 
-Most of this file is PURE -- it reads the shipped source the way
-`test_ui_invariants.py` does, and runs with no database, no Redis and no
-object store. The behavioural half is gated on DATABASE_URL below, and
-is the only part that needs one.
+Most of this file is PURE: it reads the shipped source the way `test_ui_invariants.py` does, and runs with
+no database, no Redis and no object store. The behavioural half is gated on DATABASE_URL below.
 
 Email prefix `rdyb-`, unique to this file.
 """
@@ -56,12 +45,10 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 PASSWORD = "correct-horse-battery-staple-9"
 
-#: Spelled out rather than imported, for the reason `test_readiness_pg`
-#: spells out its own list: a check quietly promoted into or demoted out
-#: of the blocking tier must turn this file red instead of redefining the
-#: contract to match itself. Adding a fifth blocker is a decision about
-#: what the product REFUSES to do, and it should cost somebody an edit
-#: here and a moment's thought.
+#: Spelled out rather than imported, for the reason `test_readiness_pg` spells out its own list: a check
+#: quietly promoted into or demoted out of the blocking tier must turn this file red instead of redefining
+#: the contract to match itself. Adding a blocker is a decision about what the product REFUSES to do, and
+#: it should cost an edit here.
 EXPECTED_BLOCKING = (
     "prohibited_content_policy",
     "sample_origin_configured",
@@ -114,10 +101,8 @@ def test_every_blocking_name_is_a_check_that_exists():
 
 
 def test_the_production_readme_counts_the_register_as_it_is():
-    """infra/production/README.md said "Sixteen checks" and "Four of the
-    sixteen"; the register grew to eighteen on 2026-09-23 (sec-dev-secrets-
-    in-production, sec-redis-isolation) and a count in prose goes stale
-    silently. Spelt the way the README spells it."""
+    """infra/production/README.md counts the register in words ("Sixteen checks", "Four of the sixteen")
+    and a count in prose goes stale silently. Spelt the way the README spells it."""
     ones = ["zero", "one", "two", "three", "four", "five", "six",
             "seven", "eight", "nine", "ten", "eleven", "twelve",
             "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
@@ -144,45 +129,28 @@ def test_the_register_names_are_unique_and_in_register_order():
     both rest on. A duplicate name would make `_by_name`-style lookups
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
-    # proxy_hops_declared (docs/17 "a missing hop count", 2026-10-08), not blocking.
+    # proxy_hops_declared (docs/17 "a missing hop count"), not blocking.
     assert len(readiness.CHECK_NAMES) == 46, readiness.CHECK_NAMES
-    # retention_sweep_current (F30, 2026-10-02), not blocking.
-    # collector_split (A collector process, 2026-10-02), not blocking.
-    # Row-level security (S1)
-    # Telegram collection (F5.3)
-    # Forum collection (F3, F4)
-    # Screening and the sandbox (F13, F14)
-    # Outbound integrations (F8, F7, F15.2)
-    # The similarity indexes (F6.1, F6.2)
-    # Comms readiness rows (roadmap F10a, F10c, 2026-09-24).
-    # egress_routes_cover_sources and egress_exits_open (roadmap S2, 2026-09-24).
-    # collection_sources_configured and collection_authority_current (the collection
-    # foundation, 2026-09-24), not blocking.
-    # sample_static_analysis and yara_rules_active (roadmap F11, F12, 2026-09-24), not blocking.
-    # dual_control_policy_changeable (roadmap F9, 2026-09-24), not blocking.
-    # role_analysis_thread_capped (roadmap F1, 2026-09-24), not blocking.
-    # egress_boundary (roadmap S2, 2026-09-24), not blocking.
-    # compartment_bindings_intact, captured_documents_compartmented,
-    # triage_claims_within_labels and triage_claims_dated (the compartment
-    # catalogue and the Alpha 6 leftovers, 2026-09-24), none blocking.
-    # 2026-09-23: `credentials_not_published` (sec-dev-secrets-in-
-    # production) and `redis_limiter_isolated` (sec-redis-isolation), both
-    # NOT blocking: the first is red on every development machine by
-    # design, and a shared limiter Redis endangers the limits rather than
-    # the material a poll collects.
+    # Also not blocking: retention_sweep_current, collector_split, the row-level security, Telegram,
+    # forum, screening and sandbox, outbound integration and similarity index rows, the comms rows,
+    # egress_routes_cover_sources, egress_exits_open, collection_sources_configured,
+    # collection_authority_current, sample_static_analysis, yara_rules_active,
+    # dual_control_policy_changeable, role_analysis_thread_capped, egress_boundary,
+    # compartment_bindings_intact, captured_documents_compartmented, triage_claims_within_labels and
+    # triage_claims_dated.
+    # `credentials_not_published` and `redis_limiter_isolated` are not blocking either: the first is red on
+    # every development machine by design, and a shared limiter Redis endangers the limits rather than the
+    # material a poll collects.
     for added in ("credentials_not_published", "redis_limiter_isolated"):
         assert added in readiness.CHECK_NAMES
         assert added not in readiness.BLOCKING_CHECKS
-    # 2026-09-22 (docs/17 F2, F24): the preservation bucket, proven
-    # write-once the same way as the evidence bucket, and NOT blocking.
-    # Adding a blocker is a decision about what the product refuses to do,
-    # and a store that cannot hold a rejected sample is a finding for the
-    # operator, not a reason to stop a collection poll.
+    # The preservation bucket is proven write-once the same way as the evidence bucket, and is NOT
+    # blocking: adding a blocker is a decision about what the product refuses to do, and a store that
+    # cannot hold a rejected sample is a finding for the operator, not a reason to stop a collection poll.
     assert "preservation_bucket_object_lock" in readiness.CHECK_NAMES
     assert "preservation_bucket_object_lock" not in readiness.BLOCKING_CHECKS
-    # 2026-09-11: `kek_ring_opens_stored_secrets` (the ring opens what is
-    # stored, counted) and `evidence_size_cap_declared` (the cap is a
-    # declaration, and the enforced value is the environment's).
+    # `kek_ring_opens_stored_secrets` (the ring opens what is stored, counted) and
+    # `evidence_size_cap_declared` (the cap is a declaration, and the enforced value is the environment's).
     assert "kek_ring_opens_stored_secrets" in readiness.CHECK_NAMES
     assert "evidence_size_cap_declared" in readiness.CHECK_NAMES
     # The two added with the tier. `ingest_pepper_set` had no entry at all
@@ -204,11 +172,8 @@ def test_the_wire_carries_the_tier_on_every_check():
     two-internally-consistent-halves defect this file exists to prevent.
     """
     keys = set(readiness.Check("x", True, "e").as_dict())
-    # `consequence` and `ui_target` joined 2026-09-23: what a failing
-    # blocker refuses, for the banner's headline, and where the console
-    # settles it (ux16-admin blocking-headline-understates-impact,
-    # readiness-actions-speak-api). `caveat` the same day: what a PASSING
-    # row needs the operator to see (security-officer-false-green).
+    # `consequence` and `ui_target`: what a failing blocker refuses, for the banner's headline, and where
+    # the console settles it. `caveat`: what a PASSING row needs the operator to see.
     assert keys == {"check", "ok", "evidence", "action", "blocking",
                     "consequence", "ui_target", "caveat"}, keys
     assert readiness.Check("x", True, "e").as_dict()["blocking"] is False, (
@@ -234,15 +199,12 @@ def test_the_report_lists_the_blocking_failures_it_derived():
 
 
 def test_blocking_failures_runs_only_the_blocking_probes():
-    """The reason the helper exists. The other checks include a Redis
-    PING, two object-store probes that each attempt a delete (the WORM
-    proofs, 2026-09-22) and an Alembic script scan, and this
-    runs on the collection route's request path: a poll that waits on the
-    object store to find out whether it may proceed has turned a
-    readiness refusal into a latency bug.
+    """The other checks include a Redis PING, two object-store probes that each attempt a delete (the WORM
+    proofs) and an Alembic script scan, and this runs on the collection route's request path: a poll that
+    waits on the object store to find out whether it may proceed has turned a readiness refusal into a
+    latency bug.
 
-    Asserted by replacing every probe with a recorder, which is the only
-    way to see what was NOT called.
+    Asserted by replacing every probe with a recorder, which is the only way to see what was NOT called.
     """
     called: list[str] = []
 
@@ -264,17 +226,13 @@ def test_blocking_failures_runs_only_the_blocking_probes():
 
 
 def test_a_probe_that_raises_is_a_blocking_failure_not_an_exception(monkeypatch):
-    """`blocking_failures` stands on a request path, so a probe that
-    blows up must come back as a name in the list. If it propagated, a
-    Postgres hiccup inside `retention_rules_confirmed` would surface as a
-    500 from the collection route -- a failure reported as the wrong
-    thing, which is the defect the whole module was written against.
+    """`blocking_failures` stands on a request path, so a probe that blows up must come back as a name in
+    the list. If it propagated, a Postgres hiccup inside `retention_rules_confirmed` would surface as a 500
+    from the collection route: a failure reported as the wrong thing.
 
-    Pure: the environment variables are cleared so the two env-backed
-    blockers fail deterministically, and the two database-backed ones
-    fail because the connection handed in is not one. Nothing here opens
-    a socket -- none of the four blocking probes touches Redis, the
-    object store or the migration scripts.
+    Pure: the environment variables are cleared so the two env-backed blockers fail deterministically, and
+    the two database-backed ones fail because the connection handed in is not one. Nothing here opens a
+    socket: none of the four blocking probes touches Redis, the object store or the migration scripts.
     """
     class NotAConnection:
         pass
@@ -299,10 +257,9 @@ def test_the_collection_run_route_refuses_while_a_blocker_fails():
         "the collection router no longer reads the readiness register")
 
     route = _run_once_source()
-    # The refusal moved, unchanged in wording, into `refuse_unready(conn)`
-    # (2026-09-24), so the Telegram adapter's attended persona acts import
-    # one sentence rather than copy it. The route calls it;
-    # the function carries every property this test held of the route.
+    # The refusal lives in `refuse_unready(conn)`, so the Telegram adapter's attended persona acts import
+    # one sentence rather than copy it. The route calls it; the function carries every property this test
+    # holds of the route.
     assert "refuse_unready(conn)" in route, (
         "POST /sources/{id}/run no longer asks whether the deployment is "
         "ready before polling a real target")
@@ -320,12 +277,10 @@ def test_the_collection_run_route_refuses_while_a_blocker_fails():
         "the refusal does not say where the evidence and the action for "
         "each failing check can be read")
 
-    # Exactly one call site REFUSES: the register is not a gate on the read
-    # paths, and a refusal quietly added to a listing route would change
-    # what a RED source's absence means. The due list also READS it since
-    # 2026-09-23, through `_run_readiness`, so the Feeds pane can draw
-    # Poll now as disabled before it is pressed (ux12-feeds:poll-now-one-
-    # click-and-blocked); that helper reports and never raises.
+    # Exactly one call site REFUSES: the register is not a gate on the read paths, and a refusal quietly
+    # added to a listing route would change what a RED source's absence means. The due list also READS it,
+    # through `_run_readiness`, so the Feeds pane can draw Poll now as disabled before it is pressed; that
+    # helper reports and never raises.
     start = src.index("def _run_readiness(")
     helper = src[start:src.index("\n\n\n", start)]
     assert "raise" not in helper and "Problem(" not in helper, (
@@ -342,7 +297,7 @@ def test_the_refusal_happens_before_anything_is_read_about_the_source():
     arrive after the route had already begun treating the request as one
     it might serve."""
     route = _run_once_source()
-    # Through refuse_unready (2026-09-24), still first.
+    # Through refuse_unready, still first.
     assert (route.index("refuse_unready(conn)")
             < route.index("user_ceiling(conn")), (
         "the readiness gate now runs after the ceiling lookup")
@@ -386,8 +341,7 @@ def test_the_console_reads_only_keys_the_register_actually_sends():
     assert read_from_body <= report_keys, (
         f"the pane reads {sorted(read_from_body - report_keys)} off the "
         f"report and report() returns {sorted(report_keys)}")
-    # And it reads the tier at all, rather than rendering thirteen
-    # identical rows the way it did before 2026-09-10.
+    # And it reads the tier at all, rather than rendering identical rows.
     assert "blocking" in read_from_check
     assert "blocking_failures" in read_from_body
 
@@ -426,14 +380,11 @@ def test_the_banner_names_every_failing_blocker_with_its_action():
 
 
 def test_the_banner_is_revealed_before_it_is_filled():
-    """`role="alert"` announces a MUTATION inside a live region, and a
-    region under `hidden` (`display: none !important` in app.css) is not
-    in the accessibility tree to mutate. Building the banner and then
-    unhiding it therefore announces nothing: the screen-reader user gets
-    the same silence they got before the banner existed, on the one
-    notice that says collection is refused. Asserted on the order of the
-    two statements because nothing else in the tree would catch it -- the
-    banner looks right on screen either way.
+    """`role="alert"` announces a MUTATION inside a live region, and a region under `hidden`
+    (`display: none !important` in app.css) is not in the accessibility tree to mutate. Building the banner
+    and then unhiding it announces nothing, on the one notice that says collection is refused. Asserted on
+    the order of the two statements because nothing else would catch it: the banner looks right on screen
+    either way.
     """
     pane = _readiness_pane()
     banner = pane[pane.index("function renderBlockingBanner("):]
@@ -473,24 +424,17 @@ def test_a_refused_read_leaves_no_stale_banner_standing():
 
 
 def test_the_report_is_not_kept_anywhere_nothing_reads_it():
-    """`state.readiness` was written twice and read nowhere. A field like
-    that cannot be seen to be wrong -- no operator notices a stale copy
-    that reaches no pixel -- so the test over it was green whatever it
-    held, which is worse than no test.
+    """`state.readiness` must not be written and never read. A field like that cannot be seen to be wrong:
+    no operator notices a stale copy that reaches no pixel, so a test over it is green whatever it holds.
 
-    Removed rather than given the consumer that was imagined for it: the
-    Feeds pane, explaining a poll's 409 without a second round trip. That
-    consumer cannot be honest. The COLLECTOR who gets the 409 does not
-    hold `user.manage`, so their copy is null exactly when it is wanted;
-    the administrator who does hold it has a snapshot taken before the
-    refusal it would sit beside, which is the stale-report defect
-    `test_a_refused_read_leaves_no_stale_banner_standing` above is
-    written against; and the 409's own detail already names every failing
-    check and where to read its evidence.
+    A Feeds pane that explains a poll's 409 from it cannot be honest: the COLLECTOR who gets the 409 does
+    not hold `user.manage`, so their copy is null exactly when it is wanted; the administrator who does
+    has a snapshot taken before the refusal it would sit beside (the stale-report defect
+    `test_a_refused_read_leaves_no_stale_banner_standing` guards); and the 409's own detail already names
+    every failing check and where to read its evidence.
 
-    Asserted as "written implies read" rather than as "absent", so a pane
-    that genuinely consumes the report may bring the field back. Vacuous
-    while there are no writes -- and that is the state being guarded.
+    Asserted as "written implies read" rather than "absent", so a pane that genuinely consumes the report
+    may bring the field back. Vacuous while there are no writes, which is the state being guarded.
     """
     js = _js()
     writes = re.findall(r"state\.readiness\s*=(?!=)", js)
@@ -502,17 +446,13 @@ def test_the_report_is_not_kept_anywhere_nothing_reads_it():
 
 
 def test_a_failing_blocker_wears_the_banner_s_red_and_not_the_ordinary_amber():
-    """One colour rule, three places, and until 2026-09-10 they
-    disagreed. app.css argues the banner must be --danger because --alert
-    is already carrying the ordinary failed check "and a blocker in the
-    same amber would be indistinguishable from an SMTP host nobody has
-    set" -- and `readinessRow` then dressed a FAILING blocker's own chip
-    in `chip warn`, which resolves to that very amber. The banner said
-    collection was refused; the row it summarised said untidy, two inches
-    below it.
+    """One colour rule, three places that must agree. app.css argues the banner must be --danger because
+    --alert already carries the ordinary failed check "and a blocker in the same amber would be
+    indistinguishable from an SMTP host nobody has set", so `readinessRow` must not dress a FAILING
+    blocker's chip in `chip warn`, which resolves to that amber.
 
-    Read as tokens rather than as prose: what has to agree is which
-    variable each class resolves to, not how either file describes it.
+    Read as tokens rather than as prose: what has to agree is which variable each class resolves to, not
+    how either file describes it.
     """
     pane = _readiness_pane()
     row = pane[pane.index("function readinessRow("):]
@@ -610,29 +550,21 @@ def _make_user(conn, *, global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked up
+    by email, then `SessionService` against the same store the API validates against. Unbound (no address,
+    no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it is off in
+    these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`: nothing in
+    this file is about the sign-in path. It also avoids the login helper's constraint that TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused by
+    # every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -680,11 +612,9 @@ def test_the_tier_reaches_the_wire_on_exactly_the_four(conn, client):
 
 @needs_db
 def test_the_two_new_checks_answer_with_evidence(conn):
-    """Both are new on 2026-09-10. `app_db_role_not_owner` in particular is
-    EXPECTED to fail here -- the suites own the tables so they can disable
-    the append-only triggers -- and what is asserted is that it names the
-    connected role either way, because "the role is wrong" without saying
-    which role is not something an operator can act on."""
+    """`app_db_role_not_owner` is EXPECTED to fail here, since the suites own the tables so they can
+    disable the append-only triggers; what is asserted is that it names the connected role either way,
+    because "the role is wrong" without saying which role is not something an operator can act on."""
     # The two probes directly rather than `run_checks`, which would also
     # PING Redis and round-trip the object store to answer a question
     # about neither.
@@ -731,15 +661,12 @@ def test_the_poll_route_refuses_while_a_blocking_check_fails(
 @needs_db
 def test_a_ready_deployment_polls_and_the_ceiling_still_decides(
         conn, client, monkeypatch):
-    """The other side of the gate, and the one that catches a refusal
-    left permanently on. With no blocking failure the route must fall
-    through to the behaviour `test_collection_clearance_pg` pins: an
-    unknown source id is a 404, indistinguishable from one above the
-    caller's ceiling.
+    """The other side of the gate: a refusal left permanently on would fail here. With no blocking failure
+    the route falls through to the behaviour `test_collection_clearance_pg` pins: an unknown source id is a
+    404, indistinguishable from one above the caller's ceiling.
 
-    The verdict is stubbed rather than arranged, because arranging it for
-    real means confirming every retention rule in a database several
-    other suites are using.
+    The verdict is stubbed rather than arranged, because arranging it for real means confirming every
+    retention rule in a database several other suites are using.
     """
     import noctornal_api.http.routers.collection as route_module
     monkeypatch.setattr(route_module, "blocking_failures", lambda conn: [])

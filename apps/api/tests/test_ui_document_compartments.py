@@ -1,5 +1,4 @@
-"""The console's half of L1 (2026-09-24): compartments on captured
-documents.
+"""The console's half of compartments on captured documents.
 
 A capture into a compartmented case is stored under the case's
 compartments, so the capture form says who can list the text (as a note,
@@ -8,12 +7,11 @@ compartments, and a collected document row and a document search hit wear
 them as chips. Pure: the shipped static assets, with the real functions run
 under Node against stubs (skipped where Node is absent), beside
 test_ui_invariants. The server halves are in test_document_compartments_pg.py.
-Each test fails on ab27a4a, where none of this existed.
 """
 from __future__ import annotations
 
 from test_ui_triage_inbox import _fn, _run, needs_node
-from test_ui_triage_release_review import _CAPTURE_PAGE
+from test_ui_triage_pane_copy import _CAPTURE_PAGE
 
 
 @needs_node

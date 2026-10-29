@@ -1,18 +1,16 @@
-"""Phase 4 collection: the persona vault, the scheduler, watch matching.
+"""Collection: the persona vault, the scheduler, watch matching.
 
-The tests that carry this file are the ones about credentials and about
-being noticed, because those are the two ways this phase loses you
-something you cannot get back:
+The tests that carry this file are the ones about credentials and about being noticed, because those
+are the two ways a collector loses something it cannot get back:
 
-- `test_the_vault_has_no_way_to_RETURN_a_secret` — invariant 7, as a shape
-  rather than a rule. A function that returns a credential is a function
-  somebody calls from a request handler.
-- `test_an_adapter_error_is_redacted_before_it_is_stored` — a persona's
-  password lands in an HTTP error body far more often than anybody expects.
-- `test_a_burnt_persona_never_comes_back` — reusing one a forum admin has
-  already flagged burns the next one too.
-- `test_jitter_is_symmetric_around_the_interval` — a collector that polls
-  on the dot is one a competent admin picks out of an access log.
+- `test_the_vault_has_no_way_to_RETURN_a_secret`: invariant 7, as a shape rather than a rule. A
+  function that returns a credential is a function somebody calls from a request handler.
+- `test_an_adapter_error_is_redacted_before_it_is_stored`: a persona's password lands in an HTTP error
+  body far more often than anybody expects.
+- `test_a_burnt_persona_never_comes_back`: reusing one a forum admin has already flagged burns the
+  next one too.
+- `test_jitter_is_symmetric_around_the_interval`: a collector that polls on the dot is one a competent
+  admin picks out of an access log.
 
 Env-gated on DATABASE_URL.
 """
@@ -476,11 +474,8 @@ def test_a_broken_regex_does_not_stop_the_other_watches(conn):
     result = svc.run_once(source_id, actor_id=actor)
     assert result.watch_hits == 1
 
-    # Added 2026-08-07. Everything above this line passed while the broken
-    # watch was ALSO silent -- `except re.error: continue` and nothing
-    # else. This test is where that should have been caught and was not:
-    # it asserted the isolation and never asked whether the typo was ever
-    # reported to anyone.
+    # A broken watch must be reported to someone, not only isolated: `except re.error: continue` alone
+    # is silent.
     assert result.warnings, "a watch that can never match must say so"
     assert "[unclosed" in result.warnings[0]
     assert str(result.run_id)  # the row below is this run
@@ -524,18 +519,13 @@ def test_one_broken_pattern_is_reported_once_not_once_per_item(conn):
 
 
 def test_a_failure_after_the_fetch_does_not_strand_the_run_at_RUNNING(conn):
-    """The run row is INSERTed 'RUNNING' on an AUTOCOMMIT connection.
+    """The run row is INSERTed 'RUNNING' on an AUTOCOMMIT connection, so it is already committed before
+    the work starts and survives whatever unwinds above it. A failure in `_store_document` or
+    `_match_watches`, not only in `adapter.fetch`, must not leave the row at RUNNING.
 
-    So it is already committed before the work starts, and survives
-    whatever unwinds above it. The handler covered `adapter.fetch` only --
-    a failure in `_store_document` or `_match_watches` left the row at
-    RUNNING for ever.
-
-    That is the same defect `analytics_runs` CR9 fixed for
-    `analytics.metric_run`, in a second service, and it matters more here:
-    `(status) WHERE status IN ('QUEUED','RUNNING')` is an indexed set the
-    scheduler and the health rollup both read as "in flight", so a
-    stranded row reads as a collector that is still working.
+    It matters because `(status) WHERE status IN ('QUEUED','RUNNING')` is an indexed set the scheduler
+    and the health rollup both read as "in flight", so a stranded row reads as a collector that is
+    still working.
     """
     from noctornal_api.collection import (CollectionService, FetchResult,
                                           Item)
@@ -659,13 +649,8 @@ def test_a_private_address_is_refused():
 
 
 def test_fetch_says_what_its_ssrf_protection_is():
-    """This held the docstring to calling itself a floor, because DNS
-    rebinding defeated a resolve-then-connect check and pretending
-    otherwise was worse than saying so. Since sec-ssrf-rebinding
-    (2026-09-23) the check and the connect are one lookup, which
-    test_collection_ssrf_rebinding.py proves against a rebinding resolver,
-    so the docstring must now say that instead, and must still name the
-    proxy it does not consult: that is the part left undone."""
+    """The docstring says the check and the connect are one lookup (test_collection_ssrf_rebinding.py
+    proves it against a rebinding resolver), and still names the proxy it does not consult."""
     import inspect
 
     from noctornal_api import collection

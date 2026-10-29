@@ -1,18 +1,11 @@
-"""A claim's similarity reasons never describe material its reader cannot
-read (F6.4, embeddings, 2026-09-25).
+"""A claim's similarity reasons never describe material its reader cannot read.
 
-A claim's row is judged on the labels of what it cites as well as its own,
-and read.py withholds cited material above the reader (the ids, no title).
-The verifier found the stored reason reaching that reader anyway: through
-the 409 of POST /cases/{id}/assertions/{id}/similar and through the
-withheld reasons and the excluded count of the Assertions column's
-coverage. An AMBER reader of a claim on an AMBER node learned that what it
-cites is TLP:AMBER_STRICT or RED, compartmented, purged or victim data.
-
-Now a reader is told what the facts THEY can read give (claim_reader_view):
-the stored reason when they can read everything the claim cites, a reason
-their readable facts alone give otherwise, and else only that the claim
-cannot be compared.
+A claim's row is judged on the labels of what it cites as well as its own, and read.py withholds cited
+material above the reader. The stored reason must not leak that through the 409 of
+POST /cases/{id}/assertions/{id}/similar or through the withheld reasons and excluded count of the
+Assertions column's coverage. A reader is told only what the facts they can read give
+(claim_reader_view): the stored reason when they can read everything the claim cites, a reason their
+readable facts alone give otherwise, else only that the claim cannot be compared.
 
 Env-gated on DATABASE_URL. Prefix `crv-`.
 """

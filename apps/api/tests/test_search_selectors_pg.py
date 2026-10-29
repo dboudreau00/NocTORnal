@@ -1,25 +1,21 @@
-"""Search finds entities by their selectors, by fragments, and says when a
-list is capped (ux09-search, 2026-09-22).
+"""Search finds entities by their selectors, by fragments, and says when a list is capped.
 
-Three findings from the 2026-09-22 review, each a way the Search pane gave
-an analyst a clean answer that was wrong:
+Three ways the Search pane could give an analyst a clean answer that is wrong:
 
-- selectors-unsearchable: ember_hobby held a wallet and a Jabber id, and
-  pasting either into Search answered "No matches." The node search vector
-  is label plus attrs and nothing joined `core.selector`.
-- whole-token-false-negatives: "skua" missed harrow_skua2, "hostmarket"
-  missed 26 vps-*.hostmarket.example hosts and "remittance" missed
-  remittance-change.eml, because `plainto_tsquery` matched whole lexemes
-  and the 'simple' parser keeps a host or a file name as one.
-- silent-truncation-50: 73 matches, 50 drawn, nothing said, and ties
-  broken by whatever order the plan produced.
+- selectors: ember_hobby holds a wallet and a Jabber id, and pasting either into Search must find it. The
+  node search vector is label plus attrs, so the search joins `core.selector`.
+- whole tokens: "skua" must find harrow_skua2, "hostmarket" the vps-*.hostmarket.example hosts and
+  "remittance" remittance-change.eml, although `plainto_tsquery` matches whole lexemes and the 'simple'
+  parser keeps a host or a file name as one.
+- truncation: a capped list says so (73 matches, 50 drawn), and ties are broken in a defined order, not
+  by whatever order the plan produced.
 
-Every selector test also asserts the gate: a selector is an observable
-ABOUT its node, so it is matched only through a node the caller may see,
-exactly as `GET /selectors` and `GET /nodes/{id}/selectors` withhold it.
+Every selector test also asserts the gate: a selector is an observable ABOUT its node, so it is matched
+only through a node the caller may see, exactly as `GET /selectors` and `GET /nodes/{id}/selectors`
+withhold it.
 
-Env-gated on DATABASE_URL (and MINIO_ENDPOINT for the exhibit test).
-Users are `ssel-`; no other suite's teardown pattern matches them.
+Env-gated on DATABASE_URL (and MINIO_ENDPOINT for the exhibit test). Users are `ssel-`; no other suite's
+teardown pattern matches them.
 """
 from __future__ import annotations
 
@@ -185,10 +181,9 @@ def world(conn):
 # --- selectors-unsearchable ---------------------------------------------
 
 def test_a_wallet_finds_the_entity_that_holds_it_exact_and_partial(conn, world):
-    """The finding's own repro: the wallet, pasted whole, finds its holder
-    and says it was an exact selector match; typed in capitals it still
-    does (the ontology's BTC normaliser); a fragment finds it too, and
-    says it was not exact."""
+    """The wallet, pasted whole, finds its holder and says it was an exact selector match; typed in
+    capitals it still does (the ontology's BTC normaliser); a fragment finds it too, and says it was not
+    exact."""
     owner, _, case_id = world
     tok = _tok()
     holder = _node(conn, case_id, owner, f"ember_{tok}")
@@ -297,16 +292,13 @@ def test_a_selector_on_a_deleted_entity_is_not_matched(conn, world):
 
 
 def _fold_across_labels(conn, source, target, by):
-    """The merged state of a RED or compartmented record folded into a less
-    restricted survivor, written straight to the redirect.
+    """The merged state of a RED or compartmented record folded into a less restricted survivor, written
+    straight to the redirect.
 
-    `MergeService.merge` refuses it since 2026-10-03 (beta review
-    graph-merge-no-element-label-gate): the survivor keeps its own lower
-    labels and takes every tie, so the folded record's ties would be shown at
-    the survivor's label. These tests are about what SEARCH does with that
-    state wherever it came from (labels raised after a merge, a restored
-    backup, a deployment that predates the refusal), so the redirect is
-    written as the owner does."""
+    `MergeService.merge` refuses it: the survivor keeps its own lower labels and takes every tie, so the
+    folded record's ties would be shown at the survivor's label. These tests are about what SEARCH does
+    with that state wherever it came from (labels raised after a merge, a restored backup, a deployment
+    that predates the refusal), so the redirect is written as the owner does."""
     conn.execute(
         "UPDATE core.node SET merged_into_id = %s, merged_at = now(), "
         "merged_by = %s, updated_at = now() WHERE id = %s", (target, by, source))
@@ -338,17 +330,15 @@ def test_a_selector_on_a_merged_record_finds_the_survivor(conn, world):
 
 
 def test_a_merge_chain_never_reaches_past_the_callers_ceiling(conn, client, world):
-    """The merge chain is walked with the caller's ceiling at EVERY hop.
-    Two shapes, each of which an AMBER analyst must not see through:
+    """The merge chain is walked with the caller's ceiling at EVERY hop. Two shapes, each of which an AMBER
+    analyst must not see through:
 
-    - a visible record merged into a RED survivor. The wallet is on the
-      AMBER record, so without the gate the RED survivor's label comes
-      back as the hit (the verifier's probe, 2026-09-22 fix round);
-    - a visible record merged through a RED record into a visible
-      survivor. Reaching the survivor would disclose the RED link in the
-      chain, and only the per-hop predicate stops it: the survivor itself
-      passes every later filter, so this is the shape that fails if the
-      recursive step loses its predicate.
+    - a visible record merged into a RED survivor. The wallet is on the AMBER record, so without the gate
+      the RED survivor's label comes back as the hit;
+    - a visible record merged through a RED record into a visible survivor. Reaching the survivor would
+      disclose the RED link in the chain, and only the per-hop predicate stops it: the survivor itself
+      passes every later filter, so this is the shape that fails if the recursive step loses its
+      predicate.
     """
     from noctornal_api.cases import CaseService
     from noctornal_api.merges import MergeService
@@ -407,21 +397,15 @@ def test_a_hidden_record_merged_into_a_visible_one_does_not_lend_it_its_selector
         conn, client, world):
     """The chain's ANCHOR (depth 0) is gated as well as every hop after it.
 
-    A record the caller may not see holds the wallet and is merged INTO a
-    survivor they may see. MergeService does not raise the survivor's
-    label, so the survivor passes every later filter, and the anchor's
-    predicate is the only thing that keeps the hidden record's label (sent
-    as `via.merged_from`) and its wallet (sent as `via.value`) from the
-    caller. No test held it: an in-memory mutant that removed the anchor's
-    classification and compartments lines passed all 17 (verifier of the
-    second 2026-09-22 fix round). One shape per line of the predicate, so
-    removing either one alone fails here:
+    A record the caller may not see holds the wallet and is merged INTO a survivor they may see.
+    MergeService does not raise the survivor's label, so the survivor passes every later filter, and the
+    anchor's predicate is the only thing that keeps the hidden record's label (sent as `via.merged_from`)
+    and its wallet (sent as `via.value`) from the caller. One shape per line of the predicate, so removing
+    either one alone fails here:
 
-    - a RED record merged into an AMBER survivor, searched by an AMBER
-      caller (the classification line);
-    - a compartmented record merged into an uncompartmented survivor,
-      searched by a RED caller outside the compartment (the compartments
-      line).
+    - a RED record merged into an AMBER survivor, searched by an AMBER caller (the classification line);
+    - a compartmented record merged into an uncompartmented survivor, searched by a RED caller outside the
+      compartment (the compartments line).
     """
     from noctornal_api.cases import CaseService
     owner, _, case_id = world
@@ -499,14 +483,11 @@ def test_a_lossy_normalisation_is_not_reported_as_an_exact_match(conn, world):
 
 
 def test_an_exact_selector_beats_a_fragment_on_the_same_entity(conn, client, world):
-    """The commonest real shape: a persona holds its handle as HANDLE "x"
-    and as JABBER "x@host", or a wallet and a block-explorer URL that
-    contains it. Searching the handle or the wallet must report the EXACT
-    selector at rank 1.0. The third fix round reported the Jabber id or
-    the URL instead, not exact, at 0.46 and 0.57: with no type label in
-    the query `exact` was NULL rather than false, and NULL sorted first
-    (verifier of the third 2026-09-22 fix round). Neither the node search,
-    the palette's lookup nor either route may disagree."""
+    """The commonest real shape: a persona holds its handle as HANDLE "x" and as JABBER "x@host", or a
+    wallet and a block-explorer URL that contains it. Searching the handle or the wallet must report the
+    EXACT selector at rank 1.0, not the Jabber id or the URL at 0.46 and 0.57: with no type label in the
+    query `exact` is NULL rather than false, and NULL sorts first. Neither the node search, the palette's
+    lookup nor either route may disagree."""
     owner, email, case_id = world
     tok = _tok()
     persona = _node(conn, case_id, owner, "Person X")
@@ -545,13 +526,11 @@ def test_an_exact_selector_beats_a_fragment_on_the_same_entity(conn, client, wor
 
 
 def test_a_case_only_difference_is_exact_only_where_the_type_folds_case(conn, world):
-    """A Matrix localpart, a SIP user part and a base58 wallet are
-    case-sensitive: "@alice:x" is a different account from "@Alice:x".
-    The first fix compared raw values case-blind and printed "(exact)" on
-    the other account at rank 1.0 (verifier, 2026-09-22 fix round). They
-    are still found, as fragments, and never as exact. Where the type
-    DOES fold case (a Matrix server name, a SIP host, an email address),
-    the case variant is the same identifier and stays exact."""
+    """A Matrix localpart, a SIP user part and a base58 wallet are case-sensitive: "@alice:x" is a
+    different account from "@Alice:x", so a case-blind compare must not print "(exact)" on the other
+    account at rank 1.0. They are still found, as fragments, and never as exact. Where the type DOES fold
+    case (a Matrix server name, a SIP host, an email address), the case variant is the same identifier and
+    stays exact."""
     owner, _, case_id = world
     tok = _tok()
     mx = _node(conn, case_id, owner, "matrix persona")
@@ -581,12 +560,10 @@ def test_a_case_only_difference_is_exact_only_where_the_type_folds_case(conn, wo
 
 
 def test_a_types_own_notation_is_exact_and_a_namespace_is_not_dropped(conn, world):
-    """"u:139292958" is the ontology's namespaced Telegram user. Its digits
-    are not a Discord id, and the first fix reported them as an EXACT
-    Discord match because the lost "u" was under a quarter of the query.
-    Conversely "AS13335" IS the ASN 13335 and a Bot-API "-100..." chat id
-    IS the channel c:<id>: both were missed, because the normaliser drops
-    or decodes characters on purpose (verifier, 2026-09-22 fix round)."""
+    """"u:139292958" is the ontology's namespaced Telegram user. Its digits are not a Discord id, and must
+    not be reported as an EXACT Discord match because the lost "u" was under a quarter of the query.
+    Conversely "AS13335" IS the ASN 13335 and a Bot-API "-100..." chat id IS the channel c:<id>: the
+    normaliser drops or decodes characters on purpose, and both must be found."""
     owner, _, case_id = world
     discord = _node(conn, case_id, owner, "discord persona")
     telegram = _node(conn, case_id, owner, "telegram persona")
@@ -607,13 +584,11 @@ def test_a_types_own_notation_is_exact_and_a_namespace_is_not_dropped(conn, worl
 
 
 def test_punctuation_that_names_another_identifier_is_never_an_exact_match(conn, world):
-    """The digits-only normalisers keep the digits of anything. Before the
-    printed-form rule, "-123456789" (a Telegram basic group in Bot-API
-    form) came back as the ICQ number 123456789 marked exact at rank 1.0
-    beside the real group, and "10.0.0.1" as the ASN 10001 (verifier of
-    the second 2026-09-22 fix round). The punctuation that is only
-    formatting for the type still is: an ICQ number in its hyphenated
-    groups and a phone number in any of its usual shapes stay exact."""
+    """The digits-only normalisers keep the digits of anything, so under the printed-form rule
+    "-123456789" (a Telegram basic group in Bot-API form) must not come back as the ICQ number 123456789
+    marked exact at rank 1.0 beside the real group, nor "10.0.0.1" as the ASN 10001. The punctuation that
+    is only formatting for the type still is: an ICQ number in its hyphenated groups and a phone number in
+    any of its usual shapes stay exact."""
     owner, _, case_id = world
     icq = _node(conn, case_id, owner, "icq persona")
     group = _node(conn, case_id, owner, "telegram group")
@@ -655,13 +630,10 @@ def test_punctuation_that_names_another_identifier_is_never_an_exact_match(conn,
 
 
 def test_a_number_pasted_with_its_type_label_finds_its_holder(conn, client, world):
-    """"ICQ: 123456789", "ICQ 123456789" and "IMEI 490154203237518" found
-    nothing at all after the letters rule (verifier of the second
-    2026-09-22 fix round): the label made the whole string no ICQ number,
-    and no stored value contains the label for a fragment to match. The
-    label names the type, so the value is searched as that type, exactly
-    and as a fragment, and never as another type that holds the same
-    digits."""
+    """"ICQ: 123456789", "ICQ 123456789" and "IMEI 490154203237518" find their holder: the label names the
+    type, so the value is searched as that type, exactly and as a fragment, and never as another type that
+    holds the same digits. (The label would otherwise make the whole string no ICQ number, and no stored
+    value contains the label for a fragment to match.)"""
     from noctornal_api.cases import CaseService
     owner, email, case_id = world
     tok = _tok()
@@ -722,8 +694,8 @@ def test_a_number_pasted_with_its_type_label_finds_its_holder(conn, client, worl
 # --- whole-token-false-negatives ----------------------------------------
 
 def test_fragments_word_starts_and_near_duplicates_match(conn, world):
-    """The review's own queries, with a unique token standing in for
-    "skua", "hostmarket" and "halcyon_owl"."""
+    """Fragments and word starts match, with a unique token standing in for "skua", "hostmarket" and
+    "halcyon_owl"."""
     owner, _, case_id = world
     tok = _tok()
     tandem = _node(conn, case_id, owner, f"tandem_{tok}")
@@ -879,15 +851,11 @@ def test_an_exhibit_is_found_by_a_fragment_of_its_file_name(conn, world):
         assert page.total == 1
 
 
-# --- final review, 2026-09-23 -------------------------------------------
-
 def test_an_identity_preserving_rewrite_finds_its_selector_exactly(conn, world):
-    """final review U8: a Gmail "+tag", googlemail.com, a Unicode domain
-    and a URL's default port normalise to the stored selector's own
-    norm_value, and found nothing. The canonical form was dropped as "not
-    one contiguous run of the query", and the fragment pattern is the
-    query as typed, which the stored value does not contain. The pasted
-    chat-log address is the same mailbox, so it is an exact match."""
+    """A Gmail "+tag", googlemail.com, a Unicode domain and a URL's default port normalise to the stored
+    selector's own norm_value. The canonical form must not be dropped as "not one contiguous run of the
+    query", and the fragment pattern is the query as typed, which the stored value does not contain. The
+    pasted chat-log address is the same mailbox, so it is an exact match."""
     from noctornal_ontology import normalise
     owner, _, case_id = world
     tok = _tok()
@@ -914,19 +882,15 @@ def test_an_identity_preserving_rewrite_finds_its_selector_exactly(conn, world):
 
 
 def test_every_way_to_match_a_selector_has_an_index(conn, world):
-    """final review U9: the selector match was ONE WHERE joining an
-    IN-subquery and the fragment ILIKEs by OR. A sublink under an OR is a
-    hashed SubPlan no index serves, so Postgres could not build a BitmapOr
-    and scanned every selector in the case, and the raw_value trigram
-    index 0065 built for this query was never used.
+    """Every way to match a selector reaches an index. A selector match built as ONE WHERE joining an
+    IN-subquery and the fragment ILIKEs by OR makes a sublink under an OR, a hashed SubPlan no index
+    serves, so Postgres could not build a BitmapOr and would scan every selector in the case, never using
+    the raw_value trigram index 0065 builds for this query.
 
-    Planner costs mean nothing on a few dozen rows, so the case is given
-    ten thousand selectors inside a transaction that is rolled back. Each
-    way to match must then reach its own index: both trigram indexes for
-    the fragment arms, labelled or not, and no sequential scan of
-    core.selector in the node search or the palette's lookup. The old
-    shape cannot pass this at any size or setting: no plan for it uses a
-    trigram index."""
+    Planner costs mean nothing on a few dozen rows, so the case is given ten thousand selectors inside a
+    transaction that is rolled back. Each way to match must then reach its own index: both trigram indexes
+    for the fragment arms, labelled or not, and no sequential scan of core.selector in the node search or
+    the palette's lookup."""
     import psycopg
 
     from noctornal_api.curation import SearchService
@@ -980,13 +944,10 @@ def test_every_way_to_match_a_selector_has_an_index(conn, world):
 
 
 def test_a_merged_records_own_name_finds_its_survivor(conn, client, world):
-    """final review U10: the pane printed a merged record's name ("held by
-    merged record old_alias") and searching that name answered "No
-    entities match", which reads as "not in this case". The name arms were
-    dropped as merged and nothing put the survivor in their place. Now the
-    name resolves to the live survivor through the same gated chain as a
-    selector, and the hit says which merged record's name matched, only
-    when the survivor's own name did not."""
+    """A merged record's own name finds its survivor. The pane prints a merged record's name ("held by
+    merged record old_alias"), and searching that name must not answer "No entities match", which reads as
+    "not in this case". The name resolves to the live survivor through the same gated chain as a selector,
+    and the hit says which merged record's name matched, only when the survivor's own name did not."""
     from noctornal_api.merges import MergeService
     owner, email, case_id = world
     tok = _tok()
@@ -1039,16 +1000,14 @@ def test_a_merged_records_own_name_finds_its_survivor(conn, client, world):
 
 
 def test_a_merged_name_never_reaches_past_the_callers_ceiling(conn, client, world):
-    """The name chain is the selector chain's, gated at its anchor and at
-    every hop, so an AMBER caller searching a name finds nothing through:
+    """The name chain is the selector chain's, gated at its anchor and at every hop, so an AMBER caller
+    searching a name finds nothing through:
 
-    - a RED record merged into an AMBER survivor (the anchor: the hidden
-      record's name must neither find the survivor nor be sent back);
+    - a RED record merged into an AMBER survivor (the anchor: the hidden record's name must neither find
+      the survivor nor be sent back);
     - an AMBER record merged into a RED survivor;
-    - an AMBER record merged through a RED record into an AMBER survivor
-      (the hop);
-    - a compartmented record merged into an open survivor, for a RED
-      caller outside the compartment.
+    - an AMBER record merged through a RED record into an AMBER survivor (the hop);
+    - a compartmented record merged into an open survivor, for a RED caller outside the compartment.
     """
     from noctornal_api.cases import CaseService
     from noctornal_api.merges import MergeService
@@ -1111,16 +1070,11 @@ def test_a_merged_name_never_reaches_past_the_callers_ceiling(conn, client, worl
 
 
 def test_a_merged_name_ranks_and_is_named_only_when_it_says_more(conn, world):
-    """The rank on screen is the reason on screen (verifier of the U10
-    fix, 2026-09-23: nothing held this rule, and a mutant that always
-    named the merged record passed). The first rule was "only when the
-    survivor's own name did not match", which demoted an EXACT merged name
-    below any weak match of the survivor's own: "ember" merged into
-    "ember_hobby" ranked 0.5 under unrelated near misses, and a survivor
-    whose attributes merely mentioned the word ranked 0.06 with no reason
-    shown at all. So a merged name ranks its survivor whenever it matches
-    better, and is named whenever it is the better reason, or the only
-    one."""
+    """The rank on screen is the reason on screen. A merged name ranks its survivor whenever it matches
+    better, and is named whenever it is the better reason, or the only one. A rule of "only when the
+    survivor's own name did not match" would demote an EXACT merged name below any weak match of the
+    survivor's own: "ember" merged into "ember_hobby" would rank 0.5 under unrelated near misses, and a
+    survivor whose attributes merely mentioned the word would rank 0.06 with no reason shown at all."""
     from noctornal_api.merges import MergeService
     owner, _, case_id = world
     merges = MergeService(conn)
@@ -1180,16 +1134,11 @@ def test_a_merged_name_ranks_and_is_named_only_when_it_says_more(conn, world):
     assert hit.id == survivor and hit.merged_name == alias_label, hit
 
 
-# --- an attribute hit says which attribute (README screenshot review) ----
-
 def test_a_hit_found_only_by_an_attribute_names_the_attribute(conn, client, world):
-    """"meridian" found mer_ash, mer_kite and mer_ledger through
-    crew=meridian, and nothing under them said so, so the README's Search
-    shot read as a match on the "mer" of their names (README screenshot
-    review, 2026-09-23). The hit whose name does not match now carries the
-    key of the attribute that did; a hit its own name, a selector or a
-    merged record already explains carries none, because the pane shows
-    one reason and those say more."""
+    """"meridian" finds mer_ash, mer_kite and mer_ledger through crew=meridian, so something under them
+    must say so; otherwise the Search shot reads as a match on the "mer" of their names. The hit whose name
+    does not match carries the key of the attribute that did; a hit its own name, a selector or a merged
+    record already explains carries none, because the pane shows one reason and those say more."""
     owner, email, case_id = world
     tok = _tok()
     by_attr = _node(conn, case_id, owner, "mer_kite",

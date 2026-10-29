@@ -3,18 +3,17 @@
 
 Pulls YARA rules from the public sources listed in yara/sources.json into a
 gitignored vendor/ tree (NEVER redistributed in this repo), records exactly
-which commit of each source was pulled in yara/fetch.lock.json (provenance,
-the same discipline the rest of this system applies to every ingested
-artifact), and builds a validated index under yara/dist/. Files that do not
-compile are routed to a dead-letter list rather than dropped (invariant 12);
-rule-name collisions across sources are reported, not silently merged.
+which commit of each source was pulled in yara/fetch.lock.json (provenance),
+and builds a validated index under yara/dist/. Files that do not compile are
+routed to a dead-letter list rather than dropped (invariant 12); rule-name
+collisions across sources are reported, not silently merged.
 
 This tool only READS rule text and, when yara-x is installed, COMPILES it
 (parsing, not execution) with the product's own two-pass compile
-(`lab_static.yara_compile_step`, F12 2026-09-24), so "compiles" here means
-what it means in the product: a file with any error contributes no rule.
-It never runs a sample. Licences vary per source and every 'review' entry in
-the manifest must be cleared before redistribution.
+(`lab_static.yara_compile_step`), so "compiles" here means what it means in
+the product: a file with any error contributes no rule. It never runs a
+sample. Licences vary per source and every 'review' entry in the manifest
+must be cleared before redistribution.
 
 `import` stores pulled sources in the deployment's database as versions of
 rule sets (created if absent), recorded as imported by this script on this
@@ -95,11 +94,10 @@ def _head(dest: str) -> tuple[str, str]:
 
 
 def _is_plain_file_inside(base: str, path: str) -> bool:
-    """A regular file, not a link, whose resolved path stays under `base`
-    (infra-13, 2026-10-03). A pulled repository is somebody else's tree: a
-    `rules/x.yar` that is a symlink to a path on this host would otherwise be
-    read as rule text and stored in a rule set version, where lab members and
-    the activating Security Officer read it as a rule."""
+    """A regular file, not a link, whose resolved path stays under `base`. A pulled repository is
+    somebody else's tree: a `rules/x.yar` symlink to a path on this host would otherwise be read
+    as rule text and stored in a rule set version, where lab members and the activating Security
+    Officer read it."""
     if os.path.islink(path) or not os.path.isfile(path):
         return False
     real_base = os.path.realpath(base)
@@ -120,18 +118,13 @@ def _remove_link(path: str) -> bool:
 
 
 def _prune_to_rules(dest: str) -> int:
-    """Delete everything that is not a .yar/.yara rule file (keeping .git for
-    updates), so no live sample, dropper, script or document that a source
-    ships alongside its rules can persist on disk. Returns the count removed.
+    """Delete everything that is not a .yar/.yara rule file (keeping .git for updates), so no live
+    sample, dropper, script or document a source ships beside its rules persists on disk. Returns
+    the count removed.
 
-    This is a hard safety boundary: a rule corpus is TEXT SIGNATURES only.
-    Added after StrangerealIntel/DailyIOC shipped live FIN7/Babuk samples that
-    the workstation AV quarantined mid-clone (2026-07-26).
-
-    A symbolic link is not a rule file whatever it is called, and goes too
-    (infra-13, 2026-10-03): `os.walk` lists a link to a file among the files
-    and a link to a directory among the directories, and neither is a thing
-    a source can legitimately mean a rule corpus to contain."""
+    A hard safety boundary: a rule corpus is text signatures only, and some sources ship live
+    samples. A symbolic link is not a rule file whatever it is called, and goes too: `os.walk`
+    lists a link to a file among the files and a link to a directory among the directories."""
     removed = 0
     for dirpath, dirnames, filenames in os.walk(dest, topdown=False):
         if ".git" in dirpath.replace("\\", "/").split("/"):
@@ -283,8 +276,7 @@ def _iter_files():
                 dirnames.remove(".git")
             for fn in filenames:
                 path = os.path.join(dirpath, fn)
-                # Links and anything resolving outside the source are not
-                # rules (infra-13, 2026-10-03; see `_is_plain_file_inside`).
+                # Links and anything resolving outside the source are not rules.
                 if fn.lower().endswith((".yar", ".yara")) and _is_plain_file_inside(base, path):
                     yield name, path
 
@@ -297,9 +289,8 @@ def _product() -> None:
 
 
 def _compile_file(path: str, rel: str, text: str) -> tuple[bool, str | None]:
-    """One file through the product's two-pass compile (F12 D): whether it
-    contributes rules, and the first error's code and title when not.
-    Never the error's text, which quotes rule lines."""
+    """One file through the product's two-pass compile: whether it contributes rules, and the
+    first error's code and title when not. Never the error's text, which quotes rule lines."""
     _product()
     from noctornal_api.lab_static import yara_compile_step
     from noctornal_api.yara_rules import canonical_json
@@ -406,8 +397,8 @@ def _source_bundle(name: str):
         size = os.path.getsize(path)
         if size > MAX_ENTRY_BYTES:
             raise BundleError(f"{rel} is larger than a rule file may be")
-        # O_NOFOLLOW where the platform has it: the listing above refused a
-        # link, and this refuses one swapped in since (infra-13, 2026-10-03).
+        # O_NOFOLLOW where the platform has it: the listing above refused a link, and this refuses
+        # one swapped in since.
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
                      | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as fh:

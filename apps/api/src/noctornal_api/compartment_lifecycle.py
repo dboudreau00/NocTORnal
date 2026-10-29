@@ -1,101 +1,33 @@
-"""Renaming and retiring a registered compartment key (docs/17, closed
-2026-09-23 as sec-compartment-retirement).
+"""Renaming and retiring a registered compartment key (docs/17).
 
-0057 made `iam.compartment` the closed vocabulary and 0059 bound every
-compartment column to it by trigger, in both directions: a row cannot
-carry an unregistered key, and the registry refuses to DROP or RENAME a
-key while any row carries it, naming the columns that do. That binding
-is right, and it left an administrator with no way to correct a key
-short of a hand-written UPDATE on each bound column, in the right
-order, inside one transaction they had to remember to open. A key typed
-as `OP-KESTRAL` and filed under for a week was permanent, and a key
-registered by mistake could not be taken out of the list.
+`rename` registers the new key with the old one's label (or a new label), rewrites the old key to
+the new one in EVERY bound column, then drops the old key, all in one transaction. Every account
+read into the old key is read into the new one and every row filed under it is filed under the new
+one, so no access decision changes: the lock has a new name and the same holders, which is why it
+may run on a CLOSED or ARCHIVED case's rows. Renaming onto a registered key is refused: it would be
+a merge, and every account read into either compartment would open the other's cases. The order is
+forced by the binding (the new key before any row carries it, the old key dropped once nothing
+does); a bound column missed makes the final drop fail and the whole rename roll back. `retire`
+removes a registered key that no row carries and refuses one that is still carried, saying where. A
+case's compartments cannot be edited in the product, so a key that files a case stays registered for
+as long as the case does.
 
-## Rename moves the lock, it does not change who holds it
+The refusal names only what the caller can already see. `user.manage` is not a case role and a
+SYS_ADMIN holds no case content by default (docs/05), so a case is named only when it is in the
+caller's own case list (`list_for_user`, the same predicate, so the two cannot drift), accounts only
+for a holder of `user.manage`, and ingest keys only for a holder of `ingest.manage`. Everything else
+is a count, and the refusal says how many it did not name and why.
 
-`rename` registers the new key with the old one's label (or a new
-label), rewrites the old key to the new one in EVERY bound column, and
-then drops the old key, all in one transaction. Every account read into
-the old key is read into the new one, and every row filed under the old
-key is filed under the new one, so no access decision changes: the lock
-has a new name and the same holders. That is why it may run on a CLOSED
-or ARCHIVED case's rows: the name of a lock is governance, not content.
-
-Renaming ONTO a key that is already registered is refused. It would be a
-merge: every account read into either compartment would open the other's
-cases, which is a widening of access with a rename's name on it.
-
-The order is forced by the binding. The new key must be registered
-before any row carries it (the column triggers refuse it otherwise), and
-the old key can only be dropped once nothing carries it (the registry
-trigger refuses it otherwise). If any bound column is missed, that final
-drop is refused by the database, and the whole rename rolls back.
-
-## Retire drops a key nothing carries
-
-`retire` removes a registered key that no row carries, and refuses one
-that is still carried, saying where: how many rows of each kind carry
-it, and, by name, the accounts, cases and ingest keys the administrator
-asking could already see. A case's compartments cannot be edited in the
-product (`UpdateCaseBody` says why), so a key that files a case stays
-registered for as long as the case does; the refusal says so rather than
-suggesting a remedy that does not exist. Accounts can be read out of it
-from their card under Accounts.
-
-## The refusal names only what the caller can already see
-
-`user.manage` administers the registry and the accounts. It is not a
-case role, and a SYS_ADMIN holds no case content by default (docs/05).
-The first version of the refusal named up to five case CODES per key to
-any `user.manage` holder, whatever their clearance, read-ins or
-assignments, so a GREEN administrator retiring `STEALER-2026` was told
-`OP-HALCYON-25`, a RED compartmented case. Nowhere else does the product
-name a case to somebody who cannot open it: `CaseService.list_for_user`
-exists so "the list [does not become] a disclosure channel", and
-governance names a case only to somebody assigned to it (verifier,
-sec-compartment-retirement, 2026-09-23). The names did not help the
-administrator act either, since the same refusal says a filed case keeps
-its key.
-
-So a case is named only when it is in the caller's own case list
-(`list_for_user`, the same predicate, so the two cannot drift), accounts
-only for a caller holding `user.manage` (who lists every account under
-Accounts anyway) and ingest keys only for one holding `ingest.manage`
-(who lists every key under Ingest). Everything else is a count, and the
-refusal says how many it did not name and why, so a count that exceeds
-the names is not read as a mistake.
-
-## Why the tables are locked
-
-Both operations lock every bound table against writes (SHARE ROW
-EXCLUSIVE for a rename, which writes them; SHARE for a retire, which only
-reads them) for the length of the transaction. Without it, a write that
-began before the rename committed (an ingest worker filing records under
-the key its API key forces, say) could insert the OLD key after the
-rename had moved every row it could see, and commit after it: a row
-carrying a key the registry no longer holds, which is the silent
-no-access 0059 exists to end. The column trigger cannot catch it,
-because it ran while the old key was still registered, and the registry
-trigger cannot either, because the row was not yet visible to it. With
-the lock the concurrent write waits, and afterwards its own trigger
-refuses the old key by name.
-
-The cost is that writes to compartmented tables, and to accounts, wait
-while a rename runs. The lock is asked for with a short timeout, and a
-rename that cannot get it is refused as busy rather than queued behind a
-long transaction with every other writer queued behind it.
-
-Each action is audited in the same transaction as the change
-(`COMPARTMENT_RENAMED` with the rows moved per column,
-`COMPARTMENT_RETIRED`), so the record and the change cannot disagree.
-Audit rows written before a rename keep the old key: they are what
-happened, and the rename's own row is the map from one to the other.
-
-Entities and ties both carry a trigger that stamps `updated_at` on every
-update (`node_tsv` on `core.node`, `edge_validate` on `core.edge`), so a
-rename moves the `updated_at` of each entity and tie it relabels. Nothing
-in the product reads either column back; they are written, not
-consulted, so no view treats the rename as a change of content.
+Both operations lock every bound table against writes for the length of the transaction (SHARE ROW
+EXCLUSIVE for a rename, SHARE for a retire). Without it a write begun before the rename committed,
+such as an ingest worker filing under its forced key, could insert the OLD key after the rename
+moved every visible row: a row carrying a key the registry no longer holds, which neither trigger
+can catch. The lock is requested with a short timeout and a busy rename is refused rather than
+queued behind a long transaction. Each action is audited in the same transaction
+(`COMPARTMENT_RENAMED` with the rows moved per column, `COMPARTMENT_RETIRED`). Audit rows written
+before a rename keep the old key; the rename's own row maps one to the other. A rename moves
+`updated_at` on the entities and ties it relabels (their triggers stamp it); nothing reads either
+column back.
 """
 from __future__ import annotations
 
@@ -110,19 +42,16 @@ from noctornal_api.cases import CaseService
 from noctornal_api.iam_admin import COMPARTMENT_KEY, AdminError, IamAdminService
 from noctornal_api.wording import agree, count_of
 
-#: Every bound column: (schema, table, column, kind). 0059's eighteen and
-#: every later migration's `ADDED_BOUND_COLUMNS` (docs/05, "Binding a
-#: compartment column"; docs/00 decision 71, 2026-09-24).
-#: test_compartment_contract_pg.py holds this tuple, the migrations and the
-#: live bindings (`iam.compartment_bindings()`) to one set, so a column
-#: bound by a later migration and missing here fails a test, fails the
-#: readiness row `compartment_bindings_intact`, and would also fail the
-#: rename itself at the final drop rather than leaving rows behind.
+#: Every bound column: (schema, table, column, kind). 0059's eighteen and every later migration's
+#: `ADDED_BOUND_COLUMNS` (docs/05, "Binding a compartment column"; docs/00 decision 71).
+#: test_compartment_contract_pg.py holds this tuple, the migrations and the live bindings
+#: (`iam.compartment_bindings()`) to one set, so a column bound by a migration and missing here
+#: fails a test and the readiness row `compartment_bindings_intact`, and would fail the rename
+#: itself at the final drop rather than leaving rows behind.
 #:
-#: APPEND-ONLY: a migration that binds a column adds one line per column
-#: below the last, with a comment naming its roadmap item, in the same
-#: change as the migration that installs its trigger. Order is not part
-#: of the contract; the tests compare sets.
+#: Append-only: a migration that binds a column adds one line per column below the last, in the same
+#: change as the migration that installs its trigger. Order is not part of the contract; the tests
+#: compare sets.
 BOUND_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("iam", "app_user", "compartments", "array"),
     ("core", "case", "compartments", "array"),
@@ -144,14 +73,13 @@ BOUND_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("ingest", "api_key", "forced_compartment", "scalar"),
     # Captured documents carry their case's compartments (L1, 0070).
     ("collect", "document", "compartments", "array"),
-    # YARA rule sets are labelled (F12, 0080).
+    # YARA rule sets are labelled (0080).
     ("lab", "yara_ruleset", "compartments", "array"),
-    # Vendor key acquisitions carry their labels (F10b, 0088).
+    # Vendor key acquisitions carry their labels (0088).
     ("comms", "pgp_key_acquisition", "compartments", "array"),
-    # A document's similarity vectors carry its keys (F6.1, 2026-09-24).
+    # A document's similarity vectors carry its keys.
     ("collect", "document_embedding", "read_compartments", "array"),
-    # A collection source carries the keys everything it collects is read
-    # under (F43, 0163, 2026-10-02).
+    # A collection source carries the keys everything it collects is read under (0163).
     ("collect", "source", "compartments", "array"),
     # An observed selector carries its owner's keys (0134, bound by 0170).
     # It stays after ("core", "node"): the selector's own trigger copies the
@@ -184,25 +112,21 @@ NOUNS: dict[tuple[str, str], tuple[str, str]] = {
     ("ingest", "api_key"): ("ingest key", "ingest keys"),
     # L1, 0070.
     ("collect", "document"): ("document", "documents"),
-    # F12, 0080.
+    # 0080.
     ("lab", "yara_ruleset"): ("YARA rule set", "YARA rule sets"),
-    # F10b, 0088.
+    # 0088.
     ("comms", "pgp_key_acquisition"): ("imported vendor key", "imported vendor keys"),
-    # F6.1.
     ("collect", "document_embedding"): ("similarity index row",
                                         "similarity index rows"),
-    # F43, 0163.
+    # 0163.
     ("collect", "source"): ("collection source", "collection sources"),
     # 0134, bound by 0170.
     ("core", "selector"): ("selector", "selectors"),
 }
 
-#: The column that names a row to a person, where there is one, so the
-#: refusal can say WHICH cases, accounts and ingest keys and not only how
-#: many; and how the refusal says why the rest are not named. Which rows a
-#: caller may be told by name is `CompartmentLifecycle._nameable`'s
-#: question (module docstring, "The refusal names only what the caller
-#: can already see").
+#: The column that names a row to a person, where there is one, so the refusal can say WHICH cases,
+#: accounts and ingest keys and not only how many; and how the refusal explains the rest. Which rows
+#: a caller may be told by name is `CompartmentLifecycle._nameable`'s question (module docstring).
 _NAMED_BY: dict[tuple[str, str], tuple[str, str]] = {
     ("iam", "app_user"): ("email", "list"),
     ("core", "case"): ("code", "open"),
@@ -294,12 +218,10 @@ def _table(schema: str, table: str) -> sql.Composed:
 def _carries(column: str, kind: str) -> sql.Composed:
     """`WHERE` predicate: this row carries the key given as the parameter.
 
-    The array form is containment behind a cardinality test
-    (2026-09-24): the same rows as `%s = ANY(col)` for a non-NULL key, and
-    the shape a partial GIN index whose predicate is `cardinality(col) >
-    0` can answer, which `collect.document` has (0070). A rename holds
-    every bound table locked while it runs, so scanning the table of
-    forum bodies for a key would hold every writer that long."""
+    The array form is containment behind a cardinality test: the same rows as `%s = ANY(col)` for a
+    non-NULL key, in the shape a partial GIN index on `cardinality(col) > 0` can answer, which
+    `collect.document` has (0070). A rename holds every bound table locked while it runs, so
+    scanning the table of forum bodies for a key would hold every writer that long."""
     col = sql.Identifier(column)
     if kind == "array":
         return sql.SQL("cardinality({c}) > 0 AND {c} @> ARRAY[%s]::text[]"
@@ -427,9 +349,8 @@ class CompartmentLifecycle:
                 f"was not renamed onto it. Choose a key that is not in use."
             ) from None
         except psycopg.errors.RaiseException as exc:
-            # A binding trigger refusing: a bound column this module does
-            # not know, most likely. Its first line names the column, and
-            # nothing was changed.
+            # A binding trigger refusing, most likely a bound column this module does not know. Its
+            # first line names the column, and nothing was changed.
             raise CompartmentError(str(exc).splitlines()[0]) from exc
         total = sum(moved.values())
         return {"key": new_key, "label": label or old["label"],

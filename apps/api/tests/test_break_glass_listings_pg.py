@@ -1,25 +1,19 @@
-"""A break-glass grant opens a case everywhere the gate does, not just
-where somebody remembered.
+"""A break-glass grant opens a case everywhere the gate does, not just where somebody remembered.
 
-The gate (`PgAccessResolver.resolve`) and `CaseService.list_for_user`
-count a live grant, global or on that case, at its level. Three other
-answers to "can this person open that case" were restatements in SQL that
-still compared `u.tlp_clearance` alone (final review, 2026-09-23):
+The gate (`PgAccessResolver.resolve`) and `CaseService.list_for_user` count a live grant, global or on
+that case, at its level. Three other answers to "can this person open that case" are restatements in
+SQL and must do the same rather than compare `u.tlp_clearance` alone:
 
-- governance's `_authorised_cases`, behind `/retention/due` and the
-  Destroyed list with no case id and the "records unchanged" count on a
-  rule confirmation, and comms' `_visible_cases`, behind the impersonation
-  candidates. A case a grant opened answered per case and was missing
-  from the cross-case forms.
-- the Share roster's `effective` and `reasons`, which told a case's
-  owner that a colleague working in it under an emergency grant "cannot
-  open the case" because "their clearance is below the case's
-  classification".
+- governance's `_authorised_cases`, behind `/retention/due` and the Destroyed list with no case id and
+  the "records unchanged" count on a rule confirmation, and comms' `_visible_cases`, behind the
+  impersonation candidates. A case a grant opened answers per case and must not be missing from the
+  cross-case forms.
+- the Share roster's `effective` and `reasons`, which must not tell a case's owner that a colleague
+  working in it under an emergency grant "cannot open the case" because "their clearance is below the
+  case's classification".
 
-Seven of the nine fail on 1667cc1. The two that pass there (no grant, and
-a revoked grant) are guards that the fixes opened nothing a live grant
-does not open. Email prefix `bgl-`, unique to this file. Env-gated on
-DATABASE_URL.
+Two of the nine tests (no grant, and a revoked grant) are guards that nothing opens which a live grant
+does not open. Email prefix `bgl-`, unique to this file. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -37,8 +31,8 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 PREFIX = "bgl-"
 WHY = "Incident 2026-0923: the next target is named in this case, needed now."
-#: After every test case's retention_until (2028-01-01), so its exhibits
-#: are due and /retention/due has something to list.
+#: After every test case's retention_until (2028-01-01), so its exhibits are due and /retention/due has
+#: something to list.
 LATER = "2029-01-01T00:00:00Z"
 
 
@@ -185,9 +179,8 @@ def test_without_a_grant_neither_form_lists_a_case_above_the_analyst(
 
 def test_a_global_grant_opens_the_cross_case_retention_list_as_it_does_per_case(
         conn, client, estate):
-    """The finding's scenario: the per-case form answered for X and the
-    cross-case form left it out. The RED case stays out: AMBER does not
-    open it. The grant's use is counted, as the per-case form counts it."""
+    """The per-case form answers for X and the cross-case form must not leave it out. The RED case
+    stays out: AMBER does not open it. The grant's use is counted, as the per-case form counts it."""
     e = estate
     grant_id, _ = _grant(conn, e["analyst"], "AMBER")
     status, per_case = _due_cases(client, conn, e["analyst"], e["x"])
@@ -271,8 +264,8 @@ def _lists(client, conn, uid, case_id) -> bool:
 
 
 def test_a_colleague_open_under_a_grant_is_shown_as_able_to_open(conn, client, team):
-    """The finding's scenario: the analyst is working in C under a grant on
-    C while the owner's roster said they could not open it."""
+    """The analyst is working in C under a grant on C, so the owner's roster must not say they cannot
+    open it."""
     t = team
     _, expires = _grant(conn, t["analyst"], "AMBER", case_id=t["case"])
     assert _lists(client, conn, t["analyst"], t["case"]), \

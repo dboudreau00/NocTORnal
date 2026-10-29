@@ -1,14 +1,13 @@
-"""Builds fuzzy_vectors.json: the golden vectors the TLSH and ssdeep ports
-in `noctornal_api.fuzzyhash` are held to (F11, 2026-09-24).
+"""Builds fuzzy_vectors.json: the golden vectors the TLSH and ssdeep ports in
+`noctornal_api.fuzzyhash` are held to.
 
-Test tooling, never imported by the product. `make_input(spec)` is also
-what test_fuzzyhash.py calls to regenerate each input from its spec, so
-the vectors file stores specs and digests and never a byte of input.
+Test tooling, never imported by the product. `make_input(spec)` is also what test_fuzzyhash.py calls
+to regenerate each input from its spec, so the vectors file stores specs and digests and never a byte
+of input.
 
-The references are the py-tlsh 4.12.1 C++ sources built with 128 buckets
-and a one-byte checksum (the digest the product stores), and libfuzzy
-2.14.1 (the library the ssdeep CLI links). Build the two harnesses below on
-any Linux host with a compiler, then run this file there:
+The references are the py-tlsh 4.12.1 C++ sources built with 128 buckets and a one-byte checksum (the
+digest the product stores), and libfuzzy 2.14.1 (the library the ssdeep CLI links). Build the two
+harnesses below on any Linux host with a compiler, then run this file there:
 
     gcc -O2 -I <libfuzzy> -o ssdeep_ref ssdeep_ref.c <libfuzzy>/.libs/libfuzzy.a
     g++ -O2 -DBUCKETS_128 -DCHECKSUM_1B -I <py-tlsh>/include -o tlsh_ref \\

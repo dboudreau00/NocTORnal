@@ -1,75 +1,34 @@
-"""Outbound transports: SMTP and HMAC-signed webhooks, and the outbox drain
-that feeds them (Jira's pass lives in `jira.py` and runs from here).
+"""Outbound transports: SMTP and HMAC-signed webhooks, and the outbox drain that feeds them.
 
-Every function here calls `egress.can_egress()` before it sends anything.
-That is invariant 8, and this file is the reason it exists -- docs/07:
+Jira's pass lives in `jira.py` and runs from here. Every function here calls `egress.can_egress()`
+before it sends anything (invariant 8, docs/07): integrations are the leak path in every system of
+this kind, because a ticket or mail quietly copies intelligence into a system with a different
+access model and a wider audience.
 
-    Integrations are the leak path in every system of this kind. Not
-    because anyone intends it, but because a Jira ticket auto-created from
-    a watch hit quietly copies intelligence into a system with a completely
-    different access model and a much wider audience.
+Email content rules (docs/07): the subject line carries no intelligence and the body carries a
+summary and a deep link, not the content. `render_email()` is the only function that builds an
+email and reads `subject` and `summary` only, never `body`; a test patches the column out and
+checks the mail still renders.
 
-## The content rules, enforced structurally
+Content that cannot leave is not silently dropped or downgraded. The delivery row is written
+`REFUSED` with the gate's reason code and, when the recipient would otherwise get nothing, a stub
+goes out: the fact that something is waiting, with no case content and no case code. The full
+notification stays in the centre behind the access gate.
 
-docs/07 is specific about email, and it is specific because email is the
-worst channel available: it sits in inboxes, gets forwarded, and syncs to
-phones that render the subject line on a lock screen.
+Deep links carry no token. A single-use token in an email is a bearer credential in the least
+trustworthy channel, so the link is a plain URL to the login page. Any future deep link must be
+scoped to navigation only, never to access.
 
-    Subject line carries no intelligence. Body carries a summary and a deep
-    link, not the content.
+The egress proxy is the only way out in production (docs/00 decision 68). Every integration takes
+its route from `egress.route_for`: SMTP uses the route "smtp" through `pinned_http.open_connection`
+and webhooks use "webhook" through `pinned_http.fetch_response`, never urllib (it honours
+HTTP(S)_PROXY, follows redirects as a bodiless GET and accepts http://). A configuration gap HOLDS
+a delivery: a channel whose route is missing or does not allow its endpoint is not drained, its due
+rows stay PENDING with attempts untouched and are counted as `held`. Only an attempted send FAILS.
 
-`render_email()` is the only function that builds an email, and it reads
-`subject` and `summary` from the notification. **It never touches `body`.**
-That is asserted by a test that patches the column out and checks the mail
-still renders -- a comment saying "do not use body here" would survive
-exactly one refactor.
-
-## What happens to content that cannot leave
-
-Not a silent drop, and not a downgrade. The delivery row is written
-`REFUSED` with the gate's reason code, and -- when the recipient would
-otherwise have been left with nothing -- a **stub** goes out instead: the
-fact that something is waiting, with no case content and no case code.
-The full notification is still in the centre, behind the access gate, which
-is where it should have been read anyway.
-
-This is the honest reading of docs/07's "Optional: refuse to send anything
-above AMBER, notify in-app only": the *content* stays in, the *fact* that
-there is something to look at may go out, and the delivery ledger records
-which of the two happened.
-
-## Deep links carry no token
-
-docs/07 floats "single-use, short-TTL deep links". They are not built, and
-the link is a plain URL that lands on the login page. A single-use token in
-an email is a bearer credential in the least trustworthy channel in the
-system; requiring the recipient to authenticate is both simpler and
-stronger. If deep links are wanted later they must be scoped to navigation
-only and never to access.
-
-## One way out: the integration routes (F8, 2026-09-24)
-
-docs/00 decision 68 makes the egress proxy the only way out in production, and
-every outbound integration takes its route from `egress.route_for`. SMTP
-takes the route "smtp" (the relay is dialled through
-`pinned_http.open_connection`, a CONNECT tunnel through the proxy or the
-pinned direct connection in development) and webhooks the route "webhook"
-(`pinned_http.fetch_response`, never urllib: urllib honoured HTTP(S)_PROXY,
-followed 301/302/303 as a bodiless GET and accepted http://).
-
-A configuration gap HOLDS a delivery; only an attempted send FAILS. A
-channel whose route is missing, or does not allow its endpoint, is not
-drained at all: its due rows stay PENDING with their attempts untouched
-and are counted as `held`, and readiness and Administration, Integrations
-say why. Before this, a misconfiguration burnt five attempts and ended
-GAVE_UP, which is an outage dressed as a fault (the N4 lesson at
-notifications._require_transport).
-
-## The ledger says why (F8)
-
-Every decided row carries a stable `cause` (CAUSES below) beside the human
-`detail`, and every row that left the building carries its `exposure`
-(STUB, SUBJECT or SUMMARY). Code matches on the cause, never the sentence.
+Every decided row carries a stable `cause` (CAUSES below) beside the human `detail`, and every row
+that left the building carries its `exposure` (STUB, SUBJECT or SUMMARY). Code matches on the
+cause, never the sentence.
 """
 from __future__ import annotations
 
@@ -117,14 +76,11 @@ MAX_PER_DRAIN = 200
 # A permanently-retried delivery is a permanently-hot outbox.
 MAX_ATTEMPTS = 5
 
-#: Serialises the WHOLE drain across processes -- see `dispatch_due`.
+#: Serialises the whole drain across processes (see `dispatch_due`).
 #:
-#: Session-scoped (`pg_try_advisory_lock`), not transaction-scoped, because
-#: `db.connect()` is autocommit: a `pg_advisory_xact_lock` would be released
-#: by the very statement that took it and would guard nothing. The name is
-#: hashed with `hashtextextended(..., 0)`, the same idiom migrations 0013
-#: and 0024 use for the audit and custody chains, so the lock space is
-#: addressed one way across the codebase.
+#: Session-scoped (`pg_try_advisory_lock`) because `db.connect()` is autocommit: a transaction-scoped
+#: lock would be released by the statement that took it. The name is hashed with
+#: `hashtextextended(..., 0)`, as migrations 0013 and 0024 do for the audit and custody chains.
 _DRAIN_LOCK = "notify.dispatch_due"
 
 PRODUCT = "NocTORnal"
@@ -138,25 +94,20 @@ SMTP_SEND_SECONDS = 60.0
 WEBHOOK_SECONDS = 15.0
 WEBHOOK_USER_AGENT = "NocTORnal-webhook/1"
 WEBHOOK_MAX_BYTES = 65536
-#: http:// for the webhook, development only (F8 A3). A production refusal
-#: in config, and refused at send time in production whatever it says:
-#: the cron sends, and the cron never ran verify_environment.
+#: http:// for the webhook, development only. Refused in config in production, and refused at send
+#: time in production whatever it says: the cron sends, and the cron never ran verify_environment.
 WEBHOOK_ALLOW_HTTP_ENV = "NOCTORNAL_WEBHOOK_ALLOW_HTTP"
 
-#: Which signature scheme the webhook destination speaks (F28, 2026-10-02).
-#: Unset or `v1` is the original: `X-NocTORnal-Signature: sha256=<hex>`, an
-#: HMAC-SHA256 over the exact body, which every existing receiver verifies and
-#: which carries no time. `v2` is opt-in: `X-NocTORnal-Signature-V2:
-#: t=<unix seconds>,v2=<hex>`, an HMAC-SHA256 over `<t>.<body>`. The exact
-#: format and a receiver's replay rules are in docs/07.
+#: Which signature scheme the webhook destination speaks. Unset or `v1`: `X-NocTORnal-Signature:
+#: sha256=<hex>`, an HMAC-SHA256 over the exact body, with no time. `v2` is opt-in:
+#: `X-NocTORnal-Signature-V2: t=<unix seconds>,v2=<hex>`, an HMAC-SHA256 over `<t>.<body>`. The format
+#: and a receiver's replay rules are in docs/07.
 WEBHOOK_SIGNATURE_ENV = "NOCTORNAL_WEBHOOK_SIGNATURE"
 WEBHOOK_SECRET_ENV = "NOCTORNAL_WEBHOOK_SECRET"
 SIGNATURE_V1 = "v1"
 SIGNATURE_V2 = "v2"
 SIGNATURE_HEADER = "X-NocTORnal-Signature"
 SIGNATURE_HEADER_V2 = "X-NocTORnal-Signature-V2"
-
-# --- causes (F8 B1) ---------------------------------------------------------
 
 RECIPIENT_DISABLED = "RECIPIENT_DISABLED"
 BELOW_THRESHOLD = "BELOW_THRESHOLD"
@@ -218,7 +169,7 @@ GATE_TEXT: dict[str, str] = {
 GATE_FALLBACK = ("The gate could not read the marking or the destination's "
                  "ceiling, so it refused rather than guess.")
 
-#: What left, in words, for the console's chip (`left`, F8).
+#: What left, in words, for the console's chip (`left`).
 EXPOSURES = ("STUB", "SUBJECT", "SUMMARY")
 
 
@@ -252,10 +203,9 @@ class TransportError(Exception):
 class Outgoing:
     """One due delivery, joined to the notification it belongs to.
 
-    The four fields after `case_code` are Jira's (F7) and are declared
-    LAST with defaults, so every constructor written before them
-    (test_notifications_pg.py builds one by keyword) keeps working. Still
-    no body: decision 46."""
+    The four fields after `case_code` are Jira's and are declared last with defaults, so existing
+    keyword constructors keep working. It carries no body (decision 46).
+    """
 
     delivery_id: UUID
     notification_id: UUID
@@ -368,18 +318,13 @@ def sign(payload: bytes, secret: str) -> str:
 
 
 def sign_v2(payload: bytes, secret: str, timestamp: int) -> str:
-    """The value of the `X-NocTORnal-Signature-V2` header (F28, 2026-10-02):
-    `t=<unix seconds>,v2=<hex>`, where `<hex>` is the lowercase hex
-    HMAC-SHA256, keyed with the secret's UTF-8 bytes, over the ASCII decimal
-    timestamp, one full stop and the exact body bytes.
+    """The value of the `X-NocTORnal-Signature-V2` header: `t=<unix seconds>,v2=<hex>`.
 
-    The timestamp is the time of THIS attempt, not of the notification: a
-    retry is signed again, so a receiver's window judges how fresh the post
-    is and its own record of notification ids judges whether it has acted on
-    the notification before. A timestamp in the signed string is what lets a
-    receiver refuse a capture posted again later; the body is JSON that
-    begins with a brace, so a v1 signature (over the body alone) can never be
-    read as a v2 one (over digits first)."""
+    `<hex>` is the lowercase hex HMAC-SHA256, keyed with the secret's UTF-8 bytes, over the ASCII
+    decimal timestamp, one full stop and the exact body bytes. The timestamp is the time of this
+    attempt, so a retry is signed again and a receiver's window judges how fresh the post is. The
+    body begins with a brace, so a v1 signature can never be read as a v2 one.
+    """
     stamp = str(int(timestamp))
     mac = hmac.new(secret.encode("utf-8"), stamp.encode("ascii") + b"." + payload,
                    hashlib.sha256).hexdigest()
@@ -387,14 +332,12 @@ def sign_v2(payload: bytes, secret: str, timestamp: int) -> str:
 
 
 def webhook_signature_version(env=None) -> tuple[str | None, str | None]:
-    """(version, None) for the webhook destination's signature setting, or
-    (None, the sentence) for a value that is neither v1 nor v2 (F28,
-    2026-10-02).
+    """(version, None) for the webhook destination's signature setting, or (None, the sentence)
+    for a value that is neither v1 nor v2.
 
-    Unset is v1: a destination that never heard of v2 sends exactly what it
-    always sent. A value that is neither is a refusal and never a fall back
-    to v1, because a misspelt v2 that quietly sent v1 would drop the
-    timestamp its operator asked for and say nothing."""
+    Unset is v1. An invalid value is a refusal, never a fall back to v1: a misspelt v2 that quietly
+    sent v1 would drop the timestamp its operator asked for.
+    """
     env = os.environ if env is None else env
     value = (env.get(WEBHOOK_SIGNATURE_ENV) or "").strip().lower()
     if value in ("", SIGNATURE_V1):
@@ -421,9 +364,7 @@ def webhook_signature_problem(env=None) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Where a webhook went, withheld (F8 C, 2026-09-24)
-# ---------------------------------------------------------------------------
+# Where a webhook went, withheld.
 
 _ENDPOINT = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://([^/?#]*)(.*)", re.DOTALL)
 _WITHHELD_PATH = re.compile(r"(/[^?#]+|/?\?)", re.DOTALL)
@@ -434,15 +375,15 @@ def _fingerprint(text: str) -> str:
 
 
 def redact_endpoint(url: str) -> str:
-    """The webhook address as the ledger stores it: the scheme and the
-    authority as written with any userinfo dropped, and a path or query
-    replaced by a fingerprint, because incoming-webhook URLs carry their
-    bearer secret in the path. Text that does not parse becomes
-    "[endpoint withheld: <8 hex>]".
+    """The webhook address as the ledger stores it.
 
-    Works on the RAW text (no lower-casing, IPv6 brackets kept, a bare "?"
-    withholds) so migration 0096's SQL twin can match it exactly; a parity
-    test holds the two together. Idempotent on its own output."""
+    Keeps the scheme and the authority as written, drops any userinfo, and replaces a path or query
+    with a fingerprint, because incoming-webhook URLs carry their bearer secret in the path. Text
+    that does not parse becomes "[endpoint withheld: <8 hex>]".
+
+    Works on the raw text (no lower-casing, IPv6 brackets kept, a bare "?" withholds) so migration
+    0096's SQL twin matches it exactly; a parity test holds the two together. Idempotent.
+    """
     if re.fullmatch(r".*/\[path withheld: [0-9a-f]{8}\]", url, re.DOTALL) or \
             re.fullmatch(r"\[endpoint withheld: [0-9a-f]{8}\]", url):
         return url
@@ -457,9 +398,7 @@ def redact_endpoint(url: str) -> str:
     return shown
 
 
-# ---------------------------------------------------------------------------
-# Routes (F8 A, docs/00 decision 68, docs/20 section 9)
-# ---------------------------------------------------------------------------
+# Routes (docs/00 decision 68, docs/20 section 9)
 
 def smtp_endpoint() -> tuple[str | None, int | None, str | None]:
     """(host, port, problem). The problem is a sentence, never a value."""
@@ -527,8 +466,8 @@ def _not_allowed(name: str, host: str, port: int) -> str:
 
 
 def route_state(channel: str, conn, *, route_for: Callable | None = None) -> RouteState:
-    """The one reader of "can this channel leave, and how" for the drain,
-    readiness, the overview and the preferences (F8 A1)."""
+    """The one reader of "can this channel leave, and how" for the drain, readiness, the overview
+    and the preferences."""
     from noctornal_api.egress import RouteUnavailable
 
     route_for = route_for or _default_route_for()
@@ -558,9 +497,7 @@ def route_state(channel: str, conn, *, route_for: Callable | None = None) -> Rou
             return RouteState(name, False, False,
                               "NOCTORNAL_WEBHOOK_URL is not https, and a webhook "
                               "carries case summaries.")
-        # A signature setting that cannot be used HOLDS the channel, as a
-        # missing route does: a configuration gap is not a failed send
-        # (F28, 2026-10-02).
+        # A signature setting that cannot be used HOLDS the channel, as a missing route does.
         signature_problem = webhook_signature_problem()
         if signature_problem:
             return RouteState(name, False, False, signature_problem)
@@ -580,13 +517,6 @@ def route_state(channel: str, conn, *, route_for: Callable | None = None) -> Rou
         return RouteState(name, False, bool(route.proxied),
                           _not_allowed(name, host, port))
     return RouteState(name, True, bool(route.proxied), None, route)
-
-
-def route_problem(channel: str, conn, *, route_for: Callable | None = None) -> str | None:
-    """None when the channel's route exists and permits its endpoint;
-    otherwise the sentence saying why it is held."""
-    state = route_state(channel, conn, route_for=route_for)
-    return None if state.ok else state.why
 
 
 def route_line(state: RouteState) -> str:
@@ -618,8 +548,7 @@ class _RoutedSMTP(smtplib.SMTP):
                                            timeout=timeout, deadline=self._deadline)
 
     def starttls(self, *args, **kwargs):
-        # STARTTLS replaces the socket, so the watchdog re-watches the new
-        # one (docs/20 section 5.7).
+        # STARTTLS replaces the socket, so the watchdog watches the new one (docs/20 section 5.7).
         result = super().starttls(*args, **kwargs)
         self._deadline.watch(self.sock)
         return result
@@ -642,19 +571,14 @@ class _RoutedSMTP_SSL(smtplib.SMTP_SSL):
 
 
 def send_smtp(message: EmailMessage, *, route) -> None:
-    """Explicit TLS on 587 or implicit on 465 (docs/07: "never plaintext"),
-    with one exception: an explicitly-declared development relay.
+    """Explicit TLS on 587 or implicit on 465 (docs/07: "never plaintext"), except for an
+    explicitly declared development relay.
 
-    The exception is guarded by its own environment variable rather than by
-    "TLS failed, carry on". A transport that silently downgrades is a
-    transport that sends case summaries in the clear on the day the
-    certificate expires. In production it never applies, whatever the
-    variable says (the cron sends, and the cron does not run
-    verify_environment).
-
-    The relay is reached through `route` (F8 A2): its socket comes from
-    pinned_http.open_connection, and one Deadline of SMTP_SEND_SECONDS
-    bounds the whole session.
+    The exception has its own environment variable rather than "TLS failed, carry on": a transport
+    that silently downgrades sends case summaries in the clear on the day the certificate expires.
+    In production it never applies, whatever the variable says (the cron does not run
+    verify_environment). The relay socket comes from `pinned_http.open_connection` through `route`,
+    and one Deadline of SMTP_SEND_SECONDS bounds the whole session.
     """
     host, port, problem = smtp_endpoint()
     if problem:
@@ -694,10 +618,9 @@ def send_smtp(message: EmailMessage, *, route) -> None:
                     pass
     except TransportError:
         raise
-    # These run after `secret_in_scope` has ended, so the password is named
-    # to `redact` again: a relay that echoes it (an AUTH reply quoting the
-    # base64 of the credential) would otherwise reach the delivery ledger
-    # and the log (2026-10-07).
+    # These run after `secret_in_scope` has ended, so the password is named to `redact` again: a
+    # relay that echoes it (an AUTH reply quoting the base64 of the credential) would otherwise
+    # reach the delivery ledger and the log.
     except pinned_http.OutboundError as exc:
         raise TransportError("SMTP relay unreachable: " + pinned_http.redact(
             str(exc), secrets=tuple(v for v in (password,) if v))) from None
@@ -708,19 +631,14 @@ def send_smtp(message: EmailMessage, *, route) -> None:
 
 def send_webhook(url: str, payload: dict, secret: str | None, *, route,
                  clock: Callable[[], float] | None = None) -> None:
-    """POST the payload through `route` (F8 A3). The body and the HMAC
-    signature are exactly as before; no redirect is followed and no
-    environment proxy is read. http:// is refused unless the development
-    flag is set, and in production always.
+    """POST the payload through `route`. No redirect is followed and no environment proxy is read.
+    http:// is refused unless the development flag is set, and in production always.
 
-    The signature is v1 unless the destination opted into v2 with
-    NOCTORNAL_WEBHOOK_SIGNATURE (F28, 2026-10-02). A v2 delivery carries ONLY
-    the v2 header, never the v1 one beside it: a v1 header is a signature over
-    the body alone, so a delivery that carried both could be posted again
-    forever by anyone who captured it, with the v2 header cut off and the v1
-    one kept, to any receiver that still accepts v1. With one header there is
-    nothing to cut down to. `clock` is the time source, injectable so a test
-    fixes the timestamp; it is seconds since the epoch."""
+    The signature is v1 unless the destination opted into v2 with NOCTORNAL_WEBHOOK_SIGNATURE. A v2
+    delivery carries only the v2 header, never the v1 one beside it: a v1 signature covers the body
+    alone, so a delivery with both could be replayed by cutting off the v2 header and keeping v1.
+    `clock` is the time source in seconds since the epoch, injectable so a test fixes the timestamp.
+    """
     try:
         target = split_url(url)
     except Refusal as refusal:
@@ -768,33 +686,21 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route,
 # The outbox drain
 # ---------------------------------------------------------------------------
 
-#: Due, AND still deliverable to this recipient, on a channel that is not
-#: held.
+#: Due, and still deliverable to this recipient, on a channel that is not held.
 #:
-#: `deliverable_predicate` (`readable_predicate`, the centre's rule, and the
-#: element's labels as they stand now) is imported from `notifications` rather
-#: than restated. This query used to check only `u.is_active`, so between the
-#: notification being written and the drain running the recipient could be
-#: taken off the case or have their clearance lowered and the summary went
-#: out by email anyway — on the one path in the system that actually crosses
-#: the boundary. The notification centre would have hidden the same row.
+#: `deliverable_predicate` (`readable_predicate`, the centre's rule, over the element's labels as
+#: they stand now) is imported from `notifications` rather than restated. A drain that disagrees
+#: with the centre it drains is worse than either rule alone: between the notification being written
+#: and the drain running, the recipient may lose access or clearance, and the summary must not go
+#: out by email on the one path that crosses the boundary.
 #:
-#: A drain that disagrees with the centre it drains is worse than either
-#: rule alone, because the in-app copy is the thing an auditor looks at.
+#: `d.channel = ANY(%s)` is the channels this pass can send: JIRA is never in it (it has its own
+#: capped query) and a channel whose route is missing is held, not attempted.
 #:
-#: `d.channel = ANY(%s)` is the channels this pass can send (F8 A5): JIRA
-#: is never in it (Jira has its own capped query, F7) and a channel whose
-#: route is missing is held, not attempted.
-#:
-#: The labels the gate judges are the notification's composed with its
-#: case's AND its element's AS THEY STAND NOW (`CASE_LABELS_SQL`), the way an
-#: export composes them. The notification's own were fixed when it was raised,
-#: so a case raised to RED, or given a compartment, while a delivery waited (a
-#: digest, quiet hours, a retry) had its code and summary sent under the old
-#: marking (2026-10-07), and so did an exhibit, an entity, a sample or a feed
-#: record raised after the notice was queued (2026-10-08;
-#: `notifications.element_rows_sql` says which elements are read). The
-#: recipient must still dominate all of them (`deliverable_predicate`).
+#: The labels the gate judges are the notification's composed with its case's and its element's as
+#: they stand now (`CASE_LABELS_SQL`), the way an export composes them, because the notification's
+#: own were fixed when it was raised. `notifications.element_rows_sql` says which elements are read.
+#: The recipient must dominate all of them.
 CASE_LABELS_SQL = f"""greatest(n.classification, coalesce(c.classification, n.classification),
                 (SELECT max(f.classification) FROM ({element_rows_sql('n')}) f)),
        n.compartments || coalesce(c.compartments, '{{}}'::text[])
@@ -830,17 +736,14 @@ SELECT count(*)
    AND {deliverable_predicate('n')}
 """
 
-#: The other half of the same rule, and the reason it is not simply a
-#: filter. A PENDING delivery whose recipient may no longer read it would
-#: sit in the outbox forever if `due()` merely skipped it — a permanently
-#: undrainable queue, and (invariant 12) a silent drop dressed as a pending
-#: one. So it is closed out explicitly, with a reason, before each drain.
+#: The other half of the same rule. A PENDING delivery whose recipient may no longer read it would
+#: sit in the outbox forever if `due()` merely skipped it: an undrainable queue and (invariant 12) a
+#: silent drop dressed as a pending one. So it is closed out explicitly, with a reason, before each
+#: drain.
 #:
-#: SUPPRESSED rather than REFUSED, and `redacted` left false, because both
-#: of those columns mean something specific here: REFUSED with
-#: `redacted = true` is "the gate refused the content and a content-free
-#: stub went out instead". Nothing went out. `attempts` is not incremented
-#: for the same reason — nothing was attempted.
+#: It is SUPPRESSED rather than REFUSED, with `redacted` left false: REFUSED with `redacted = true`
+#: means the gate refused the content and a stub went out, and here nothing went out. `attempts` is
+#: not incremented because nothing was attempted.
 _REVOKE_SQL = f"""
 UPDATE notify.delivery d
    SET state = 'SUPPRESSED', last_attempt_at = now(), cause = 'REVOKED',
@@ -875,10 +778,8 @@ def count_held(conn: psycopg.Connection, channels: list[str]) -> int:
 def revoke_undeliverable(conn: psycopg.Connection) -> int:
     """Close out every PENDING delivery the recipient may no longer read.
 
-    Not time-bounded and not limited: this is a cheap UPDATE over a small
-    working set, and a cap here would mean a revocation that took several
-    drains to take effect. Returns how many were closed so the caller can
-    report it rather than discover it in the table.
+    Not time-bounded and not limited: it is a cheap UPDATE over a small working set, and a cap would
+    delay a revocation by several drains. Returns how many were closed.
     """
     return len(conn.execute(_REVOKE_SQL).fetchall())
 
@@ -889,12 +790,11 @@ def destination_for(channel: str) -> Destination:
 
 
 def configured_ceiling(channel: str) -> str | None:
-    """The ceiling the deployment set for the SMTP or webhook channel
-    (`NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`), or None when it
-    set none. The drain judges every delivery against it, and a report's
-    release judges the document against it too (2026-10-08): the release
-    used the caller's typed ceiling alone, so it allowed what the drain then
-    refused. One reader, so the two cannot differ."""
+    """The ceiling the deployment set for the SMTP or webhook channel (`NOCTORNAL_SMTP_CEILING`,
+    `NOCTORNAL_WEBHOOK_CEILING`), or None when it set none.
+
+    The drain and a report's release both judge against it; one reader keeps the two from differing.
+    """
     return os.environ.get(f"NOCTORNAL_{channel}_CEILING") or None
 
 
@@ -903,60 +803,31 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
                  route_for: Callable | None = None, jira_client=None) -> dict:
     """Drain the outbox once.
 
-    Deliberately a function you CALL rather than a loop that runs: there is
-    no worker process in this build (decision 30's precedent), so the drain
-    is driven by an operator, a cron entry, or a test. That is a real
-    limitation and it is written down rather than hidden behind a thread
-    that silently dies.
+    A function you call, not a loop: there is no worker process in this build (decision 30), so an
+    operator, a cron entry or a test drives it. The transports are injectable so tests exercise the
+    gate, the redaction and the ledger without a mail server. An injected transport stands in for
+    the route as well as the relay; only the default transports are held behind their route.
 
-    The transports are injectable so the tests exercise the gate, the
-    redaction and the ledger without a mail server. An injected transport
-    stands in for the route as well as the relay (2026-09-24): a
-    one-argument fake has no route to be given and needs none, so only the
-    DEFAULT transports are held behind their route. The
-    route's own rules are exercised with the default transport and an
-    injected `route_for`.
+    One pass, in this order: revoke (`revoke_undeliverable`, before the drain rather than as a
+    filter inside it, or rows would queue up invisibly); withdraw the Jira rows nothing may route
+    any more (`jira.withdraw_unroutable`); the email and webhook loop; Jira's own pass
+    (`jira.JiraPass`, capped per pass and by wall clock, so email is never behind Jira); then the
+    producers. A channel whose route is missing or does not allow its endpoint is HELD: its due
+    rows are counted into `held` and left alone.
 
-    Closes out any PENDING delivery whose recipient may no longer read it —
-    see `revoke_undeliverable` — BEFORE the drain rather than as a filter
-    inside it, or the rows would queue up invisibly forever.
+    The producers run after the drain loop, so a drain sends what was already due when it started
+    and what the producers raise goes out on the next pass. Otherwise an URGENT escalation, which
+    `deliver_after` makes due now, would send mail from a drain whose only queued row was DEFERRED.
 
-    ## One pass, in this order (F7 and F8, 2026-09-24)
+    One drain at a time: both producers dedupe by reading the rows they are about to write, and
+    `notify.notification` has no unique index, so two overlapping drains would each write one.
+    `pg_try_advisory_lock` rather than `pg_advisory_lock`, so an operator who dispatches while cron
+    holds the lock gets an immediate all-zero drain. The lock also serialises Jira's pass, which
+    claims a per-event posting row.
 
-    revoke; withdraw the Jira rows nothing may route any more
-    (`jira.withdraw_unroutable`); the email and webhook loop; Jira's own
-    pass (`jira.JiraPass`, capped per pass and by wall clock, so email is
-    never behind Jira); then the producers. A channel whose route is
-    missing or does not allow its endpoint is HELD: its due rows are
-    counted into `held` and left alone.
-
-    ## The producers run AFTER the drain loop, not before (2026-09-02)
-
-    They were originally evaluated inside the `counters` literal, i.e.
-    BEFORE `due()` was read, so anything they raised went out in the SAME
-    pass. That quietly broke the contract every other caller relies on:
-    ESCALATION is registered URGENT and `deliver_after` returns `now` for
-    priority 1, so a drain whose only queued row was DEFERRED still sent
-    mail. So: a drain sends what was ALREADY due when it started, and what
-    the producers raise goes out on the next pass.
-
-    ## One drain at a time (2026-09-02)
-
-    Both producers dedupe by reading the rows they are about to write, and
-    `notify.notification` has no unique index to fall back on. On an
-    autocommit connection with no lock that dedupe is a read-then-write
-    race, so two overlapping drains each see "no escalation yet" and both
-    write one. `pg_try_advisory_lock` rather than `pg_advisory_lock`: an
-    operator who presses dispatch while cron holds the lock gets an
-    immediate all-zero drain and can see that nothing was theirs to do.
-    The lock also serialises Jira's pass, which is what lets it claim a
-    per-event posting row without racing another pass.
-
-    Every key in the `counters` literal below is a field of the HTTP
-    `DrainOut` model, and test_ui_invariants reads this literal to hold the
-    model to it -- so a new counter goes IN the literal, not on a later
-    line, or that test cannot see it. The producers assign INTO the literal
-    after the loop for that reason; their keys are still declared in it.
+    Every key in the `counters` literal is a field of the HTTP `DrainOut` model, and
+    test_ui_invariants reads the literal to hold the model to it, so a new counter goes in the
+    literal, not on a later line. The producers assign into it after the loop.
     """
     counters = {"sent": 0, "redacted": 0, "refused": 0, "failed": 0,
                 "revoked": 0, "held": 0, "deferred": 0, "withdrawn": 0,
@@ -1006,9 +877,8 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
                 if out.channel == SMTP:
                     if not out.address:
                         raise TransportError("no email address for this recipient")
-                    # egress-notify-address-list (2026-10-03): a list stored
-                    # before the rule existed is undeliverable, never expanded
-                    # into one RCPT per address by smtplib.
+                    # A list stored before the single-address rule is undeliverable, never
+                    # expanded into one RCPT per address by smtplib.
                     if single_address_domain(out.address) is None:
                         raise TransportError(
                             "the delivery address is not one plain address, "
@@ -1057,10 +927,9 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
             jira_counts = jira.JiraPass(conn, client_factory=jira_client,
                                         route_for=route_for).run()
         except Exception:  # noqa: BLE001 - Jira never silences the producers
-            # A Jira pass that fails outside any one row (a destination read,
-            # the credential, a bug) must not take the review and URGENT
-            # escalation notices with it: they run below whatever Jira did
-            # (2026-09-25). The failure is logged and counted.
+            # A Jira pass that fails outside any one row (a destination read, the credential, a
+            # bug) must not take the review and URGENT escalation notices with it. The failure is
+            # logged and counted.
             log.exception("the Jira pass failed; the producers still run")
             jira_counts = {"failed": 1}
         for key in ("sent", "refused", "failed", "held", "deferred"):
@@ -1086,18 +955,15 @@ def _succeed(conn: psycopg.Connection, out: Outgoing, *, state: str,
              jira_link_id: UUID | None = None, attempted: bool = True) -> None:
     """Record the outcome.
 
-    A stub that went out is REFUSED, not SENT. What the gate refused was the
-    CONTENT, and an auditor asking "did the summary leave the boundary" must
-    get a straight no without reconstructing it from the classification.
-    `delivery_sent_has_timestamp` ties SENT to `sent_at`, so a REFUSED row
-    carries only `last_attempt_at` — which is also the honest reading: the
-    delivery of the notification did not happen.
+    A stub that went out is REFUSED, not SENT: what the gate refused was the content, and an auditor
+    asking "did the summary leave the boundary" must get a straight no.
+    `delivery_sent_has_timestamp` ties SENT to `sent_at`, so a REFUSED row carries only
+    `last_attempt_at`.
 
-    `sent_to` is WHERE it went, resolved at drain time (migration 0044):
-    the address for email, the withheld endpoint for a webhook (0096), the
-    browse URL for Jira. `exposure` is what left (0095). `attempted` is
-    false for a row that consumed no attempt (Jira's gate refusal sends
-    nothing; ALREADY_ON_ISSUE rides another recipient's post).
+    `sent_to` is where it went, resolved at drain time (migration 0044): the address for email, the
+    withheld endpoint for a webhook (0096), the browse URL for Jira. `exposure` is what left (0095).
+    `attempted` is false for a row that consumed no attempt (Jira's gate refusal sends nothing;
+    ALREADY_ON_ISSUE rides another recipient's post).
     """
     conn.execute(
         """UPDATE notify.delivery
@@ -1112,7 +978,7 @@ def _succeed(conn: psycopg.Connection, out: Outgoing, *, state: str,
          jira_link_id, out.delivery_id))
 
 
-#: Retry-After is honoured within these bounds (F8 B2).
+#: Retry-After is honoured within these bounds.
 RETRY_AFTER_FLOOR_S = 60
 RETRY_AFTER_CAP_S = 3600
 

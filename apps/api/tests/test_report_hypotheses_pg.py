@@ -1,23 +1,18 @@
-"""The competing hypotheses travel with the case header, and the matrix is
-read at the reader's level.
+"""The competing hypotheses travel with the case header, and the matrix is read at the reader's level.
 
-Final review C2 (2026-09-23). `ReportBuilder.build` added the ACH section
-whenever `include_hypotheses` was on, which is the default on both routes
-and in the console, and three things followed:
+`ReportBuilder.build` adds the ACH section when `include_hypotheses` is on, which is the default on both
+routes and in the console. Three things must hold:
 
-- The section went in whether or not the case header did. A hypothesis
-  statement ("OP-KESTREL is run by Ivan Petrov") is free text about the
-  case with no label of its own, so a RED case prepared at GREEN with the
-  console's defaults saved a TLP:CLEAR file naming the operation and its
-  suspect, and the egress gate permitted it.
-- The document's mark ignored the section entirely.
-- The matrix's cells were read with no classification or compartment
-  filter, in the report and in GET /ach alike: an AMBER analyst received
-  a RED node's label as `evidence[].label` while the graph hid it, and
-  above-ceiling stances moved the printed scores.
+- The section goes in only when the case header does. A hypothesis statement ("OP-KESTREL is run by Ivan
+  Petrov") is free text about the case with no label of its own, so a RED case prepared at GREEN with the
+  console's defaults must not save a TLP:CLEAR file naming the operation and its suspect.
+- The document's mark accounts for the section.
+- The matrix's cells are read under the classification and compartment filter, in the report and in
+  GET /ach alike: an AMBER analyst must not receive a RED node's label as `evidence[].label` while the
+  graph hides it, and above-ceiling stances must not move the printed scores.
 
-The F19 laundering test passed `include_hypotheses=False`, so none of this
-was reachable from a test. Every test here builds with it ON.
+The laundering test passes `include_hypotheses=False`, so none of this is reachable from it. Every test
+here builds with it ON.
 
 Env-gated on DATABASE_URL.
 """
@@ -158,7 +153,7 @@ def _build(conn, case_id, owner, target, compartments=frozenset()):
 # --- the statements go with the header ------------------------------------
 
 def test_a_red_case_prepared_at_green_does_not_carry_its_hypotheses(conn):
-    """The finding's own reproduction, with hypotheses ON."""
+    """A RED case prepared at GREEN with hypotheses ON does not carry them."""
     from noctornal_api.egress import Destination
     from noctornal_api.reports import check_egress, render_markdown
 
@@ -269,8 +264,8 @@ def test_an_above_ceiling_stance_neither_labels_nor_scores(conn):
     scored = {h["id"]: h for h in green.hypotheses["hypotheses"]}
     assert scored[str(h1)]["inconsistency"] == 0.0, (
         "a RED stance moved a score printed in a GREEN document")
-    # Under the default setting (PRESENCE) the document says that some of the
-    # matrix's evidence was left out and not how much (2026-10-08).
+    # Under the default setting (PRESENCE) the document says that some of the matrix's evidence was left
+    # out and not how much.
     assert green.redaction.hypothesis_evidence_some_withheld is True
     assert green.redaction.hypothesis_evidence_withheld == 0
     assert "hypothesis matrix" in green.redaction.statement()

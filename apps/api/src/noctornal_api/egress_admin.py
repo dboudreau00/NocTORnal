@@ -1,48 +1,14 @@
-"""Configuring where anything may leave this deployment: egress profiles and
-their sealed exits, integration routes and their exact destinations, and the
-passive default (S2, the egress proxy, 2026-09-24; docs/00 decision 68).
+"""Configuring where anything may leave this deployment: egress profiles and their sealed exits, integration
+routes and their exact destinations, and the passive default (docs/00 decision 68).
 
-## Every write is step-up, audited, and says what it widened
-
-The routes (http/routers/egress.py) require egress.manage, a step-up
-permission held by SYS_ADMIN; scripts/egress_setup.py signs the operator
-in with a password and a current authenticator code. Every change writes
-one audit.event row naming the action and, for a policy, the before and
-after. A change that makes a profile reach further than before is decided
-by the database (collect.egress_profile_reach, 0085), reported back as
-`widened`, and costs every collection authority recorded before it: the
-egress proxy refuses them until a new authority is recorded and confirmed
-by a second person.
-
-## Exits are sealed here and never shown again
-
-An exit's address and credentials are HPKE-sealed to the egress proxy's
-public key (security/egress_seal.py); this process cannot open what it
-seals. The plaintext is never stored, logged, audited or returned: the
-answer says it was sealed and cannot be shown again. A RESIDENTIAL or VPN
-exit reached in clear across the internet (http or SOCKS5 to a public
-upstream) is refused unless the administrator acknowledges it in the same
-call, which is audited and shown on the profile.
-
-## Labels
-
-A profile's policy names the forums its sources target, so the overview
-labels it at the greater of its ceiling and the highest label among the
-sources bound to it (through its personas or directly), and, once
-collect.source carries compartments, by their union. Above the caller's
-clearance or compartments only its name, kind, exit kind and state are
-shown, the dry-run check answers 404, and the withheld profiles are
-counted.
-
-## Destinations are egress_policy rules and nothing else
-
-An integration entry is one rule in parse_rule's form (NAME:PORTS,
-NAME@CIDR:PORTS or CIDR:PORTS) validated by egress_policy.validate_rule:
-no wildcard, no suffix, the /16 and /64 caps, no reserved service name,
-nothing overlapping this deployment's own networks (in production the
-proxy's exits network included; the models network stays nameable, since
-an embeddings entry naming it is how a local model is reached), loopback
-only outside production. The proxy admits with the same functions.
+Every write is step-up (egress.manage, held by SYS_ADMIN), audited, and reports whether it widened reach. The
+database decides that (collect.egress_profile_reach, 0085), and a widening makes the egress proxy refuse every
+earlier collection authority until a new one is confirmed by a second person. An exit's address and credentials
+are HPKE-sealed to the egress proxy's public key (security/egress_seal.py) and are never stored, logged, audited
+or returned in plaintext; a RESIDENTIAL or VPN exit reached in clear across the internet is refused unless the
+administrator acknowledges it in the same call. Destinations are egress_policy rules (parse_rule's form,
+validated by egress_policy.validate_rule) and nothing else. Above the caller's clearance a profile shows only its
+name, kind, exit kind and state.
 """
 from __future__ import annotations
 
@@ -884,13 +850,10 @@ class EgressAdminService:
     # --- adopting an existing deployment ------------------------------------------
 
     def adopt_proposal(self, *, resolve: bool = True) -> dict:
-        """What an upgraded deployment needs to keep its feeds and deliveries
-        working through the proxy: a passive default that reads what RSS
-        always read (any public host, the ports the feeds use plus 80 and
-        443, a ceiling at the highest feed label or AMBER), and smtp and
-        webhook routes for the configured relay and hook. A relay whose
-        name answers a private address is proposed as NAME@<network>, which
-        the operator confirms (2026-09-24).
+        """What an upgraded deployment needs to keep its feeds and deliveries working through the proxy: a passive
+        default that reads what RSS always read (any public host, the ports the feeds use plus 80 and 443, a
+        ceiling of AMBER), and smtp and webhook routes for the configured relay and hook. A relay whose name
+        answers a private address is proposed as NAME@<network>, which the operator confirms.
         Proposes only what does not exist."""
         proposal: dict[str, Any] = {"passive_default": None, "routes": []}
         exists = self._c.execute(
@@ -898,9 +861,8 @@ class EgressAdminService:
         ).fetchone()[0]
         if not exists:
             ports = {80, 443}
-            # egress-rss-floor (2026-10-03): AMBER, never the highest feed
-            # label. A feed above AMBER is not polled (invariant 8); it is
-            # counted as a gap the operator sees, not carried by the route.
+            # The ceiling is AMBER, never the highest feed label. A feed above AMBER is not polled (invariant 8);
+            # it is counted as a gap the operator sees, not carried by the route.
             highest = "AMBER"
             above = 0
             for base_url, label in self._c.execute(
@@ -967,12 +929,10 @@ class EgressAdminService:
                 "confirm_network": network is not None}
 
     def adopt(self, *, actor_id: UUID, proposal: dict, via: dict | None = None) -> dict:
-        """Create what an administrator confirmed from adopt_proposal, all
-        of it or none of it: one transaction around every step (each step's
-        own transaction becomes a savepoint inside it), so a refused entry
-        halfway through leaves no passive default without its routes and
-        no route without its entry for the operator to find and retire by
-        hand (S2, 2026-09-25)."""
+        """Create what an administrator confirmed from adopt_proposal, all of it or none of it: one transaction
+        around every step (each step's own transaction becomes a savepoint inside it), so a refused entry halfway
+        through leaves no passive default without its routes and no route without its entry for the operator to
+        find and retire by hand."""
         created: list[str] = []
         passive = proposal.get("passive_default")
         with self._c.transaction():

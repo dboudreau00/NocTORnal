@@ -1,28 +1,21 @@
-"""Renaming and retiring a registered compartment key
-(sec-compartment-retirement, 2026-09-23).
+"""Renaming and retiring a registered compartment key.
 
-Before this there was no product route to do either: 0059's registry
-trigger refuses to drop or rename a key while any row carries it, so a
-mistyped key was permanent short of a hand-written UPDATE on each of
-eighteen columns. Each test here would fail on the base commit (245cb57)
-for the plainest reason, a 404 or 405 from a route that did not exist.
+0059's registry trigger refuses to drop or rename a key while any row carries it, so a mistyped key
+would be permanent short of a hand-written UPDATE on each of eighteen columns; these routes are the
+product path.
 
 What is held:
 
 - the service's column list is migration 0059's, and the live triggers';
-- a rename moves every carrier at once, in one transaction, keeps the
-  label and the registration, and changes no access decision: the analyst
-  read into the old key still opens the case filed under it;
-- a rename onto a registered key (a merge), to a malformed key, of an
-  unknown key, without `user.manage` or without a fresh step-up, is
-  refused and changes nothing;
-- retiring a key nothing carries removes it; retiring one still carried
-  is refused, naming the accounts and cases by name and the rest by
-  count, and changes nothing;
+- a rename moves every carrier at once, in one transaction, keeps the label and the registration, and
+  changes no access decision: the analyst read into the old key still opens the case filed under it;
+- a rename onto a registered key (a merge), to a malformed key, of an unknown key, without
+  `user.manage` or without a fresh step-up, is refused and changes nothing;
+- retiring a key nothing carries removes it; retiring one still carried is refused, naming the
+  accounts and cases by name and the rest by count, and changes nothing;
 - both are audited in the transaction that makes the change;
-- the bound tables are locked while it runs, so a write in flight makes
-  it wait, and give up as busy, rather than leave a row behind carrying a
-  key the registry no longer holds.
+- the bound tables are locked while it runs, so a write in flight makes it wait, and give up as busy,
+  rather than leave a row behind carrying a key the registry no longer holds.
 
 Env-gated on DATABASE_URL. Email prefix `cml-`; registry keys `CML-T1-`.
 """
@@ -195,12 +188,10 @@ def _audits(conn, action, field, value) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def test_the_service_moves_exactly_the_bound_columns(conn):
-    """A column the service does not know would be left behind by a rename
-    (the final drop would then refuse, and nothing would change), so the
-    list is held to the migrations that installed the triggers (0059's
-    eighteen and every later ADDED_BOUND_COLUMNS, docs/00 decision 71,
-    2026-09-24) and to the triggers themselves, read by name prefix so a
-    second bound column on one table counts."""
+    """A column the service does not know would be left behind by a rename (the final drop would then
+    refuse, and nothing would change), so the list is held to the migrations that installed the
+    triggers (0059's eighteen and every later ADDED_BOUND_COLUMNS, docs/00 decision 71) and to the
+    triggers themselves, read by name prefix so a second bound column on one table counts."""
     from noctornal_api.compartment_lifecycle import BOUND_COLUMNS, NOUNS
     from test_compartment_contract_pg import bound_columns_at_head
     assert set(BOUND_COLUMNS) == set(bound_columns_at_head())
@@ -427,18 +418,15 @@ def _case(conn, client, owner_email, key, classification) -> str:
 
 
 def test_the_refusal_names_no_case_the_administrator_cannot_open(conn, client):
-    """Verifier, sec-compartment-retirement (2026-09-23): the refusal named
-    up to five case codes to ANY `user.manage` holder, so a GREEN
-    administrator retiring a key was told the code of a RED compartmented
-    case they could not open, which no other surface in the product
-    does. A case is named now only when it is in the caller's own case
-    list; the rest are counted, and the refusal says why."""
+    """The refusal names up to five case codes only when they are in the caller's own case list; the
+    rest are counted, and the refusal says why. Otherwise a GREEN administrator retiring a key would be
+    told the code of a RED compartmented case they cannot open, which no other surface does."""
     key = _key()
     e = _estate(conn, client, key)                     # an AMBER case
     red = _case(conn, client, e["owner_email"], key, "RED")
     url = f"/api/v1/compartments/{key}/retire"
 
-    # The verifier's administrator: GREEN, read into the key, on no case.
+    # An administrator who is GREEN, read into the key, on no case.
     _uid, green = _user(conn, "SYS_ADMIN", clearance="GREEN",
                         compartments=(key,))
     r = client.post(url, headers=_auth(conn, green))

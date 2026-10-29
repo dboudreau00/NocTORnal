@@ -1,19 +1,14 @@
-"""Shared fixtures for the prohibited-content screening and sandbox suites
-(F13 and F14, 2026-09-24). Not a test module: the suites import it.
+"""Shared fixtures for the prohibited-content screening and sandbox suites. Not a test module.
 
-Nothing here is prohibited material, and no real hash list is used: every
-list is built from digests of random bytes the test itself made.
+Nothing here is prohibited material, and no real hash list is used: every list is built from digests
+of random bytes the test itself made.
 
-## The scrub, keyed by list
-
-A pass screens EVERY held sample, so a test that imports a list marks the
-demo estate's samples NO_MATCH against it. The scrub therefore works from
-the LISTS a suite created: it removes every result and review that
-consulted one, resets the screening columns of samples the suite did not
-create that were screened against one, and deletes the entries and the
-lists; then `lab_static_fixtures.teardown` removes the suite's own samples,
-people and cases. `assert_scrubbed` holds that nothing a downgrade of 0102
-or 0103 refuses on is left behind.
+The scrub is keyed by list. A pass screens every held sample, so a test that imports a list marks the
+demo estate's samples NO_MATCH against it. The scrub therefore works from the lists a suite created:
+it removes every result and review that consulted one, resets the screening columns of samples the
+suite did not create that were screened against one, and deletes the entries and the lists; then
+`lab_static_fixtures.teardown` removes the suite's own samples, people and cases. `assert_scrubbed`
+holds that nothing a downgrade of 0102 or 0103 refuses on is left behind.
 """
 from __future__ import annotations
 
@@ -165,21 +160,18 @@ _BEYOND_EVERY_LIST = 2 ** 62
 
 
 def stand_alone(c) -> None:
-    """For a test that runs in a rolled-back transaction (`rolled_back`):
-    hide whatever the database already holds that the screening and sandbox
-    readiness rows count, so the test sees only its own world and the
-    transaction's end gives everything back.
+    """For a test that runs in a rolled-back transaction (`rolled_back`): hide whatever the database
+    already holds that the screening and sandbox readiness rows count, so the test sees only its own
+    world and the transaction's end gives everything back.
 
-    Those rows are counts over the whole database: lists that are active,
-    samples that no pass has reached, matches nobody has reviewed,
-    detonations waiting to be sent. Another suite (or a real estate) leaves
-    any of them, and a test that needs "no list is loaded" or "every sample
-    is screened" then skipped, which CI's no-skip gate turns into a failure.
-    So: every list, entry, result and review is removed, every sample is
-    marked screened against a list from the future (so a pass of the test's
-    own list does not reach for bytes that are not in its store), and every
-    detonation is removed. The guards that keep these tables append-only are
-    off for the statements and on again, inside the transaction."""
+    Those rows are counts over the whole database (active lists, unscreened samples, unreviewed
+    matches, detonations waiting to be sent), and another suite can leave any of them, which would
+    make a test skip and fail CI's no-skip gate. So every list, entry, result and review is removed,
+    every sample is marked screened against a list from the future (so a pass of the test's own list
+    does not reach for bytes that are not in its store), and every detonation is removed. The guards
+    that keep these tables append-only are off for the statements and on again, inside the
+    transaction.
+    """
     tables = ("screening_review", "screening_result", "screening_hash",
               "screening_list", "sample", "detonation")
     for table in tables:

@@ -1,34 +1,26 @@
-"""Telegram MTProto collection (roadmap F5.2 and F5.3, 2026-09-24;
-docs/00 decisions 68, 69 and 77).
+"""Telegram MTProto collection (docs/00 decisions 68, 69 and 77).
 
-A Telegram chat is read by ONE persona: a real Telegram account whose
-MTProto session is sealed in the persona's credential column, which reaches
-Telegram only through that persona's egress profile on the egress proxy
-(SOCKS5, docs/20 section 8.4), and which reads a chat only under a collection
-authority two people confirmed. This module is the part that needs no
-library: the constants, the typed ids, the chat references, the sealed
-secret's shape, the outcome exceptions and the adapter. It never imports
-Telethon; telegram_wire.py is the only module that does, and only inside
-functions, so a build without the optional `telegram` extra imports this
-module, lists the gap, and refuses every Telegram act with one sentence.
+A Telegram chat is read by one persona: a real Telegram account whose MTProto session is sealed in the
+persona's credential column, which reaches Telegram only through that persona's egress profile on the
+egress proxy (SOCKS5, docs/20 section 8.4), and which reads a chat only under a collection authority two
+people confirmed. This module is the part that needs no library: the constants, the typed ids, the chat
+references, the sealed secret's shape, the outcome exceptions and the adapter. It never imports Telethon;
+telegram_wire.py is the only module that does, and only inside functions, so a build without the optional
+`telegram` extra imports this module, lists the gap, and refuses every Telegram act with one sentence.
 
 ## What leaves the host
 
-The persona's encrypted MTProto session to Telegram's data centres, through
-the egress proxy and its exit: chat ids, access hashes and message ids.
-Never case data, never a watch term, never a selector: matching happens on
-this server after the messages arrive, and the adapter never searches,
-never marks anything read, never sends, never joins on a poll and never
-downloads media (docs/16 L1).
+The persona's encrypted MTProto session to Telegram's data centres, through the egress proxy and its exit:
+chat ids, access hashes and message ids. Never case data, never a watch term, never a selector: matching
+happens on this server after the messages arrive, and the adapter never searches, never marks anything
+read, never sends, never joins on a poll and never downloads media (docs/16 L1).
 
 ## Outcomes
 
-Every answer Telegram gives is one of the exceptions below, each a subclass
-of the collection foundation's class of the same meaning with a fixed
-sentence and never Telethon's text. The foundation's record_outcome turns
-each into the persona's machine hold or lock, the notification and the
-audit row, for a poll and for an attended act alike, before the persona
-lock is released.
+Every answer Telegram gives is one of the exceptions below, each a subclass of the collection foundation's
+class of the same meaning with a fixed sentence and never Telethon's text. The foundation's record_outcome
+turns each into the persona's machine hold or lock, the notification and the audit row, for a poll and for
+an attended act alike, before the persona lock is released.
 """
 from __future__ import annotations
 
@@ -99,12 +91,10 @@ MAX_REF_CHARS = 200
 #: marker appended failed the database's own cap and wedged the chat).
 TRUNCATION_MARK = " [cut]"
 
-#: Telegram's published data-centre networks, fetched 2026-09-24 from
-#: https://core.telegram.org/resources/cidr.txt. IPv4 only: the client
-#: connects with use_ipv6 False, and the IPv6 blocks (/48 and /32) are wider
-#: than egress_policy's /64 rule cap, so the egress proxy's 'telegram' preset,
-#: which reads this constant, could not save them (2026-09-24). A new
-#: Telegram range fails closed until this list is updated.
+#: Telegram's published data-centre networks (https://core.telegram.org/resources/cidr.txt). IPv4 only: the
+#: client connects with use_ipv6 False, and the IPv6 blocks (/48 and /32) are wider than egress_policy's
+#: /64 rule cap, so the egress proxy's 'telegram' preset, which reads this constant, could not save them. A
+#: new Telegram range fails closed until this list is updated.
 TELEGRAM_DC_NETWORKS: tuple[str, ...] = (
     "91.108.56.0/22", "91.108.4.0/22", "91.108.8.0/22", "91.108.16.0/22",
     "91.108.12.0/22", "149.154.160.0/20", "91.105.192.0/23",
@@ -258,13 +248,12 @@ _BARE_DIGITS = re.compile(r"^\+?[0-9][0-9 ]*$")
 
 
 def parse_chat_reference(ref) -> ChatRef:
-    """@name, https://t.me/name, t.me/name, c:<id>, g:<id> and the Bot API
-    forms -100<id> (a channel or supergroup) and -<id> (a basic group).
-    Hostile input is refused with a sentence and never normalised into
-    something else: the id forms are matched strictly BEFORE the ontology
-    decodes them, because telegram_id_norm drops every non-digit after a
-    prefix and would read 'c:12' a newline '34' as c:1234
-    (2026-09-24)."""
+    """@name, https://t.me/name, t.me/name, c:<id>, g:<id> and the Bot API forms -100<id> (a channel or
+    supergroup) and -<id> (a basic group).
+
+    Hostile input is refused with a sentence and never normalised into something else: the id forms are
+    matched strictly before the ontology decodes them, because telegram_id_norm drops every non-digit
+    after a prefix and would read 'c:12' a newline '34' as c:1234."""
     from noctornal_ontology import normalise, refusal
 
     if not isinstance(ref, str):
@@ -678,21 +667,17 @@ class TelegramTransport(Protocol):
 
 def run_blocking(coro_factory, budget_s: float, *,
                  backstop_s: float = BACKSTOP_SECONDS):
-    """Run `coro_factory()` in asyncio.run on a DAEMON thread and wait for it.
+    """Run `coro_factory()` in asyncio.run on a daemon thread and wait for it.
 
-    The coroutine is wrapped in asyncio.wait_for(budget_s), whose
-    cancellation runs the transport's close() in the coroutine's finally.
-    The caller waits budget_s + backstop_s; if even that expires, the thread
-    is abandoned with its connection possibly alive and the call raises
-    TelegramSessionAbandoned, which the persona gate records as the
-    ABANDONED machine hold BEFORE the persona lock is released. A daemon
-    thread, never a ThreadPoolExecutor, whose worker is joined at
-    interpreter exit.
+    The coroutine is wrapped in asyncio.wait_for(budget_s), whose cancellation runs the transport's close()
+    in the coroutine's finally. The caller waits budget_s + backstop_s; if even that expires, the thread is
+    abandoned with its connection possibly alive and the call raises TelegramSessionAbandoned, which the
+    persona gate records as the ABANDONED machine hold before the persona lock is released. A daemon
+    thread, never a ThreadPoolExecutor, whose worker is joined at interpreter exit.
 
-    The thread runs in a COPY of the caller's context (2026-09-24): a
-    new thread starts with an empty context, so
-    the secrets the lease registered for redact() would otherwise be out of
-    scope exactly where the library runs."""
+    The thread runs in a copy of the caller's context: a new thread starts with an empty context, so the
+    secrets the lease registered for redact() would otherwise be out of scope exactly where the library
+    runs."""
     import contextvars
     import queue
 
@@ -807,20 +792,17 @@ def _aware(moment):
 
 
 class TelegramAdapter(Adapter):
-    """Reads one Telegram chat per source, as its persona, through the
-    persona's route on the egress proxy, under a confirmed authority.
+    """Reads one Telegram chat per source, as its persona, through the persona's route on the egress
+    proxy, under a confirmed authority.
 
     ## plan to fetch
 
-    The collection foundation's run_once calls plan() and keeps nothing it
-    returns, and its RunContext has no field for a plan (an adapter
-    builds on the frozen collection contract and adds nothing to it,
-    docs/00 decision 69). plan() therefore hands its result to fetch()
-    through `prime()`, keyed by source id, and fetch() takes it:
-    run_once holds the source's advisory lock from before plan() until
-    after fetch(), so exactly one poll of a source is between the two at
-    any moment, and plan() always runs again before the next fetch()
-    (2026-09-24)."""
+    The collection foundation's run_once calls plan() and keeps nothing it returns, and its RunContext has
+    no field for a plan (an adapter builds on the frozen collection contract and adds nothing to it, docs/00
+    decision 69). plan() therefore hands its result to fetch() through `prime()`, keyed by source id, and
+    fetch() takes it: run_once holds the source's advisory lock from before plan() until after fetch(), so
+    exactly one poll of a source is between the two at any moment, and plan() always runs again before the
+    next fetch()."""
 
     key = "telegram"
     version = "1"

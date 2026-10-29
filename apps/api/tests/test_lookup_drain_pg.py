@@ -1,10 +1,9 @@
-"""The lookup drain (F15.4, 2026-09-24): housekeeping
-whatever the host switch says, then the queued NONE lookups only, paced by
-the provider's queued share, each re-checked at send time; and the cron
-entry scripts/lookup_drain.py with its exit codes.
+"""The lookup drain: housekeeping whatever the host switch says, then the queued NONE lookups only, paced by
+the provider's queued share, each re-checked at send time; and the cron entry scripts/lookup_drain.py with
+its exit codes.
 
-The fetcher and the routes are fakes; nothing reaches a provider. **The
-email prefix is `lkdrain-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. The email prefix is `lkdrain-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -120,10 +119,9 @@ def test_the_drain_refuses_what_the_provider_now_exposes_differently(conn):
 
 def test_an_exposure_raised_while_the_drain_runs_stops_the_sends_it_had_not_made(
         conn, monkeypatch):
-    """The drain reads a provider once per pass, and a pass may run for
-    minutes. An administrator who raises the provider's exposure after the
-    first send must not see the rest of the queue go out under the old one
-    (2026-10-07)."""
+    """The drain reads a provider once per pass, and a pass may run for minutes. An administrator who raises
+    the provider's exposure after the first send must not see the rest of the queue go out under the old
+    one."""
     from noctornal_api import lookups, providers
     w = _queued(conn)
     svc = w.service(conn)
@@ -297,9 +295,8 @@ def test_the_script_exits_one_when_a_send_failed(conn, capsys):
 
 
 def test_the_script_refuses_published_credentials_in_production(monkeypatch, capsys):
-    """Through config.refuse_unsafe_job_environment since docs/17 F52
-    (2026-10-02), on a real published value rather than a stub of the
-    reader: CI's KEK, 32 'A' bytes."""
+    """Refused through config.refuse_unsafe_job_environment (docs/17), on a real published value rather than
+    a stub of the reader: CI's KEK, 32 'A' bytes."""
     from noctornal_api import config
     monkeypatch.setenv(config.ENV_VAR, config.PRODUCTION)
     monkeypatch.setenv("NOCTORNAL_TOTP_KEK", "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=")

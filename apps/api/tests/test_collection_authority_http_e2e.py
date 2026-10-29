@@ -1,10 +1,9 @@
-"""The collection authority routes (2026-09-24; docs/00 decision 69).
+"""The collection authority routes (docs/00 decision 69).
 
-A collection manager records, a security officer confirms, both with a
-fresh second factor; the same person is never both, even holding both
-roles; a source above the confirmer is hidden; the review queue lists what
-waits and what is in force; either side can stop one, audited with which
-side it was. DATABASE_URL-gated.
+A collection manager records, a security officer confirms, both with a fresh second factor; the same
+person is never both, even holding both roles; a source above the confirmer is hidden; the review queue
+lists what waits and what is in force; either side can stop one, audited with which side it was.
+DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -122,8 +121,8 @@ def test_an_amber_officer_cannot_confirm_a_red_source(conn, api, monkeypatch):
         [amber_source, red_source])).json()["authority"]
     conn.execute("UPDATE collect.source SET classification = 'RED' WHERE id = %s",
                  (red_source,))
-    # The authority rose with its source, so the AMBER officer no longer
-    # sees it at all: the same 404 as a missing id.
+    # The authority rose with its source, so the AMBER officer does not see it at all: the same 404 as
+    # a missing id.
     r = api.post(f"{API}/{view['id']}/confirm", headers=amber,
                  json={"note": "check it", "target_ids": []})
     assert r.status_code == 404

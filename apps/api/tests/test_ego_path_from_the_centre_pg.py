@@ -1,26 +1,18 @@
-"""docs/17, "ego and path past 5,000 entities" (Beta 1.1).
+"""docs/17, "ego and path past 5,000 entities".
 
-The ego and path views used to take the projection of the FIRST 5,000
-entities of a case by creation time and search inside it, so on a case of
-101,000 entities 88 of 100 ego requests answered 404 for an entity that was
-there, and a path between two entities past the first 5,000 could not be
-asked at all. They are built from the centre outward now: the ego network
-gathers the neighbours of the neighbours level by level, the path search
-grows from both ends until they meet, and each stops at
-`projections.NEIGHBOURHOOD_MAX_NODES` and says so.
+The ego and path views are built from the centre outward, so entities past the first 5,000 of a case are
+reachable: the ego network gathers the neighbours of the neighbours level by level, the path search grows
+from both ends until they meet, and each stops at `projections.NEIGHBOURHOOD_MAX_NODES` and says so.
 
 What these hold:
 
-- the answer is what the old one was where the old one could answer: the same
-  entities and ties as a search of the whole projection, under every
-  projection parameter and every reader (a differential test against the old
-  algorithm run over `project()`);
+- the answer is the same entities and ties as a search of the whole projection, under every projection
+  parameter and every reader (a differential test against that algorithm run over `project()`);
 - the entities past the first 5,000 are reachable;
 - a hidden, dissolved or merged entity is never passed through;
 - a search that was cut off says so and never reports "not connected".
 
-Everything is created inside one transaction that is rolled back. Env-gated
-on DATABASE_URL.
+Everything is created inside one transaction that is rolled back. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

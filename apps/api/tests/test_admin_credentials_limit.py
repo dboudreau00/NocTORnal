@@ -1,13 +1,10 @@
 """The admin credential routes have their own rate-limit meter (pure).
 
-Final review U18 (2026-09-23). `POST /admin/users` and
-`POST /admin/users/{id}/totp` were metered on `auth.recovery_codes`, the
-administrator's OWN recovery-code bucket: three at once, then one every
-twelve minutes. The console spends one of the three issuing the first
-administrator's codes at their first sign-in, so a fresh install's
-operator could add two colleagues before a 429. The HTTP proof is
-`test_admin_credentials_limit_pg.py`; these pin the catalogue and the
-wiring without a database.
+`POST /admin/users` and `POST /admin/users/{id}/totp` must not be metered on `auth.recovery_codes`,
+the administrator's own recovery-code bucket (three at once, then one every twelve minutes). The
+console spends one of the three issuing the first administrator's codes at first sign-in, so a fresh
+install's operator could add only two colleagues before a 429. The HTTP proof is
+`test_admin_credentials_limit_pg.py`; these pin the catalogue and the wiring without a database.
 """
 from __future__ import annotations
 

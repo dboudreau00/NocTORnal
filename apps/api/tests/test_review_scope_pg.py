@@ -1,11 +1,10 @@
-"""L3 against Postgres (2026-09-24): the accepted-ties scope over a real
-case, written through GraphWriteService, with review states set the way
-tie review and legacy rows leave them (SUPERSEDED included, by UPDATE, as
+"""L3 against Postgres: the accepted-ties scope over a real case, written through GraphWriteService.
+
+Review states are set the way tie review and legacy rows leave them (SUPERSEDED included, by UPDATE, as
 test_tie_review_pg does: nothing in the database stops it on a tie).
 
-Also the shared world and helpers of this group's Postgres files
-(test_one_mode_pg, test_concor_pg import them), so one teardown covers
-every account, case, projection and run they make. Email prefix `rs-`,
+Also the shared world and helpers of this group's Postgres files (test_one_mode_pg, test_concor_pg import
+them), so one teardown covers every account, case, projection and run they make. Email prefix `rs-`,
 unique to these files. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations

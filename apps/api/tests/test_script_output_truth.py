@@ -1,32 +1,22 @@
-"""What the scripts, launchers and runtime warnings state, held to the code
-and configuration they describe.
+"""What the scripts, launchers and runtime warnings state, held to the code and configuration they
+describe.
 
-## Why this file exists
+Text an operator reads at the moment they act on it goes stale silently, so each check below holds one
+sentence to its source and fails here when the thing it describes changes:
 
-The Alpha 6 pre-release check (2026-09-23) found sentences that had been
-true once and were not any more, in text an operator reads at the moment
-they act on it:
+* the startup warning and the readiness action for an evicting Redis name the policy
+  `infra/docker-compose.yml` sets (`noeviction`);
+* the launchers say what losing `.env.local` costs: the key also seals persona and victim credentials and
+  every sample's data key, not only authenticators;
+* `bootstrap.py create-user` suggests commands that work on a stock Ubuntu, and its import hint names the
+  project's virtual environment;
+* `refresh_counters.py` uses only what Python 3.12, the documented minimum, has (`Path.read_text` takes no
+  `newline`);
+* `redact_dead_letters.py` prints the bracketed plural that docs/18 quotes word for word;
+* the production compose file describes the dev file as it is.
 
-* the startup warning and the readiness action for an evicting Redis said
-  `infra/docker-compose.yml` sets `allkeys-lru`, after that file moved to
-  `noeviction`;
-* the launchers said losing `.env.local` meant re-enrolling
-  authenticators, when the key also seals persona and victim credentials
-  and every sample's data key;
-* `bootstrap.py create-user` suggested `python scripts/bootstrap.py
-  demo-case`, which exits 127 on a stock Ubuntu, and its import hint never
-  named the project's virtual environment;
-* `refresh_counters.py` called `Path.read_text(newline=...)`, which
-  Python 3.12, the documented minimum, does not have;
-* `redact_dead_letters.py` printed a bracketed plural that docs/18
-  quotes word for word;
-* the production compose file described the dev file as it used to be.
-
-Each check below holds one of those to its source, so the sentence fails
-here when the thing it describes changes.
-
-Pure: no database, no object store, no Redis. A script that does work at
-import is read with `ast` or run in a subprocess rather than imported.
+Pure: no database, no object store, no Redis. A script that does work at import is read with `ast` or run
+in a subprocess rather than imported.
 """
 from __future__ import annotations
 
@@ -177,9 +167,7 @@ def test_the_production_file_describes_the_dev_file_as_it_is():
     # "pinned to the same RELEASE tag as the dev file".
     assert "same RELEASE tag as the dev file" in notes
     minio = "ghcr.io/dboudreau00/minio"
-    # The production file also pins the digest (infra-7, 2026-10-03); the tag
-    # in front of it is still the dev file's.
-    # Both files pin the image by digest now: the same tag and the same digest.
+    # Both files pin the image by digest: the same tag and the same digest.
     assert _image(prod, minio) == _image(dev, minio)
     assert ":latest" not in _image(prod, minio)
     # And both Redis services run the policy the notes say they share.
@@ -195,14 +183,13 @@ def test_the_production_file_describes_the_dev_file_as_it_is():
 #: a column nothing writes, so a warning naming it would describe nothing.
 _SEALED_WORDS = {
     "iam.app_user": "authenticator",
-    # collect.collection_account left SEALED_COLUMNS on 2026-10-02 (A
-    # collector process): the persona ring seals it, and every generated
-    # header names that key (test_persona_key_split.py).
+    # collect.collection_account is not listed: the persona ring seals it, and every generated header
+    # names that key (test_persona_key_split.py).
     "ingest.victim_credential": "victim",
     "lab.sample": "sample",
     "collect.egress_profile": None,
-    "notify.jira_destination": "jira",  # F7
-    "ingest.provider": "lookup provider",  # F15.2
+    "notify.jira_destination": "jira",
+    "ingest.provider": "lookup provider",
 }
 
 
@@ -298,9 +285,9 @@ def test_create_user_points_at_the_console_and_the_readme_recipe(
 
 
 def test_create_user_on_the_production_stack_points_at_the_production_console(capsys, monkeypatch):
-    """2026-10-12, README step 5 on a fresh box: create-user, run in the production container, told the
-    operator to sign in at http://127.0.0.1:8000/ui/ (not published there) and offered a .venv command
-    the image does not have. In production it names the public origin and nothing else."""
+    """In production, create-user names the public origin and nothing else: the operator must not be told
+    to sign in at http://127.0.0.1:8000/ui/ (not published there) or offered a .venv command the image
+    does not have."""
     monkeypatch.setenv("NOCTORNAL_ENV", "production")
     monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", "https://console.noctornal.test/")
     out = _next_block(capsys, ["CASE_OWNER", "SYS_ADMIN"], windows=False)
@@ -359,8 +346,7 @@ def test_the_import_hint_names_the_projects_virtual_environment():
     python, script = bootstrap._venv_python(), bootstrap._this_script()
     assert "cannot import the API package" in proc.stderr
     assert f"{python} {script} <command>" in proc.stderr, proc.stderr
-    # With the pins: without them pip takes the newest release of every >=
-    # floor (c3, 2026-09-24).
+    # With the pins: without them pip takes the newest release of every >= floor.
     assert (f"{python} -m pip install -c constraints.txt -e "
             in proc.stderr), proc.stderr
     assert "db/requirements.txt" not in proc.stderr

@@ -22,10 +22,7 @@ pytestmark = pytest.mark.skipif(
 
 PASSWORD = "correct-horse-battery-staple"
 
-#: The grading a claim carries where a test is not about grading. The API
-#: grades nothing for the caller since gap-api-grade-required (2026-09-23),
-#: and these are the values its old defaults applied silently, so each test
-#: exercises what it did before, now stated.
+#: The grading a claim carries where a test is not about grading; the API grades nothing for the caller.
 UNGRADED = {"basis": "DIRECT_OBSERVATION", "reliability": "F",
             "credibility": "6", "confidence": "LOW"}
 
@@ -40,13 +37,9 @@ def conn():
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
     psub = f"(SELECT id FROM analytics.projection WHERE case_id IN {csub})"
     rsub = f"(SELECT id FROM analytics.metric_run WHERE projection_id IN {psub})"
-    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
-    # this teardown deleted them with the trigger stood down, which only
-    # ever took the chain's tail and so never tripped `custody_verify.py`
-    # -- the teardown in `test_evidence_pg.py` has the full account. What
-    # a custody row points at stays with it: the exhibit, its case, and
-    # the humans on the custody row, the exhibit and the case. NULL-guarded
-    # because one NULL in a NOT IN list silently deletes nothing.
+    # Custody rows stay and the chain trigger stays up. What a custody row points at stays with it: the
+    # exhibit, its case, and the humans on the custody row, the exhibit and the case. NULL-guarded because
+    # one NULL in a NOT IN list silently deletes nothing.
     pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
     pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
     pinned_users = (
@@ -92,15 +85,11 @@ def conn():
 def _isolated_limiter(**overrides):
     """A rate limiter this test alone owns.
 
-    The default limiter is backed by Redis when REDIS_URL is set, and Redis
-    is shared, persistent and blind to test boundaries -- so one test's
-    logins would spend the next test's budget and the suite would pass or
-    fail depending on the order it ran in. A flaky security test is a
-    deleted security test. The Redis path has its own proof in
-    test_ratelimit_redis.py; what the e2e suite proves is the wiring.
+    The default limiter is backed by Redis when REDIS_URL is set, and Redis is shared and persistent, so one
+    test's logins would spend the next test's budget and results would depend on run order. The Redis path
+    is proven in test_ratelimit_redis.py.
 
-    Pass overrides to shrink a limit so a test can reach it in three
-    requests rather than a hundred.
+    Pass overrides to shrink a limit so a test can reach it in a few requests.
     """
     from noctornal_api.ratelimit import LIMITS, InProcessBackend, RateLimiter
     catalogue = dict(LIMITS)
@@ -126,10 +115,7 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     uid = store.create_user(email, "E2E", PASSWORD)
     secret = totp.generate_secret()
     store.enroll_totp(uid, secret)
-    # Since 0059 every compartment column is bound to iam.compartment. This
-    # helper writes whatever it is handed, so it registers it first rather
-    # than trusting the caller to have done so -- two helpers of this shape
-    # were refused on CI's fresh database on 2026-09-09 while passing here.
+    # Every compartment column is bound to iam.compartment, so the helper registers each key first.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -147,41 +133,27 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted as `scripts/bootstrap.py session` does: the account by email, then
+    `SessionService` against the store the API validates against.
 
-    Most of this file needs an authenticated caller and is not about the
-    sign-in path, and since 2026-09-10 `POST /auth/login` answers 204 with
-    the token only in `__Host-session`. Driving a login for every test
-    would mean unpicking a Set-Cookie header for a value handed straight
-    back as a Bearer -- and would keep the constraint that shaped this
-    file: TOTP codes are single-use, so two sign-ins for one account
-    inside one 30-second step failed on the code, not on the thing under
-    test. The tests that ARE about signing in -- the audit rows, the
-    failure meter, the cookie the browser is left holding -- still call
-    `_login`.
+    Unbound (no address, no User-Agent); only `NOCTORNAL_SESSION_STRICT_BINDING` refuses that, and it is off
+    here. `POST /auth/login` answers 204 with the token only in `__Host-session`, and TOTP codes are
+    single-use within a 30-second step, so most tests skip it. The tests about signing in call `_login`.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as the real mint sites pass: step-up gated routes refuse a session without it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
 
 
 def _login(client, email, secret):
-    """A real sign-in, for the tests that are about one. Returns the
-    RESPONSE: since 2026-09-10 a login answers 204 and the token exists
-    only as `__Host-session`, so a caller that needs the credential reads
-    it out of the jar with `_cookie_jar`."""
+    """A real sign-in, for the tests that are about one. Returns the response: a login answers 204 and the
+    token exists only as `__Host-session`, so a caller that needs the credential reads it from the jar with
+    `_cookie_jar`."""
     import time
 
     from noctornal_api.security import totp
@@ -235,14 +207,8 @@ def test_login_requires_totp(conn, client):
 
 
 def test_login_then_me(conn, client):
-    """The browser's own path end to end: sign in, then be recognised by
-    the cookie the sign-in set, with nothing carried across by hand.
-
-    It reads that way because the login response is 204 and the pair is
-    all of it (2026-09-10). Until then this sent the body token as a
-    Bearer -- a transport `POST /auth/login` no longer issues -- and not
-    the cookie pair every browser uses.
-    """
+    """The browser's own path end to end: sign in, then be recognised by the cookie the sign-in set, with
+    nothing carried across by hand. The login response is 204 and the cookie pair is all of it."""
     from noctornal_api.http.deps import CSRF_COOKIE, SESSION_COOKIE
     uid, email, secret = _make_user(conn)
     jar = _cookie_jar(_login(client, email, secret))
@@ -435,14 +401,9 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
     the leg that passed vacuously before, because an uploaded exhibit
     carries no compartments of its own so the case must supply them."""
     from noctornal_api.cases import CaseService
-    # 0057 (2026-09-02) made `iam.compartment` a closed vocabulary and
-    # `CaseService.create` refuses a key that is not in it, so the case
-    # below cannot be filed until `OP_X` is registered. Before this line
-    # the test passed only where the 0057 backfill had happened to find
-    # `OP_X` already in an array, and failed on every fresh database.
-    # Not withdrawn in teardown: this file PINS cases that custody rows
-    # point at, and an in-use value with no registry entry is the one
-    # state `test_compartment_registry_pg.py` says cannot exist.
+    # `iam.compartment` is a closed vocabulary and `CaseService.create` refuses a key not in it, so `OP_X` is
+    # registered first. Not withdrawn in teardown: this file pins cases that custody rows point at, and an
+    # in-use value with no registry entry is a state `test_compartment_registry_pg.py` says cannot exist.
     conn.execute(
         "INSERT INTO iam.compartment (key, label) VALUES ('OP_X', "
         "'Compartmented Op (e2e test)') ON CONFLICT (key) DO NOTHING")
@@ -478,14 +439,9 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
 def test_cannot_create_case_in_a_compartment_you_lack(conn, client):
     """The read-in ceiling refuses an owner who is not read in.
 
-    Since migration 0057 `cases.py` runs `_require_registered` BEFORE
-    `_require_compartments`, so an unregistered key is refused first and a
-    substring match on "compartment" is satisfied by the REGISTRY refusal.
-    This test -- the only cover for the owner branch of the read-in
-    ceiling -- therefore proved nothing between 0057 and 2026-09-02: it
-    passed because the key was unregistered, not because the caller lacked
-    it. Register the key so the request reaches the check under test, and
-    assert on "not read into" so the two refusals cannot be confused again.
+    `cases.py` runs `_require_registered` before `_require_compartments`, so an unregistered key is refused
+    first and a substring match on "compartment" would be satisfied by the registry refusal. The key is
+    registered here so the request reaches the check under test, and the assertion is on "not read into".
     """
     conn.execute("INSERT INTO iam.compartment (key, label) VALUES "
                  "('OP_SECRET', 'Secret Op (e2e test)') "
@@ -580,11 +536,8 @@ def test_session_rejection_reason_is_not_disclosed(conn, client):
 def test_logout_revokes_only_the_presenting_session(conn, client):
     """Closing one device must not evict the analyst everywhere."""
     _, email, secret = _make_user(conn)
-    # Two sessions for one account, both minted rather than signed in: two
-    # logins inside one 30-second step would fail on the TOTP replay guard
-    # (which is doing its job), and sleeping 30s to prove an unrelated
-    # property is not worth the wall clock. The second one carried this
-    # comment alone until 2026-09-10; now both do, for the same reason.
+    # Two sessions for one account, both minted rather than signed in: two logins inside one 30-second step
+    # would fail on the TOTP replay guard, and sleeping 30s to prove an unrelated property is not worth it.
     desktop, laptop = _session(conn, email), _session(conn, email)
     assert client.post("/api/v1/auth/logout",
                        headers=_auth(desktop)).status_code == 204
@@ -793,14 +746,12 @@ def _tiny(name, **kwargs):
 
 
 def test_login_failures_are_rate_limited_by_source(conn, client):
-    """The anti-spraying brake. IP-scoped and cheap to trip on failures, so
-    it survives the attacker cycling the email — and deliberately NOT
-    email-scoped, which would let anyone lock a named analyst out just by
-    sending their address.
+    """The anti-spraying brake: IP-scoped and cheap to trip on failures, so it survives the attacker cycling
+    the email, and deliberately not email-scoped, which would let anyone lock a named analyst out by sending
+    their address.
 
-    The refusal must carry Retry-After: a 429 that does not say when to
-    come back makes a compliant client indistinguishable from a hammering
-    one.
+    The refusal must carry Retry-After: a 429 that does not say when to come back makes a compliant client
+    indistinguishable from a hammering one.
     """
     _limited(client.app, **{
         "auth.login_failed": _tiny("auth.login_failed", quota=3, per_seconds=300,
@@ -843,21 +794,14 @@ def _seed_small_graph(client, token, case_id) -> None:
 
 
 def test_a_successful_login_does_not_move_the_failure_meter(conn, client):
-    """The property that makes an IP-scoped login control usable at all.
+    """A successful login does not spend the IP-scoped failure meter.
 
-    The customer is an organisation behind ONE egress address: two hundred
-    analysts signing on within ten minutes of 09:00 look, to any per-IP
-    counter, exactly like an attack. Metering failures instead of attempts
-    is what separates them — a building full of correct passwords moves
-    nothing, and a sprayer produces nothing else.
+    The customer is an organisation behind one egress address: two hundred analysts signing on at 09:00 look,
+    to a per-IP counter, like an attack. Metering failures instead of attempts separates them.
 
-    The failure budget here is exactly ONE. A success is spent first; if it
-    consumed the failure meter, the very next bad password would already be
-    429 instead of reaching the authenticator.
-
-    (One success, not several: TOTP codes are single-use by design — the
-    counter advance is a compare-and-set that rejects a replay — so a loop
-    of logins inside one 30-second step is not a thing this system permits.)
+    The failure budget here is exactly one. A success is spent first; if it consumed the meter, the next bad
+    password would already be 429. One success, not several: TOTP codes are single-use, so a loop of logins
+    inside one 30-second step is not permitted.
     """
     _limited(client.app, **{
         "auth.login_failed": _tiny("auth.login_failed", quota=1, per_seconds=300,
@@ -901,8 +845,8 @@ def test_the_rate_limit_denial_is_audited_once_not_once_per_request(conn, client
 
 
 def test_analytics_is_rate_limited_per_user(conn, client):
-    """decision 30 accepted a CPU-bound path behind a non-step-up
-    permission as a known DoS surface, pending exactly this."""
+    """The analytics suite is CPU-bound behind a non-step-up permission, so it is rate limited per user
+    (decision 30)."""
     _limited(client.app, **{
         "analytics.suite": _tiny("analytics.suite", quota=3, per_seconds=300,
                                  burst=3)})
@@ -1116,23 +1060,15 @@ def test_the_merge_executes_the_approved_parameters_not_the_posted_ones(conn, cl
 
 
 def test_turning_dual_control_off_is_audited(conn, client):
-    """When did this case stop requiring two signatures, is a question
-    somebody eventually needs answered.
-
-    Rewritten for F9b (2026-09-24): turning the switch OFF takes a
-    second Lead investigator on the case, so the one-signature "off" this
-    test used to make is exactly the behaviour that item removes. The
-    audit assertions are the ones it always made, plus who approved."""
+    """Turning dual control off is audited: when a case stopped requiring two signatures, and who approved.
+    The switch takes a second Lead investigator on the case."""
     uid, email, secret = _make_user(conn, clearance="RED",
                                     global_roles=("CASE_OWNER",))
     deputy, deputy_email, _ = _make_user(conn, clearance="RED")
     token = _session(conn, email)
     case_id = _create_case(client, token)
-    # F39 (2026-10-02): the second person on the switch must have held
-    # case.update on the case for the seasoning window, so the deputy is
-    # assigned eight days back, as a colleague who has worked the case is.
-    # This test is about the audit trail of a turned-off switch; the rule
-    # itself is test_relax_seasoning_pg.py's.
+    # The second person on the switch must have held case.update on the case for the seasoning window, so the
+    # deputy is assigned eight days back. The rule itself is test_relax_seasoning_pg.py's.
     conn.execute(
         """INSERT INTO iam.case_assignment
                (case_id, user_id, role_key, granted_by, granted_at)
