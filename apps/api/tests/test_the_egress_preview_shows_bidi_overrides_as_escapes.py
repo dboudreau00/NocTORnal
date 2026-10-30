@@ -1,7 +1,8 @@
 """The report preview shows a bidi override as an escape, not as an effect.
 
 The labels in the preview (assumptions, entities, relationship ends,
-exhibit titles, hypotheses) and the full markdown about to be saved come
+exhibit titles, hypotheses, the line saying what the numbers were computed over, the
+hypothesis warnings) and the full markdown about to be saved come
 from forum text. `textContent` stops markup but leaves a right-to-left
 override in force, so "harmless" + RLO + "fdp.exe" reads as
 "harmlessexe.pdf" and a relationship can appear to run the other way. The
@@ -78,7 +79,8 @@ def _render(body: dict) -> list[str]:
 
 
 BODY = {
-    "summary": {"entities": 2, "relationships": 1, "exhibits": 1},
+    "summary": {"entities": 2, "relationships": 1, "exhibits": 1,
+                "computed_over": "case" + RLO + "fdp.exe"},
     "case": {"legal_basis": "warrant"},
     "assumptions": [{"statement": "a" + RLO + "b", "status": "open",
                      "made_by_name": "Rae", "reviewed_at": None}],
@@ -93,7 +95,7 @@ BODY = {
     "evidence": [{"id": "e-1", "title": "photo" + RLO + "gpj.exe", "sha256": "ab" * 32}],
     "hypotheses": {"hypotheses": [{"id": 1, "statement": "x" + RLO + "y",
                                    "inconsistency": 0, "support": 1}],
-                   "statuses": {}},
+                   "statuses": {}, "warnings": ["one" + RLO + "fdp.exe"]},
     "document": "# Report\n\nharmless" + RLO + "fdp.exe\n",
 }
 

@@ -50,6 +50,7 @@ The rules, in the order they are applied to a member:
 from __future__ import annotations
 
 import bz2
+import contextlib
 import gzip
 import hashlib
 import io
@@ -545,7 +546,42 @@ def _counted_tarinfo(walk: _Walk) -> type[tarfile.TarInfo]:
             walk.header_body(self.size)
             return super()._proc_pax(tarfile)
 
+        # A sparse header reads a chain of extension blocks, and a sparse map in a pax body reads as many
+        # blocks as it declares entries, both with no length known beforehand. Each block read is counted.
+        def _proc_sparse(self, tarfile):
+            with _counted_reads(tarfile, walk):
+                return super()._proc_sparse(tarfile)
+
+        def _proc_gnusparse_10(self, next, pax_headers, tarfile):
+            with _counted_reads(tarfile, walk):
+                return super()._proc_gnusparse_10(next, pax_headers, tarfile)
+
     return _Counted
+
+
+class _CountedReads:
+    """The archive's stream with every read held to the walk's caps, for the header code that reads on its own."""
+
+    def __init__(self, stream, walk: _Walk) -> None:
+        self._stream, self._walk = stream, walk
+
+    def read(self, size: int = -1):
+        data = self._stream.read(size)
+        self._walk.header_body(len(data))
+        return data
+
+    def tell(self) -> int:
+        return self._stream.tell()
+
+
+@contextlib.contextmanager
+def _counted_reads(tf: tarfile.TarFile, walk: _Walk):
+    real = tf.fileobj
+    tf.fileobj = _CountedReads(real, walk)
+    try:
+        yield
+    finally:
+        tf.fileobj = real
 
 
 def walk_tar(data: bytes, walk: _Walk) -> None:

@@ -1,5 +1,63 @@
 # Changelog
 
+## Beta 1.5b: 2026-10-30
+
+A fix round on Beta 1.5, still version 0.9.5. It fixes the findings Beta 1.5 listed
+as known and not fixed, and each has a test that fails without its fix. There is
+one migration, 0184, and no setting changes. It has not been audited, and it is
+still not lawful to operate against real material until docs/16 L1 to L5 are
+settled outside this codebase. Legal review is required before any active case
+load.
+
+- **Case material keeps its compartments and its label** (0184). The request role
+  could write an empty compartment list over an entity or a tie it was read into,
+  and lower the label of a document, a selector, a sample, a message, a
+  conversation, a contact block, a channel binding, a key acquisition, a capture,
+  an e-mail, a call record or a dead letter, which then read at the case's level.
+  A trigger on each refuses a compartment list that no longer holds the old one and
+  a lower classification. Adding a compartment and raising a label stay open, and
+  the schema owner and the system role are exempt, as for 0183. A test lists every
+  table the request role can write a label on and fails for one that is neither
+  guarded nor named as governed by another rule.
+- **An out-of-schedule purge names only exhibits the caller may read.** A second
+  person's approval no longer stands in for the caller's own clearance. An exhibit
+  above the caller is refused with the answer an id outside the case gets, nothing
+  is destroyed, and the approval is not spent.
+- **The notice sent when a merge is reversed counts only the ties its owner may
+  read**, as the merge notice does.
+- **A third party's identifier is not the publisher's, however its label is
+  spelled.** A guarantor or escrow word before the identifier needs no colon, an
+  accented label is read as its plain letters, and a label ended by a fullwidth,
+  small, vertical, ratio or modifier colon is a label.
+- **The extension blocks of a GNU sparse header count against the archive's ratio
+  and total**, as a long-name or pax body does, so a chain of them cannot inflate
+  past the caps.
+- **The egress preview** shows a bidirectional override as an escape in the line
+  saying what the numbers were computed over and in the hypothesis warnings.
+- **A test holds the role repair to the revisions.** `scripts/runtime_roles.py
+  ensure` must name every revision after 0108 that exports grant SQL.
+
+8434 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12883 and skipped 0.
+
+### Upgrading from Beta 1.5
+
+One revision, 0184, which adds a function and 26 triggers and writes no row. Stop the
+API and, on a production stack, the jobs that run the application image, take the
+usual backup, then:
+
+```
+git pull
+```
+
+A development install applies the revision the next time it starts through
+`scripts/launch.*` or the installer, or by hand with `alembic upgrade head`. On the
+production stack `sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build`
+rebuilds the image and runs the migration job. The downgrade drops the triggers and the
+function. Where the roles were created later than the migrations, `python
+scripts/runtime_roles.py ensure` replays the grants. The release was installed on a
+clean Ubuntu 24.04 machine from its zip, and a database holding the demo case at 0183
+was taken to 0184 and back with its rows unchanged.
+
 ## Beta 1.5: 2026-10-29
 
 The fifth revision of the beta, version 0.9.5. It closes the 18 findings of a code

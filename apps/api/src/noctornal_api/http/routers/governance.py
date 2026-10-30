@@ -796,19 +796,25 @@ def purge_out_of_schedule(
     # another case's exhibits would be destroyed under this case's tombstone. Counted positively
     # (ids present in this case), since counting foreign ids would pass a nonexistent id through.
     ids = list(dict.fromkeys(body.evidence_ids))
+    # Only an exhibit the caller may read can be named: a second person's approval does not stand in for
+    # the caller's own clearance, and the refusal for one above them reads as the refusal for an id that
+    # is not in the case, so it does not say the exhibit exists.
+    clearance, held = user_ceiling(conn, user.user_id, case_id=body.case_id)
+    readable = [who for who, (found, comps) in _read_labels(conn, "evidence", ids).items()
+                if tlp_from_name(found) <= clearance and frozenset(comps or []) <= held]
     present = sconn.execute(
         """SELECT count(*) FROM core.evidence
             WHERE id = ANY(%s) AND case_id = %s""",
-        (ids, body.case_id)).fetchone()[0]
+        (readable, body.case_id)).fetchone()[0]
     if present != len(ids):
         raise Problem(
             400, "Invalid request",
             f"{len(ids) - present} of the {len(ids)} selected exhibits are "
-            f"not in this case. An out-of-schedule purge destroys exactly "
-            f"what its approval named, in the case it named. The "
-            f"tombstone is written against that case, so a cross-case "
-            f"destruction would leave the other case with no record that "
-            f"it happened.")
+            f"not in this case, or are not ones you may read. An "
+            f"out-of-schedule purge destroys exactly what its approval "
+            f"named, in the case it named. The tombstone is written "
+            f"against that case, so a cross-case destruction would leave "
+            f"the other case with no record that it happened.")
     try:
         result = _purger(sconn).purge_out_of_schedule(
             actor_id=user.user_id, authority=body.authority,
@@ -818,8 +824,8 @@ def purge_out_of_schedule(
             case_id=body.case_id, evidence_ids=ids)
     except RetentionError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    # The caller may name an exhibit above their own labels, so the answer covers only those they may
-    # know of, as the scheduled run's does. The tombstone still records the whole destruction.
+    # The answer covers only what the caller may know of, as the scheduled run's does, so a clearance
+    # lowered since the check above does not widen it. The tombstone still records the whole destruction.
     out = _purge_response(result, dry_run=False)
     _answer_over(out, result, _visible_ids(conn, user, body.case_id, result))
     return out

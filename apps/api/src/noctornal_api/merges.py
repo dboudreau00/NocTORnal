@@ -413,7 +413,8 @@ class MergeService:
             dst = self._node(record.case_id, record.target_node_id, "target")
             notify_events.merge_reversed(
                 self._c, case_id=record.case_id, merge_id=merge_id,
-                edges_restored=len(rows) - left_retired, reason=reason.strip(),
+                edges_restored=self._restored_for_owner(record.case_id, merge_id),
+                reason=reason.strip(),
                 actor_id=reversed_by,
                 element_classification=max(
                     (src["classification"], dst["classification"]),
@@ -565,6 +566,28 @@ class MergeService:
                   AND b.compartments <@ u.compartments""",
             {"case": case_id, "merge": merge_id, "src": source_id,
              "dst": target_id}).fetchone()
+
+    def _restored_for_owner(self, case_id: UUID, merge_id: UUID) -> int:
+        """Ties of this merge that are live again and that the case owner may read, counted as
+        `_counts_for_owner` counts them: a number that included a tie above the owner would tell them it
+        exists. A tie retired after the merge is not live and is not counted."""
+        return self._c.execute(
+            """SELECT count(*)
+                 FROM core.node_merge_edge e
+                 JOIN core.edge x ON x.id = e.edge_id
+                 JOIN core.node a ON a.id = e.original_src_node_id
+                 JOIN core.node b ON b.id = e.original_dst_node_id
+                 JOIN iam.case_facts(%(case)s) f ON true
+                 JOIN iam.app_user u ON u.id = f.owner_user_id
+                WHERE e.merge_id = %(merge)s
+                  AND x.deleted_at IS NULL
+                  AND x.classification <= u.tlp_clearance
+                  AND x.compartments <@ u.compartments
+                  AND a.classification <= u.tlp_clearance
+                  AND a.compartments <@ u.compartments
+                  AND b.classification <= u.tlp_clearance
+                  AND b.compartments <@ u.compartments""",
+            {"case": case_id, "merge": merge_id}).fetchone()[0]
 
     def _node(self, case_id: UUID, node_id: UUID, which: str) -> dict:
         row = self._c.execute(

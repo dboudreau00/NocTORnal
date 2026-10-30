@@ -163,8 +163,11 @@ _WS = re.compile(r"\s+")
 #: `_resolve_by_shape` strips every non-hex character and a 76-hex Tox ID resolves cleanly out of a
 #: guarantor's line and is attributed to the vendor. Excluding digits from the FIRST character keeps
 #: "76A1F3B2..." from reading as a label.
+#: The separator is a colon or an equals sign in any of the forms that read as one: fullwidth, small, vertical,
+#: ratio and modifier. A label may carry combining marks (an accent written as a separate mark).
 _LINE = re.compile(
-    r"^\s*(?P<label>[^\W\d_][\w /_.+\-]{0,28}?)\s*[:=]\s*(?P<value>\S.*?)\s*$")
+    r"^\s*(?P<label>[^\W\d_][\w\u0300-\u036f /_.+\-]{0,28}?)\s*"
+    r"[:=\uff1a\uff1d\ufe55\ufe13\u2236\ua789]\s*(?P<value>\S.*?)\s*$")
 #: Box drawing, rules and bullets that fence a block.
 _DECORATION = re.compile(r"^[\s\-=_*~#|>•·+★☆▪▫—–─━═╔╗╚╝║╠╣╦╩╬┌┐└┘│├┤┬┴┼█▄▀]*$")
 _TRIM_DECORATION = re.compile(r"^[\s\-=_*~#|>•·★☆▪▫\[\(]+|[\s\-=_*~#|<\]\)]+$")
@@ -247,23 +250,45 @@ _TO_CYRILLIC = str.maketrans("abcehkmoptxy", "авсенкмортху")
 
 def _readings(text: str) -> tuple[str, ...]:
     """The text as written, lowercased, and as it reads: NFKC-casefolded (fullwidth and other
-    compatibility letters), then with lookalike letters folded to each script. The original stays
-    in the set so a word in the list matches as written."""
+    compatibility letters), then with lookalike letters folded to each script, and again with the accents
+    taken off. The original stays in the set so a word in the list matches as written."""
     folded = unicodedata.normalize("NFKC", text).casefold()
-    return (text.lower(), folded, folded.translate(_TO_LATIN), folded.translate(_TO_CYRILLIC))
+    plain = "".join(ch for ch in unicodedata.normalize("NFKD", folded) if not unicodedata.combining(ch))
+    return (text.lower(), folded, folded.translate(_TO_LATIN), folded.translate(_TO_CYRILLIC),
+            plain, plain.translate(_TO_LATIN), plain.translate(_TO_CYRILLIC))
+
+
+#: How many plain words at the start of an unlabelled line are read as its label.
+_LEADING_WORDS = 6
+
+
+def _leading_words(line: str) -> str:
+    """The plain words a line opens with, up to the first token that is part of an identifier (one with a digit
+    or a symbol in it): "Forum escrow agent 0x12ab..." opens with "Forum escrow agent". Empty when the first token
+    is already the identifier, so an address whose local part is a role word is not read as a label."""
+    words: list[str] = []
+    for token in line.split()[:_LEADING_WORDS]:
+        if not all(unicodedata.category(ch)[0] in "LM" for ch in token):
+            break
+        words.append(token)
+    return " ".join(words)
 
 
 def _looks_third_party(label: str | None, whole_line: str) -> str | None:
     """Return the reason this line names somebody else, or None."""
-    if label:
+    # An unlabelled line is read by the plain words it opens with, so "Guarantor <id>" with no colon names a
+    # third party as "Guarantor: <id>" does.
+    named = label or _leading_words(whole_line)
+    if named:
         # Split on non-WORD characters, not on non-[a-z]: an ASCII split reduces a Cyrillic label to
         # nothing, and the word list would never be reached for it.
-        readings = _readings(label)
+        readings = _readings(named)
         words = {w for r in readings for w in re.split(r"[\W_]+", r) if w}
         whole = {r.strip() for r in readings}
         hit = (words | whole) & _THIRD_PARTY_LABEL_WORDS
         if hit:
-            return (f"the label {label!r} names a third-party role "
+            what = f"the label {label!r}" if label else f"the line, which opens with {named!r},"
+            return (f"{what} names a third-party role "
                     f"({', '.join(sorted(hit))}). Attributing the "
                     f"escrow's identifier to the vendor is a serious and "
                     f"easy error")

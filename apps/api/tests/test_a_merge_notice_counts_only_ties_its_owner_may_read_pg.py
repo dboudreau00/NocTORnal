@@ -97,3 +97,43 @@ def test_a_red_owner_is_told_of_every_tie(owner, client):
     assert "re-pointed 2 relationships." in summary
     assert "A further 1 relationship BETWEEN the two was destroyed" in body
     assert "A further 1 relationship duplicated a tie" in body
+
+
+def _reversal_notice(owner, keeper):
+    rows = owner.execute(
+        """SELECT summary, body FROM notify.notification
+            WHERE recipient_id = %s AND kind = 'MERGE_REVERSED'""",
+        (keeper,)).fetchall()
+    assert len(rows) == 1
+    return rows[0]
+
+
+def _reverse(client, owner, caller, case_id, merge_id):
+    done = client.post(
+        f"/api/v1/cases/{case_id}/merges/{merge_id}/reverse",
+        headers=g.auth(owner, caller), json={"reason": "two different people"})
+    assert done.status_code == 200, done.text
+
+
+def test_an_amber_owner_is_not_told_how_many_red_ties_a_reversal_restored(owner, client):
+    from noctornal_api.merges import MergeService
+    keeper, caller, case_id, left, right = _world(owner, "AMBER")
+    merge_id = _merge(client, owner, caller, case_id, left, right)
+    _reverse(client, owner, caller, case_id, merge_id)
+
+    system = MergeService(owner).get(merge_id)
+    assert system.reversed_at is not None
+
+    summary, body = _reversal_notice(owner, keeper)
+    assert "restoring 1 relationship." in summary
+    assert "1 relationship was restored" in body
+
+
+def test_a_red_owner_is_told_every_tie_a_reversal_restored(owner, client):
+    keeper, caller, case_id, left, right = _world(owner, "RED")
+    merge_id = _merge(client, owner, caller, case_id, left, right)
+    _reverse(client, owner, caller, case_id, merge_id)
+
+    summary, body = _reversal_notice(owner, keeper)
+    assert "restoring 4 relationships." in summary
+    assert "4 relationships were restored" in body
