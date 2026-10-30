@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## Beta 1.5b: 2026-10-30
 
-The findings Beta 1.5 listed as known and not fixed are fixed, and each has a test
-that fails without its fix. There is one migration, 0184.
+A fix round on Beta 1.5, still version 0.9.5. It fixes the findings Beta 1.5 listed
+as known and not fixed, and each has a test that fails without its fix. There is
+one migration, 0184, and no setting changes. It has not been audited, and it is
+still not lawful to operate against real material until docs/16 L1 to L5 are
+settled outside this codebase. Legal review is required before any active case
+load.
 
 - **Case material keeps its compartments and its label** (0184). The request role
   could write an empty compartment list over an entity or a tie it was read into,
@@ -32,6 +36,27 @@ that fails without its fix. There is one migration, 0184.
   saying what the numbers were computed over and in the hypothesis warnings.
 - **A test holds the role repair to the revisions.** `scripts/runtime_roles.py
   ensure` must name every revision after 0108 that exports grant SQL.
+
+8434 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12883 and skipped 0.
+
+### Upgrading from Beta 1.5
+
+One revision, 0184, which adds a function and 26 triggers and writes no row. Stop the
+API and, on a production stack, the jobs that run the application image, take the
+usual backup, then:
+
+```
+git pull
+```
+
+A development install applies the revision the next time it starts through
+`scripts/launch.*` or the installer, or by hand with `alembic upgrade head`. On the
+production stack `sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build`
+rebuilds the image and runs the migration job. The downgrade drops the triggers and the
+function. Where the roles were created later than the migrations, `python
+scripts/runtime_roles.py ensure` replays the grants. The release was installed on a
+clean Ubuntu 24.04 machine from its zip, and a database holding the demo case at 0183
+was taken to 0184 and back with its rows unchanged.
 
 ## Beta 1.5: 2026-10-29
 
