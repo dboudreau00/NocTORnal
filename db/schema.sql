@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0183.
+-- GENERATED MIRROR of the schema at Alembic revision 0184.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0183
+-- Alembic revision: 0184
 -- =====================================================================
 
 --
@@ -1864,6 +1864,32 @@ END $$;
 --
 
 COMMENT ON FUNCTION core.classification_never_lowered() IS 'The request role may raise a node''s or a tie''s classification and never lower it, so an element filed above the case floor is not shown to readers cleared only to the floor. The owner and the system role (row security exempt) are left as they were (0183).';
+
+--
+-- Name: compartments_never_dropped(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.compartments_never_dropped() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF NOT (COALESCE(OLD.compartments, '{}') <@ COALESCE(NEW.compartments, '{}')) THEN
+    RAISE EXCEPTION '%: compartments % may not be dropped (new %)',
+      TG_TABLE_NAME, OLD.compartments, NEW.compartments
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: FUNCTION compartments_never_dropped(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.compartments_never_dropped() IS 'The request role may add a compartment to case material and never drop one, so a row read into a compartment is not shown to readers who are not (0184).';
 
 --
 -- Name: custody_chain_hash(); Type: FUNCTION; Schema: core; Owner: -
@@ -11766,6 +11792,12 @@ CREATE TRIGGER event_append_only BEFORE DELETE OR UPDATE ON audit.event FOR EACH
 CREATE TRIGGER event_no_truncate BEFORE TRUNCATE ON audit.event FOR EACH STATEMENT EXECUTE FUNCTION audit.block_mutation();
 
 --
+-- Name: document classification_kept; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON collect.document FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
 -- Name: collection_account collection_account_egress_bound; Type: TRIGGER; Schema: collect; Owner: -
 --
 
@@ -11824,6 +11856,12 @@ CREATE TRIGGER collection_authority_target_no_truncate BEFORE TRUNCATE ON collec
 --
 
 CREATE TRIGGER collection_run_requests_once BEFORE UPDATE OF requests ON collect.collection_run FOR EACH ROW EXECUTE FUNCTION collect.guard_run_requests();
+
+--
+-- Name: document compartments_kept; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON collect.document FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
 
 --
 -- Name: document compartments_registered; Type: TRIGGER; Schema: collect; Owner: -
@@ -11980,6 +12018,66 @@ CREATE TRIGGER telegram_message_no_truncate BEFORE TRUNCATE ON collect.telegram_
 --
 
 CREATE TRIGGER acquisition_tlp BEFORE INSERT OR UPDATE ON comms.pgp_key_acquisition FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
+
+--
+-- Name: channel_binding classification_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON comms.channel_binding FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: contact_block classification_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON comms.contact_block FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: conversation classification_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON comms.conversation FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: message classification_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON comms.message FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: pgp_key_acquisition classification_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON comms.pgp_key_acquisition FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: channel_binding compartments_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON comms.channel_binding FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: contact_block compartments_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON comms.contact_block FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: conversation compartments_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON comms.conversation FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: message compartments_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON comms.message FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: pgp_key_acquisition compartments_kept; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON comms.pgp_key_acquisition FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
 
 --
 -- Name: channel_binding compartments_registered; Type: TRIGGER; Schema: comms; Owner: -
@@ -12148,6 +12246,30 @@ CREATE TRIGGER assertion_supersedes_unchanged BEFORE UPDATE OF supersedes_id ON 
 --
 
 CREATE TRIGGER case_merge_switch_guarded BEFORE UPDATE ON core."case" FOR EACH ROW WHEN (((old.dual_control_merge IS DISTINCT FROM new.dual_control_merge) OR (old.dual_control_merge_epoch IS DISTINCT FROM new.dual_control_merge_epoch))) EXECUTE FUNCTION core.guard_case_merge_switch();
+
+--
+-- Name: selector classification_kept; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON core.selector FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: edge compartments_kept; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON core.edge FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: node compartments_kept; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON core.node FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: selector compartments_kept; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON core.selector FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
 
 --
 -- Name: case compartments_registered; Type: TRIGGER; Schema: core; Owner: -
@@ -12366,6 +12488,42 @@ CREATE TRIGGER call_record_tlp BEFORE INSERT OR UPDATE ON deception.call_record 
 CREATE TRIGGER capture_tlp BEFORE INSERT OR UPDATE ON deception.capture FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
 
 --
+-- Name: call_record classification_kept; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON deception.call_record FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: capture classification_kept; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON deception.capture FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: email_message classification_kept; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON deception.email_message FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: call_record compartments_kept; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON deception.call_record FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: capture compartments_kept; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON deception.capture FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
+-- Name: email_message compartments_kept; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON deception.email_message FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
+
+--
 -- Name: call_record compartments_registered; Type: TRIGGER; Schema: deception; Owner: -
 --
 
@@ -12466,6 +12624,18 @@ CREATE TRIGGER separated_duty_written_by_ledger BEFORE INSERT OR DELETE OR UPDAT
 --
 
 CREATE TRIGGER session_guard BEFORE UPDATE ON iam.session FOR EACH ROW EXECUTE FUNCTION iam.session_guard();
+
+--
+-- Name: dead_letter classification_kept; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON ingest.dead_letter FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: dead_letter compartments_kept; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON ingest.dead_letter FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
 
 --
 -- Name: api_key compartments_registered; Type: TRIGGER; Schema: ingest; Owner: -
@@ -12598,6 +12768,18 @@ CREATE TRIGGER record_request_guard BEFORE UPDATE OF case_id, retain_until ON in
 --
 
 CREATE TRIGGER victim_credential_request_guard BEFORE UPDATE OF reveal_count, last_revealed_at ON ingest.victim_credential FOR EACH ROW EXECUTE FUNCTION ingest.victim_credential_request_guard();
+
+--
+-- Name: sample classification_kept; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER classification_kept BEFORE UPDATE OF classification ON lab.sample FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
+-- Name: sample compartments_kept; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER compartments_kept BEFORE UPDATE OF compartments ON lab.sample FOR EACH ROW EXECUTE FUNCTION core.compartments_never_dropped();
 
 --
 -- Name: sample compartments_registered; Type: TRIGGER; Schema: lab; Owner: -

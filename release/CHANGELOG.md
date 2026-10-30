@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+The findings Beta 1.5 listed as known and not fixed are fixed, and each has a test
+that fails without its fix. There is one migration, 0184.
+
+- **Case material keeps its compartments and its label** (0184). The request role
+  could write an empty compartment list over an entity or a tie it was read into,
+  and lower the label of a document, a selector, a sample, a message, a
+  conversation, a contact block, a channel binding, a key acquisition, a capture,
+  an e-mail, a call record or a dead letter, which then read at the case's level.
+  A trigger on each refuses a compartment list that no longer holds the old one and
+  a lower classification. Adding a compartment and raising a label stay open, and
+  the schema owner and the system role are exempt, as for 0183. A test lists every
+  table the request role can write a label on and fails for one that is neither
+  guarded nor named as governed by another rule.
+- **An out-of-schedule purge names only exhibits the caller may read.** A second
+  person's approval no longer stands in for the caller's own clearance. An exhibit
+  above the caller is refused with the answer an id outside the case gets, nothing
+  is destroyed, and the approval is not spent.
+- **The notice sent when a merge is reversed counts only the ties its owner may
+  read**, as the merge notice does.
+- **A third party's identifier is not the publisher's, however its label is
+  spelled.** A guarantor or escrow word before the identifier needs no colon, an
+  accented label is read as its plain letters, and a label ended by a fullwidth,
+  small, vertical, ratio or modifier colon is a label.
+- **The extension blocks of a GNU sparse header count against the archive's ratio
+  and total**, as a long-name or pax body does, so a chain of them cannot inflate
+  past the caps.
+- **The egress preview** shows a bidirectional override as an escape in the line
+  saying what the numbers were computed over and in the hypothesis warnings.
+- **A test holds the role repair to the revisions.** `scripts/runtime_roles.py
+  ensure` must name every revision after 0108 that exports grant SQL.
+
 ## Beta 1.5: 2026-10-29
 
 The fifth revision of the beta, version 0.9.5. It closes the 18 findings of a code

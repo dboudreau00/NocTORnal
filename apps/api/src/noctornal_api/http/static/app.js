@@ -27313,7 +27313,7 @@ function renderReportBody(body) {
     /* A metric without its projection is not reproducible (docs/03), so
        the projection travels with the numbers rather than being implied
        by them. */
-    box.appendChild(el('p', 'help', 'Computed over ' + summary.computed_over));
+    box.appendChild(el('p', 'help', 'Computed over ' + visibleText(summary.computed_over)));
   }
 
   /* The authority the material was collected under: in the file, so on
@@ -27375,7 +27375,7 @@ function renderReportBody(body) {
         + ', inconsistency ' + h.inconsistency + ', support '
         + h.support + ')'));
     for (const w of body.hypotheses.warnings || []) {
-      box.appendChild(el('p', 'help warn', w));
+      box.appendChild(el('p', 'help warn', visibleText(w)));
     }
   } else if ((body.redaction || {}).hypotheses_withheld) {
     /* Said, as the document says it: a missing section reads as "no alternatives were
