@@ -1,18 +1,19 @@
-"""The answer to an out-of-schedule purge covers only what the caller may see.
+"""An out-of-schedule purge names only exhibits the caller may read.
 
-A caller with the purge permission on a case can name, and have approved by
-somebody else, an exhibit classified above their own clearance. When the
-store refuses that exhibit under a retention lock, its warning names the
-storage key, which carries the exhibit's SHA-256. The answer is drawn over
-the exhibits the caller may know of, as the scheduled real run's is, so the
-key, the counts and the tombstone id of the hidden exhibit stay out of it.
-The tombstone itself still records the whole destruction.
+A second person's approval does not stand in for the caller's own clearance:
+a caller with the purge permission on a case who names an exhibit classified
+above them is refused, with the answer an id outside the case gets, so the
+refusal does not say the exhibit exists. Nothing is destroyed, no tombstone is
+written and the approval is not spent. A caller cleared for the exhibit
+destroys it as before, and when the store refuses it under a retention lock the
+answer names its key.
 
 Accounts `g44t-*`; the object store is `evidence_retention_support.VersionedStore`.
 """
 from __future__ import annotations
 
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 
@@ -89,8 +90,7 @@ def _purge(client, conn, caller, request_id, case_id, evidence_ids):
               "authority": AUTHORITY})
 
 
-def test_a_locked_exhibit_above_the_caller_is_not_in_the_answer(
-        conn, store, client):
+def test_an_exhibit_above_the_caller_cannot_be_named(conn, store, client):
     boss = g.user(conn, "RED", roles=("CASE_OWNER",))
     lead = g.user(conn, "AMBER", roles=("CASE_OWNER",))
     case_id = g.case(conn, boss)
@@ -98,25 +98,24 @@ def test_a_locked_exhibit_above_the_caller_is_not_in_the_answer(
     s.assign(conn, case_id, lead, "CASE_OWNER")
     hidden, _data = g.lodge(conn, store, case_id, boss,
                             classification="RED", title="dpto hidden")
-    hidden_key = g.evidence_row(conn, hidden.evidence_id)[0]
-    store.locked_keys.add(hidden_key)
     request_id = _approved(conn, case_id, lead, boss, [hidden.evidence_id])
 
     response = _purge(client, conn, lead, request_id, case_id,
                       [hidden.evidence_id])
+    missing = _purge(client, conn, lead, request_id, case_id, [uuid4()])
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert hidden_key not in response.text
-    assert hidden_key.rsplit("/", 1)[-1] not in response.text
-    assert body["evidence_purged"] == 0
-    assert body["storage_locked"] == 0
-    assert body["storage_failed"] == 0
-    assert body["tombstones"] == []
-    # The record of destruction still counts the exhibit.
+    assert response.status_code == 400, response.text
+    assert missing.status_code == 400
+    assert response.json()["detail"] == missing.json()["detail"]
+    assert conn.execute(
+        "SELECT purged_at FROM core.evidence WHERE id = %s",
+        (hidden.evidence_id,)).fetchone()[0] is None
     assert conn.execute(
         """SELECT count(*) FROM core.purge_tombstone
-            WHERE approval_request_id = %s""", (request_id,)).fetchone()[0] == 1
+            WHERE approval_request_id = %s""", (request_id,)).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT consumed_at FROM core.approval_request WHERE id = %s",
+        (request_id,)).fetchone()[0] is None
 
 
 def test_a_caller_cleared_for_the_exhibit_is_still_told_its_key(
