@@ -3174,7 +3174,6 @@ function renderScrubber(syncValue) {
       'carries a valid-from, first-seen or last-seen time, so there is no ' +
       'history to play through. The strip switches on as soon as one element ' +
       'does.';
-    $('tl-note').title = '';
     range.setAttribute('aria-valuetext', 'unavailable: no temporal data');
     if (syncValue !== false) range.value = '1000';
     drawDensity();
@@ -3192,8 +3191,8 @@ function renderScrubber(syncValue) {
   const undated = state.timeUndated || 0;
   $('tl-note').textContent = 'density: ' + countOf(state.timePoints.length,
     'dated element', 'dated elements') + ' over ' + countOf(days, 'day', 'days')
-    + (undated ? ', ' + undated + ' undated not drawn' : '') + '.';
-  $('tl-note').title = 'Each bar counts the elements whose world time (valid '
+    + (undated ? ', ' + undated + ' undated not drawn' : '') + '. '
+    + 'Each bar counts the elements whose world time (valid '
     + 'from, or first seen) falls in it. Bar height grows with the square '
     + 'root of the count, so one busy stretch cannot flatten the rest. '
     + (undated ? countOf(undated, 'element carries', 'elements carry')

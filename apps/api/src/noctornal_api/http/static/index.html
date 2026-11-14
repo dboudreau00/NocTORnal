@@ -824,7 +824,9 @@
           <div id="scrubber" class="scrubber">
             <div class="tl-head">
               <span class="label">Timeline (world time)</span>
-              <span id="tl-note" class="help tl-note"></span>
+              <button type="button" class="info" data-tip-from="tl-note" aria-describedby="tl-note"
+                      aria-label="About the timeline">i</button>
+              <span id="tl-note" class="tl-note" hidden></span>
               <span id="tl-current" class="tl-current mono">as-of: now</span>
               <!-- "Jump to now": an action, so it does not repeat the "as-of: now" status beside
                    it. -->
