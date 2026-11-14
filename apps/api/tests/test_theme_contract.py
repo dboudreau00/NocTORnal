@@ -549,9 +549,12 @@ def test_canvas_text_clears_4_5_on_its_plate():
     js = APP_JS.read_text(encoding="utf-8")
     start = js.index("function placeText(")
     body = js[start:js.index("\n}\n", start)]
-    assert "PAINT.void" in body and body.index("fillRect") < body.index("fillText"), (
-        "placeText no longer lays a --void plate under the text, so the "
+    assert "labelPlate(" in body and body.index("labelPlate(") < body.index("fillText"), (
+        "placeText no longer lays a plate under the text, so the "
         "4.5:1 above is measured against the wrong background")
+    plate = js[js.index("function labelPlate("):]
+    plate = plate[:plate.index("\n}\n")]
+    assert "PAINT.void" in plate and "ctx.fill()" in plate, "the plate under a name is no longer --void"
     assert "cssVar('--canvas-label-alpha')" in js
 
 

@@ -4224,7 +4224,9 @@ const PARALLEL_GAP = 9;
 /* Labels. */
 const LABEL_H = 13;            // line box of the 11px face
 const LABEL_GAP = 4;           // px between a node's outermost ring and its label
-const LABEL_PAD = 2;           // clear space kept round every label
+const LABEL_PAD = 3;           // clear space kept round every label
+const LABEL_PLATE_X = 3;       // the plate reaches this far either side of the text
+const LABEL_PLATE_R = 4;       // and is rounded by this
 const LABEL_CELL = 64;         // spatial hash cell, px
 const LABEL_CHARS = 24;        // longer handles are cut with an ellipsis
 const EDGE_LABEL_SCALE = 1.9;  // edge types only this close in
@@ -4695,12 +4697,23 @@ function boxHash() {
    marks are obstacles the placement avoids. */
 function placeText(hash, text, tw, x, y, colour, alpha) {
   hash.add(x - LABEL_PAD, y - LABEL_PAD, tw + LABEL_PAD * 2, LABEL_H + LABEL_PAD * 2, null);
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = PAINT.void;
-  ctx.fillRect(x - 1, y, tw + 2, LABEL_H);
+  labelPlate(x - LABEL_PLATE_X, y - 1, tw + LABEL_PLATE_X * 2, LABEL_H + 1);
   ctx.globalAlpha = alpha;
   ctx.fillStyle = colour;
   ctx.fillText(text, x, y + 1);
+}
+
+/** The plate under a name: --void, rounded, with a hairline edge. */
+function labelPlate(x, y, pw, ph) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, pw, ph, LABEL_PLATE_R);
+  else ctx.rect(x, y, pw, ph);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = PAINT.void;
+  ctx.fill();
+  ctx.strokeStyle = PAINT.hairline;
+  ctx.lineWidth = 1;
+  ctx.stroke();
 }
 
 /* The canvas's own chrome: the status chips and layout buttons along the top, the note, the
@@ -4834,7 +4847,7 @@ function drawLabels(g, fs, sel, w, h, withEdges, hash) {
       ? (graded ? 'no tie in this projection is ' + graded : 'no ties in this projection')
       : g.shelf.count + ' with no tie in this projection';
     const tw = labelWidth(g, text);
-    const x = clamp(first.sx - first.sr, 0, Math.max(0, w - tw));
+    const x = clamp(first.sx - first.sr, LABEL_PLATE_X, Math.max(LABEL_PLATE_X, w - tw - LABEL_PLATE_X));
     const y = first.sy - (first.reach || first.sr) - LABEL_GAP - LABEL_H;
     if (y >= 0 && y + LABEL_H <= h && !underChrome(plates, x, y, tw, LABEL_H)) {
       placeText(hash, text, tw, x, y, PAINT.dim, 1);

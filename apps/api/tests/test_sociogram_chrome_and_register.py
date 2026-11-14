@@ -115,19 +115,19 @@ const drawn = [];
 const ctx = {
   font: '', textAlign: '', textBaseline: '', globalAlpha: 1, fillStyle: '',
   measureText(t) { return { width: t.length * 6.6 }; },
-  fillRect() {},
+  fillRect() {}, beginPath() {}, roundRect() {}, rect() {}, fill() {}, stroke() {},
   fillText(t, x, y) { drawn.push({ t: t, x: x, y: y - 1, w: t.length * 6.6 }); },
 };
 const PAINT = { labelFont: '11px mono', void: '#000', dim: '#555', bright: '#fff',
-                label: '#ccc', labelAlpha: 0.9 };
+                label: '#ccc', labelAlpha: 0.9, hairline: '#222' };
 const state = { hoverId: null, proj: { min_confidence: 'LOW' } };
 const canvasChrome = { stale: false, boxes: PLATES, top: 35, bottom: 35 };
 function chromeBoxes() { return canvasChrome; }
 function edgeTypeName(k) { return k; }
 """ + "\n".join(_const(c) for c in ("LABEL_H", "LABEL_GAP", "LABEL_PAD", "LABEL_CELL",
-                                    "LABEL_CHARS")) + "\n" \
+                                    "LABEL_CHARS", "LABEL_PLATE_X", "LABEL_PLATE_R")) + "\n" \
     + "\n".join(_fn(f) for f in ("labelText", "labelWidth", "boxHash", "placeText",
-                                 "underChrome", "drawLabels")) + r"""
+                                 "labelPlate", "underChrome", "drawLabels")) + r"""
 function scene(nodes) {
   return { nodes: nodes, links: [], shelf: null, loose: [], labelW: new Map(),
            labelsDrawn: 0, labelsWanted: 0 };
