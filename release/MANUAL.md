@@ -157,6 +157,10 @@ When the case is not in an ordinary working state a line under the strip says so
 
 ![Jump to: a pane, a case or an entity by name.](../docs/images/manual/palette.png)
 
+#### The i buttons
+
+Where a pane has something to explain that you need only once, such as what a setting covers or how a figure is counted, a small **i** sits beside the heading it belongs to. Hover it, focus it with the keyboard or press it to read the explanation; <kbd>Esc</kbd>, a scroll or a press elsewhere closes it. A warning, a refusal or a consequence is never behind an **i**: it stays on the page.
+
 #### The inspector
 
 The panel on the right is the **inspector**. Select an entity or a relationship anywhere and it shows **why it is believed**: its claims, each with its basis, grade and exhibit, its history, and what you may do next. The inspector is the same everywhere; Chapter 12 describes it in full.
@@ -283,7 +287,7 @@ Wherever the system has to turn a grade into a number (the ACH ranking, Chapter 
 - An **entity** has no confidence of its own. It is drawn at the highest confidence among its ties in the current view, and an entity with no tie that meets the filter claims no confidence and is drawn at the lowest opacity, because nothing in the view vouches for it.
 - Opacity is confidence, and the number is never opacity alone: the inspector spells the word out.
 - **Dashed** lines are inferred: their basis is an analyst or automated inference. They stay dashed, and the metrics count them only while the view includes them (Chapter 8; the console opens with **Include inferred** ticked).
-- **Hollow** entities and **hollow beads** on ties mark elements that nothing rests on, when **Mark unevidenced** is on. The line under the canvas counts how many elements rest on an exhibit you can see.
+- **Hollow** entities and **hollow beads** on ties mark elements that nothing rests on, when **Mark unevidenced** is on. The evidence line on the canvas counts how many elements rest on an exhibit you can see.
 
 To lower a tie's confidence, add the lower claim under **Assertions** and retract the claims graded above it, giving the reason. A correction can raise a tie's grade but not lower it past a claim that still stands.
 
@@ -540,7 +544,7 @@ The case as a network, and the working surface. Entities are nodes, relationship
 | **hold** <kbd>space</kbd> | hide inferred ties, so you can see how much of the picture is assessment rather than evidence |
 | <kbd>Esc</kbd> | clear |
 
-The strip under the canvas repeats these, and the canvas's accessible name lists the keyboard half for screen-reader users.
+The **Shortcuts** button at the foot of the canvas repeats these, and the canvas's accessible name lists the keyboard half for screen-reader users.
 
 **Re-layout** runs the force layout again; **Save layout** keeps your pinned positions for your next visit; **Clear pins** releases them (it confirms with a count and offers Undo); **Reload** fetches the case and the view again.
 
@@ -548,9 +552,9 @@ The strip under the canvas repeats these, and the canvas's accessible name lists
 
 - **Nodes** are drawn by type, with a ring for the **unreviewed proposal** state. A **LEGAL HOLD** chip is on an exhibit's card and in the case strip. When part of the case is above your clearance, the canvas shows one **INCOMPLETE** chip for the whole view; it never says which entities or where.
 - **Lines** carry a sign: a `+` or `-` mark, because colour is never the only encoding. **Dashed** means inferred. A line's opacity is its confidence.
-- **Hollow** nodes and beads mark elements nothing rests on, while **Mark unevidenced** is on. The bar says how many elements in view rest on an exhibit you can see, "counted from the elements on the canvas" and, if the canvas shows a focus, also for the whole view.
+- **Hollow** nodes and beads mark elements nothing rests on, while **Mark unevidenced** is on. The evidence line at the top left of the canvas says how many elements in view rest on an exhibit you can see, "counted from the elements on the canvas" and, if the canvas shows a focus, also for the whole view.
 
-> **Note.** Metrics are computed over the **view**, not the case. Change the preset, the confidence floor or the as-of date and the numbers change, correctly. The bar under the canvas states what was actually computed, and the canvas says how much of the view you cannot see, as far as this case discloses it: a count, or only that something is withheld.
+> **Note.** Metrics are computed over the **view**, not the case. Change the preset, the confidence floor or the as-of date and the numbers change, correctly. The **i** beside the count at the foot of the canvas states what was actually computed, and the canvas says how much of the view you cannot see, as far as this case discloses it: a count, or only that something is withheld.
 
 #### Notes the canvas may show
 
@@ -632,7 +636,7 @@ An **exhibit** is one item of evidence: a file, a capture, a message, a recorded
 
 #### Lodging an exhibit
 
-Choose the file, give it a **title**, choose the **Acquisition** method (Manual upload, Collector or Legal process), and its **classification**. **Acquired at** (UTC) is when the material was obtained; leave it blank only for material obtained just now, and a blank field records the moment the server received it. **Source** is the URL or location it came from. **Legal process** needs the authority reference it was obtained under: the warrant, production order or other instrument.
+Open **Upload an exhibit** (it is already open while the case has none). Choose the file, give it a **title**, choose the **Acquisition** method (Manual upload, Collector or Legal process), and its **classification**. **Acquired at** (UTC) is when the material was obtained; leave it blank only for material obtained just now, and a blank field records the moment the server received it. **Source** is the URL or location it came from. **Legal process** needs the authority reference it was obtained under: the warrant, production order or other instrument.
 
 Exhibits are accepted up to the deployment's declared size, shown above the list (the default is 256 MiB). Every accepted byte is written once and locked until the case's retention date (Chapter 9). If **identical bytes were already held**, the existing exhibit is reused and this acquisition is its own entry on that exhibit's custody record.
 
@@ -2035,7 +2039,7 @@ None of these is a bug. A refusal you do not understand looks like one, which is
 | You see | Do this |
 |---|---|
 | Analysis says "The graph has changed since" | The numbers describe the graph as it was. Run the analysis again. |
-| A metric differs from yesterday | The view moved: preset, confidence floor, inferred in or out, decay, or the as-of date. Read the view line under the canvas before quoting a number. |
+| A metric differs from yesterday | The view moved: preset, confidence floor, inferred in or out, decay, or the as-of date. Read the view (the **i** beside the count at the foot of the canvas, or the View line in Analysis) before quoting a number. |
 | A role or centrality ranking reorders on a small change | Betweenness on a sparse investigative graph is unstable. Treat the ranking as a prompt, not a finding. |
 | "Not computed for this view yet" | The removal set, the positions and the regular roles are each their own run, stored per size or option. Press the button beside it. |
 | The Entities count is higher than the Graph's | The Graph draws a view. The difference is identity and other links the **All social ties** preset leaves out. |
