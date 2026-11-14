@@ -566,11 +566,11 @@ def test_the_projection_bar_holds_controls_and_the_canvas_holds_its_own():
         assert f'id="{button}"' not in bar, f"{button} is back in the projection bar"
         wrap = _between('<div class="canvas-wrap">', "<!-- THE SIGNATURE ELEMENT", html)
         assert f'id="{button}"' in wrap, f"{button} is not on the canvas"
-    # The preset's gloss is behind a disclosure, and the metric note that
+    # The preset's gloss is behind an "i", and the metric note that
     # restated the chosen metric is gone: a size that is NOT the chosen
     # metric is said on the canvas, where it costs no height.
-    assert '<p id="preset-desc" class="proj-desc" hidden>' in bar
-    assert 'aria-controls="preset-desc"' in bar and 'aria-expanded="false"' in bar
+    assert '<p id="preset-desc" class="proj-desc tip-src">' in bar
+    assert 'data-tip-from="preset-desc"' in bar and 'aria-describedby="preset-desc"' in bar
     assert 'id="metric-note"' not in _html()
     assert "state.metricsNote = 'size = '" not in _js(), (
         "the note restates the chosen metric again")

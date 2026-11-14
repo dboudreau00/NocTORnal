@@ -704,10 +704,8 @@
                 <select id="sel-preset" class="select"
                         aria-describedby="preset-desc"></select>
               </label>
-              <button id="btn-preset-about" type="button" class="btn ghost small about-btn"
-                      aria-expanded="false" aria-controls="preset-desc"
-                      aria-label="About this projection"
-                      title="What this projection includes, and why">i</button>
+              <button id="btn-preset-about" type="button" class="info" data-tip-from="preset-desc"
+                      aria-describedby="preset-desc" aria-label="About this projection">i</button>
               <label class="field inline">
                 <span class="label">Confidence</span>
                 <select id="sel-minconf" class="select"></select>
@@ -740,7 +738,7 @@
               </span>
             </div>
 
-            <p id="preset-desc" class="proj-desc" hidden></p>
+            <p id="preset-desc" class="proj-desc tip-src"></p>
           </div>
 
           <div class="canvas-wrap">

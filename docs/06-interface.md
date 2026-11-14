@@ -409,9 +409,12 @@ they fit. Everything visible at once is a hairball.
   stays when it protects someone (legal exposure, destruction, material
   leaving the platform), in one sentence. What a method does, why a number
   is what it is, and what a setting covers belong in the analyst manual
-  (`release/MANUAL.md`), or open behind a "More" line when the analyst needs
+  (`release/MANUAL.md`), or sit behind a small "i" when the analyst needs
   them at the point of use. Text a service wrote is cut to its first
   sentence in the pane; the API response keeps all of it.
+- **The "i".** What is read once is not on the screen every visit. An "i"
+  opens its words in a bubble on hover or focus and holds it on a press, and
+  Esc, a scroll or a press elsewhere closes it (`infoTip`, `wireTips`).
 
 ## Quality floor
 

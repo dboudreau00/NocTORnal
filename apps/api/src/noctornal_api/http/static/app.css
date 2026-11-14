@@ -71,6 +71,35 @@ p { margin: 0; }
   background: var(--wash-3); white-space: nowrap;
 }
 
+/* ── what is read once ─────────────────────────────────────────────── */
+/* An explanation that is not needed on every visit sits behind a small "i": it opens on hover or
+   focus and stays on a press, and the words are in the page either way (data-tip, or the element
+   named by data-tip-from) so a screen reader gets them as the button's description. */
+.info {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 16px; height: 16px; margin-left: var(--s-1); padding: 0; cursor: help;
+  font: 600 10px/1 var(--mono); color: var(--text-tertiary); vertical-align: middle;
+  background: transparent; border: 1px solid var(--hairline-strong); border-radius: 50%;
+  transition: color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out),
+              background-color var(--motion-fast) var(--ease-out);
+}
+/* The circle stays 16px; the press target is 24px, so a finger or a trackpad finds it. */
+.info { position: relative; }
+.info::after { content: ''; position: absolute; inset: -5px; }
+.info:hover, .info:focus-visible, .info[aria-expanded="true"] {
+  color: var(--accent-soft); border-color: var(--accent-edge); background: var(--accent-wash);
+}
+.tip-bubble {
+  position: fixed; z-index: 120; max-width: min(340px, calc(100vw - 16px));
+  padding: var(--s-2) var(--s-3); pointer-events: none; overflow-wrap: anywhere;
+  font-size: 12px; line-height: 1.5; color: var(--text-secondary);
+  background: var(--surface-2); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-ctl); box-shadow: var(--shadow-pop);
+}
+/* Words an "i" reads (data-tip-from): still in the page, and read by the bubble. */
+.tip-src { display: none !important; }
+
 /* ── banners ───────────────────────────────────────────────────────── */
 /* Below the app bar, never over it, so a failure cannot cover All cases, the identity and
    Log out. The height is capped so a long stack scrolls inside itself, not down the page. */
@@ -739,7 +768,7 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 
 /* ── projection controls ───────────────────────────────────────────── */
 /* One row at laptop widths, so the controls do not squeeze the sociogram: tighter gaps, labels
-   beside their selects, and the preset's gloss behind .about-btn. */
+   beside their selects, and the preset's gloss behind an "i". */
 .proj-bar {
   display: flex; align-items: center; gap: var(--s-2) var(--s-3); flex-wrap: wrap;
   padding: 6px var(--s-3); background: var(--wash-1);
@@ -752,15 +781,6 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .proj-bar .field.inline { gap: 6px; }
 .proj-bar select.select { padding-top: 4px; padding-bottom: 4px; padding-left: 8px;
                           font-size: 12px; }
-.about-btn {
-  width: 22px; height: 22px; padding: 0; border-radius: 50%;
-  font-family: var(--mono); font-size: 11px; line-height: 1;
-}
-.about-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent-edge); }
-.proj-desc {
-  flex-basis: 100%; font-size: 11px; color: var(--text-tertiary);
-  border-left: 2px solid var(--hairline); padding-left: 8px; margin: 0;
-}
 .focus-flag {
   display: flex; align-items: center; gap: var(--s-2);
   border: 1px solid var(--accent-edge); border-radius: var(--r-pill);

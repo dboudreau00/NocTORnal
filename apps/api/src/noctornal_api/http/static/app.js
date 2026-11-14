@@ -323,6 +323,97 @@ function splitLead(text, limit) {
   return m ? { lead: m[1], rest: t.slice(m[0].length) } : { lead: t, rest: '' };
 }
 
+/* ── what is read once: the "i" bubble ───────────────────────────────────
+ * An explanation that is not needed on every visit sits behind a small "i". It opens on hover or
+ * focus and stays open on a press (touch and keyboard have no hover); Esc, a press elsewhere or a
+ * scroll closes it. The words come from `data-tip`, or from the element named by `data-tip-from`
+ * when they change with the page, and reach a screen reader as the button's description. */
+const tipBubble = { node: null, owner: null, pinned: false };
+
+/** A small "i" that explains on hover, focus or press. `text` is plain words, never markup. */
+function infoTip(text, label) {
+  const b = el('button', 'info', 'i');
+  b.type = 'button';
+  b.dataset.tip = String(text);
+  b.setAttribute('aria-label', label || 'More about this');
+  b.setAttribute('aria-description', String(text));
+  return b;
+}
+
+function tipText(owner) {
+  const from = owner.dataset.tipFrom ? $(owner.dataset.tipFrom) : null;
+  return (from ? from.textContent : owner.dataset.tip || '').replace(/\s+/g, ' ').trim();
+}
+
+function showTip(owner) {
+  const text = tipText(owner);
+  if (!text) return;
+  let n = tipBubble.node;
+  if (!n) {
+    n = el('div', 'tip-bubble');
+    n.id = 'tip-bubble';
+    n.setAttribute('role', 'tooltip');
+    n.hidden = true;
+    document.body.appendChild(n);
+    tipBubble.node = n;
+  }
+  n.textContent = text;
+  n.hidden = false;
+  /* Above the control when there is room, below it when not, and kept inside the window. */
+  const r = owner.getBoundingClientRect();
+  const w = n.offsetWidth, h = n.offsetHeight;
+  const above = r.top >= h + 12;
+  n.style.left = Math.round(clamp(r.left + r.width / 2 - w / 2, 8,
+                                  Math.max(8, window.innerWidth - w - 8))) + 'px';
+  n.style.top = Math.round(above ? r.top - h - 8 : r.bottom + 8) + 'px';
+  tipBubble.owner = owner;
+}
+
+function hideTip() {
+  if (!tipBubble.owner) return;
+  tipBubble.node.hidden = true;
+  tipBubble.owner.removeAttribute('aria-expanded');
+  tipBubble.owner = null;
+  tipBubble.pinned = false;
+}
+
+function wireTips() {
+  const ownerOf = (t) => (t instanceof Element ? t.closest('.info, .info-link') : null);
+  for (const b of document.querySelectorAll('.info[data-tip]')) {
+    b.setAttribute('aria-description', b.dataset.tip);
+  }
+  document.addEventListener('mouseover', (e) => {
+    const o = ownerOf(e.target);
+    if (o && !tipBubble.pinned) showTip(o);
+  });
+  document.addEventListener('mouseout', (e) => {
+    const o = ownerOf(e.target);
+    if (o && !tipBubble.pinned && !o.contains(e.relatedTarget)) hideTip();
+  });
+  document.addEventListener('focusin', (e) => {
+    const o = ownerOf(e.target);
+    if (o && !tipBubble.pinned) showTip(o);
+  });
+  document.addEventListener('focusout', (e) => {
+    if (ownerOf(e.target) && !tipBubble.pinned) hideTip();
+  });
+  document.addEventListener('click', (e) => {
+    const o = ownerOf(e.target);
+    if (!o) { if (tipBubble.pinned) hideTip(); return; }
+    const same = tipBubble.pinned && tipBubble.owner === o;
+    hideTip();
+    if (same) return;
+    showTip(o);
+    tipBubble.pinned = true;
+    o.setAttribute('aria-expanded', 'true');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && tipBubble.owner) hideTip();
+  });
+  window.addEventListener('scroll', hideTip, true);
+  window.addEventListener('resize', hideTip);
+}
+
 /** Make an identifier click-to-copy: a <button>, because it is an action and must be keyboard
  *  reachable.
  *
@@ -5425,12 +5516,6 @@ function wireCanvasControls() {
   $('btn-pin').addEventListener('click', () => {
     const sel = state.selection;
     if (sel && sel.kind === 'node') togglePin(sel.id);
-  });
-  $('btn-preset-about').addEventListener('click', () => {
-    const btn = $('btn-preset-about');
-    const open = btn.getAttribute('aria-expanded') !== 'true';
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    show($('preset-desc'), open);
   });
   window.addEventListener('beforeunload', guardLayout);
 
@@ -14155,6 +14240,7 @@ function paintWkdExposure() {
 
 function wire() {
   loadPaint();
+  wireTips();
   initTabs();
   initInbox();
   initComms();
