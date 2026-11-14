@@ -24062,6 +24062,8 @@ function ruleRow(r, use) {
   head.appendChild(el('span', 'row-title', r.category));
   head.appendChild(el('span', 'chip', dayCount(r.retain_days)));
   if (r.is_placeholder) head.appendChild(el('span', 'chip warn', 'unconfirmed'));
+  /* Why the category carries the period it does: read once, so behind an "i" on the row. */
+  if (r.rationale) head.appendChild(infoTip(r.rationale, 'Why this category carries this period'));
   card.appendChild(head);
   const facts = el('div', 'facts');
   if (!r.is_placeholder) {
@@ -24074,7 +24076,6 @@ function ruleRow(r, use) {
       countOf(use.live_records, 'record', 'records')));
   }
   if (facts.childElementCount) card.appendChild(facts);
-  if (r.rationale) card.appendChild(el('p', 'why', r.rationale));
   return card;
 }
 
@@ -24087,6 +24088,8 @@ function unruledRow(c) {
   head.appendChild(el('span', 'chip', dayCount(c.retain_days)));
   head.appendChild(el('span', 'chip warn',
     'no rule: ' + c.retain_days + '-day fallback'));
+  head.appendChild(infoTip('No rule has been set for this category. Its records carry the fallback '
+    + 'period. Confirm a rule below.', 'About the fallback period'));
   card.appendChild(head);
   const facts = el('div', 'facts');
   facts.appendChild(fact('live on your cases',
@@ -24096,8 +24099,6 @@ function unruledRow(c) {
       + ' (' + untilWords(c.soonest_deadline) + ')'));
   }
   card.appendChild(facts);
-  card.appendChild(el('p', 'why', 'No rule has been set for this category. Its records '
-    + 'carry the fallback period. Confirm a rule below.'));
   return card;
 }
 
