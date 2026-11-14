@@ -48,6 +48,19 @@ first. Nothing in this repository is legal advice.
 | **L4** | Message-level capture, including group channels and call recordings | That interception law, one-party vs two-party consent, and retention of uninvolved third parties' content are settled. `provenance_class` records *which kind* of capture it was; it cannot confer authority for any of them. |
 | **L5** | Web capture of phishing infrastructure | That fetching attacker infrastructure is authorised, and (separately) that **entering any input into a phishing page, including canary credentials, is covered.** That may constitute unauthorised access. The schema refuses to record a submission without a written authority reference. |
 
+### For law enforcement in the US and Canada
+
+The evidence handling is architected on **US Federal Rules of Evidence
+902(13) and 902(14)** and **Canada Evidence Act sections 31.1 to 31.8**.
+Each exhibit is hashed twice (SHA-256 and BLAKE3) and locked write-once when
+it is lodged, and re-verified on every read and export. Each lodging, read,
+export and verification is a row in an append-only, hash-chained custody
+ledger. That is the technical half. Those rules also need a qualified person
+to certify or swear to how the system ran, and the agency supplies that,
+with counsel's written determinations, a hardened deployment and written
+procedures.
+[docs/21](docs/21-law-enforcement-readiness.md) lists those steps, in order.
+
 
 ---
 
@@ -722,6 +735,7 @@ noctornal/
 | **[`release/MANUAL.md`](release/MANUAL.md)** ([PDF](release/NocTORnal-Manual.pdf)) | operating it: what each pane is for, what the numbers mean, every refusal and why |
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
 | [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) | **the register**: every place the build stops because the next step is a legal question, and why holding this material is dangerous |
+| [`docs/21-law-enforcement-readiness.md`](docs/21-law-enforcement-readiness.md) | **for an agency in the US or Canada**: what FRE 902(13), (14) and Canada Evidence Act ss. 31.1-31.8 ask, what the build supplies, and the steps before real casework |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | what may need to change: data not to be trusted, the Beta 1 review, known residuals, judgement calls |
 | [`docs/00-decisions.md`](docs/00-decisions.md) | the numbered decisions and why the architecture is the way it is |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | the map of what was built |
