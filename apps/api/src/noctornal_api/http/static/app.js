@@ -11680,7 +11680,7 @@ function buildEndpointSelect(which, keepId) {
     return;
   }
   count.textContent = !terms.length
-    ? total + ' entities, grouped by type. Type above to filter by label or type.'
+    ? total + ' entities'
     : (!matches.length
       ? 'Nothing matches. Filter on part of a label, or on a type such as WALLET.'
       : matches.length + ' of ' + total + ' '
@@ -11810,9 +11810,9 @@ function refreshEdgeTypes() {
   createForms.clearedType = '';
   $('edge-type-count').textContent = '';
   if (!src || !dst) {
+    /* The placeholder says it; a note under it would say it twice. */
     placeholder('Choose both entities first');
-    note.textContent = 'The types on offer depend on what the two entities ' +
-      'are, so they appear once both are chosen.';
+    note.textContent = '';
     return;
   }
   if (src.id === dst.id) {
