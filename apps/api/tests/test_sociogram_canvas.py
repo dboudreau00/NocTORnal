@@ -178,7 +178,7 @@ def test_state_rings_stand_clear_of_the_type_ring():
 # The ground
 # ---------------------------------------------------------------------------
 
-def test_the_key_light_is_painted_once_per_size_and_cannot_throw():
+def test_the_ground_light_is_painted_once_per_size_and_cannot_throw():
     """A fresh gradient and a second full-canvas fill ran every frame (cr01
     ground-repainted-every-frame), and an unresolved token threw out of
     addColorStop and killed the canvas (cr01 missing-token-now-kills-canvas)."""
@@ -186,7 +186,8 @@ def test_the_key_light_is_painted_once_per_size_and_cannot_throw():
     assert "createRadialGradient" not in _fn("draw")
     build = _fn("buildGround")
     assert "createRadialGradient" in build
-    assert "PAINT.canvasKeylight && PAINT.canvasKeylightOut" in build
+    assert "if (PAINT.canvasLit) {" in build
+    assert "PAINT.canvasVignette && PAINT.canvasVignetteOut" in build
     assert "try {" in build
     assert "buildGround()" in _fn("resizeGraph")
     assert "buildGround()" in _fn("loadPaint")

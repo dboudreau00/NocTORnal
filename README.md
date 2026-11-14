@@ -331,7 +331,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **8434 tests** (`def test_`
+With the containers up, expect **no failures** across **8446 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -361,7 +361,7 @@ structural edges wait on a shelf at the side (five here: three crews, a
 wallet and a domain). Inferred edges render **dashed**, like the one beside
 the selected vouch between bit_forge and bit_lathe, and count toward the
 metrics only when a projection opts in. The console's default projection
-does, and the readout under the legend says so. The bar along the bottom is
+does, and the "i" beside the count at the foot of the canvas says so. The bar along the bottom is
 world time: drag it and the graph becomes the network as it stood on that
 date, as the case records it today.
 
@@ -695,7 +695,7 @@ enforces it.
 
 ### Testing
 
-**8434 tests** (`def test_` functions across two pytest roots, maintained by
+**8446 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -775,8 +775,14 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1.5b, release 0.9.5, tag `v0.9.5b-beta`: Beta 1.5 with the findings it
-listed as not fixed closed, each with a test, and one more migration, 0184, which keeps
+This is Beta 1.5c, release 0.9.5, tag `v0.9.5c-beta`: Beta 1.5b with a new look for
+the sociogram and a quieter console, and no migration. The graph sits on a lit navy
+stage with a soft halo behind each entity, the rows of legend and keys under it are one
+row with a Key and a Shortcuts button, and what a pane says once (what a setting
+covers, how a figure is counted) opens from a small "i" instead of staying on the
+screen. A warning, a refusal or a consequence still stays on screen. Beta 1.5b was
+Beta 1.5 with the findings it listed as not fixed closed, each with a test, and one
+more migration, 0184, which keeps
 the request role from dropping a compartment from case material or lowering its label.
 Beta 1.5 was Beta 1.4 with the 18 findings of a code review of the whole tree closed,
 each with a test, and one migration, 0183, which stops the request role from lowering
@@ -813,7 +819,7 @@ reads, selectors, search and the audit log hold at 100,000 entities and
 about 5,000 entities a case, and the ego network and the path search stop at
 5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1.5b has entity merge under the two-person
+Beyond what the tour shows, Beta 1.5c has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery

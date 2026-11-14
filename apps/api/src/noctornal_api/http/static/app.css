@@ -1,5 +1,6 @@
 /* NocTORnal analyst console (docs/06-interface.md).
-   The canvas is the darkest surface; chrome is a lighter charcoal that recedes. Colour carries
+   The canvas is a lit stage that falls to the darkest surface at its edges; chrome is a lighter
+   charcoal that recedes. Colour carries
    meaning only (node type, edge sign, confidence, TLP): buttons, panels, borders and tabs stay
    neutral. Elevation is light, not paint: a raised surface is a translucent white wash plus a
    hairline, never a different opaque grey. Opaque steps are for the surfaces a canvas fills and
@@ -68,6 +69,56 @@ p { margin: 0; }
   border: 1px solid var(--hairline); border-bottom-width: 2px;
   border-radius: var(--r-sm); padding: 1px 5px; color: var(--text-secondary);
   background: var(--wash-3); white-space: nowrap;
+}
+
+/* ── what is read once ─────────────────────────────────────────────── */
+/* An explanation that is not needed on every visit sits behind a small "i": it opens on hover or
+   focus and stays on a press, and the words are in the page either way (data-tip, or the element
+   named by data-tip-from) so a screen reader gets them as the button's description. */
+.info, .info-glyph {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 16px; height: 16px; margin-left: var(--s-1); padding: 0; cursor: help;
+  font: 600 10px/1 var(--mono); color: var(--text-tertiary); vertical-align: middle;
+  background: transparent; border: 1px solid var(--hairline-strong); border-radius: 50%;
+  transition: color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out),
+              background-color var(--motion-fast) var(--ease-out);
+}
+/* The circle stays 16px; the press target is 24px, so a finger or a trackpad finds it. */
+.info { position: relative; }
+.info::after { content: ''; position: absolute; inset: -5px; }
+.info:hover, .info:focus-visible, .info[aria-expanded="true"],
+.info-link:hover .info-glyph, .info-link:focus-visible .info-glyph,
+.info-link[aria-expanded="true"] .info-glyph {
+  color: var(--accent-soft); border-color: var(--accent-edge); background: var(--accent-wash);
+}
+/* "About this", where a line of help had no heading to hang its "i" on. */
+.info-link {
+  display: inline-flex; align-items: center; gap: var(--s-1); margin: 0 0 var(--s-2); padding: 0;
+  font: inherit; font-size: 11px; color: var(--text-tertiary); cursor: help;
+  background: none; border: 0; border-radius: var(--r-sm);
+}
+.info-link:hover, .info-link:focus-visible { color: var(--text-secondary); }
+.info-link .info-glyph { margin-left: 0; }
+.tip-bubble {
+  position: fixed; z-index: 120; max-width: min(340px, calc(100vw - 16px));
+  padding: var(--s-2) var(--s-3); pointer-events: none; overflow-wrap: anywhere;
+  font-size: 12px; line-height: 1.5; color: var(--text-secondary);
+  background: var(--surface-2); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-ctl); box-shadow: var(--shadow-pop);
+}
+/* A help line whose words moved behind an "i" (foldHelp): still in the page, and read by the bubble. */
+.tip-src { display: none !important; }
+/* A button that opens a panel of reference beside it (the canvas key, the shortcuts). */
+.graph-bar .btn.panel-btn { color: var(--text-secondary); border-color: var(--hairline-strong); }
+.btn.panel-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent-edge); }
+.panel-pop {
+  position: absolute; z-index: 40; left: var(--s-3); bottom: calc(100% + var(--s-2));
+  width: min(680px, calc(100% - var(--s-6)));
+  padding: var(--s-2) var(--s-4); font-size: 11px; color: var(--text-secondary);
+  background: var(--glass); backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid var(--hairline-strong); border-radius: var(--r-card);
+  box-shadow: var(--shadow-pop);
 }
 
 /* ── banners ───────────────────────────────────────────────────────── */
@@ -738,7 +789,7 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 
 /* ── projection controls ───────────────────────────────────────────── */
 /* One row at laptop widths, so the controls do not squeeze the sociogram: tighter gaps, labels
-   beside their selects, and the preset's gloss behind .about-btn. */
+   beside their selects, and the preset's gloss behind an "i". */
 .proj-bar {
   display: flex; align-items: center; gap: var(--s-2) var(--s-3); flex-wrap: wrap;
   padding: 6px var(--s-3); background: var(--wash-1);
@@ -751,15 +802,6 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .proj-bar .field.inline { gap: 6px; }
 .proj-bar select.select { padding-top: 4px; padding-bottom: 4px; padding-left: 8px;
                           font-size: 12px; }
-.about-btn {
-  width: 22px; height: 22px; padding: 0; border-radius: 50%;
-  font-family: var(--mono); font-size: 11px; line-height: 1;
-}
-.about-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent-edge); }
-.proj-desc {
-  flex-basis: 100%; font-size: 11px; color: var(--text-tertiary);
-  border-left: 2px solid var(--hairline); padding-left: 8px; margin: 0;
-}
 .focus-flag {
   display: flex; align-items: center; gap: var(--s-2);
   border: 1px solid var(--accent-edge); border-radius: var(--r-pill);
@@ -797,8 +839,8 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .canvas-note {
   flex: 0 1 auto; min-width: 0; margin: 0; pointer-events: none;
   font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 2px var(--s-2);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-2);
 }
 .canvas-status {
   flex: 1 1 16rem; min-width: 0;
@@ -809,8 +851,8 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .cs-chip {
   display: inline-flex; align-items: center; gap: var(--s-2);
   font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 2px var(--s-2);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-2);
 }
 .cs-chip.cs-warn { color: var(--alert); border-color: var(--alert-edge); }
 .cs-chip.coverage-none { color: var(--danger); border-color: var(--danger-edge); }
@@ -822,24 +864,24 @@ button.hdr-user.codes-low::before { background: var(--alert); }
   gap: var(--s-1); margin-left: auto; flex: 0 1 auto; min-width: 0;
   pointer-events: none;
 }
-.canvas-tools .btn { pointer-events: auto; background: var(--surface-1); }
-/* Disabled, but still an opaque plate: the 0.45 fade of .btn[disabled] lets the graph show
+.canvas-tools .btn { pointer-events: auto; background: var(--glass); backdrop-filter: blur(10px) saturate(130%); }
+/* Disabled, but still a glass plate: the 0.45 fade of .btn[disabled] lets the graph show
    through the words, so here the words go quiet instead. */
 .canvas-tools .btn[disabled],
 .canvas-tools .btn[disabled]:hover {
-  opacity: 1; background: var(--surface-1); color: var(--text-tertiary);
+  opacity: 1; background: var(--glass); color: var(--text-tertiary);
   border-color: var(--hairline);
 }
 .zoom-btn { min-width: 26px; font-family: var(--mono); }
 .zoom-level {
   min-width: 44px; text-align: center; font-size: 11px; color: var(--text-secondary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 3px var(--s-1);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-1);
 }
 .cs-note {
   font-family: var(--mono); font-size: 11px; color: var(--text-tertiary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 3px var(--s-2);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-2);
 }
 /* Unsaved hand placements: a dot on Save layout. */
 #btn-save-layout.dirty::after {
@@ -848,15 +890,24 @@ button.hdr-user.codes-low::before { background: var(--alert); }
   vertical-align: middle;
 }
 
+/* One slim row under the timeline: the entity types, what is drawn, and the two buttons that open
+   the rest. The panels open upward over the canvas. */
 .graph-bar {
-  display: flex; flex-direction: column; gap: var(--s-1);
-  padding: var(--s-2) var(--s-4); background: var(--wash-1);
+  position: relative; display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--s-1) var(--s-4); padding: var(--s-2) var(--s-4); background: var(--wash-1);
   border-top: 1px solid var(--hairline);
 }
-.legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+.legend { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; min-width: 0;
           font-size: 11px; color: var(--text-secondary); }
+.lg-types { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-3); }
 .lg { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
-.legend-sep { width: 1px; height: 14px; background: var(--hairline); }
+.lg-group { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-4);
+            padding: var(--s-2) 0; }
+.lg-group + .lg-group { border-top: 1px solid var(--hairline-soft); }
+.lg-head { flex: 0 0 112px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+           color: var(--text-tertiary); }
+.legend-more { width: min(760px, calc(100% - var(--s-6))); }
+.keys-more { left: auto; right: var(--s-4); width: min(560px, calc(100% - var(--s-6))); }
 .line { display: inline-block; width: 16px; height: 0;
         border-top: 2px solid var(--sign-neutral); margin-right: 5px; }
 .line.pos { border-top-color: var(--sign-positive); }
@@ -901,11 +952,11 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 }
 
 /* docs/03: show the projection parameters next to the results, always. */
-.proj-readout { font-size: 11px; color: var(--text-secondary);
-                overflow-wrap: anywhere; }
+.proj-readout { margin-left: auto; font-size: 11px; color: var(--text-secondary);
+                display: inline-flex; align-items: center; overflow-wrap: anywhere; }
 .proj-readout .rd-warn { color: var(--alert); }
-.canvas-keys { font-size: 10px; color: var(--text-tertiary);
-               display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.canvas-keys { font-size: 11px; color: var(--text-secondary); line-height: 2;
+               display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 /* ── timeline scrubber (the signature element) ─────────────────────── */
 /* Two rows, to leave the canvas its height: the note beside the heading, and the dates flanking
@@ -999,6 +1050,9 @@ button.hdr-user.codes-low::before { background: var(--alert); }
                margin-top: 16px; }
 /* Deception records under the two columns. */
 .search-deception { margin-top: 20px; }
+/* The result groups appear with the first search, not as five empty headings before it. */
+.search-scope[hidden] ~ .search-cols,
+.search-scope[hidden] ~ .search-deception { display: none; }
 .hit-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .hit {
   display: flex; justify-content: space-between; gap: 10px; text-align: left;

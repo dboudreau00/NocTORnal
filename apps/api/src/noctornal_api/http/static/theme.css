@@ -28,27 +28,25 @@
      Opaque on purpose: these are what a <canvas> fills (the sociogram ground, the timeline
      track) and what scrolled content passes under (sticky table headers), where a translucent
      value would let rows ghost through. Everything else uses a --wash-* token. */
-  --void: #111214;        /* the canvas ground: darkest surface in the app */
+  --void: #0A0D16;        /* the edge of the canvas ground and the plate behind canvas text: the darkest surface */
   --surface-0: #161719;   /* app ground */
   --surface-1: #1C1D20;   /* rail, app bar, inspector ground */
   --surface-2: #26272B;   /* raised: inputs, buttons, sticky headers */
   --surface-3: #313237;   /* hover / selected row */
 
   /* ── the canvas ground ─────────────────────────────────────────────
-     The key-light gesture `body` uses, plus a graph-paper grid that gives pan and zoom something
-     to move against. Two ceilings, held by test_theme_contract
-     (test_the_canvas_ground_keeps_every_mark_above_its_floor): the key light alone stays at or
-     below --surface-0, so the canvas is the darkest surface even at its brightest point (0.02
-     is the largest two-place alpha that does); and every mark keeps its contrast floor where a
-     grid line crosses the brightest light. That assumes the grid composites once: paintGrid
-     fills one path of rectangles, because 1px strokes composite every crossing twice in
-     Chromium at DPR 1. Canvas text sits on a void plate, so its floor is measured against the
-     void, where the tertiary text tier is 4.82:1 and may not be dimmed further. The -out token
-     exists because a canvas gradient needs both stops as colours and the painter may not
-     invent the second. */
-  --canvas-grid: rgba(240, 242, 244, 0.016);
-  --canvas-keylight: rgba(240, 242, 244, 0.02);
-  --canvas-keylight-out: rgba(240, 242, 244, 0);
+     The sociogram is a stage, not a hole: --void at its edges, a cool slate lit from the middle
+     (--canvas-lit), the corners drawn back toward the dark (--canvas-vignette), and a lattice of
+     dots in world space that gives pan and zoom something to move against. It is painted once per
+     canvas size into an offscreen canvas (buildGround), so none of it costs a frame. Two things
+     are held by test_theme_contract: every mark keeps its contrast floor where a lattice dot sits
+     on the lit centre, and canvas text, which sits on a --void plate, is measured against the
+     void. The -out token exists because a canvas gradient needs both stops as colours and the
+     painter may not invent the second. */
+  --canvas-lit: #16213A;
+  --canvas-vignette: rgba(2, 4, 9, 0.55);
+  --canvas-vignette-out: rgba(2, 4, 9, 0);
+  --canvas-grid: rgba(150, 175, 225, 0.10);
 
   /* The node body's alpha per confidence step; ring and core take the --conf-* steps
      themselves. The body is where confidence is read, so HIGH keeps 2:1 or better against LOW
@@ -69,6 +67,9 @@
   --wash-2: rgba(255, 255, 255, 0.045);  /* raised card fill */
   --wash-3: rgba(255, 255, 255, 0.07);   /* hover fill */
   --hairline: rgba(255, 255, 255, 0.10);
+  /* A panel that floats over the sociogram or a pane: --surface-1 at 78%, so what is under it
+     shows through. */
+  --glass: rgba(24, 26, 30, 0.78);
   --hairline-strong: rgba(255, 255, 255, 0.16);
   /* The boundary of anything you can type in or press. Much brighter than the decorative
      hairline, because WCAG 1.4.11 asks for 3:1 on the edge that identifies a control: this is

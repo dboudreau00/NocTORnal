@@ -704,10 +704,8 @@
                 <select id="sel-preset" class="select"
                         aria-describedby="preset-desc"></select>
               </label>
-              <button id="btn-preset-about" type="button" class="btn ghost small about-btn"
-                      aria-expanded="false" aria-controls="preset-desc"
-                      aria-label="About this projection"
-                      title="What this projection includes, and why">i</button>
+              <button id="btn-preset-about" type="button" class="info" data-tip-from="preset-desc"
+                      aria-describedby="preset-desc" aria-label="About this projection">i</button>
               <label class="field inline">
                 <span class="label">Confidence</span>
                 <select id="sel-minconf" class="select"></select>
@@ -740,7 +738,7 @@
               </span>
             </div>
 
-            <p id="preset-desc" class="proj-desc" hidden></p>
+            <p id="preset-desc" class="proj-desc tip-src"></p>
           </div>
 
           <div class="canvas-wrap">
@@ -826,7 +824,9 @@
           <div id="scrubber" class="scrubber">
             <div class="tl-head">
               <span class="label">Timeline (world time)</span>
-              <span id="tl-note" class="help tl-note"></span>
+              <button type="button" class="info" data-tip-from="tl-note" aria-describedby="tl-note"
+                      aria-label="About the timeline">i</button>
+              <span id="tl-note" class="tl-note" hidden></span>
               <span id="tl-current" class="tl-current mono">as-of: now</span>
               <!-- "Jump to now": an action, so it does not repeat the "as-of: now" status beside
                    it. -->
@@ -843,86 +843,108 @@
           </div>
 
           <div class="graph-bar">
+            <!-- The entity types stay in view, because hue is how a type is read. Everything else the
+                 canvas draws is one press away under Key, and the keyboard under Shortcuts. -->
             <div class="legend" aria-label="Legend">
-              <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
-              <span class="lg" title="An assessed person is drawn with a second
-                    ring inside the first, so it never rests on hue alone."><i
-                    class="swatch dbl hue-actor-person"></i>Person</span>
-              <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
-              <span class="lg" title="A victim is a SQUARE in the Group hue: a
-                    target, not a member (2026-09-23)."><i
-                    class="swatch sq hue-actor-group"></i>Victim</span>
-              <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
-              <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
-              <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
-              <span class="lg" title="Events, incidents, campaigns and places are
-                    DIAMONDS: things that happened, not entities."><i
-                    class="swatch dia hue-context"></i>Context</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <span class="lg"><i class="line pos"></i>vouch / positive</span>
-              <span class="lg"><i class="line neg"></i>dispute / negative</span>
-              <span class="lg"><i class="line neu"></i>neutral</span>
-              <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
-              <span class="lg" title="Sign is never carried by hue alone: from 120%
-                    zoom a positive tie is marked + at its midpoint and a negative
-                    tie &minus;. The dash pattern cannot carry sign, because solid
-                    versus dashed already means asserted versus inferred.">
-                <code class="mono">+ / &minus;</code>&nbsp;sign mark (from 120%)</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <!-- The evidence encoding (docs/06), spelled out rather than left to the checkbox's
-                   hover title. -->
-              <span class="lg" title="An entity with an exhibit behind it has a
-                    filled body and a solid core."><i class="glyph-node"></i>evidenced</span>
-              <span class="lg" title="Hollow: nothing inside the ring. The entity
-                    rests on no exhibit. Shown while Mark unevidenced is on."><i class="glyph-node hollow"></i>hollow = no exhibit</span>
-              <span class="lg" title="A hollow bead at a tie's midpoint: the tie
-                    rests on no exhibit. It is a shape, not a fade, because opacity
-                    already means confidence."><i class="line bead"></i>bead = tie with no exhibit</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <!-- Every ring the canvas draws, each with its own pattern. The dashed ring is drawn
-                   from the Triage queue and from a tie's review, so it clears when the proposal is
-                   dispositioned or the tie reviewed. -->
-              <span class="lg" title="A proposal about this entity is waiting in the Triage queue, or a tie at it is still PROPOSED. Accepting, rejecting or deferring the proposal in Triage, or accepting or disputing the tie under Review in the inspector, clears the ring."><i class="ring prop"></i>proposal in Triage or tie to review</span>
-              <span class="lg"><i class="ring sel"></i>selected</span>
-              <span class="lg"><i class="ring pin"></i>pinned</span>
-              <span class="lg" title="Shift-click or P marks the first end of a
-                    path; the next shift-click or P traces it."><i
-                    class="ring anchor"></i>path anchor</span>
-              <span class="lg" title="The entity an ego focus is centred on
-                    (double-click or Enter)."><i class="ring ego"></i>ego centre</span>
-              <span class="lg" title="Pointing at an entity dims everything
-                    outside its neighbourhood, whatever its confidence.">hover dims the rest</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <span class="lg size-key-lg"><canvas id="size-key" class="size-key"
-                    aria-hidden="true"></canvas><span id="legend-size"
-                    class="muted">area = degree</span></span>
-              <span class="lg muted" title="Confidence encodes as opacity, because hue
-                    is already spent on node type. An entity takes the best
-                    confidence among its ties in this projection, and one with no
-                    tie that meets the filter takes the lowest step. A tie with no
-                    confidence recorded is drawn at full opacity rather than at a
-                    made-up step. The numeric value is in the inspector, so it is
-                    never opacity alone.">opacity = confidence</span>
+              <span class="lg-types">
+                <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
+                <span class="lg" title="An assessed person is drawn with a second
+                      ring inside the first, so it never rests on hue alone."><i
+                      class="swatch dbl hue-actor-person"></i>Person</span>
+                <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
+                <span class="lg" title="A victim is a square in the Group hue: a
+                      target, not a member."><i
+                      class="swatch sq hue-actor-group"></i>Victim</span>
+                <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
+                <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
+                <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
+                <span class="lg" title="Events, incidents, campaigns and places are
+                      diamonds: things that happened, not entities."><i
+                      class="swatch dia hue-context"></i>Context</span>
+              </span>
+              <button id="btn-key" type="button" class="btn ghost small panel-btn"
+                      aria-expanded="false" aria-controls="legend-more">Key</button>
+              <div id="legend-more" class="panel-pop legend-more" role="group"
+                   aria-label="Everything the canvas draws" hidden>
+                <div class="lg-group">
+                  <span class="lg-head">Relationships</span>
+                  <span class="lg"><i class="line pos"></i>vouch / positive</span>
+                  <span class="lg"><i class="line neg"></i>dispute / negative</span>
+                  <span class="lg"><i class="line neu"></i>neutral</span>
+                  <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
+                  <span class="lg" title="Sign is never carried by hue alone: from 120%
+                        zoom a positive tie is marked + at its midpoint and a negative
+                        tie &minus;. The dash pattern cannot carry sign, because solid
+                        versus dashed already means asserted versus inferred.">
+                    <code class="mono">+ / &minus;</code>&nbsp;sign mark (from 120%)</span>
+                </div>
+                <!-- The evidence encoding (docs/06), spelled out rather than left to the checkbox's
+                     hover title. -->
+                <div class="lg-group">
+                  <span class="lg-head">Evidence</span>
+                  <span class="lg" title="An entity with an exhibit behind it has a
+                        filled body and a solid core."><i class="glyph-node"></i>evidenced</span>
+                  <span class="lg" title="Hollow: nothing inside the ring. The entity
+                        rests on no exhibit. Shown while Mark unevidenced is on."><i class="glyph-node hollow"></i>hollow = no exhibit</span>
+                  <span class="lg" title="A hollow bead at a tie's midpoint: the tie
+                        rests on no exhibit. It is a shape, not a fade, because opacity
+                        already means confidence."><i class="line bead"></i>bead = tie with no exhibit</span>
+                </div>
+                <!-- Every ring the canvas draws, each with its own pattern. The dashed ring is drawn
+                     from the Triage queue and from a tie's review, so it clears when the proposal is
+                     dispositioned or the tie reviewed. -->
+                <div class="lg-group">
+                  <span class="lg-head">Rings</span>
+                  <span class="lg" title="A proposal about this entity is waiting in the Triage queue, or a tie at it is still PROPOSED. Accepting, rejecting or deferring the proposal in Triage, or accepting or disputing the tie under Review in the inspector, clears the ring."><i class="ring prop"></i>proposal in Triage or tie to review</span>
+                  <span class="lg"><i class="ring sel"></i>selected</span>
+                  <span class="lg"><i class="ring pin"></i>pinned</span>
+                  <span class="lg" title="Shift-click or P marks the first end of a
+                        path; the next shift-click or P traces it."><i
+                        class="ring anchor"></i>path anchor</span>
+                  <span class="lg" title="The entity an ego focus is centred on
+                        (double-click or Enter)."><i class="ring ego"></i>ego centre</span>
+                  <span class="lg" title="Pointing at an entity dims everything
+                        outside its neighbourhood, whatever its confidence.">hover dims the rest</span>
+                </div>
+                <div class="lg-group">
+                  <span class="lg-head">Size and opacity</span>
+                  <span class="lg size-key-lg"><canvas id="size-key" class="size-key"
+                        aria-hidden="true"></canvas><span id="legend-size"
+                        class="muted">area = degree</span></span>
+                  <span class="lg muted" title="Confidence encodes as opacity, because hue
+                        is already spent on node type. An entity takes the best
+                        confidence among its ties in this projection, and one with no
+                        tie that meets the filter takes the lowest step. A tie with no
+                        confidence recorded is drawn at full opacity rather than at a
+                        made-up step. The numeric value is in the inspector, so it is
+                        never opacity alone.">opacity = confidence</span>
+                </div>
+              </div>
             </div>
             <p id="proj-readout" class="proj-readout" role="status"></p>
             <!-- The keyboard's half as well as the mouse's: a sighted keyboard user never reads
                  the canvas's accessible name, the only other place the keys are listed. -->
-            <p class="canvas-keys">
-              <span class="kbd">drag</span> pan ·
-              <span class="kbd">drag a node</span> move and pin ·
-              <span class="kbd">U</span> pin or unpin ·
-              <span class="kbd">scroll</span> <span class="kbd">+</span> <span class="kbd">&minus;</span> zoom ·
-              <span class="kbd">0</span> fit ·
-              <span class="kbd">click</span> inspect ·
-              <span class="kbd">&larr; &rarr;</span> select ·
-              <span class="kbd">[ ]</span> ties ·
-              <span class="kbd">shift-arrows</span> pan ·
-              <span class="kbd">dbl-click</span> or <span class="kbd">Enter</span> ego ·
-              <span class="kbd">shift-click</span> or <span class="kbd">P</span> path ·
-              <span class="kbd">Esc</span> clear ·
-              <span class="kbd">hold space</span> hide inferred ·
-              <span class="kbd" id="canvas-keys-palette">Ctrl K</span> jump to
-            </p>
+            <button id="btn-keys" type="button" class="btn ghost small panel-btn"
+                    aria-expanded="false" aria-controls="keys-more">Shortcuts</button>
+            <div id="keys-more" class="panel-pop keys-more" role="group"
+                 aria-label="Mouse and keyboard" hidden>
+              <p class="canvas-keys">
+                <span class="kbd">drag</span> pan ·
+                <span class="kbd">drag a node</span> move and pin ·
+                <span class="kbd">U</span> pin or unpin ·
+                <span class="kbd">scroll</span> <span class="kbd">+</span> <span class="kbd">&minus;</span> zoom ·
+                <span class="kbd">0</span> fit ·
+                <span class="kbd">click</span> inspect ·
+                <span class="kbd">&larr; &rarr;</span> select ·
+                <span class="kbd">[ ]</span> ties ·
+                <span class="kbd">shift-arrows</span> pan ·
+                <span class="kbd">dbl-click</span> or <span class="kbd">Enter</span> ego ·
+                <span class="kbd">shift-click</span> or <span class="kbd">P</span> path ·
+                <span class="kbd">Esc</span> clear ·
+                <span class="kbd">hold space</span> hide inferred ·
+                <span class="kbd" id="canvas-keys-palette">Ctrl K</span> jump to
+              </p>
+            </div>
           </div>
         </section>
 
@@ -980,7 +1002,7 @@
               </div>
               <!-- The read-time filter, notifications.readable_predicate, checks clearance,
                    compartments and a live case assignment, so this line names no single one. -->
-              <p class="help">Only notices you can still read are shown.</p>
+              <p class="help fold">Only notices you can still read are shown.</p>
               <!-- "Needs action", not "Unread only": reading an urgent alarm does not stop it
                    escalating, so an unread filter would hide it the moment it was glanced at. -->
               <label class="field inline">
@@ -998,7 +1020,7 @@
 
             <details class="card">
               <summary>Delivery preferences</summary>
-              <p class="help">Quiet hours delay delivery; urgent notices ignore them. Email carries a summary and a link, never the detail.</p>
+              <p class="help fold" data-fold="inline">Quiet hours delay delivery; urgent notices ignore them. Email carries a summary and a link, never the detail.</p>
               <div id="inbox-prefs" class="stack"></div>
               <p id="inbox-prefs-empty" class="empty" hidden>No delivery
                 channel can be set here: in-app notifications are always
@@ -1014,7 +1036,7 @@
 
           <details id="capture-box" class="card capture">
             <summary>Capture text</summary>
-            <p class="help">Paste text to raise suggestions. Nothing enters the graph until you accept it.</p>
+            <p class="help fold">Paste text to raise suggestions. Nothing enters the graph until you accept it.</p>
             <!-- Where a capture here is listed, or why this case takes none: filled by
                  syncCaptureForm in app.js, which toggles the warn class. -->
             <p id="cap-scope" class="msg" role="status" hidden></p>
@@ -1060,7 +1082,7 @@
 
           <!-- Says what the keys do and where they act: only inside the list, A asks first, and
                the ? sheet can turn them off. -->
-          <p class="help"><kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer. The keys work when the list has focus.</p>
+          <p class="help fold"><kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer. The keys work when the list has focus.</p>
 
           <p id="triage-last" class="msg" role="status" hidden></p>
           <div id="triage-list" class="triage-list" role="group" tabindex="0"
@@ -1073,7 +1095,7 @@
           <!-- DUAL CONTROL: the approvals "Open approvals" leads to. A merge on a dual-control case
                needs an approval_request_id, which is obtained here. -->
           <h3 class="h3">Dual control: approvals</h3>
-          <p class="help">A second signature for operations this case has put behind one. <strong>You cannot decide your own request.</strong></p>
+          <p class="help fold">A second signature for operations this case has put behind one. <strong>You cannot decide your own request.</strong></p>
           <!-- The case's merge switch, where the approvals it produces are listed. Turning it on is
                one signature; turning it off takes a second Lead investigator on the case, through a
                case.policy.relax request raised here. Governance, so it stays live on a closed
@@ -1212,7 +1234,7 @@
             </div>
 
             <h3 id="an-hist-head" class="h3" tabindex="-1">Trend: one entity across past runs</h3>
-            <p class="help">A run with no value for this entity does not appear here at all, so a straight line can span a gap.</p>
+            <p class="help fold">A run with no value for this entity does not appear here at all, so a straight line can span a gap.</p>
             <div class="pane-head">
               <label class="field inline">
                 <span class="label">Metric</span>
@@ -1312,9 +1334,11 @@
         <!-- EVIDENCE -->
         <section id="pane-evidence" class="pane" role="tabpanel"
                  aria-labelledby="tab-evidence" tabindex="-1" hidden>
-          <form id="ev-form" class="card row-form" novalidate>
+          <details id="ev-box" class="card capture">
+            <summary>Upload an exhibit</summary>
+          <form id="ev-form" class="row-form" novalidate>
             <label class="field">
-              <span class="label">Exhibit file</span>
+              <span id="ev-file-label" class="label">Exhibit file</span>
               <input id="ev-file" type="file" required>
             </label>
             <label class="field">
@@ -1360,7 +1384,8 @@
             <p id="ev-error" class="form-error" role="alert" hidden></p>
             <p id="ev-result" class="form-ok" role="status" hidden></p>
           </form>
-          <p id="ev-cap" class="help" hidden></p>
+          <p id="ev-cap" class="help fold" data-tip-for="ev-file-label" hidden></p>
+          </details>
           <!-- The register's own controls: a count that says how many there are, a filter, and
                the exhibits nothing rests on. -->
           <form id="ev-find" class="row ev-find" role="search" novalidate>
@@ -1419,7 +1444,7 @@
             </fieldset>
             <button type="submit" class="btn primary">Search</button>
           </form>
-          <p id="search-help" class="help search-help">Search entities, selectors, exhibits, claims and documents. Enter three or more characters, and add a type to narrow it, as in ICQ: 123456789.</p>
+          <p id="search-help" class="help search-help fold" data-fold="inline">Search entities, selectors, exhibits, claims and documents. Enter three or more characters, and add a type to narrow it, as in ICQ: 123456789.</p>
           <!-- What the similarity modes do, filled in by paintSearchModes with where the model
                is. -->
           <p id="search-similar-help" class="help search-help" hidden></p>
@@ -1447,7 +1472,7 @@
                its own under the columns. -->
           <div class="search-deception">
             <h3 class="h-sm">Deception records</h3>
-            <p class="help">Matches hosts, addresses and URLs in captures, messages and calls.</p>
+            <p class="help fold">Matches hosts, addresses and URLs in captures, messages and calls.</p>
             <div id="search-deception" class="hit-list"></div>
           </div>
         </section>
@@ -1461,12 +1486,12 @@
                tell why two observations did or did not correlate. -->
           <form id="comms-bind-form" class="card stack narrow" novalidate>
             <h2 class="h-sm">Record a channel</h2>
-            <p class="hint">Record an identifier as a claim. Confirm it under Verification.</p>
+            <p class="hint fold">Record an identifier as a claim. Confirm it under Verification.</p>
             <label class="field">
               <span class="label">Platform</span>
               <select id="comms-platform" required></select>
             </label>
-            <p id="comms-platform-note" class="hint mono-sm" hidden></p>
+            <p id="comms-platform-note" class="hint mono-sm fold" hidden></p>
             <p id="comms-platform-coverage" class="hint warn" hidden></p>
             <label class="field">
               <span class="label">Identifier as observed</span>
@@ -1514,7 +1539,7 @@
           <!-- Contact block parser -->
           <form id="comms-block-form" class="card stack" novalidate>
             <h2 class="h-sm">Parse a contact block</h2>
-            <p class="hint">Third-party identifiers are flagged, not attributed to the publisher.</p>
+            <p class="hint fold">Third-party identifiers are flagged, not attributed to the publisher.</p>
             <label class="field">
               <span class="label">Where it was published</span>
               <input id="comms-block-source" type="text" required
@@ -1539,7 +1564,7 @@
                comms-pgpkey- because the Feeds pane already uses key-*. -->
           <section id="comms-pgpkey" class="stack">
             <h2 class="h-sm">Vendor keys</h2>
-            <p class="help">Record where the key came from. Nothing is confirmed when it is added.</p>
+            <p class="help fold">Record where the key came from. Nothing is confirmed when it is added.</p>
             <form id="comms-pgpkey-form" class="card stack" novalidate>
               <fieldset class="pgp-choice">
                 <legend class="label">Where the key comes from</legend>
@@ -1617,7 +1642,7 @@
                an unchecked claim never reads as a checked-and-rejected one. -->
           <form id="comms-pgp-form" class="card stack" novalidate>
             <h2 class="h-sm">Verify a signature</h2>
-            <p class="help">A valid signature from a key named in a contact block is evidence of control.</p>
+            <p class="help fold">A valid signature from a key named in a contact block is evidence of control.</p>
             <!-- The claim a check confirms, when one was chosen from the queue below. -->
             <p id="comms-pgp-binding" class="hint pgp-binding" hidden>
               <span id="comms-pgp-binding-text"></span>
@@ -1657,7 +1682,7 @@
                 <span class="label">Or the signed file itself</span>
                 <input id="comms-pgp-data-file" type="file">
               </label>
-              <p class="hint">Upload the signed file if you have it: a pasted copy can break the signature.</p>
+              <p class="hint fold">Upload the signed file if you have it: a pasted copy can break the signature.</p>
             </div>
             <label class="field">
               <span class="label">Key</span>
@@ -1704,7 +1729,7 @@
             Recorded checks load when you ask for them.</p>
 
           <h2 class="h-sm">Awaiting verification</h2>
-          <p class="help">Bindings still at CLAIMED.</p>
+          <p class="help fold">Bindings still at CLAIMED.</p>
           <div class="pane-head">
             <button id="comms-unverified-refresh" type="button" class="btn">
               Refresh</button>
@@ -1717,7 +1742,7 @@
           <!-- Co-participation. An INFERRED tie, and invariant 4 says an
                inferred edge stays visually and structurally distinct. -->
           <h2 class="h-sm">Co-participation</h2>
-          <p class="help">Inferred from shared rooms, weighted by room size.</p>
+          <p class="help fold">Inferred from shared rooms, weighted by room size.</p>
           <div class="pane-head">
             <button id="comms-copart-refresh" type="button" class="btn">
               Load</button>
@@ -1763,7 +1788,7 @@
             <!-- Named for what fills it: this list is the collector's polls, while the Ingest
                  queue is partner feeds. -->
             <h3 class="h3">Watch hits: what this case's polls matched</h3>
-            <p class="help">Hits on this case's watches, unacknowledged first.</p>
+            <p class="help fold">Hits on this case's watches, unacknowledged first.</p>
             <div class="pane-head">
               <label class="field inline check">
                 <input id="col-hits-unack" type="checkbox">
@@ -1779,7 +1804,7 @@
 
             <!-- F53 (2026-10-08): the watches themselves, and the way to make one. -->
             <h3 class="h3">Watches: what this case's polls look for</h3>
-            <p class="help">A watch checks every item a source returns for your keywords, selectors and patterns.</p>
+            <p class="help fold">A watch checks every item a source returns for your keywords, selectors and patterns.</p>
             <div class="pane-head">
               <button id="col-watch-refresh" type="button" class="btn">
                 Load</button>
@@ -1852,7 +1877,7 @@
             </details>
 
             <h3 class="h3">Collected documents</h3>
-            <p class="help">Documents from every source, not only this case.</p>
+            <p class="help fold">Documents from every source, not only this case.</p>
             <div class="pane-head">
               <label class="field inline">
                 <span class="label">Triage</span>
@@ -1905,7 +1930,7 @@
                       title="Score every record in this case's queue again. Do this after a watch's selectors change: a record scores only against the selectors that existed when it was scored.">Rescore all</button>
               <span id="ing-counts" class="muted small"></span>
             </div>
-            <p class="help">Duplicates are folded into one row: a resend, not a second source. Open shows metadata and shape, never values.</p>
+            <p class="help fold">Duplicates are folded into one row: a resend, not a second source. Open shows metadata and shape, never values.</p>
             <p id="ing-flash" class="form-ok" role="status" hidden></p>
             <div id="ing-list"></div>
             <p id="ing-empty" class="empty" hidden>Nothing in the queue for this case.</p>
@@ -1914,7 +1939,7 @@
 
             <details id="ing-quarantine-box" class="card" hidden>
               <summary>Quarantine: material attached to no case</summary>
-              <p class="help">Records not attached to any case. Attach one to put it under a case's authority.</p>
+              <p class="help fold">Records not attached to any case. Attach one to put it under a case's authority.</p>
               <div id="ing-quarantine-list"></div>
               <p id="ing-quarantine-empty" class="empty" hidden>Nothing unattached.</p>
             </details>
@@ -1922,7 +1947,7 @@
 
           <!-- DEAD LETTERS -->
           <div id="feeds-dead" class="subpane" hidden>
-            <p class="help">Records that could not be parsed are kept here, never dropped.</p>
+            <p class="help fold">Records that could not be parsed are kept here, never dropped.</p>
             <!-- A fragment that parses goes through ingest.redact_structure and keeps each value's
                  type and length; one that does not goes through redact_text, which masks it line
                  by line with no types or lengths. -->
@@ -1952,18 +1977,18 @@
 
           <!-- COLLECTION SOURCES -->
           <div id="feeds-sources" class="subpane" hidden>
-            <p class="help">Nothing polls on its own. Use Poll now.</p>
+            <p class="help fold">Nothing polls on its own. Use Poll now.</p>
             <div class="pane-head">
               <button id="src-refresh" type="button" class="btn">Refresh</button>
               <span id="src-counts" class="muted small"></span>
             </div>
             <h2 class="h-sm">Unhealthy</h2>
-            <p class="help">Consecutive failures often mean the site changed its markup.</p>
+            <p class="help fold">Consecutive failures often mean the site changed its markup.</p>
             <div id="src-unhealthy"></div>
             <p id="src-unhealthy-empty" class="empty" hidden>Every source is healthy.</p>
 
             <h2 class="h-sm">Never polled</h2>
-            <p class="help">Added but never polled.</p>
+            <p class="help fold">Added but never polled.</p>
             <div id="src-never"></div>
             <p id="src-never-empty" class="empty" hidden>Every source has been polled.</p>
 
@@ -1981,7 +2006,7 @@
             <!-- Sources: what the collector leaves alone until a person acts. Not polled, not
                  rescheduled, not a failure. -->
             <h2 class="h-sm">Waiting on a person</h2>
-            <p class="help">Waiting on a person: a ceiling to declare, a persona to replace or an authority to confirm. Not polled.</p>
+            <p class="help fold">Waiting on a person: a ceiling to declare, a persona to replace or an authority to confirm. Not polled.</p>
             <div id="src-held"></div>
             <p id="src-held-empty" class="empty" hidden>Nothing is waiting on a person.</p>
 
@@ -2074,7 +2099,7 @@
                 <button id="src-add-btn" type="submit" class="btn primary">
                   Add source</button>
               </form>
-              <p class="help">Read only once the ceiling and an authority are in place.</p>
+              <p class="help fold" data-fold="inline">Read only once the ceiling and an authority are in place.</p>
               <p id="src-add-forum-help" class="help" hidden
                  data-hint-xenforo="https://board.example.test/threads/name.123/"
                  data-hint-mybb="https://board.example.test/showthread.php?tid=12">A public XenForo or MyBB thread or board, read without signing in: the forum sees NocTORnal-collector in its access logs, from the egress profile, never from this server. MyBB boards need their time zone and date formats, or no posting time is stored.</p>
@@ -2089,7 +2114,7 @@
                  second person has confirmed it under the persona's
                  authority. -->
             <h2 class="h-sm">Telegram chats</h2>
-            <p class="help">Each chat is read by one persona under a confirmed authority. Nothing is sent or marked read.</p>
+            <p class="help fold">Each chat is read by one persona under a confirmed authority. Nothing is sent or marked read.</p>
             <p id="src-tg-off" class="help warn" hidden></p>
             <details id="src-tg-box" class="card" hidden>
               <summary>Add a chat</summary>
@@ -2197,7 +2222,7 @@
                     <input id="sp-tg-syslang" type="text" maxlength="16"
                            autocomplete="off" spellcheck="false" placeholder="en-GB">
                   </label>
-                  <p class="help">The device this persona presents to Telegram. Keep it for the life of the persona.</p>
+                  <p class="help fold">The device this persona presents to Telegram. Keep it for the life of the persona.</p>
                 </fieldset>
                 <label class="field">
                   <span class="label">Language</span>
@@ -2229,7 +2254,7 @@
             <!-- Persona acts: what you asked a persona to do, run by the collector, the one process
                  that holds the persona key. -->
             <h2 class="h-sm">Persona acts</h2>
-            <p class="help">Persona actions you asked for, with their outcome. An act the collector has not started in time (fifteen minutes, unless your operator set another limit) is not run.</p>
+            <p class="help fold">Persona actions you asked for, with their outcome. An act the collector has not started in time (fifteen minutes, unless your operator set another limit) is not run.</p>
             <div id="src-acts"></div>
             <p id="src-acts-empty" class="empty" hidden>You have asked for no persona act.</p>
 
@@ -2306,7 +2331,7 @@
                 <button id="sa-btn" type="submit" class="btn primary">
                   Record authority</button>
               </form>
-              <p class="help">The reference an auditor would look up. A security officer confirms it before any source is read.</p>
+              <p class="help fold">The reference an auditor would look up. A security officer confirms it before any source is read.</p>
               <p id="sa-error" class="form-error" role="alert" hidden></p>
               <p id="sa-ok" class="form-ok" role="status" hidden></p>
             </details>
@@ -2320,7 +2345,7 @@
 
           <!-- INGEST KEYS -->
           <div id="feeds-keys" class="subpane" hidden>
-            <p class="help">Keys can submit records but read nothing back.</p>
+            <p class="help fold">Keys can submit records but read nothing back.</p>
             <div class="pane-head">
               <label class="field inline check">
                 <input id="key-revoked" type="checkbox">
@@ -2437,7 +2462,7 @@
                  (routers/ach.py), never typed-in text. -->
             <details class="card" id="ach-score-card">
               <summary>Score an assertion</summary>
-              <p class="help">Select an entity or tie on the graph, load its assertions here, then score them against each hypothesis.</p>
+              <p class="help fold">Select an entity or tie on the graph, load its assertions here, then score them against each hypothesis.</p>
               <div class="pane-head">
                 <button id="ach-evidence-load" type="button" class="btn">
                   Load assertions of the selected element</button>
@@ -2485,7 +2510,7 @@
           <div id="ach-assumptions" class="subpane" hidden>
             <div class="card">
               <h2 class="h-sm">What this analysis takes for granted</h2>
-              <p class="help">Things the case rests on that nobody has evidenced.</p>
+              <p class="help fold">Things the case rests on that nobody has evidenced.</p>
               <form id="asm-create" class="row-form" novalidate>
                 <label class="field grow">
                   <span class="label">Assumption</span>
@@ -2538,7 +2563,7 @@
               Prepare</button>
           </div>
 
-          <p class="help">Nothing above the target classification is read.</p>
+          <p class="help fold" data-fold="inline">Nothing above the target classification is read.</p>
 
           <p id="rep-msg" class="msg" hidden></p>
           <p id="rep-empty" class="empty">Nothing prepared yet. Choose a level and press Prepare.</p>
@@ -2618,7 +2643,7 @@
                lookup that sends case material to a vendor or the public waits for a named second
                person to sign it off here. -->
           <div id="gov-lookups" class="subpane" hidden>
-            <p class="help">Lookups waiting for sign-off. Answers become suggestions in Triage.</p>
+            <p class="help fold">Lookups waiting for sign-off. Answers become suggestions in Triage.</p>
             <p id="lk-msg" class="msg" role="status" hidden></p>
             <h2 class="h-sm">Waiting for your sign-off</h2>
             <div id="lk-signoff" class="stack"></div>
@@ -2652,7 +2677,7 @@
                people who hold cases, not a case surface. -->
           <div id="gov-audit" class="subpane" hidden>
             <h2 class="h-sm">Tamper evidence</h2>
-            <p class="help">Re-computes the audit log's hash chain to check it is intact.</p>
+            <p class="help fold">Re-computes the audit log's hash chain to check it is intact.</p>
             <div class="row audit-actions">
               <button id="btn-audit-verify" type="button" class="btn">
                 Verify the chain
@@ -2664,7 +2689,7 @@
             <!-- The other tamper-evident ledger: core.evidence_custody is hash-chained (migration
                  0024), and it is the record produced to a court, so it is recomputed here too. -->
             <h2 class="h-sm">Chain of custody</h2>
-            <p class="help">Checks the custody ledger. Leave the exhibit blank to check every exhibit.</p>
+            <p class="help fold">Checks the custody ledger. Leave the exhibit blank to check every exhibit.</p>
             <label class="field">
               <span class="label">Exhibit id (optional)</span>
               <input id="custody-evidence-id" type="text" class="mono"
@@ -2683,7 +2708,7 @@
           <!-- RETENTION -->
           <div id="gov-retention" class="subpane">
             <h2 class="h-sm">Rules <span class="chip">deployment-wide</span></h2>
-            <p class="help">Periods for material about people who are not under investigation, in every case. Unconfirmed rules use the shipped default.</p>
+            <p class="help fold">Periods for material about people who are not under investigation, in every case. Unconfirmed rules use the shipped default.</p>
             <div id="ret-rules"></div>
             <p id="ret-rules-notice" class="help warn" hidden></p>
 
@@ -2708,11 +2733,11 @@
                 Confirm rule</button>
             </form>
             <p id="ret-cat-state" class="help"></p>
-            <p class="help">A confirmed period applies to material ingested from now on.</p>
+            <p class="help fold" data-fold="inline">A confirmed period applies to material ingested from now on.</p>
             <p id="ret-confirm-msg" class="msg" hidden></p>
 
             <h2 class="h-sm">Due for destruction</h2>
-            <p class="help">This case's material nearing the end of retention, soonest first. A legal hold keeps anything it covers.</p>
+            <p class="help fold">This case's material nearing the end of retention, soonest first. A legal hold keeps anything it covers.</p>
             <!-- Forward, and by name: the case's own clocks are stated first, the window looks
                  ahead so an item appears before it becomes destroyable, and each row names its
                  exhibit or its category. -->
@@ -2772,7 +2797,7 @@
 
           <!-- TOMBSTONES -->
           <div id="gov-tombstones" class="subpane" hidden>
-            <p class="help">What was destroyed, by whom and under whose authority.</p>
+            <p class="help fold">What was destroyed, by whom and under whose authority.</p>
             <div class="pane-head">
               <button id="tomb-refresh" type="button" class="btn">Refresh</button>
               <span id="tomb-counts" class="muted small"></span>
@@ -2969,7 +2994,7 @@
 
           <!-- The compartment registry. A user's read-ins are set on their card under Accounts. -->
           <div id="adm-compartments" class="subpane adm-section" hidden>
-            <p class="help">A need-to-know lock on a case. Only accounts read into it can open the case.</p>
+            <p class="help fold">A need-to-know lock on a case. Only accounts read into it can open the case.</p>
             <form id="adm-comp-form" class="card row-form" novalidate>
               <label class="field">
                 <span class="label">Key</span>
@@ -3005,7 +3030,7 @@
                not an administrator countersigns, and the administrator applies it. -->
           <div id="adm-dual" class="subpane adm-section" hidden>
             <div id="dual-body" class="stack">
-              <p class="help">Which acts need two different people. Keep case details out of justifications: security officers hold no case access.</p>
+              <p class="help fold">Which acts need two different people. Keep case details out of justifications: security officers hold no case access.</p>
               <p id="dual-say" class="sr-only" role="status" aria-live="polite"></p>
               <p id="dual-refused" class="empty refused" hidden></p>
               <button id="dual-signin" type="button" class="btn" hidden>Sign in again</button>
@@ -3062,7 +3087,7 @@
                An exit's address and credentials are sealed for the proxy and never shown again,
                so no field here is ever filled from the server. -->
           <div id="adm-egress" class="subpane adm-section" hidden>
-            <p class="help">Where anything may leave this deployment. Changes need a recent sign-in and are audited. Widening a profile suspends earlier collection authorities until reconfirmed.</p>
+            <p class="help fold">Where anything may leave this deployment. Changes need a recent sign-in and are audited. Widening a profile suspends earlier collection authorities until reconfirmed.</p>
             <p id="egr-say" class="sr-only" role="status" aria-live="polite"></p>
             <p id="egr-refused" class="empty refused" hidden></p>
             <button id="egr-signin" type="button" class="btn" hidden>Sign in again</button>
@@ -3156,7 +3181,7 @@
             <p id="egr-prof-hidden" class="help" hidden></p>
 
             <h2 class="h-sm">Integration routes</h2>
-            <p class="help">Each route names the one host and port an integration may use. No wildcards.</p>
+            <p class="help fold">Each route names the one host and port an integration may use. No wildcards.</p>
             <details id="egr-route-box" class="card adm-create" hidden>
               <summary class="adm-create-sum">Add a route</summary>
               <form id="egr-route-form" class="stack" novalidate>
@@ -3190,7 +3215,7 @@
             </details>
 
             <h2 class="h-sm">Connection log</h2>
-            <p class="help">What the egress proxy allowed and refused, newest first. Rows you are not cleared to see are counted over the whole log, not shown.</p>
+            <p class="help fold">What the egress proxy allowed and refused, newest first. Rows you are not cleared to see are counted over the whole log, not shown.</p>
             <div class="row-form egr-log-controls">
               <label class="field">
                 <span class="label">Route</span>
@@ -3221,7 +3246,7 @@
                administrator's own labels and only with collected-document access; sizes are in the
                embed-pass log, not here. -->
           <div id="adm-embeddings" class="subpane adm-section" hidden>
-            <p class="help">Similar wording runs on this host. Similar meaning uses the model server, if one is configured. Times are UTC.</p>
+            <p class="help fold">Similar wording runs on this host. Similar meaning uses the model server, if one is configured. Times are UTC.</p>
             <p id="emb-say" class="sr-only" role="status" aria-live="polite"></p>
             <p id="emb-refused" class="empty refused" hidden></p>
             <div class="emb-cards">
@@ -3268,7 +3293,7 @@
           <!-- Administration, Integrations: what tried to leave, where it went, why it did not,
                and whether anything is draining; the Jira destination; the delivery ledger. -->
           <div id="adm-integrations" class="subpane adm-section" hidden>
-            <p class="help">Every channel that can carry a notification out. A channel without an allowed route is held.</p>
+            <p class="help fold">Every channel that can carry a notification out. A channel without an allowed route is held.</p>
             <p id="int-msg" class="msg" role="status" hidden></p>
             <div id="int-channels" class="int-channels"></div>
             <section id="int-outbox" class="card int-outbox" aria-labelledby="int-outbox-title">
@@ -3281,7 +3306,7 @@
             </section>
             <section id="int-retry" class="card" aria-labelledby="int-retry-title">
               <h2 id="int-retry-title" class="h-sm">Retry failed deliveries</h2>
-              <p class="help">Retry the failed deliveries of one channel (up to 30 days and 1,000 rows).</p>
+              <p class="help fold">Retry the failed deliveries of one channel (up to 30 days and 1,000 rows).</p>
               <div class="row-form">
                 <label class="field">
                   <span class="label">Channel</span>
@@ -3399,7 +3424,7 @@
               <p id="jira-msg" class="msg" role="status" hidden></p>
               <details id="jira-links-box">
                 <summary>Issues NocTORnal raised</summary>
-                <p class="help">Find the Jira issues raised about a case by its id.</p>
+                <p class="help fold">Find the Jira issues raised about a case by its id.</p>
                 <div class="row-form">
                   <label class="field grow">
                     <span class="label">Case id</span>
@@ -3415,7 +3440,7 @@
             </section>
             <section class="card" aria-labelledby="dlv-title">
               <h2 id="dlv-title" class="h-sm">Delivery ledger</h2>
-              <p class="help">Every attempt to send a notification out, newest first. Webhook paths are withheld.</p>
+              <p class="help fold">Every attempt to send a notification out, newest first. Webhook paths are withheld.</p>
               <div class="row-form">
                 <label class="field">
                   <span class="label">Channel</span>
@@ -3462,7 +3487,7 @@
           <!-- Administration, Providers: the services a case selector may be sent to, their sealed
                keys, the route each leaves by, and their exposure. -->
           <div id="adm-providers" class="subpane adm-section" hidden>
-            <p class="help">Services this deployment may send selectors to. Nothing is sent unless lookups are on and the provider is enabled.</p>
+            <p class="help fold">Services this deployment may send selectors to. Nothing is sent unless lookups are on and the provider is enabled.</p>
             <p id="prv-switch" class="msg warn" hidden></p>
             <p id="prv-msg" class="msg" role="status" hidden></p>
             <div id="prv-list" class="stack"></div>
@@ -3522,7 +3547,7 @@
                   <span class="label">Why this exposure is right</span>
                   <textarea id="prv-basis" rows="2"></textarea>
                 </label>
-                <p class="help">Lowering a provider's exposure needs a second administrator's approval.</p>
+                <p class="help fold" data-fold="inline">Lowering a provider's exposure needs a second administrator's approval.</p>
                 <div class="setup-actions">
                   <button id="prv-create-btn" type="submit" class="btn primary">Register</button>
                 </div>
@@ -3689,7 +3714,7 @@
               <button id="rul-refresh" type="button" class="btn">Refresh</button>
               <span id="rul-counts" class="muted small"></span>
             </div>
-            <p class="help">Rule sets the lab scans with. A Security Officer who did not sponsor a set activates it.</p>
+            <p class="help fold">Rule sets the lab scans with. A Security Officer who did not sponsor a set activates it.</p>
             <p id="rul-engine" class="help"></p>
             <div id="rul-forms"></div>
             <div id="rul-list" class="rows"></div>
@@ -3722,7 +3747,7 @@
                 Refresh</button>
               <span id="dcp-cap-counts" class="muted small"></span>
             </div>
-            <p class="help">Record the whole fetch, not just a screenshot. URLs are defanged and not clickable.</p>
+            <p class="help fold">Record the whole fetch, not just a screenshot. URLs are defanged and not clickable.</p>
             <!-- Recorded from what somebody else captured (the victim, an analyst's own upload, a
                  passive feed); an ACTIVE fetch is the collection tooling's, with the egress profile
                  the table requires. -->
@@ -3844,7 +3869,7 @@
                 Refresh</button>
               <span id="dcp-eml-counts" class="muted small"></span>
             </div>
-            <p class="help">Message bodies are never rendered. Only plain text is shown, with URLs defanged.</p>
+            <p class="help fold" data-fold="inline">Message bodies are never rendered. Only plain text is shown, with URLs defanged.</p>
             <!-- The .eml upload. The file is kept as a hostile exhibit, write once, and its headers
                  are parsed from that exhibit. -->
             <details id="dcp-eml-new" class="card ingest-form">
@@ -3872,7 +3897,7 @@
                   <span class="label">Classification</span>
                   <select id="dcp-emlf-class" class="select"></select>
                 </label>
-                <p class="help">Kept as uploaded and never rendered.</p>
+                <p class="help fold" data-fold="inline">Kept as uploaded and never rendered.</p>
                 <p id="dcp-emlf-msg" class="msg" hidden></p>
                 <button id="dcp-emlf-save" type="button" class="btn primary">Upload the message</button>
               </div>
@@ -3898,7 +3923,7 @@
                 Refresh</button>
               <span id="dcp-call-counts" class="muted small"></span>
             </div>
-            <p class="help">The number shown to the victim is kept apart from what the network recorded, and never becomes a selector.</p>
+            <p class="help fold">The number shown to the victim is kept apart from what the network recorded, and never becomes a selector.</p>
             <!-- Record a call. What the victim saw and what the network recorded are separate
                  groups here, as on the row, so a presented number is never typed where a network
                  field goes without the form saying which is which. -->
@@ -4058,7 +4083,7 @@
                  aria-labelledby="tab-add-node" tabindex="-1" hidden>
           <form id="node-form" class="card stack narrow" novalidate>
             <h2 class="h-sm">Add entity</h2>
-            <p class="help assertion-note">Record a claim with its source and grade.</p>
+            <p class="help assertion-note fold">Record a claim with its source and grade.</p>
             <label class="field">
               <span class="label">Entity type</span>
               <select id="node-type" class="select" required></select>
@@ -4178,7 +4203,7 @@
                  aria-labelledby="tab-add-edge" tabindex="-1" hidden>
           <form id="edge-form" class="card stack narrow" novalidate>
             <h2 class="h-sm">Add link</h2>
-            <p class="help">Record one relationship between two entities.</p>
+            <p class="help fold">Record one relationship between two entities.</p>
             <!-- Each endpoint has a filter box over a select grouped by type, and both open
                  unchosen rather than on the same entity. -->
             <div class="row">
@@ -4431,7 +4456,7 @@
               <button id="claim-open" type="button" class="btn ghost small"
                       aria-expanded="false" aria-controls="claim-form">Add a claim about this tie…</button>
               <form id="claim-form" class="stack" novalidate hidden>
-                <p class="help">Add another source or grade for this tie. The tie takes its highest live grade.</p>
+                <p class="help fold">Add another source or grade for this tie. The tie takes its highest live grade.</p>
                 <div class="row">
                   <label class="field">
                     <span class="label">Basis</span>
@@ -4537,7 +4562,7 @@
             <div id="insp-metrics" class="metric-grid"></div>
             <p id="insp-metrics-dyad" class="metric-note" hidden></p>
             <p id="insp-metrics-proj" class="assert-meta"></p>
-            <p class="help">Local measures for this entity. Run Analysis for brokerage.</p>
+            <p class="help fold">Local measures for this entity. Run Analysis for brokerage.</p>
             <!-- This entity's brokerage from the run on the Analysis pane, and the way there.
                  Filled by renderInspectorAnalysis. -->
             <p id="insp-an-brief" class="help"></p>
@@ -4567,7 +4592,7 @@
               <span class="label">Merge this entity into</span>
               <select id="merge-target" class="select"></select>
             </label>
-            <p class="help">This entity is folded into the one you choose. Same type only. It can be reversed.</p>
+            <p class="help fold">This entity is folded into the one you choose. Same type only. It can be reversed.</p>
             <button id="merge-run" type="button" class="btn small">Merge</button>
             <p id="merge-error" class="form-error" role="alert" hidden></p>
             <div id="merge-history" class="insp-list"></div>
@@ -4646,7 +4671,7 @@
   <div class="palette share-sheet" role="dialog" aria-modal="true"
        aria-labelledby="share-title">
     <h2 id="share-title" class="h-sm">Who is on this case</h2>
-    <p class="help">People assigned to this case, and whether their access works.</p>
+    <p class="help fold">People assigned to this case, and whether their access works.</p>
     <div id="share-roster" class="share-roster"></div>
     <p id="share-roster-msg" class="msg" hidden></p>
     <form id="share-form" class="share-form" novalidate>
@@ -4901,7 +4926,7 @@
       <span>Single-letter triage keys (J, K, A, R, D). They act only while
         the triage list has the focus.</span>
     </label>
-    <p class="help">The triage keys act only when the list has focus. Accept asks for confirmation; reject and defer ask for a reason.</p>
+    <p class="help fold">The triage keys act only when the list has focus. Accept asks for confirmation; reject and defer ask for a reason.</p>
     <button id="keys-close" type="button" class="btn">Close</button>
   </div>
 </div>

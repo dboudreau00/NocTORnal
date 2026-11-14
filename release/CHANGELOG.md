@@ -1,5 +1,50 @@
 # Changelog
 
+## Beta 1.5c: 2026-11-13
+
+A console release on Beta 1.5b, still version 0.9.5. It changes how the console
+looks and how much it says at first glance, and nothing else: no migration, no
+setting and no change to the API. It has not been audited, and it is still not
+lawful to operate against real material until docs/16 L1 to L5 are settled outside
+this codebase. Legal review is required before any active case load.
+
+- **The sociogram has a stage.** The flat black ground is a deep navy lit from the
+  middle and drawn back to the darkest tone at its edges, with a lattice of faint
+  dots that moves with pan and zoom. Each entity has a soft halo in its own hue
+  behind a body lit from its upper left, labels sit on small rounded plates, and
+  the selection glows. A view of up to 1,200 entities gets all of it and a larger
+  one is drawn flat; on the development machine a frame paints in about 8 ms at
+  1,200 entities, and at 3,000 drawn flat. What the marks mean has not moved: opacity is
+  confidence, dashed is inferred, hollow is no exhibit, and the contrast floors are
+  measured against the brightest point of the ground.
+- **One row under the canvas.** The rows of legend, hints and keys are one row: the
+  entity types, a **Key** button that opens every other mark and the size key, the
+  count of what is drawn, and a **Shortcuts** button. How the view is cut is behind
+  an **i** beside the count.
+- **What a pane says once is behind an "i".** About sixty-five help lines sit behind
+  a small **i** on the heading they explain, or a quiet **About this** where there
+  is no heading. The **i** opens on hover or keyboard focus and stays open on a
+  press; Esc, a scroll or a press elsewhere closes it, and a screen reader reads the
+  words as the button's description. A warning, a refusal or a consequence is never
+  folded, and a test fails if one is.
+- **Smaller trims.** The Evidence upload is a disclosure, open by itself while the
+  case has no exhibit. A retention rule's rationale and a failing blocker's pointer
+  to the red box sit behind the row's **i**, and the Add link form no longer repeats
+  its placeholders under the pickers.
+- **The README screenshots and the manual's figures were re-shot**, the manual says
+  where the key, the shortcuts and the **i** are, and the keyboard map figure shows
+  the keyboard map; it showed the canvas before.
+
+8446 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12895 and skipped 0.
+
+### Upgrading from Beta 1.5b
+
+Nothing to migrate and no setting to add. `git pull`, then restart the API through
+`scripts/launch.*`, or on the production stack run
+`sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build`.
+The console's files are served with `Cache-Control: no-cache`, so the next page load
+in the browser fetches the new ones.
+
 ## Beta 1.5b: 2026-10-30
 
 A fix round on Beta 1.5, still version 0.9.5. It fixes the findings Beta 1.5 listed

@@ -566,11 +566,11 @@ def test_the_projection_bar_holds_controls_and_the_canvas_holds_its_own():
         assert f'id="{button}"' not in bar, f"{button} is back in the projection bar"
         wrap = _between('<div class="canvas-wrap">', "<!-- THE SIGNATURE ELEMENT", html)
         assert f'id="{button}"' in wrap, f"{button} is not on the canvas"
-    # The preset's gloss is behind a disclosure, and the metric note that
+    # The preset's gloss is behind an "i", and the metric note that
     # restated the chosen metric is gone: a size that is NOT the chosen
     # metric is said on the canvas, where it costs no height.
-    assert '<p id="preset-desc" class="proj-desc" hidden>' in bar
-    assert 'aria-controls="preset-desc"' in bar and 'aria-expanded="false"' in bar
+    assert '<p id="preset-desc" class="proj-desc tip-src">' in bar
+    assert 'data-tip-from="preset-desc"' in bar and 'aria-describedby="preset-desc"' in bar
     assert 'id="metric-note"' not in _html()
     assert "state.metricsNote = 'size = '" not in _js(), (
         "the note restates the chosen metric again")
@@ -609,7 +609,7 @@ def test_the_zoom_level_and_its_controls_are_on_the_canvas():
     for cap in ('<span class="kbd">+</span>', '<span class="kbd">&minus;</span>',
                 '<span class="kbd">0</span>', '<span class="kbd">&larr; &rarr;</span>',
                 '<span class="kbd">Enter</span>', '<span class="kbd">P</span>'):
-        assert cap in keys, f"the hint strip omits {cap}"
+        assert cap in keys, f"the Shortcuts panel omits {cap}"
 
 
 def test_the_warnings_are_on_the_canvas_and_the_readout_is_words():
@@ -635,6 +635,7 @@ const box = { kids: [], appendChild(n) { this.kids.push(n); } };
 function $() { return box; }
 function clear(b) { b.kids = []; }
 function el(tag, cls, text) { return { tag, text }; }
+function infoTip(text) { return { tag: 'tip', text }; }
 function countOf(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
 function fmtTime(t) { return t; }
 function num(v) { return String(v); }
@@ -645,7 +646,8 @@ const state = { projMeta: { include_inferred: true }, proj: { include_inferred: 
                 preset: 'all', min_confidence: 'LOW' }, nodes: [], graph: { nodes: [], links: [] },
                 metrics: null };
 """ + _fn("renderReadout") + r"""
-const line = () => { renderReadout(); return box.kids[0].text; };
+// what is drawn is in view and the rest is behind the "i": both are said
+const line = () => { renderReadout(); return box.kids.map((k) => k.text).join(' | '); };
 const out = { empty: line() };
 state.metrics = { node_count: 0, density: 0 };
 out.emptyWithMetrics = line();
@@ -684,7 +686,7 @@ def test_the_canvas_chrome_is_two_wrapping_rows_that_cannot_overlap():
         assert "calc(100% -" not in body, f"{rule} is held apart by a guessed width again"
     disabled = re.search(r"\.canvas-tools \.btn\[disabled\],\s*\.canvas-tools \.btn\[disabled\]:hover \{([^}]*)\}", css)
     assert disabled and "opacity: 1" in disabled.group(1)
-    assert "background: var(--surface-1)" in disabled.group(1)
+    assert "background: var(--glass)" in disabled.group(1)
     assert ".canvas-tools .btn:disabled { opacity" not in css
 
 
@@ -790,13 +792,15 @@ console.log(JSON.stringify({ nightjar: world([0, 1, 5, 8, 13, 18]),
 """
     got = _run(script)
     nj, ks = got["nightjar"], got["kestrel"]
-    assert nj["18"] == 16 and ks["8"] == 16
+    r_max, r_min, r_flat = (float(re.search(rf"^const {c} = ([0-9.]+);", _js(), re.M).group(1))
+                            for c in ("NODE_R_MAX", "NODE_R_MIN", "NODE_R_FLAT"))
+    assert nj["18"] == r_max and ks["8"] == r_max
     # Area in proportion: 18 ties is 3.6 times the ink of 5.
     assert abs((nj["18"] / nj["5"]) ** 2 - 18 / 5) < 0.05, nj
     assert abs((ks["8"] / ks["2"]) ** 2 - 8 / 2) < 0.05, ks
     assert ks["2"] > 7, "the least connected actor is a bare dot again"
-    assert nj["0"] == nj["1"] == 5, "the floor is not where 0 and 1 tie meet"
-    assert got["flat"]["0"] == 8
+    assert nj["0"] == nj["1"] == r_min, "the floor is not where 0 and 1 tie meet"
+    assert got["flat"]["0"] == r_flat
     assert "Math.log1p" not in _fn("sizeRaw") + _fn("sizeScale")
 
 

@@ -323,6 +323,197 @@ function splitLead(text, limit) {
   return m ? { lead: m[1], rest: t.slice(m[0].length) } : { lead: t, rest: '' };
 }
 
+/* ── what is read once: the "i" bubble and the panels ────────────────────
+ * An explanation that is not needed on every visit sits behind a small "i". It opens on hover or
+ * focus and stays open on a press (touch and keyboard have no hover); Esc, a press elsewhere or a
+ * scroll closes it. The words come from `data-tip`, or from the element named by `data-tip-from`
+ * when they change with the page, and reach a screen reader as the button's description. */
+const tipBubble = { node: null, owner: null, pinned: false };
+
+/** A small "i" that explains on hover, focus or press. `text` is plain words, never markup. */
+function infoTip(text, label) {
+  const b = el('button', 'info', 'i');
+  b.type = 'button';
+  b.dataset.tip = String(text);
+  b.setAttribute('aria-label', label || 'More about this');
+  b.setAttribute('aria-description', String(text));
+  return b;
+}
+
+function tipText(owner) {
+  const from = owner.dataset.tipFrom ? $(owner.dataset.tipFrom) : null;
+  return (from ? from.textContent : owner.dataset.tip || '').replace(/\s+/g, ' ').trim();
+}
+
+function showTip(owner) {
+  const text = tipText(owner);
+  if (!text) return;
+  let n = tipBubble.node;
+  if (!n) {
+    n = el('div', 'tip-bubble');
+    n.id = 'tip-bubble';
+    n.setAttribute('role', 'tooltip');
+    n.hidden = true;
+    document.body.appendChild(n);
+    tipBubble.node = n;
+  }
+  n.textContent = text;
+  n.hidden = false;
+  /* Above the control when there is room, below it when not, and kept inside the window. */
+  const r = owner.getBoundingClientRect();
+  const w = n.offsetWidth, h = n.offsetHeight;
+  const above = r.top >= h + 12;
+  n.style.left = Math.round(clamp(r.left + r.width / 2 - w / 2, 8,
+                                  Math.max(8, window.innerWidth - w - 8))) + 'px';
+  n.style.top = Math.round(above ? r.top - h - 8 : r.bottom + 8) + 'px';
+  tipBubble.owner = owner;
+}
+
+function hideTip() {
+  if (!tipBubble.owner) return;
+  tipBubble.node.hidden = true;
+  tipBubble.owner.removeAttribute('aria-expanded');
+  tipBubble.owner = null;
+  tipBubble.pinned = false;
+}
+
+function wireTips() {
+  const ownerOf = (t) => (t instanceof Element ? t.closest('.info, .info-link') : null);
+  for (const b of document.querySelectorAll('.info[data-tip]')) {
+    b.setAttribute('aria-description', b.dataset.tip);
+  }
+  document.addEventListener('mouseover', (e) => {
+    const o = ownerOf(e.target);
+    if (o && !tipBubble.pinned) showTip(o);
+  });
+  document.addEventListener('mouseout', (e) => {
+    const o = ownerOf(e.target);
+    if (o && !tipBubble.pinned && !o.contains(e.relatedTarget)) hideTip();
+  });
+  document.addEventListener('focusin', (e) => {
+    const o = ownerOf(e.target);
+    if (o && !tipBubble.pinned) showTip(o);
+  });
+  document.addEventListener('focusout', (e) => {
+    if (ownerOf(e.target) && !tipBubble.pinned) hideTip();
+  });
+  document.addEventListener('click', (e) => {
+    const o = ownerOf(e.target);
+    if (!o) { if (tipBubble.pinned) hideTip(); return; }
+    const same = tipBubble.pinned && tipBubble.owner === o;
+    hideTip();
+    if (same) return;
+    showTip(o);
+    tipBubble.pinned = true;
+    o.setAttribute('aria-expanded', 'true');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && tipBubble.owner) hideTip();
+  });
+  window.addEventListener('scroll', hideTip, true);
+  window.addEventListener('resize', hideTip);
+}
+
+/** A button that opens a panel of reference beside it (the canvas key, the shortcuts). One is open
+ *  at a time; Esc, a press elsewhere or another panel's button closes it. */
+function wirePanels() {
+  const buttons = [...document.querySelectorAll('.panel-btn[aria-controls]')];
+  const panelOf = (b) => $(b.getAttribute('aria-controls'));
+  const closeAll = (except) => {
+    for (const b of buttons) {
+      if (b === except) continue;
+      b.setAttribute('aria-expanded', 'false');
+      show(panelOf(b), false);
+    }
+  };
+  for (const b of buttons) {
+    b.addEventListener('click', () => {
+      const open = b.getAttribute('aria-expanded') !== 'true';
+      closeAll(b);
+      b.setAttribute('aria-expanded', open ? 'true' : 'false');
+      show(panelOf(b), open);
+      /* The size key is a canvas, drawn only while it has a size. */
+      if (open && state.graph) { sizeKeyShown = ''; noteSizeKey(state.graph); }
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (e.target instanceof Element && e.target.closest('.panel-pop, .panel-btn')) return;
+    closeAll(null);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const open = buttons.find((b) => b.getAttribute('aria-expanded') === 'true');
+    if (!open) return;
+    closeAll(null);
+    open.focus({ preventScroll: true });
+  });
+}
+
+/* A help line marked `fold` keeps its words and its element, and the console tucks it behind an
+ * "i" on the heading it explains: the nearest heading before it, among its siblings or inside the
+ * sibling before it, then the same one level up. A line with no heading to hang on, or marked
+ * `data-fold="inline"`, gets a quiet "About this" where it stood; `data-tip-for` names the element
+ * to hang on instead. The bubble reads the line when it opens, so a line a script rewrites stays
+ * current, and the "i" is hidden while the line is empty. */
+const FOLD_HEADS = 'h1, h2, h3, h4, .pane-title, .h-sm, .h-md, .h-xs, legend, .label, .eyebrow';
+let foldSeq = 0;
+const foldWatch = new MutationObserver((changes) => {
+  for (const c of changes) {
+    const at = c.target.nodeType === 1 ? c.target : c.target.parentElement;
+    syncFold(at && at.closest('.tip-src'));
+  }
+});
+
+function foldAnchor(p) {
+  if (p.dataset.fold === 'inline') return null;
+  if (p.dataset.tipFor) return $(p.dataset.tipFor);
+  /* Never past the pane or sub-pane the line is in, and never out of a disclosure: a heading in
+     another view is not what this line explains. */
+  const fence = p.closest('.pane, [role="tabpanel"], .subpane');
+  for (let node = p, hops = 0; node && node !== fence && hops < 4; node = node.parentElement, hops += 1) {
+    if (node !== p && node.tagName === 'DETAILS') return null;
+    for (let prev = node.previousElementSibling, steps = 0; prev && steps < 8;
+         prev = prev.previousElementSibling, steps += 1) {
+      if (prev.matches(FOLD_HEADS)) return prev;
+      const inner = prev.querySelectorAll(FOLD_HEADS);
+      if (inner.length) return inner[inner.length - 1];
+    }
+  }
+  return null;
+}
+
+function syncFold(p) {
+  if (!p || !p.foldButton) return;
+  p.foldButton.hidden = !p.textContent.trim();
+}
+
+function foldHelp(root) {
+  for (const p of (root || document).querySelectorAll('.help.fold, .hint.fold')) {
+    if (p.foldButton) continue;
+    const anchor = foldAnchor(p);
+    if (!p.id) { foldSeq += 1; p.id = 'fold-' + foldSeq; }
+    /* With no heading to hang on, a quiet "About this" stands where the line was. */
+    const b = anchor ? el('button', 'info', 'i') : el('button', 'info-link');
+    if (!anchor) {
+      b.appendChild(el('span', 'info-glyph', 'i'));
+      b.appendChild(document.createTextNode('About this'));
+    }
+    b.type = 'button';
+    b.dataset.tipFrom = p.id;
+    b.setAttribute('aria-describedby', p.id);
+    if (anchor) {
+      b.setAttribute('aria-label', 'More about ' + anchor.textContent.trim().slice(0, 40));
+      anchor.appendChild(b);
+    } else {
+      p.parentNode.insertBefore(b, p);
+    }
+    p.classList.add('tip-src');
+    p.foldButton = b;
+    syncFold(p);
+    foldWatch.observe(p, { childList: true, characterData: true, subtree: true });
+  }
+}
+
 /** Make an identifier click-to-copy: a <button>, because it is an action and must be keyboard
  *  reachable.
  *
@@ -1536,7 +1727,8 @@ const CASE_CONTENT_CONTROLS = [
   'merge-target', 'merge-run',                                // merge
   'btn-save-layout',                                          // graph
   'capture-box',                                              // triage
-  'ev-form',                                                  // evidence
+  'ev-box',                                                   // evidence
+  'ev-form',
   'comms-bind-form', 'comms-block-form', 'comms-pgp-form',    // comms
   'comms-pgpkey-form', 'comms-pgpkey-wkd-form',   // comms: PGP keys
   'dcp-cap-new', 'dcp-eml-new', 'dcp-call-new',               // deception
@@ -2681,27 +2873,25 @@ function renderReadout() {
   const inCase = state.nodes.length >= CASE_LIST_PAGE
     ? CASE_LIST_PAGE.toLocaleString('en-GB') + ' or more entities'
     : countOf(state.nodes.length, 'entity', 'entities');
-  const parts = [];
-  parts.push('Showing ' + drawnNodes + ' of ' + inCase
-    + ' and ' + countOf(drawnTies, 'tie', 'ties'));
   const inferred = p.include_inferred === undefined
     ? state.proj.include_inferred : p.include_inferred;
-  /* "Counted in the metrics" only while there are metrics to count them in: an empty case, a
-     refused call or a timeline drag has none. */
-  parts.push(inferred
+  /* What is drawn stays in view; how the view is cut sits behind the "i". "Counted in the metrics"
+     only while there are metrics to count them in: an empty case, a refused call or a timeline
+     drag has none. */
+  const more = [];
+  more.push(inferred
     ? 'inferred ties included'
       + (state.metrics && drawnNodes ? ', and counted in the metrics' : '')
     : 'asserted ties only');
-  parts.push('as of ' + (p.as_of ? fmtTime(p.as_of) : 'now'));
   if (state.metrics && state.metrics.node_count > 1) {
-    parts.push('density ' + num(state.metrics.density, 2));
+    more.push('density ' + num(state.metrics.density, 2));
   }
-  const line = el('span', null, parts.join(' · '));
+  box.appendChild(el('span', null, 'Showing ' + drawnNodes + ' of ' + inCase
+    + ' and ' + countOf(drawnTies, 'tie', 'ties')));
   /* The view in the words every other place uses, and the parameters a disclosure or a re-run
      quotes exactly. */
-  line.title = viewWords(p) + '. ' + viewParameters(p)
-    + '. The metrics are computed over this view and nothing else.';
-  box.appendChild(line);
+  box.appendChild(infoTip(more.join(' · ') + '. ' + viewWords(p) + '. ' + viewParameters(p)
+    + '. The metrics are computed over this view and nothing else.', 'About this view'));
 }
 
 /** What changes how the picture may be read, on the picture: how much of it is evidenced, a
@@ -3050,7 +3240,6 @@ function renderScrubber(syncValue) {
       'carries a valid-from, first-seen or last-seen time, so there is no ' +
       'history to play through. The strip switches on as soon as one element ' +
       'does.';
-    $('tl-note').title = '';
     range.setAttribute('aria-valuetext', 'unavailable: no temporal data');
     if (syncValue !== false) range.value = '1000';
     drawDensity();
@@ -3068,8 +3257,8 @@ function renderScrubber(syncValue) {
   const undated = state.timeUndated || 0;
   $('tl-note').textContent = 'density: ' + countOf(state.timePoints.length,
     'dated element', 'dated elements') + ' over ' + countOf(days, 'day', 'days')
-    + (undated ? ', ' + undated + ' undated not drawn' : '') + '.';
-  $('tl-note').title = 'Each bar counts the elements whose world time (valid '
+    + (undated ? ', ' + undated + ' undated not drawn' : '') + '. '
+    + 'Each bar counts the elements whose world time (valid '
     + 'from, or first seen) falls in it. Bar height grows with the square '
     + 'root of the count, so one busy stretch cannot flatten the rest. '
     + (undated ? countOf(undated, 'element carries', 'elements carry')
@@ -3270,13 +3459,15 @@ function loadPaint() {
   PAINT.hairline = cssVar('--hairline');
   PAINT.grid = cssVar('--chart-grid');
   PAINT.canvasGrid = cssVar('--canvas-grid');
-  PAINT.canvasKeylight = cssVar('--canvas-keylight');
-  PAINT.canvasKeylightOut = cssVar('--canvas-keylight-out');
+  PAINT.canvasLit = cssVar('--canvas-lit');
+  PAINT.canvasVignette = cssVar('--canvas-vignette');
+  PAINT.canvasVignetteOut = cssVar('--canvas-vignette-out');
   PAINT.pos = cssVar('--sign-positive');
   PAINT.neg = cssVar('--sign-negative');
   PAINT.neu = cssVar('--sign-neutral');
   PAINT.accent = cssVar('--accent');
   PAINT.accentDim = cssVar('--accent-dim');
+  PAINT.accentGlow = cssVar('--accent-glow');
   PAINT.alert = cssVar('--alert');
   PAINT.label = cssVar('--text-secondary');
   PAINT.dim = cssVar('--text-tertiary');
@@ -3304,6 +3495,10 @@ function loadPaint() {
     MODERATE: parseFloat(cssVar('--canvas-node-body-moderate')),
     LOW: parseFloat(cssVar('--canvas-node-body-low')),
   };
+  /* The lit body and the halo mix a type hue toward these two. */
+  PAINT.lightRgb = hexParts(PAINT.bright);
+  PAINT.voidRgb = hexParts(PAINT.void);
+  HALO_CACHE.clear();
   PAINT.hues = {};
   for (const h of ['actor-persona', 'actor-person', 'actor-group',
                    'artefact-infra', 'artefact-finance', 'artefact-malware',
@@ -3964,9 +4159,9 @@ function sizeRaw(n) {
 }
 
 /* Node radius at 100% zoom, px. */
-const NODE_R_MIN = 5;          // the floor: small enough to rank, big enough to hit
-const NODE_R_MAX = 16;
-const NODE_R_FLAT = 8;         // when there is nothing to compare
+const NODE_R_MIN = 6;          // the floor: small enough to rank, big enough to hit
+const NODE_R_MAX = 19;
+const NODE_R_FLAT = 9;         // when there is nothing to compare
 
 /** Node area in proportion to the metric, anchored at zero: radius = R_MAX * sqrt(value /
  *  largest), so 18 ties is 3.6 times the ink of 5. Size is the only channel for "who matters",
@@ -4089,20 +4284,19 @@ function edgeHidden(e) {
 
 /* ── the ground ─────────────────────────────────────────────────────────
  *
- * The sociogram's ground joins the elevation system theme.css describes with two marks, both
- * theme tokens held by test_theme_contract to a measured ceiling (the binding mark is
- * --sign-neutral, every neutral tie's colour, at a grid line under the brightest light):
+ * The sociogram's ground is a stage: --void at the edges, --canvas-lit in the middle, a vignette
+ * drawing the corners back toward the dark, and a lattice of dots in world space so pan and zoom
+ * have something to move against. All theme tokens, and test_theme_contract holds every mark to
+ * its contrast floor at the brightest point, a lattice dot on the lit centre. The light and the
+ * vignette depend only on the canvas size, so they are painted once per size into an offscreen
+ * canvas (buildGround) and blitted each frame.
  *
- *   - the key light `body` casts, so the top of the workspace is brightest. It depends only on
- *     the canvas size, so it is painted once per size into an offscreen canvas (buildGround)
- *     and blitted each frame;
- *   - a graph-paper grid in world space, so it pans and zooms with the graph.
- *
- * The grid spacing halves and doubles to stay inside GRID_MIN..GRID_MAX screen pixels, which
+ * The lattice spacing halves and doubles to stay inside GRID_MIN..GRID_MAX screen pixels, which
  * controls its density at every zoom, with no zoom threshold below which it vanishes. */
-const GRID_WORLD = 80;      // world units between lines at 1x
+const GRID_WORLD = 80;      // world units between dots at 1x
 const GRID_MIN = 22;        // screen px: below this, double the spacing
 const GRID_MAX = 128;       // screen px: above this, halve it
+const GRID_DOT = 2;         // px: the side of one dot
 
 function buildGround() {
   const bw = canvas.width, bh = canvas.height;
@@ -4114,20 +4308,29 @@ function buildGround() {
   gx.fillStyle = PAINT.void;
   gx.fillRect(0, 0, bw, bh);
   /* A gradient stop that is not a colour throws, where fillStyle quietly ignores it, and a throw
-     here would blank the canvas on every frame. An empty token skips the light
-     (paintIsComplete has already reported it); one present but unparseable is caught here. */
-  if (PAINT.canvasKeylight && PAINT.canvasKeylightOut) {
+     here would blank the canvas on every frame. An empty token skips that layer (paintIsComplete
+     has already reported it); one present but unparseable is caught here. */
+  const cx = bw / 2, cy = bh * 0.46, far = Math.hypot(bw, bh) * 0.6;
+  if (PAINT.canvasLit) {
     try {
-      // Centred above the top edge, so the falloff crosses the canvas
-      // rather than sitting in it as a visible blob.
-      const cx = bw / 2, cy = -bh * 0.28, far = Math.max(bw, bh) * 1.05;
-      const lamp = gx.createRadialGradient(cx, cy, 0, cx, cy, far);
-      lamp.addColorStop(0, PAINT.canvasKeylight);
-      lamp.addColorStop(1, PAINT.canvasKeylightOut);
-      gx.fillStyle = lamp;
+      const lit = gx.createRadialGradient(cx, cy, 0, cx, cy, far);
+      lit.addColorStop(0, PAINT.canvasLit);
+      lit.addColorStop(1, PAINT.void);
+      gx.fillStyle = lit;
       gx.fillRect(0, 0, bw, bh);
     } catch (err) {
-      console.error('canvas key light skipped: ' + err.message);
+      console.error('canvas light skipped: ' + err.message);
+    }
+  }
+  if (PAINT.canvasVignette && PAINT.canvasVignetteOut) {
+    try {
+      const rim = gx.createRadialGradient(cx, cy, far * 0.5, cx, cy, far * 1.1);
+      rim.addColorStop(0, PAINT.canvasVignetteOut);
+      rim.addColorStop(1, PAINT.canvasVignette);
+      gx.fillStyle = rim;
+      gx.fillRect(0, 0, bw, bh);
+    } catch (err) {
+      console.error('canvas vignette skipped: ' + err.message);
     }
   }
   GROUND.canvas = gc;
@@ -4149,22 +4352,23 @@ function paintGround(w, h) {
   paintGrid(w, h);
 }
 
-/* One path of 1px rectangles, filled once. Stroked as lines, Chromium composites each hairline
-   on its own at DPR 1, so every crossing takes the grid's alpha twice; a fill covers the union
-   once, which is the case test_theme_contract models. */
+/* One path of small squares, filled once: a fill covers the union once, which is the case
+   test_theme_contract models. */
 function paintGrid(w, h) {
   const v = state.view;
   if (!v || !(v.scale > 0) || !PAINT.canvasGrid) return;
   let step = GRID_WORLD * v.scale;
   while (step < GRID_MIN) step *= 2;
   while (step > GRID_MAX) step /= 2;
-  // Anchored to world coordinates: the first line on screen is wherever
+  // Anchored to world coordinates: the first dot on screen is wherever
   // world 0 lands, modulo the step.
   const ox = ((v.tx % step) + step) % step;
   const oy = ((v.ty % step) + step) % step;
+  const half = GRID_DOT / 2;
   ctx.beginPath();
-  for (let x = ox; x < w; x += step) ctx.rect(Math.round(x), 0, 1, h);
-  for (let y = oy; y < h; y += step) ctx.rect(0, Math.round(y), w, 1);
+  for (let x = ox; x < w; x += step) {
+    for (let y = oy; y < h; y += step) ctx.rect(Math.round(x) - half, Math.round(y) - half, GRID_DOT, GRID_DOT);
+  }
   ctx.globalAlpha = 1;
   ctx.fillStyle = PAINT.canvasGrid;
   ctx.fill();
@@ -4209,7 +4413,9 @@ const PARALLEL_GAP = 9;
 /* Labels. */
 const LABEL_H = 13;            // line box of the 11px face
 const LABEL_GAP = 4;           // px between a node's outermost ring and its label
-const LABEL_PAD = 2;           // clear space kept round every label
+const LABEL_PAD = 3;           // clear space kept round every label
+const LABEL_PLATE_X = 3;       // the plate reaches this far either side of the text
+const LABEL_PLATE_R = 4;       // and is rounded by this
 const LABEL_CELL = 64;         // spatial hash cell, px
 const LABEL_CHARS = 24;        // longer handles are cut with an ellipsis
 const EDGE_LABEL_SCALE = 1.9;  // edge types only this close in
@@ -4376,6 +4582,80 @@ function stepTie(g, dir) {
   selectEdge(ties[next].ref.id);
 }
 
+/* ── depth ──────────────────────────────────────────────────────────────
+ * A halo behind an evidenced node and a lit body in front of it, both derived from the node's type
+ * hue at paint time: the theme names each hue once and cannot spell it at every strength. Opacity
+ * is still confidence and nothing else, because both are drawn at the node's own step, and a
+ * hollow node, which rests on no exhibit, gets neither. Past RICH_NODES entities the painter
+ * falls back to the flat disc, so a large case stays smooth. */
+const RICH_NODES = 1200;
+const HALO_SCALE = 2.9;        // the halo's radius as a multiple of the node's
+const HALO_CACHE = new Map();
+
+function hexParts(hex) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '');
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
+}
+
+/** A hex token at an alpha, as a canvas colour. A value that is not a hex comes back unchanged. */
+function hueAlpha(hex, a) {
+  const c = hexParts(hex);
+  return c ? 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')' : hex;
+}
+
+/** A hex token moved `t` of the way toward `toward` ([r, g, b]). */
+function hueMix(hex, toward, t) {
+  const c = hexParts(hex);
+  if (!c || !toward) return hex;
+  return 'rgb(' + c.map((v, i) => Math.round(v + (toward[i] - v) * t)).join(',') + ')';
+}
+
+/** The soft light round a node, drawn once per hue and radius into a small canvas and blitted. */
+function haloSprite(hue, r) {
+  const rb = Math.max(4, Math.round(r));
+  const key = hue + '|' + rb;
+  let sprite = HALO_CACHE.get(key);
+  if (sprite) return sprite;
+  const size = Math.ceil(rb * HALO_SCALE * 2);
+  const cv = document.createElement('canvas');
+  cv.width = size;
+  cv.height = size;
+  const hx = cv.getContext('2d');
+  const mid = size / 2;
+  try {
+    const g = hx.createRadialGradient(mid, mid, rb * 0.6, mid, mid, mid);
+    g.addColorStop(0, hueAlpha(hue, 0.42));
+    g.addColorStop(0.45, hueAlpha(hue, 0.15));
+    g.addColorStop(1, hueAlpha(hue, 0));
+    hx.fillStyle = g;
+    hx.fillRect(0, 0, size, size);
+  } catch (err) {
+    console.error('node halo skipped: ' + err.message);
+  }
+  sprite = { cv: cv, size: size };
+  HALO_CACHE.set(key, sprite);
+  return sprite;
+}
+
+function paintHalo(x, y, hue, r) {
+  const sprite = haloSprite(hue, r);
+  ctx.drawImage(sprite.cv, x - sprite.size / 2, y - sprite.size / 2);
+}
+
+/** The node body lit from the upper left: a lighter spot, the hue, then the hue drawn toward the
+ *  void at the rim. The ring and the core are drawn over it unchanged. */
+function bodyGradient(x, y, r, hue) {
+  try {
+    const g = ctx.createRadialGradient(x - r * 0.32, y - r * 0.36, r * 0.04, x, y, r);
+    g.addColorStop(0, hueMix(hue, PAINT.lightRgb, 0.5));
+    g.addColorStop(0.55, hue);
+    g.addColorStop(1, hueMix(hue, PAINT.voidRgb, 0.4));
+    return g;
+  } catch (err) {
+    return hue;
+  }
+}
+
 function draw() {
   const g = state.graph;
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -4396,6 +4676,8 @@ function draw() {
   // Marks a name may not be printed over: beads and sign marks here,
   // node discs in drawLabels.
   const marks = boxHash();
+  const rich = g.live.length <= RICH_NODES;
+  ctx.lineCap = 'round';
 
   /* edges */
   for (const l of g.links) {
@@ -4417,6 +4699,14 @@ function draw() {
     const colour = on ? PAINT.accent : edgeColour(e.sign);
     const width = edgeWidth(e) + (on ? 1.5 : 0) +
                   (lit && fs && fs.mode === 'path' ? 1.5 : 0);
+    /* The selected tie sits in a soft accent light, so it is found at a glance. */
+    if (on) {
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = PAINT.accentGlow;
+      ctx.lineWidth = width + 6;
+      traceLink(geo);
+      ctx.stroke();
+    }
     ctx.globalAlpha = alpha;
     /* Invariant: solid = asserted, dashed = inferred. Never negotiable. */
     ctx.setLineDash(e.is_inferred ? [5, 4] : []);
@@ -4469,6 +4759,16 @@ function draw() {
     const ringW = clamp(r * NODE_RING_FRAC, NODE_RING_W_MIN, NODE_RING_W_MAX);
     /* The type's outline (SHAPE_BY_TYPE): hue's second channel. */
     const shape = n.shape;
+    /* Light behind the node: the selection's accent, and for an evidenced node its own hue at its
+       own step. A hollow node rests on no exhibit and glows with nothing. */
+    if (selected) {
+      ctx.globalAlpha = 1;
+      paintHalo(n.sx, n.sy, PAINT.accent, r + STATE_RINGS.selected[0]);
+    }
+    if (rich && !nodeUnevidenced(n)) {
+      ctx.globalAlpha = base;
+      paintHalo(n.sx, n.sy, hue, r);
+    }
     if (nodeUnevidenced(n)) {
       /* An entity that rests on no exhibit is hollow: --void inside the ring, no body, no core,
          a whole interior that survives the small radii of a fitted view. It marks the absence
@@ -4480,10 +4780,11 @@ function draw() {
     } else {
       nodeOutline(shape, n.sx, n.sy, r);
       ctx.globalAlpha = lit ? bodyAlpha(conf) : NODE_DIM_BODY;
-      ctx.fillStyle = hue;
+      ctx.fillStyle = rich ? bodyGradient(n.sx, n.sy, r, hue) : hue;
       ctx.fill();
       canvasDisc(n.sx, n.sy, r * NODE_CORE_FRAC);
       ctx.globalAlpha = base;
+      ctx.fillStyle = hue;
       ctx.fill();
     }
     /* The type ring, inset: its outer edge is r, whatever the shape. */
@@ -4585,12 +4886,23 @@ function boxHash() {
    marks are obstacles the placement avoids. */
 function placeText(hash, text, tw, x, y, colour, alpha) {
   hash.add(x - LABEL_PAD, y - LABEL_PAD, tw + LABEL_PAD * 2, LABEL_H + LABEL_PAD * 2, null);
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = PAINT.void;
-  ctx.fillRect(x - 1, y, tw + 2, LABEL_H);
+  labelPlate(x - LABEL_PLATE_X, y - 1, tw + LABEL_PLATE_X * 2, LABEL_H + 1);
   ctx.globalAlpha = alpha;
   ctx.fillStyle = colour;
   ctx.fillText(text, x, y + 1);
+}
+
+/** The plate under a name: --void, rounded, with a hairline edge. */
+function labelPlate(x, y, pw, ph) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, pw, ph, LABEL_PLATE_R);
+  else ctx.rect(x, y, pw, ph);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = PAINT.void;
+  ctx.fill();
+  ctx.strokeStyle = PAINT.hairline;
+  ctx.lineWidth = 1;
+  ctx.stroke();
 }
 
 /* The canvas's own chrome: the status chips and layout buttons along the top, the note, the
@@ -4724,7 +5036,7 @@ function drawLabels(g, fs, sel, w, h, withEdges, hash) {
       ? (graded ? 'no tie in this projection is ' + graded : 'no ties in this projection')
       : g.shelf.count + ' with no tie in this projection';
     const tw = labelWidth(g, text);
-    const x = clamp(first.sx - first.sr, 0, Math.max(0, w - tw));
+    const x = clamp(first.sx - first.sr, LABEL_PLATE_X, Math.max(LABEL_PLATE_X, w - tw - LABEL_PLATE_X));
     const y = first.sy - (first.reach || first.sr) - LABEL_GAP - LABEL_H;
     if (y >= 0 && y + LABEL_H <= h && !underChrome(plates, x, y, tw, LABEL_H)) {
       placeText(hash, text, tw, x, y, PAINT.dim, 1);
@@ -5302,12 +5614,6 @@ function wireCanvasControls() {
   $('btn-pin').addEventListener('click', () => {
     const sel = state.selection;
     if (sel && sel.kind === 'node') togglePin(sel.id);
-  });
-  $('btn-preset-about').addEventListener('click', () => {
-    const btn = $('btn-preset-about');
-    const open = btn.getAttribute('aria-expanded') !== 'true';
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    show($('preset-desc'), open);
   });
   window.addEventListener('beforeunload', guardLayout);
 
@@ -6136,6 +6442,8 @@ function renderEvidence() {
   setMsg($('ev-count'), registerCountText(page, evView));
   renderShortLocks(page);
   show($('ev-empty'), (Number(page.total) || 0) === 0);
+  /* With nothing held yet, the way to add the first exhibit is open. */
+  if ((Number(page.total) || 0) === 0) $('ev-box').open = true;
   const shown = (page.items || []).length;
   const older = page.offset + shown < (Number(page.matching) || 0);
   $('ev-prev').hidden = !!evView.only || page.offset === 0;
@@ -11372,7 +11680,7 @@ function buildEndpointSelect(which, keepId) {
     return;
   }
   count.textContent = !terms.length
-    ? total + ' entities, grouped by type. Type above to filter by label or type.'
+    ? total + ' entities'
     : (!matches.length
       ? 'Nothing matches. Filter on part of a label, or on a type such as WALLET.'
       : matches.length + ' of ' + total + ' '
@@ -11502,9 +11810,9 @@ function refreshEdgeTypes() {
   createForms.clearedType = '';
   $('edge-type-count').textContent = '';
   if (!src || !dst) {
+    /* The placeholder says it; a note under it would say it twice. */
     placeholder('Choose both entities first');
-    note.textContent = 'The types on offer depend on what the two entities ' +
-      'are, so they appear once both are chosen.';
+    note.textContent = '';
     return;
   }
   if (src.id === dst.id) {
@@ -12676,7 +12984,7 @@ function initPalette() {
      label, and assigning textContent to it would delete both. */
   $('palette-key').textContent = mac ? '⌘K' : 'Ctrl K';
   $('keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
-  /* And the hint strip under the canvas, so it agrees with the header chip. */
+  /* And the key in the Shortcuts panel, so it agrees with the header chip. */
   $('canvas-keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
@@ -14032,6 +14340,9 @@ function paintWkdExposure() {
 
 function wire() {
   loadPaint();
+  wireTips();
+  wirePanels();
+  foldHelp();
   initTabs();
   initInbox();
   initComms();
@@ -23386,11 +23697,12 @@ function readinessRow(c) {
       'BLOCKING'));
   }
   card.appendChild(head);
-  /* A failing blocker's evidence and action are in the banner above, in
-     full; printing them again here was the same four paragraphs twice. */
+  /* A failing blocker's evidence and action are in the banner above, in full; printing them again
+     here was the same four paragraphs twice, and a sentence pointing at them three times over is
+     no better, so the row carries a small "i" instead. */
   if (c.blocking && !c.ok) {
-    card.appendChild(el('p', 'help', 'Failing: what it refuses and how to settle it are in '
-      + 'the red box above.'));
+    head.appendChild(infoTip('What it refuses and how to settle it are in the red box above.',
+      'Where the detail is'));
     return card;
   }
   if (caveat) card.appendChild(el('p', 'help warn', caveat));
@@ -23751,6 +24063,8 @@ function ruleRow(r, use) {
   head.appendChild(el('span', 'row-title', r.category));
   head.appendChild(el('span', 'chip', dayCount(r.retain_days)));
   if (r.is_placeholder) head.appendChild(el('span', 'chip warn', 'unconfirmed'));
+  /* Why the category carries the period it does: read once, so behind an "i" on the row. */
+  if (r.rationale) head.appendChild(infoTip(r.rationale, 'Why this category carries this period'));
   card.appendChild(head);
   const facts = el('div', 'facts');
   if (!r.is_placeholder) {
@@ -23763,7 +24077,6 @@ function ruleRow(r, use) {
       countOf(use.live_records, 'record', 'records')));
   }
   if (facts.childElementCount) card.appendChild(facts);
-  if (r.rationale) card.appendChild(el('p', 'why', r.rationale));
   return card;
 }
 
@@ -23776,6 +24089,8 @@ function unruledRow(c) {
   head.appendChild(el('span', 'chip', dayCount(c.retain_days)));
   head.appendChild(el('span', 'chip warn',
     'no rule: ' + c.retain_days + '-day fallback'));
+  head.appendChild(infoTip('No rule has been set for this category. Its records carry the fallback '
+    + 'period. Confirm a rule below.', 'About the fallback period'));
   card.appendChild(head);
   const facts = el('div', 'facts');
   facts.appendChild(fact('live on your cases',
@@ -23785,8 +24100,6 @@ function unruledRow(c) {
       + ' (' + untilWords(c.soonest_deadline) + ')'));
   }
   card.appendChild(facts);
-  card.appendChild(el('p', 'why', 'No rule has been set for this category. Its records '
-    + 'carry the fallback period. Confirm a rule below.'));
   return card;
 }
 

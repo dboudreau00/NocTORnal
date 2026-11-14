@@ -86,7 +86,8 @@ def test_the_metrics_help_is_one_short_line():
     sec = html[html.index('<section id="insp-metrics-sec"'):]
     sec = sec[:sec.index("</section>")]
     assert '<details class="insp-more">' not in sec
-    assert '<p class="help">Local measures for this entity. Run Analysis for brokerage.</p>' in sec
+    # One short line, and tucked behind an "i" on the heading it explains.
+    assert '<p class="help fold">Local measures for this entity. Run Analysis for brokerage.</p>' in sec
 
 
 def test_the_signed_rows_are_called_ties_not_vouches():

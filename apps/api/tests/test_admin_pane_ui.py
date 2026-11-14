@@ -188,7 +188,7 @@ function refusalText(err, fallback) { return fallback; }
 
 @needs_node
 def test_attention_is_amber_unless_the_check_blocks(tmp_path):
-    got = _run(["moreDetails", "readinessDetail", "readinessRow"], """
+    got = _run(["infoTip", "moreDetails", "readinessDetail", "readinessRow"], """
 function readinessGoTo() { return null; }
 const rows = [
   readinessRow({check: 'smtp', ok: false, blocking: false, evidence: 'e', action: 'a'}),
@@ -196,16 +196,18 @@ const rows = [
   readinessRow({check: 'kek', ok: true, blocking: false, evidence: 'e', action: ''}),
 ];
 console.log(JSON.stringify(rows.map((r) => ({
-  chips: r.children[0].children.slice(1).map((c) => c.className),
+  chips: r.children[0].children.slice(1).map((c) => c.className).filter((c) => c.startsWith('chip')),
+  tips: r.children[0].children.filter((c) => c.className === 'info').map((c) => c.dataset.tip),
   body: r.children.slice(1).map(text)}))));
 """, tmp_path)
     smtp, policy, kek = got
     assert smtp["chips"] == ["chip warn"], smtp
     assert policy["chips"] == ["chip bad", "chip bad"], policy
     assert kek["chips"] == ["chip good"], kek
-    assert policy["body"] == ["Failing: what it refuses and how to settle it "
-                              "are in the red box above."], (
-        "a failing blocker prints its evidence twice again")
+    assert policy["body"] == [], "a failing blocker prints its evidence twice again"
+    assert policy["tips"] == ["What it refuses and how to settle it are in the red box above."], (
+        "the pointer to the red box is a sentence on every failing blocker again, or is gone")
+    assert smtp["tips"] == [] and kek["tips"] == [], "only a failing blocker points at the red box"
 
 
 def test_the_readiness_intro_no_longer_overclaims():

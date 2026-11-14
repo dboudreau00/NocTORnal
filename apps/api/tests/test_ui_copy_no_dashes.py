@@ -481,8 +481,8 @@ console.log(JSON.stringify({
 
 
 def test_the_canvas_hint_names_the_palette_key_for_this_platform():
-    """The hint strip under the canvas names the palette key for the platform: it starts as Ctrl K and
-    is set where the header chip is."""
+    """The Shortcuts panel names the palette key for the platform: it starts as Ctrl K and is set
+    where the header chip is."""
     html = _html()
     # The word beside the key is the header control's own, "Jump to".
     assert 'id="canvas-keys-palette">Ctrl K</span> jump to' in html

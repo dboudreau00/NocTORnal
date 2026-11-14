@@ -200,7 +200,7 @@ def test_a_case_with_fewer_than_two_entities_says_to_add_them():
     body = _fn("buildEndpointSelect")
     assert "This case has no entities yet. " in body
     assert "A relationship joins two, so add them first." in body
-    assert body.index("if (total < 2)") < body.index("Type above to filter")
+    assert body.index("if (total < 2)") < body.index("count.textContent = !terms.length")
     pickers = _fn("buildEdgePickers")
     assert "show($('edge-need-entities'), !enough)" in pickers
     assert "show($('edge-swap'), enough)" in pickers
