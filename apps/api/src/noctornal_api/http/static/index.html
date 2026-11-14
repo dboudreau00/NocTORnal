@@ -1334,9 +1334,11 @@
         <!-- EVIDENCE -->
         <section id="pane-evidence" class="pane" role="tabpanel"
                  aria-labelledby="tab-evidence" tabindex="-1" hidden>
-          <form id="ev-form" class="card row-form" novalidate>
+          <details id="ev-box" class="card capture">
+            <summary>Upload an exhibit</summary>
+          <form id="ev-form" class="row-form" novalidate>
             <label class="field">
-              <span class="label">Exhibit file</span>
+              <span id="ev-file-label" class="label">Exhibit file</span>
               <input id="ev-file" type="file" required>
             </label>
             <label class="field">
@@ -1382,7 +1384,8 @@
             <p id="ev-error" class="form-error" role="alert" hidden></p>
             <p id="ev-result" class="form-ok" role="status" hidden></p>
           </form>
-          <p id="ev-cap" class="help" hidden></p>
+          <p id="ev-cap" class="help fold" data-tip-for="ev-file-label" hidden></p>
+          </details>
           <!-- The register's own controls: a count that says how many there are, a filter, and
                the exhibits nothing rests on. -->
           <form id="ev-find" class="row ev-find" role="search" novalidate>

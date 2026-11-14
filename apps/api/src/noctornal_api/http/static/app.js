@@ -1727,7 +1727,8 @@ const CASE_CONTENT_CONTROLS = [
   'merge-target', 'merge-run',                                // merge
   'btn-save-layout',                                          // graph
   'capture-box',                                              // triage
-  'ev-form',                                                  // evidence
+  'ev-box',                                                   // evidence
+  'ev-form',
   'comms-bind-form', 'comms-block-form', 'comms-pgp-form',    // comms
   'comms-pgpkey-form', 'comms-pgpkey-wkd-form',   // comms: PGP keys
   'dcp-cap-new', 'dcp-eml-new', 'dcp-call-new',               // deception
@@ -6441,6 +6442,8 @@ function renderEvidence() {
   setMsg($('ev-count'), registerCountText(page, evView));
   renderShortLocks(page);
   show($('ev-empty'), (Number(page.total) || 0) === 0);
+  /* With nothing held yet, the way to add the first exhibit is open. */
+  if ((Number(page.total) || 0) === 0) $('ev-box').open = true;
   const shown = (page.items || []).length;
   const older = page.offset + shown < (Number(page.matching) || 0);
   $('ev-prev').hidden = !!evView.only || page.offset === 0;
