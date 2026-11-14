@@ -19,7 +19,10 @@ ground is not flat: a lit centre, a vignette and a lattice of dots in world
 space give pan and zoom something to move against. It is held to a measured
 ceiling (theme.css, test_theme_contract): the lit centre stays under a
 luminance ceiling, so no mark drawn on the ground falls under its contrast
-floor, and the lattice stays quieter than any mark.
+floor, and the lattice stays quieter than any mark. A node is a translucent
+body lit from its upper left with a halo of its own hue behind it, both at its
+own confidence step, and an entity that rests on no exhibit is hollow and
+glows with nothing.
 
 **Colour is reserved for meaning.** Node type, confidence and edge sign are
 the only things allowed to use hue. Buttons, panels, borders and chrome are

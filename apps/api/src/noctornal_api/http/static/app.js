@@ -3278,6 +3278,7 @@ function loadPaint() {
   PAINT.neu = cssVar('--sign-neutral');
   PAINT.accent = cssVar('--accent');
   PAINT.accentDim = cssVar('--accent-dim');
+  PAINT.accentGlow = cssVar('--accent-glow');
   PAINT.alert = cssVar('--alert');
   PAINT.label = cssVar('--text-secondary');
   PAINT.dim = cssVar('--text-tertiary');
@@ -3305,6 +3306,10 @@ function loadPaint() {
     MODERATE: parseFloat(cssVar('--canvas-node-body-moderate')),
     LOW: parseFloat(cssVar('--canvas-node-body-low')),
   };
+  /* The lit body and the halo mix a type hue toward these two. */
+  PAINT.lightRgb = hexParts(PAINT.bright);
+  PAINT.voidRgb = hexParts(PAINT.void);
+  HALO_CACHE.clear();
   PAINT.hues = {};
   for (const h of ['actor-persona', 'actor-person', 'actor-group',
                    'artefact-infra', 'artefact-finance', 'artefact-malware',
@@ -4386,6 +4391,80 @@ function stepTie(g, dir) {
   selectEdge(ties[next].ref.id);
 }
 
+/* ── depth ──────────────────────────────────────────────────────────────
+ * A halo behind an evidenced node and a lit body in front of it, both derived from the node's type
+ * hue at paint time: the theme names each hue once and cannot spell it at every strength. Opacity
+ * is still confidence and nothing else, because both are drawn at the node's own step, and a
+ * hollow node, which rests on no exhibit, gets neither. Past RICH_NODES entities the painter
+ * falls back to the flat disc, so a large case stays smooth. */
+const RICH_NODES = 1200;
+const HALO_SCALE = 2.9;        // the halo's radius as a multiple of the node's
+const HALO_CACHE = new Map();
+
+function hexParts(hex) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '');
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
+}
+
+/** A hex token at an alpha, as a canvas colour. A value that is not a hex comes back unchanged. */
+function hueAlpha(hex, a) {
+  const c = hexParts(hex);
+  return c ? 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')' : hex;
+}
+
+/** A hex token moved `t` of the way toward `toward` ([r, g, b]). */
+function hueMix(hex, toward, t) {
+  const c = hexParts(hex);
+  if (!c || !toward) return hex;
+  return 'rgb(' + c.map((v, i) => Math.round(v + (toward[i] - v) * t)).join(',') + ')';
+}
+
+/** The soft light round a node, drawn once per hue and radius into a small canvas and blitted. */
+function haloSprite(hue, r) {
+  const rb = Math.max(4, Math.round(r));
+  const key = hue + '|' + rb;
+  let sprite = HALO_CACHE.get(key);
+  if (sprite) return sprite;
+  const size = Math.ceil(rb * HALO_SCALE * 2);
+  const cv = document.createElement('canvas');
+  cv.width = size;
+  cv.height = size;
+  const hx = cv.getContext('2d');
+  const mid = size / 2;
+  try {
+    const g = hx.createRadialGradient(mid, mid, rb * 0.6, mid, mid, mid);
+    g.addColorStop(0, hueAlpha(hue, 0.42));
+    g.addColorStop(0.45, hueAlpha(hue, 0.15));
+    g.addColorStop(1, hueAlpha(hue, 0));
+    hx.fillStyle = g;
+    hx.fillRect(0, 0, size, size);
+  } catch (err) {
+    console.error('node halo skipped: ' + err.message);
+  }
+  sprite = { cv: cv, size: size };
+  HALO_CACHE.set(key, sprite);
+  return sprite;
+}
+
+function paintHalo(x, y, hue, r) {
+  const sprite = haloSprite(hue, r);
+  ctx.drawImage(sprite.cv, x - sprite.size / 2, y - sprite.size / 2);
+}
+
+/** The node body lit from the upper left: a lighter spot, the hue, then the hue drawn toward the
+ *  void at the rim. The ring and the core are drawn over it unchanged. */
+function bodyGradient(x, y, r, hue) {
+  try {
+    const g = ctx.createRadialGradient(x - r * 0.32, y - r * 0.36, r * 0.04, x, y, r);
+    g.addColorStop(0, hueMix(hue, PAINT.lightRgb, 0.5));
+    g.addColorStop(0.55, hue);
+    g.addColorStop(1, hueMix(hue, PAINT.voidRgb, 0.4));
+    return g;
+  } catch (err) {
+    return hue;
+  }
+}
+
 function draw() {
   const g = state.graph;
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -4406,6 +4485,8 @@ function draw() {
   // Marks a name may not be printed over: beads and sign marks here,
   // node discs in drawLabels.
   const marks = boxHash();
+  const rich = g.live.length <= RICH_NODES;
+  ctx.lineCap = 'round';
 
   /* edges */
   for (const l of g.links) {
@@ -4427,6 +4508,14 @@ function draw() {
     const colour = on ? PAINT.accent : edgeColour(e.sign);
     const width = edgeWidth(e) + (on ? 1.5 : 0) +
                   (lit && fs && fs.mode === 'path' ? 1.5 : 0);
+    /* The selected tie sits in a soft accent light, so it is found at a glance. */
+    if (on) {
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = PAINT.accentGlow;
+      ctx.lineWidth = width + 6;
+      traceLink(geo);
+      ctx.stroke();
+    }
     ctx.globalAlpha = alpha;
     /* Invariant: solid = asserted, dashed = inferred. Never negotiable. */
     ctx.setLineDash(e.is_inferred ? [5, 4] : []);
@@ -4479,6 +4568,16 @@ function draw() {
     const ringW = clamp(r * NODE_RING_FRAC, NODE_RING_W_MIN, NODE_RING_W_MAX);
     /* The type's outline (SHAPE_BY_TYPE): hue's second channel. */
     const shape = n.shape;
+    /* Light behind the node: the selection's accent, and for an evidenced node its own hue at its
+       own step. A hollow node rests on no exhibit and glows with nothing. */
+    if (selected) {
+      ctx.globalAlpha = 1;
+      paintHalo(n.sx, n.sy, PAINT.accent, r + STATE_RINGS.selected[0]);
+    }
+    if (rich && !nodeUnevidenced(n)) {
+      ctx.globalAlpha = base;
+      paintHalo(n.sx, n.sy, hue, r);
+    }
     if (nodeUnevidenced(n)) {
       /* An entity that rests on no exhibit is hollow: --void inside the ring, no body, no core,
          a whole interior that survives the small radii of a fitted view. It marks the absence
@@ -4490,10 +4589,11 @@ function draw() {
     } else {
       nodeOutline(shape, n.sx, n.sy, r);
       ctx.globalAlpha = lit ? bodyAlpha(conf) : NODE_DIM_BODY;
-      ctx.fillStyle = hue;
+      ctx.fillStyle = rich ? bodyGradient(n.sx, n.sy, r, hue) : hue;
       ctx.fill();
       canvasDisc(n.sx, n.sy, r * NODE_CORE_FRAC);
       ctx.globalAlpha = base;
+      ctx.fillStyle = hue;
       ctx.fill();
     }
     /* The type ring, inset: its outer edge is r, whatever the shape. */
