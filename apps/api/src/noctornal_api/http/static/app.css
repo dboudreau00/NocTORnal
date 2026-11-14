@@ -1050,6 +1050,9 @@ button.hdr-user.codes-low::before { background: var(--alert); }
                margin-top: 16px; }
 /* Deception records under the two columns. */
 .search-deception { margin-top: 20px; }
+/* The result groups appear with the first search, not as five empty headings before it. */
+.search-scope[hidden] ~ .search-cols,
+.search-scope[hidden] ~ .search-deception { display: none; }
 .hit-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .hit {
   display: flex; justify-content: space-between; gap: 10px; text-align: left;
