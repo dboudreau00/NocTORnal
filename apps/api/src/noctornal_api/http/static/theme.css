@@ -67,6 +67,9 @@
   --wash-2: rgba(255, 255, 255, 0.045);  /* raised card fill */
   --wash-3: rgba(255, 255, 255, 0.07);   /* hover fill */
   --hairline: rgba(255, 255, 255, 0.10);
+  /* A panel that floats over the sociogram or a pane: --surface-1 at 78%, so what is under it
+     shows through. */
+  --glass: rgba(24, 26, 30, 0.78);
   --hairline-strong: rgba(255, 255, 255, 0.16);
   /* The boundary of anything you can type in or press. Much brighter than the decorative
      hairline, because WCAG 1.4.11 asks for 3:1 on the edge that identifies a control: this is

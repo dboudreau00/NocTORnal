@@ -798,8 +798,8 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .canvas-note {
   flex: 0 1 auto; min-width: 0; margin: 0; pointer-events: none;
   font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 2px var(--s-2);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-2);
 }
 .canvas-status {
   flex: 1 1 16rem; min-width: 0;
@@ -810,8 +810,8 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .cs-chip {
   display: inline-flex; align-items: center; gap: var(--s-2);
   font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 2px var(--s-2);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-2);
 }
 .cs-chip.cs-warn { color: var(--alert); border-color: var(--alert-edge); }
 .cs-chip.coverage-none { color: var(--danger); border-color: var(--danger-edge); }
@@ -823,24 +823,24 @@ button.hdr-user.codes-low::before { background: var(--alert); }
   gap: var(--s-1); margin-left: auto; flex: 0 1 auto; min-width: 0;
   pointer-events: none;
 }
-.canvas-tools .btn { pointer-events: auto; background: var(--surface-1); }
-/* Disabled, but still an opaque plate: the 0.45 fade of .btn[disabled] lets the graph show
+.canvas-tools .btn { pointer-events: auto; background: var(--glass); backdrop-filter: blur(10px) saturate(130%); }
+/* Disabled, but still a glass plate: the 0.45 fade of .btn[disabled] lets the graph show
    through the words, so here the words go quiet instead. */
 .canvas-tools .btn[disabled],
 .canvas-tools .btn[disabled]:hover {
-  opacity: 1; background: var(--surface-1); color: var(--text-tertiary);
+  opacity: 1; background: var(--glass); color: var(--text-tertiary);
   border-color: var(--hairline);
 }
 .zoom-btn { min-width: 26px; font-family: var(--mono); }
 .zoom-level {
   min-width: 44px; text-align: center; font-size: 11px; color: var(--text-secondary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 3px var(--s-1);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-1);
 }
 .cs-note {
   font-family: var(--mono); font-size: 11px; color: var(--text-tertiary);
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-sm); padding: 3px var(--s-2);
+  background: var(--glass); backdrop-filter: blur(10px) saturate(130%); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: 3px var(--s-2);
 }
 /* Unsaved hand placements: a dot on Save layout. */
 #btn-save-layout.dirty::after {

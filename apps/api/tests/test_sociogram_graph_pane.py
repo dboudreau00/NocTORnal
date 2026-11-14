@@ -684,7 +684,7 @@ def test_the_canvas_chrome_is_two_wrapping_rows_that_cannot_overlap():
         assert "calc(100% -" not in body, f"{rule} is held apart by a guessed width again"
     disabled = re.search(r"\.canvas-tools \.btn\[disabled\],\s*\.canvas-tools \.btn\[disabled\]:hover \{([^}]*)\}", css)
     assert disabled and "opacity: 1" in disabled.group(1)
-    assert "background: var(--surface-1)" in disabled.group(1)
+    assert "background: var(--glass)" in disabled.group(1)
     assert ".canvas-tools .btn:disabled { opacity" not in css
 
 
