@@ -790,13 +790,15 @@ console.log(JSON.stringify({ nightjar: world([0, 1, 5, 8, 13, 18]),
 """
     got = _run(script)
     nj, ks = got["nightjar"], got["kestrel"]
-    assert nj["18"] == 16 and ks["8"] == 16
+    r_max, r_min, r_flat = (float(re.search(rf"^const {c} = ([0-9.]+);", _js(), re.M).group(1))
+                            for c in ("NODE_R_MAX", "NODE_R_MIN", "NODE_R_FLAT"))
+    assert nj["18"] == r_max and ks["8"] == r_max
     # Area in proportion: 18 ties is 3.6 times the ink of 5.
     assert abs((nj["18"] / nj["5"]) ** 2 - 18 / 5) < 0.05, nj
     assert abs((ks["8"] / ks["2"]) ** 2 - 8 / 2) < 0.05, ks
     assert ks["2"] > 7, "the least connected actor is a bare dot again"
-    assert nj["0"] == nj["1"] == 5, "the floor is not where 0 and 1 tie meet"
-    assert got["flat"]["0"] == 8
+    assert nj["0"] == nj["1"] == r_min, "the floor is not where 0 and 1 tie meet"
+    assert got["flat"]["0"] == r_flat
     assert "Math.log1p" not in _fn("sizeRaw") + _fn("sizeScale")
 
 

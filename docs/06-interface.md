@@ -242,7 +242,7 @@ readable.
 
 | Property | Encodes |
 |---|---|
-| Node size | Chosen centrality metric (analyst picks; label states which). AREA in proportion to the value, from zero: radius = 16px x sqrt(value / largest), floor 5px, at 100% zoom; the largest is taken over the connected entities. A size key in the legend draws two values at the current zoom |
+| Node size | Chosen centrality metric (analyst picks; label states which). AREA in proportion to the value, from zero: radius = 19px x sqrt(value / largest), floor 6px, at 100% zoom; the largest is taken over the connected entities. A size key in the legend draws two values at the current zoom |
 | Node colour | Node type: a translucent body in the type hue, and a type ring inset inside the outline |
 | Node outline | Node type again, so type is never hue alone: a victim is a square, context (events, incidents, places) a diamond, an assessed person has a second ring inside the first, everything else is a disc. Every outline can be hollow |
 | Node opacity | Confidence, and nothing else. The body takes `--canvas-node-body-*`, the ring and core take `--conf-*`, the same at every radius. An entity with no tie that meets the filter takes the LOW step, never full opacity |

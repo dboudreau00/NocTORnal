@@ -3970,9 +3970,9 @@ function sizeRaw(n) {
 }
 
 /* Node radius at 100% zoom, px. */
-const NODE_R_MIN = 5;          // the floor: small enough to rank, big enough to hit
-const NODE_R_MAX = 16;
-const NODE_R_FLAT = 8;         // when there is nothing to compare
+const NODE_R_MIN = 6;          // the floor: small enough to rank, big enough to hit
+const NODE_R_MAX = 19;
+const NODE_R_FLAT = 9;         // when there is nothing to compare
 
 /** Node area in proportion to the metric, anchored at zero: radius = R_MAX * sqrt(value /
  *  largest), so 18 ties is 3.6 times the ink of 5. Size is the only channel for "who matters",
