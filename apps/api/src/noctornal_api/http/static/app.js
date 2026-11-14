@@ -23697,11 +23697,12 @@ function readinessRow(c) {
       'BLOCKING'));
   }
   card.appendChild(head);
-  /* A failing blocker's evidence and action are in the banner above, in
-     full; printing them again here was the same four paragraphs twice. */
+  /* A failing blocker's evidence and action are in the banner above, in full; printing them again
+     here was the same four paragraphs twice, and a sentence pointing at them three times over is
+     no better, so the row carries a small "i" instead. */
   if (c.blocking && !c.ok) {
-    card.appendChild(el('p', 'help', 'Failing: what it refuses and how to settle it are in '
-      + 'the red box above.'));
+    head.appendChild(infoTip('What it refuses and how to settle it are in the red box above.',
+      'Where the detail is'));
     return card;
   }
   if (caveat) card.appendChild(el('p', 'help warn', caveat));
