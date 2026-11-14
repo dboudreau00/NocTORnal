@@ -10,17 +10,16 @@ information is competing with the graph.
 Dark, but not the default "near-black plus one acid accent" that every
 security dashboard ships with. Two decisions push it somewhere specific:
 
-**The canvas is the darkest surface, not the panels.** Inverted from the
-usual pattern. The graph sits on a deep charcoal void; the chrome around
-it is lit glass over charcoal that recedes rather than glows. Edges and nodes
-are the brightest things on screen because they are the content. The
-ground is not flat: the key light the rest of the room is lit by falls
-across the top of it, and a faint graph-paper grid in world space gives pan
-and zoom something to move against. Both are held to measured ceilings
-(theme.css, test_theme_contract): the key light keeps the canvas at or
-below `--surface-0` at its brightest point, so this rule holds everywhere
-and not only on average, and no mark drawn on the ground falls under its
-contrast floor where a grid line crosses the light.
+**The canvas is a stage, not a hole.** Inverted from the
+usual pattern. The graph sits on a deep navy ground lit from the middle and
+drawn back to the darkest point in the app (`--void`) at its edges; the chrome
+around it is lit glass over charcoal that recedes rather than glows. Edges and
+nodes are the brightest things on screen because they are the content. The
+ground is not flat: a lit centre, a vignette and a lattice of dots in world
+space give pan and zoom something to move against. It is held to a measured
+ceiling (theme.css, test_theme_contract): the lit centre stays under a
+luminance ceiling, so no mark drawn on the ground falls under its contrast
+floor, and the lattice stays quieter than any mark.
 
 **Colour is reserved for meaning.** Node type, confidence and edge sign are
 the only things allowed to use hue. Buttons, panels, borders and chrome are
@@ -38,7 +37,7 @@ tokens here to the theme's values.
 
 ```
 /* Surfaces: neutral charcoal, five steps with no hue to speak of */
---void            #111214   /* the canvas ground, the deepest point */
+--void            #0A0D16   /* the canvas edge and the plate behind canvas text, the deepest point */
 --surface-0       #161719   /* app background */
 --surface-1       #1C1D20   /* rail, app bar, inspector ground */
 --surface-2       #26272B   /* raised: inputs, buttons, sticky headers */
@@ -80,11 +79,12 @@ tokens here to the theme's values.
 --artefact-malware #D97BA8
 --context         #9A9BA0   /* near-neutral: "not an actor" */
 
-/* The canvas ground. The key light is painted once per canvas size;
-   the grid is one filled path, so a crossing composites once. */
---canvas-grid     rgba(240, 242, 244, 0.016)
---canvas-keylight rgba(240, 242, 244, 0.02)
---canvas-keylight-out rgba(240, 242, 244, 0)
+/* The canvas ground. The light and the vignette are painted once per canvas
+   size; the lattice is one filled path of small squares. */
+--canvas-lit      #16213A   /* the centre of the ground */
+--canvas-vignette rgba(2, 4, 9, 0.55)
+--canvas-vignette-out rgba(2, 4, 9, 0)
+--canvas-grid     rgba(150, 175, 225, 0.10)
 
 /* Node body alpha, one step per confidence grade. The ring and the
    core take the --conf-* steps below. */
@@ -131,7 +131,7 @@ system mono.
 │      │                                           │             │
 │ RAIL │            SOCIOGRAM CANVAS               │  INSPECTOR  │
 │      │                                           │             │
-│ ◇    │  (--void ground, key light, world grid)   │  selected   │
+│ ◇    │  (--void edge, lit centre, dot lattice)   │  selected   │
 │ ⬡    │                                           │  entity     │
 │ ▤    │                                           │             │
 │ ⚑    │                                           │  assertions │

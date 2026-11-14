@@ -1,5 +1,6 @@
 /* NocTORnal analyst console (docs/06-interface.md).
-   The canvas is the darkest surface; chrome is a lighter charcoal that recedes. Colour carries
+   The canvas is a lit stage that falls to the darkest surface at its edges; chrome is a lighter
+   charcoal that recedes. Colour carries
    meaning only (node type, edge sign, confidence, TLP): buttons, panels, borders and tabs stay
    neutral. Elevation is light, not paint: a raised surface is a translucent white wash plus a
    hairline, never a different opaque grey. Opaque steps are for the surfaces a canvas fills and

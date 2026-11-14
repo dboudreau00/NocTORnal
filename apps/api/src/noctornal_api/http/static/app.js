@@ -3270,8 +3270,9 @@ function loadPaint() {
   PAINT.hairline = cssVar('--hairline');
   PAINT.grid = cssVar('--chart-grid');
   PAINT.canvasGrid = cssVar('--canvas-grid');
-  PAINT.canvasKeylight = cssVar('--canvas-keylight');
-  PAINT.canvasKeylightOut = cssVar('--canvas-keylight-out');
+  PAINT.canvasLit = cssVar('--canvas-lit');
+  PAINT.canvasVignette = cssVar('--canvas-vignette');
+  PAINT.canvasVignetteOut = cssVar('--canvas-vignette-out');
   PAINT.pos = cssVar('--sign-positive');
   PAINT.neg = cssVar('--sign-negative');
   PAINT.neu = cssVar('--sign-neutral');
@@ -4089,20 +4090,19 @@ function edgeHidden(e) {
 
 /* ── the ground ─────────────────────────────────────────────────────────
  *
- * The sociogram's ground joins the elevation system theme.css describes with two marks, both
- * theme tokens held by test_theme_contract to a measured ceiling (the binding mark is
- * --sign-neutral, every neutral tie's colour, at a grid line under the brightest light):
+ * The sociogram's ground is a stage: --void at the edges, --canvas-lit in the middle, a vignette
+ * drawing the corners back toward the dark, and a lattice of dots in world space so pan and zoom
+ * have something to move against. All theme tokens, and test_theme_contract holds every mark to
+ * its contrast floor at the brightest point, a lattice dot on the lit centre. The light and the
+ * vignette depend only on the canvas size, so they are painted once per size into an offscreen
+ * canvas (buildGround) and blitted each frame.
  *
- *   - the key light `body` casts, so the top of the workspace is brightest. It depends only on
- *     the canvas size, so it is painted once per size into an offscreen canvas (buildGround)
- *     and blitted each frame;
- *   - a graph-paper grid in world space, so it pans and zooms with the graph.
- *
- * The grid spacing halves and doubles to stay inside GRID_MIN..GRID_MAX screen pixels, which
+ * The lattice spacing halves and doubles to stay inside GRID_MIN..GRID_MAX screen pixels, which
  * controls its density at every zoom, with no zoom threshold below which it vanishes. */
-const GRID_WORLD = 80;      // world units between lines at 1x
+const GRID_WORLD = 80;      // world units between dots at 1x
 const GRID_MIN = 22;        // screen px: below this, double the spacing
 const GRID_MAX = 128;       // screen px: above this, halve it
+const GRID_DOT = 2;         // px: the side of one dot
 
 function buildGround() {
   const bw = canvas.width, bh = canvas.height;
@@ -4114,20 +4114,29 @@ function buildGround() {
   gx.fillStyle = PAINT.void;
   gx.fillRect(0, 0, bw, bh);
   /* A gradient stop that is not a colour throws, where fillStyle quietly ignores it, and a throw
-     here would blank the canvas on every frame. An empty token skips the light
-     (paintIsComplete has already reported it); one present but unparseable is caught here. */
-  if (PAINT.canvasKeylight && PAINT.canvasKeylightOut) {
+     here would blank the canvas on every frame. An empty token skips that layer (paintIsComplete
+     has already reported it); one present but unparseable is caught here. */
+  const cx = bw / 2, cy = bh * 0.46, far = Math.hypot(bw, bh) * 0.6;
+  if (PAINT.canvasLit) {
     try {
-      // Centred above the top edge, so the falloff crosses the canvas
-      // rather than sitting in it as a visible blob.
-      const cx = bw / 2, cy = -bh * 0.28, far = Math.max(bw, bh) * 1.05;
-      const lamp = gx.createRadialGradient(cx, cy, 0, cx, cy, far);
-      lamp.addColorStop(0, PAINT.canvasKeylight);
-      lamp.addColorStop(1, PAINT.canvasKeylightOut);
-      gx.fillStyle = lamp;
+      const lit = gx.createRadialGradient(cx, cy, 0, cx, cy, far);
+      lit.addColorStop(0, PAINT.canvasLit);
+      lit.addColorStop(1, PAINT.void);
+      gx.fillStyle = lit;
       gx.fillRect(0, 0, bw, bh);
     } catch (err) {
-      console.error('canvas key light skipped: ' + err.message);
+      console.error('canvas light skipped: ' + err.message);
+    }
+  }
+  if (PAINT.canvasVignette && PAINT.canvasVignetteOut) {
+    try {
+      const rim = gx.createRadialGradient(cx, cy, far * 0.5, cx, cy, far * 1.1);
+      rim.addColorStop(0, PAINT.canvasVignetteOut);
+      rim.addColorStop(1, PAINT.canvasVignette);
+      gx.fillStyle = rim;
+      gx.fillRect(0, 0, bw, bh);
+    } catch (err) {
+      console.error('canvas vignette skipped: ' + err.message);
     }
   }
   GROUND.canvas = gc;
@@ -4149,22 +4158,23 @@ function paintGround(w, h) {
   paintGrid(w, h);
 }
 
-/* One path of 1px rectangles, filled once. Stroked as lines, Chromium composites each hairline
-   on its own at DPR 1, so every crossing takes the grid's alpha twice; a fill covers the union
-   once, which is the case test_theme_contract models. */
+/* One path of small squares, filled once: a fill covers the union once, which is the case
+   test_theme_contract models. */
 function paintGrid(w, h) {
   const v = state.view;
   if (!v || !(v.scale > 0) || !PAINT.canvasGrid) return;
   let step = GRID_WORLD * v.scale;
   while (step < GRID_MIN) step *= 2;
   while (step > GRID_MAX) step /= 2;
-  // Anchored to world coordinates: the first line on screen is wherever
+  // Anchored to world coordinates: the first dot on screen is wherever
   // world 0 lands, modulo the step.
   const ox = ((v.tx % step) + step) % step;
   const oy = ((v.ty % step) + step) % step;
+  const half = GRID_DOT / 2;
   ctx.beginPath();
-  for (let x = ox; x < w; x += step) ctx.rect(Math.round(x), 0, 1, h);
-  for (let y = oy; y < h; y += step) ctx.rect(0, Math.round(y), w, 1);
+  for (let x = ox; x < w; x += step) {
+    for (let y = oy; y < h; y += step) ctx.rect(Math.round(x) - half, Math.round(y) - half, GRID_DOT, GRID_DOT);
+  }
   ctx.globalAlpha = 1;
   ctx.fillStyle = PAINT.canvasGrid;
   ctx.fill();

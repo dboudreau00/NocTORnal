@@ -479,31 +479,38 @@ def _ratio_rgb(a: tuple[float, ...], b: tuple[float, ...]) -> float:
 
 
 def _worst_ground() -> tuple[float, float, float]:
-    """The brightest point a mark can sit on: the key light at its full
-    alpha, then ONE grid layer. One, because paintGrid fills a single path
-    of rectangles, which composites the union once
-    (test_sociogram_canvas holds the painter to that). Stroked hairlines
-    composited every crossing twice at DPR 1."""
-    t = _tokens()
-    void = _rgb(t["--void"])
-    key_rgb, key_a = _rgba_token("--canvas-keylight")
-    grid_rgb, grid_a = _rgba_token("--canvas-grid")
-    return _over(grid_rgb, grid_a, _over(key_rgb, key_a, void))
+    """The brightest point a mark can sit on: the lit centre of the ground. The lattice of dots covers well
+    under one percent of the canvas, so a mark is judged against the light, and the lattice is held quieter
+    than any mark by its own test below."""
+    return _rgb(_tokens()["--canvas-lit"])
 
 
-def test_the_canvas_is_still_the_darkest_surface_under_its_key_light():
-    """docs/06: "The canvas is the darkest surface". The restyle's key
-    light lifted the top of the canvas above --surface-0, so the claim
-    held only on average. The grid is a mark, not a surface, and is held
-    by the next test instead."""
+#: The lit centre of the canvas ground may not be brighter than this (relative luminance). The binding marks
+#: are the ego ring in --accent-dim, held to 3:1 by the floors below, and every node hue at 4.5:1.
+CANVAS_LIT_CEILING = 0.019
+
+
+def test_the_canvas_edge_is_the_darkest_surface_and_its_light_has_a_ceiling():
+    """docs/06: the canvas is a stage that falls to the darkest surface in the app at its edges, and the
+    light in the middle is bounded, so the claim holds where a mark is drawn and not only on average."""
     t = _tokens()
-    key_rgb, key_a = _rgba_token("--canvas-keylight")
-    lit = _over(key_rgb, key_a, _rgb(t["--void"]))
-    assert _lum_rgb(lit) <= _lum_rgb(_rgb(t["--surface-0"])), (
-        f"--canvas-keylight lifts the canvas to {tuple(round(v) for v in lit)}, "
-        "brighter than --surface-0: the canvas is no longer the darkest surface")
-    _, out_a = _rgba_token("--canvas-keylight-out")
-    assert out_a == 0, "the key light must fall off to nothing"
+    void = _lum(t["--void"])
+    for surface in ("--surface-0", "--surface-1", "--surface-2", "--surface-3"):
+        assert void < _lum(t[surface]), f"--void is no longer darker than {surface}"
+    lit = _lum(t["--canvas-lit"])
+    assert void < lit <= CANVAS_LIT_CEILING, (
+        f"--canvas-lit has luminance {lit:.4f}; it must sit above --void and at or under {CANVAS_LIT_CEILING}")
+    _, out_a = _rgba_token("--canvas-vignette-out")
+    assert out_a == 0, "the vignette must fall off to nothing"
+
+
+def test_the_lattice_is_quieter_than_any_mark():
+    """The dots give pan and zoom something to move against and may not read as marks of their own: a dot on
+    the lit centre stays within 1.45:1 of the light itself."""
+    t = _tokens()
+    lit = _rgb(t["--canvas-lit"])
+    dot_rgb, dot_a = _rgba_token("--canvas-grid")
+    assert _ratio_rgb(_over(dot_rgb, dot_a, lit), lit) <= 1.45
 
 
 @pytest.mark.parametrize("token,floor", [
@@ -601,12 +608,18 @@ def test_docs_06_quotes_the_canvas_tokens_the_theme_defines():
         assert m, f"docs/06 does not list {token}"
         assert float(m.group(1)) == a[token], (
             f"{token}: theme.css says {a[token]}, docs/06 says {m.group(1)}")
-    for token in ("--canvas-grid", "--canvas-keylight"):
+    for token in ("--canvas-grid", "--canvas-vignette"):
         _, alpha = _rgba_token(token)
         m = re.search(rf"^{token}\s+rgba\([^)]*?,\s*([0-9.]+)\)", docs, re.M)
         assert m, f"docs/06 does not list {token}"
         assert float(m.group(1)) == alpha, (
             f"{token}: theme.css alpha {alpha}, docs/06 {m.group(1)}")
+    t = _tokens()
+    for token in ("--void", "--canvas-lit"):
+        m = re.search(rf"^{token}\s+(#[0-9A-Fa-f]{{6}})", docs, re.M)
+        assert m, f"docs/06 does not list {token}"
+        assert m.group(1).upper() == t[token].upper(), (
+            f"{token}: theme.css says {t[token]}, docs/06 says {m.group(1)}")
 
 
 def test_docs_06_claims_only_the_hue_distances_this_file_measures():
