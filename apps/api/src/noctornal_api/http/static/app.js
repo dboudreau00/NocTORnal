@@ -449,6 +449,71 @@ function wirePanels() {
   });
 }
 
+/* A help line marked `fold` keeps its words and its element, and the console tucks it behind an
+ * "i" on the heading it explains: the nearest heading before it, among its siblings or inside the
+ * sibling before it, then the same one level up. A line with no heading to hang on, or marked
+ * `data-fold="inline"`, gets a quiet "About this" where it stood; `data-tip-for` names the element
+ * to hang on instead. The bubble reads the line when it opens, so a line a script rewrites stays
+ * current, and the "i" is hidden while the line is empty. */
+const FOLD_HEADS = 'h1, h2, h3, h4, .pane-title, .h-sm, .h-md, .h-xs, legend, .label, .eyebrow';
+let foldSeq = 0;
+const foldWatch = new MutationObserver((changes) => {
+  for (const c of changes) {
+    const at = c.target.nodeType === 1 ? c.target : c.target.parentElement;
+    syncFold(at && at.closest('.tip-src'));
+  }
+});
+
+function foldAnchor(p) {
+  if (p.dataset.fold === 'inline') return null;
+  if (p.dataset.tipFor) return $(p.dataset.tipFor);
+  /* Never past the pane or sub-pane the line is in, and never out of a disclosure: a heading in
+     another view is not what this line explains. */
+  const fence = p.closest('.pane, [role="tabpanel"], .subpane');
+  for (let node = p, hops = 0; node && node !== fence && hops < 4; node = node.parentElement, hops += 1) {
+    if (node !== p && node.tagName === 'DETAILS') return null;
+    for (let prev = node.previousElementSibling, steps = 0; prev && steps < 8;
+         prev = prev.previousElementSibling, steps += 1) {
+      if (prev.matches(FOLD_HEADS)) return prev;
+      const inner = prev.querySelectorAll(FOLD_HEADS);
+      if (inner.length) return inner[inner.length - 1];
+    }
+  }
+  return null;
+}
+
+function syncFold(p) {
+  if (!p || !p.foldButton) return;
+  p.foldButton.hidden = !p.textContent.trim();
+}
+
+function foldHelp(root) {
+  for (const p of (root || document).querySelectorAll('.help.fold, .hint.fold')) {
+    if (p.foldButton) continue;
+    const anchor = foldAnchor(p);
+    if (!p.id) { foldSeq += 1; p.id = 'fold-' + foldSeq; }
+    /* With no heading to hang on, a quiet "About this" stands where the line was. */
+    const b = anchor ? el('button', 'info', 'i') : el('button', 'info-link');
+    if (!anchor) {
+      b.appendChild(el('span', 'info-glyph', 'i'));
+      b.appendChild(document.createTextNode('About this'));
+    }
+    b.type = 'button';
+    b.dataset.tipFrom = p.id;
+    b.setAttribute('aria-describedby', p.id);
+    if (anchor) {
+      b.setAttribute('aria-label', 'More about ' + anchor.textContent.trim().slice(0, 40));
+      anchor.appendChild(b);
+    } else {
+      p.parentNode.insertBefore(b, p);
+    }
+    p.classList.add('tip-src');
+    p.foldButton = b;
+    syncFold(p);
+    foldWatch.observe(p, { childList: true, characterData: true, subtree: true });
+  }
+}
+
 /** Make an identifier click-to-copy: a <button>, because it is an action and must be keyboard
  *  reachable.
  *
@@ -14274,6 +14339,7 @@ function wire() {
   loadPaint();
   wireTips();
   wirePanels();
+  foldHelp();
   initTabs();
   initInbox();
   initComms();

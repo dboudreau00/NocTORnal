@@ -415,10 +415,15 @@ they fit. Everything visible at once is a hairball.
   sentence in the pane; the API response keeps all of it.
 - **The "i".** What is read once is not on the screen every visit. An "i"
   opens its words in a bubble on hover or focus and holds it on a press, and
-  Esc, a scroll or a press elsewhere closes it (`infoTip`, `wireTips`). The
-  canvas key and the shortcuts are two closed panels one press away, with
-  the entity types left in view; a readout says what is drawn and keeps how
-  the view is cut behind its own "i".
+  Esc, a scroll or a press elsewhere closes it (`infoTip`, `wireTips`). A
+  help line marked `fold` in `index.html` keeps its element and its words
+  and is tucked behind an "i" on the nearest heading before it in the same
+  pane (a quiet "About this" where there is none), so a test, a screen
+  reader and the bubble all read the same sentence. A warning, a refusal or
+  a consequence is never folded. The canvas key and the shortcuts are two
+  closed panels one press away, with the entity types left in view; a
+  readout says what is drawn and keeps how the view is cut behind its own
+  "i".
 
 ## Quality floor
 

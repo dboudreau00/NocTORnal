@@ -75,7 +75,7 @@ p { margin: 0; }
 /* An explanation that is not needed on every visit sits behind a small "i": it opens on hover or
    focus and stays on a press, and the words are in the page either way (data-tip, or the element
    named by data-tip-from) so a screen reader gets them as the button's description. */
-.info {
+.info, .info-glyph {
   display: inline-flex; align-items: center; justify-content: center; flex: none;
   width: 16px; height: 16px; margin-left: var(--s-1); padding: 0; cursor: help;
   font: 600 10px/1 var(--mono); color: var(--text-tertiary); vertical-align: middle;
@@ -87,9 +87,19 @@ p { margin: 0; }
 /* The circle stays 16px; the press target is 24px, so a finger or a trackpad finds it. */
 .info { position: relative; }
 .info::after { content: ''; position: absolute; inset: -5px; }
-.info:hover, .info:focus-visible, .info[aria-expanded="true"] {
+.info:hover, .info:focus-visible, .info[aria-expanded="true"],
+.info-link:hover .info-glyph, .info-link:focus-visible .info-glyph,
+.info-link[aria-expanded="true"] .info-glyph {
   color: var(--accent-soft); border-color: var(--accent-edge); background: var(--accent-wash);
 }
+/* "About this", where a line of help had no heading to hang its "i" on. */
+.info-link {
+  display: inline-flex; align-items: center; gap: var(--s-1); margin: 0 0 var(--s-2); padding: 0;
+  font: inherit; font-size: 11px; color: var(--text-tertiary); cursor: help;
+  background: none; border: 0; border-radius: var(--r-sm);
+}
+.info-link:hover, .info-link:focus-visible { color: var(--text-secondary); }
+.info-link .info-glyph { margin-left: 0; }
 .tip-bubble {
   position: fixed; z-index: 120; max-width: min(340px, calc(100vw - 16px));
   padding: var(--s-2) var(--s-3); pointer-events: none; overflow-wrap: anywhere;
@@ -97,7 +107,7 @@ p { margin: 0; }
   background: var(--surface-2); border: 1px solid var(--hairline-strong);
   border-radius: var(--r-ctl); box-shadow: var(--shadow-pop);
 }
-/* Words an "i" reads (data-tip-from): still in the page, and read by the bubble. */
+/* A help line whose words moved behind an "i" (foldHelp): still in the page, and read by the bubble. */
 .tip-src { display: none !important; }
 /* A button that opens a panel of reference beside it (the canvas key, the shortcuts). */
 .graph-bar .btn.panel-btn { color: var(--text-secondary); border-color: var(--hairline-strong); }
