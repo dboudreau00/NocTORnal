@@ -609,7 +609,7 @@ def test_the_zoom_level_and_its_controls_are_on_the_canvas():
     for cap in ('<span class="kbd">+</span>', '<span class="kbd">&minus;</span>',
                 '<span class="kbd">0</span>', '<span class="kbd">&larr; &rarr;</span>',
                 '<span class="kbd">Enter</span>', '<span class="kbd">P</span>'):
-        assert cap in keys, f"the hint strip omits {cap}"
+        assert cap in keys, f"the Shortcuts panel omits {cap}"
 
 
 def test_the_warnings_are_on_the_canvas_and_the_readout_is_words():
@@ -635,6 +635,7 @@ const box = { kids: [], appendChild(n) { this.kids.push(n); } };
 function $() { return box; }
 function clear(b) { b.kids = []; }
 function el(tag, cls, text) { return { tag, text }; }
+function infoTip(text) { return { tag: 'tip', text }; }
 function countOf(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
 function fmtTime(t) { return t; }
 function num(v) { return String(v); }
@@ -645,7 +646,8 @@ const state = { projMeta: { include_inferred: true }, proj: { include_inferred: 
                 preset: 'all', min_confidence: 'LOW' }, nodes: [], graph: { nodes: [], links: [] },
                 metrics: null };
 """ + _fn("renderReadout") + r"""
-const line = () => { renderReadout(); return box.kids[0].text; };
+// what is drawn is in view and the rest is behind the "i": both are said
+const line = () => { renderReadout(); return box.kids.map((k) => k.text).join(' | '); };
 const out = { empty: line() };
 state.metrics = { node_count: 0, density: 0 };
 out.emptyWithMetrics = line();

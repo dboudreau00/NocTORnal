@@ -323,7 +323,7 @@ function splitLead(text, limit) {
   return m ? { lead: m[1], rest: t.slice(m[0].length) } : { lead: t, rest: '' };
 }
 
-/* ── what is read once: the "i" bubble ───────────────────────────────────
+/* ── what is read once: the "i" bubble and the panels ────────────────────
  * An explanation that is not needed on every visit sits behind a small "i". It opens on hover or
  * focus and stays open on a press (touch and keyboard have no hover); Esc, a press elsewhere or a
  * scroll closes it. The words come from `data-tip`, or from the element named by `data-tip-from`
@@ -412,6 +412,41 @@ function wireTips() {
   });
   window.addEventListener('scroll', hideTip, true);
   window.addEventListener('resize', hideTip);
+}
+
+/** A button that opens a panel of reference beside it (the canvas key, the shortcuts). One is open
+ *  at a time; Esc, a press elsewhere or another panel's button closes it. */
+function wirePanels() {
+  const buttons = [...document.querySelectorAll('.panel-btn[aria-controls]')];
+  const panelOf = (b) => $(b.getAttribute('aria-controls'));
+  const closeAll = (except) => {
+    for (const b of buttons) {
+      if (b === except) continue;
+      b.setAttribute('aria-expanded', 'false');
+      show(panelOf(b), false);
+    }
+  };
+  for (const b of buttons) {
+    b.addEventListener('click', () => {
+      const open = b.getAttribute('aria-expanded') !== 'true';
+      closeAll(b);
+      b.setAttribute('aria-expanded', open ? 'true' : 'false');
+      show(panelOf(b), open);
+      /* The size key is a canvas, drawn only while it has a size. */
+      if (open && state.graph) { sizeKeyShown = ''; noteSizeKey(state.graph); }
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (e.target instanceof Element && e.target.closest('.panel-pop, .panel-btn')) return;
+    closeAll(null);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const open = buttons.find((b) => b.getAttribute('aria-expanded') === 'true');
+    if (!open) return;
+    closeAll(null);
+    open.focus({ preventScroll: true });
+  });
 }
 
 /** Make an identifier click-to-copy: a <button>, because it is an action and must be keyboard
@@ -2772,27 +2807,25 @@ function renderReadout() {
   const inCase = state.nodes.length >= CASE_LIST_PAGE
     ? CASE_LIST_PAGE.toLocaleString('en-GB') + ' or more entities'
     : countOf(state.nodes.length, 'entity', 'entities');
-  const parts = [];
-  parts.push('Showing ' + drawnNodes + ' of ' + inCase
-    + ' and ' + countOf(drawnTies, 'tie', 'ties'));
   const inferred = p.include_inferred === undefined
     ? state.proj.include_inferred : p.include_inferred;
-  /* "Counted in the metrics" only while there are metrics to count them in: an empty case, a
-     refused call or a timeline drag has none. */
-  parts.push(inferred
+  /* What is drawn stays in view; how the view is cut sits behind the "i". "Counted in the metrics"
+     only while there are metrics to count them in: an empty case, a refused call or a timeline
+     drag has none. */
+  const more = [];
+  more.push(inferred
     ? 'inferred ties included'
       + (state.metrics && drawnNodes ? ', and counted in the metrics' : '')
     : 'asserted ties only');
-  parts.push('as of ' + (p.as_of ? fmtTime(p.as_of) : 'now'));
   if (state.metrics && state.metrics.node_count > 1) {
-    parts.push('density ' + num(state.metrics.density, 2));
+    more.push('density ' + num(state.metrics.density, 2));
   }
-  const line = el('span', null, parts.join(' · '));
+  box.appendChild(el('span', null, 'Showing ' + drawnNodes + ' of ' + inCase
+    + ' and ' + countOf(drawnTies, 'tie', 'ties')));
   /* The view in the words every other place uses, and the parameters a disclosure or a re-run
      quotes exactly. */
-  line.title = viewWords(p) + '. ' + viewParameters(p)
-    + '. The metrics are computed over this view and nothing else.';
-  box.appendChild(line);
+  box.appendChild(infoTip(more.join(' · ') + '. ' + viewWords(p) + '. ' + viewParameters(p)
+    + '. The metrics are computed over this view and nothing else.', 'About this view'));
 }
 
 /** What changes how the picture may be read, on the picture: how much of it is evidenced, a
@@ -12884,7 +12917,7 @@ function initPalette() {
      label, and assigning textContent to it would delete both. */
   $('palette-key').textContent = mac ? '⌘K' : 'Ctrl K';
   $('keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
-  /* And the hint strip under the canvas, so it agrees with the header chip. */
+  /* And the key in the Shortcuts panel, so it agrees with the header chip. */
   $('canvas-keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
@@ -14241,6 +14274,7 @@ function paintWkdExposure() {
 function wire() {
   loadPaint();
   wireTips();
+  wirePanels();
   initTabs();
   initInbox();
   initComms();

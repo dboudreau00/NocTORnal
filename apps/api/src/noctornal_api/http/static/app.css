@@ -99,6 +99,17 @@ p { margin: 0; }
 }
 /* Words an "i" reads (data-tip-from): still in the page, and read by the bubble. */
 .tip-src { display: none !important; }
+/* A button that opens a panel of reference beside it (the canvas key, the shortcuts). */
+.graph-bar .btn.panel-btn { color: var(--text-secondary); border-color: var(--hairline-strong); }
+.btn.panel-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent-edge); }
+.panel-pop {
+  position: absolute; z-index: 40; left: var(--s-3); bottom: calc(100% + var(--s-2));
+  width: min(680px, calc(100% - var(--s-6)));
+  padding: var(--s-2) var(--s-4); font-size: 11px; color: var(--text-secondary);
+  background: var(--glass); backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid var(--hairline-strong); border-radius: var(--r-card);
+  box-shadow: var(--shadow-pop);
+}
 
 /* ── banners ───────────────────────────────────────────────────────── */
 /* Below the app bar, never over it, so a failure cannot cover All cases, the identity and
@@ -869,15 +880,24 @@ button.hdr-user.codes-low::before { background: var(--alert); }
   vertical-align: middle;
 }
 
+/* One slim row under the timeline: the entity types, what is drawn, and the two buttons that open
+   the rest. The panels open upward over the canvas. */
 .graph-bar {
-  display: flex; flex-direction: column; gap: var(--s-1);
-  padding: var(--s-2) var(--s-4); background: var(--wash-1);
+  position: relative; display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--s-1) var(--s-4); padding: var(--s-2) var(--s-4); background: var(--wash-1);
   border-top: 1px solid var(--hairline);
 }
-.legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+.legend { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; min-width: 0;
           font-size: 11px; color: var(--text-secondary); }
+.lg-types { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-3); }
 .lg { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
-.legend-sep { width: 1px; height: 14px; background: var(--hairline); }
+.lg-group { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-4);
+            padding: var(--s-2) 0; }
+.lg-group + .lg-group { border-top: 1px solid var(--hairline-soft); }
+.lg-head { flex: 0 0 112px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+           color: var(--text-tertiary); }
+.legend-more { width: min(760px, calc(100% - var(--s-6))); }
+.keys-more { left: auto; right: var(--s-4); width: min(560px, calc(100% - var(--s-6))); }
 .line { display: inline-block; width: 16px; height: 0;
         border-top: 2px solid var(--sign-neutral); margin-right: 5px; }
 .line.pos { border-top-color: var(--sign-positive); }
@@ -922,11 +942,11 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 }
 
 /* docs/03: show the projection parameters next to the results, always. */
-.proj-readout { font-size: 11px; color: var(--text-secondary);
-                overflow-wrap: anywhere; }
+.proj-readout { margin-left: auto; font-size: 11px; color: var(--text-secondary);
+                display: inline-flex; align-items: center; overflow-wrap: anywhere; }
 .proj-readout .rd-warn { color: var(--alert); }
-.canvas-keys { font-size: 10px; color: var(--text-tertiary);
-               display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.canvas-keys { font-size: 11px; color: var(--text-secondary); line-height: 2;
+               display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 /* ── timeline scrubber (the signature element) ─────────────────────── */
 /* Two rows, to leave the canvas its height: the note beside the heading, and the dates flanking

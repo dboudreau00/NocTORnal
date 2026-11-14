@@ -201,8 +201,8 @@ readable.
   entity's ties, the ties on one pair next to each other; Shift with an
   arrow pans; Home returns to the selection; `+`/`-` zoom; `0` fits;
   Enter opens the ego network; `P` marks a path anchor; `U` pins or
-  unpins the selection. The hint strip under the canvas and the `?` sheet
-  list all of them.
+  unpins the selection. The Shortcuts button at the foot of the canvas and
+  the `?` sheet list all of them.
 - The zoom level is shown on the canvas, with `-`, `+` and Fit beside it
   and the count of names held back for lack of room.
 - What changes how the picture may be read sits ON the canvas, top left:
@@ -211,8 +211,9 @@ readable.
   focus it counts the focus drawn, says so, and gives the whole
   projection's figure in its title), a truncated page,
   material above the reader's clearance, and metrics that did not load
-  (retried by itself when the refusal says when). The readout under the
-  legend says what is drawn in words.
+  (retried by itself when the refusal says when). The readout at the foot,
+  beside the key, says what is drawn in words; how the view is cut sits
+  behind its "i".
 - An empty canvas says whether the case or the projection is empty, and
   offers the one thing that would fill it: add the first entity, change
   the case status, move the as-of position back to now, or reload. The
@@ -242,7 +243,7 @@ readable.
 
 | Property | Encodes |
 |---|---|
-| Node size | Chosen centrality metric (analyst picks; label states which). AREA in proportion to the value, from zero: radius = 19px x sqrt(value / largest), floor 6px, at 100% zoom; the largest is taken over the connected entities. A size key in the legend draws two values at the current zoom |
+| Node size | Chosen centrality metric (analyst picks; label states which). AREA in proportion to the value, from zero: radius = 19px x sqrt(value / largest), floor 6px, at 100% zoom; the largest is taken over the connected entities. A size key in the canvas key (the Key button) draws two values at the current zoom |
 | Node colour | Node type: a translucent body in the type hue, and a type ring inset inside the outline |
 | Node outline | Node type again, so type is never hue alone: a victim is a square, context (events, incidents, places) a diamond, an assessed person has a second ring inside the first, everything else is a disc. Every outline can be hollow |
 | Node opacity | Confidence, and nothing else. The body takes `--canvas-node-body-*`, the ring and core take `--conf-*`, the same at every radius. An entity with no tie that meets the filter takes the LOW step, never full opacity |
@@ -414,7 +415,10 @@ they fit. Everything visible at once is a hairball.
   sentence in the pane; the API response keeps all of it.
 - **The "i".** What is read once is not on the screen every visit. An "i"
   opens its words in a bubble on hover or focus and holds it on a press, and
-  Esc, a scroll or a press elsewhere closes it (`infoTip`, `wireTips`).
+  Esc, a scroll or a press elsewhere closes it (`infoTip`, `wireTips`). The
+  canvas key and the shortcuts are two closed panels one press away, with
+  the entity types left in view; a readout says what is drawn and keeps how
+  the view is cut behind its own "i".
 
 ## Quality floor
 

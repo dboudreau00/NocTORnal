@@ -841,86 +841,108 @@
           </div>
 
           <div class="graph-bar">
+            <!-- The entity types stay in view, because hue is how a type is read. Everything else the
+                 canvas draws is one press away under Key, and the keyboard under Shortcuts. -->
             <div class="legend" aria-label="Legend">
-              <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
-              <span class="lg" title="An assessed person is drawn with a second
-                    ring inside the first, so it never rests on hue alone."><i
-                    class="swatch dbl hue-actor-person"></i>Person</span>
-              <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
-              <span class="lg" title="A victim is a SQUARE in the Group hue: a
-                    target, not a member (2026-09-23)."><i
-                    class="swatch sq hue-actor-group"></i>Victim</span>
-              <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
-              <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
-              <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
-              <span class="lg" title="Events, incidents, campaigns and places are
-                    DIAMONDS: things that happened, not entities."><i
-                    class="swatch dia hue-context"></i>Context</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <span class="lg"><i class="line pos"></i>vouch / positive</span>
-              <span class="lg"><i class="line neg"></i>dispute / negative</span>
-              <span class="lg"><i class="line neu"></i>neutral</span>
-              <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
-              <span class="lg" title="Sign is never carried by hue alone: from 120%
-                    zoom a positive tie is marked + at its midpoint and a negative
-                    tie &minus;. The dash pattern cannot carry sign, because solid
-                    versus dashed already means asserted versus inferred.">
-                <code class="mono">+ / &minus;</code>&nbsp;sign mark (from 120%)</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <!-- The evidence encoding (docs/06), spelled out rather than left to the checkbox's
-                   hover title. -->
-              <span class="lg" title="An entity with an exhibit behind it has a
-                    filled body and a solid core."><i class="glyph-node"></i>evidenced</span>
-              <span class="lg" title="Hollow: nothing inside the ring. The entity
-                    rests on no exhibit. Shown while Mark unevidenced is on."><i class="glyph-node hollow"></i>hollow = no exhibit</span>
-              <span class="lg" title="A hollow bead at a tie's midpoint: the tie
-                    rests on no exhibit. It is a shape, not a fade, because opacity
-                    already means confidence."><i class="line bead"></i>bead = tie with no exhibit</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <!-- Every ring the canvas draws, each with its own pattern. The dashed ring is drawn
-                   from the Triage queue and from a tie's review, so it clears when the proposal is
-                   dispositioned or the tie reviewed. -->
-              <span class="lg" title="A proposal about this entity is waiting in the Triage queue, or a tie at it is still PROPOSED. Accepting, rejecting or deferring the proposal in Triage, or accepting or disputing the tie under Review in the inspector, clears the ring."><i class="ring prop"></i>proposal in Triage or tie to review</span>
-              <span class="lg"><i class="ring sel"></i>selected</span>
-              <span class="lg"><i class="ring pin"></i>pinned</span>
-              <span class="lg" title="Shift-click or P marks the first end of a
-                    path; the next shift-click or P traces it."><i
-                    class="ring anchor"></i>path anchor</span>
-              <span class="lg" title="The entity an ego focus is centred on
-                    (double-click or Enter)."><i class="ring ego"></i>ego centre</span>
-              <span class="lg" title="Pointing at an entity dims everything
-                    outside its neighbourhood, whatever its confidence.">hover dims the rest</span>
-              <span class="legend-sep" aria-hidden="true"></span>
-              <span class="lg size-key-lg"><canvas id="size-key" class="size-key"
-                    aria-hidden="true"></canvas><span id="legend-size"
-                    class="muted">area = degree</span></span>
-              <span class="lg muted" title="Confidence encodes as opacity, because hue
-                    is already spent on node type. An entity takes the best
-                    confidence among its ties in this projection, and one with no
-                    tie that meets the filter takes the lowest step. A tie with no
-                    confidence recorded is drawn at full opacity rather than at a
-                    made-up step. The numeric value is in the inspector, so it is
-                    never opacity alone.">opacity = confidence</span>
+              <span class="lg-types">
+                <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
+                <span class="lg" title="An assessed person is drawn with a second
+                      ring inside the first, so it never rests on hue alone."><i
+                      class="swatch dbl hue-actor-person"></i>Person</span>
+                <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
+                <span class="lg" title="A victim is a square in the Group hue: a
+                      target, not a member."><i
+                      class="swatch sq hue-actor-group"></i>Victim</span>
+                <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
+                <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
+                <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
+                <span class="lg" title="Events, incidents, campaigns and places are
+                      diamonds: things that happened, not entities."><i
+                      class="swatch dia hue-context"></i>Context</span>
+              </span>
+              <button id="btn-key" type="button" class="btn ghost small panel-btn"
+                      aria-expanded="false" aria-controls="legend-more">Key</button>
+              <div id="legend-more" class="panel-pop legend-more" role="group"
+                   aria-label="Everything the canvas draws" hidden>
+                <div class="lg-group">
+                  <span class="lg-head">Relationships</span>
+                  <span class="lg"><i class="line pos"></i>vouch / positive</span>
+                  <span class="lg"><i class="line neg"></i>dispute / negative</span>
+                  <span class="lg"><i class="line neu"></i>neutral</span>
+                  <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
+                  <span class="lg" title="Sign is never carried by hue alone: from 120%
+                        zoom a positive tie is marked + at its midpoint and a negative
+                        tie &minus;. The dash pattern cannot carry sign, because solid
+                        versus dashed already means asserted versus inferred.">
+                    <code class="mono">+ / &minus;</code>&nbsp;sign mark (from 120%)</span>
+                </div>
+                <!-- The evidence encoding (docs/06), spelled out rather than left to the checkbox's
+                     hover title. -->
+                <div class="lg-group">
+                  <span class="lg-head">Evidence</span>
+                  <span class="lg" title="An entity with an exhibit behind it has a
+                        filled body and a solid core."><i class="glyph-node"></i>evidenced</span>
+                  <span class="lg" title="Hollow: nothing inside the ring. The entity
+                        rests on no exhibit. Shown while Mark unevidenced is on."><i class="glyph-node hollow"></i>hollow = no exhibit</span>
+                  <span class="lg" title="A hollow bead at a tie's midpoint: the tie
+                        rests on no exhibit. It is a shape, not a fade, because opacity
+                        already means confidence."><i class="line bead"></i>bead = tie with no exhibit</span>
+                </div>
+                <!-- Every ring the canvas draws, each with its own pattern. The dashed ring is drawn
+                     from the Triage queue and from a tie's review, so it clears when the proposal is
+                     dispositioned or the tie reviewed. -->
+                <div class="lg-group">
+                  <span class="lg-head">Rings</span>
+                  <span class="lg" title="A proposal about this entity is waiting in the Triage queue, or a tie at it is still PROPOSED. Accepting, rejecting or deferring the proposal in Triage, or accepting or disputing the tie under Review in the inspector, clears the ring."><i class="ring prop"></i>proposal in Triage or tie to review</span>
+                  <span class="lg"><i class="ring sel"></i>selected</span>
+                  <span class="lg"><i class="ring pin"></i>pinned</span>
+                  <span class="lg" title="Shift-click or P marks the first end of a
+                        path; the next shift-click or P traces it."><i
+                        class="ring anchor"></i>path anchor</span>
+                  <span class="lg" title="The entity an ego focus is centred on
+                        (double-click or Enter)."><i class="ring ego"></i>ego centre</span>
+                  <span class="lg" title="Pointing at an entity dims everything
+                        outside its neighbourhood, whatever its confidence.">hover dims the rest</span>
+                </div>
+                <div class="lg-group">
+                  <span class="lg-head">Size and opacity</span>
+                  <span class="lg size-key-lg"><canvas id="size-key" class="size-key"
+                        aria-hidden="true"></canvas><span id="legend-size"
+                        class="muted">area = degree</span></span>
+                  <span class="lg muted" title="Confidence encodes as opacity, because hue
+                        is already spent on node type. An entity takes the best
+                        confidence among its ties in this projection, and one with no
+                        tie that meets the filter takes the lowest step. A tie with no
+                        confidence recorded is drawn at full opacity rather than at a
+                        made-up step. The numeric value is in the inspector, so it is
+                        never opacity alone.">opacity = confidence</span>
+                </div>
+              </div>
             </div>
             <p id="proj-readout" class="proj-readout" role="status"></p>
             <!-- The keyboard's half as well as the mouse's: a sighted keyboard user never reads
                  the canvas's accessible name, the only other place the keys are listed. -->
-            <p class="canvas-keys">
-              <span class="kbd">drag</span> pan ·
-              <span class="kbd">drag a node</span> move and pin ·
-              <span class="kbd">U</span> pin or unpin ·
-              <span class="kbd">scroll</span> <span class="kbd">+</span> <span class="kbd">&minus;</span> zoom ·
-              <span class="kbd">0</span> fit ·
-              <span class="kbd">click</span> inspect ·
-              <span class="kbd">&larr; &rarr;</span> select ·
-              <span class="kbd">[ ]</span> ties ·
-              <span class="kbd">shift-arrows</span> pan ·
-              <span class="kbd">dbl-click</span> or <span class="kbd">Enter</span> ego ·
-              <span class="kbd">shift-click</span> or <span class="kbd">P</span> path ·
-              <span class="kbd">Esc</span> clear ·
-              <span class="kbd">hold space</span> hide inferred ·
-              <span class="kbd" id="canvas-keys-palette">Ctrl K</span> jump to
-            </p>
+            <button id="btn-keys" type="button" class="btn ghost small panel-btn"
+                    aria-expanded="false" aria-controls="keys-more">Shortcuts</button>
+            <div id="keys-more" class="panel-pop keys-more" role="group"
+                 aria-label="Mouse and keyboard" hidden>
+              <p class="canvas-keys">
+                <span class="kbd">drag</span> pan ·
+                <span class="kbd">drag a node</span> move and pin ·
+                <span class="kbd">U</span> pin or unpin ·
+                <span class="kbd">scroll</span> <span class="kbd">+</span> <span class="kbd">&minus;</span> zoom ·
+                <span class="kbd">0</span> fit ·
+                <span class="kbd">click</span> inspect ·
+                <span class="kbd">&larr; &rarr;</span> select ·
+                <span class="kbd">[ ]</span> ties ·
+                <span class="kbd">shift-arrows</span> pan ·
+                <span class="kbd">dbl-click</span> or <span class="kbd">Enter</span> ego ·
+                <span class="kbd">shift-click</span> or <span class="kbd">P</span> path ·
+                <span class="kbd">Esc</span> clear ·
+                <span class="kbd">hold space</span> hide inferred ·
+                <span class="kbd" id="canvas-keys-palette">Ctrl K</span> jump to
+              </p>
+            </div>
           </div>
         </section>
 

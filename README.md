@@ -312,7 +312,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **8439 tests** (`def test_`
+With the containers up, expect **no failures** across **8442 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -342,7 +342,7 @@ structural edges wait on a shelf at the side (five here: three crews, a
 wallet and a domain). Inferred edges render **dashed**, like the one beside
 the selected vouch between bit_forge and bit_lathe, and count toward the
 metrics only when a projection opts in. The console's default projection
-does, and the readout under the legend says so. The bar along the bottom is
+does, and the "i" beside the count at the foot of the canvas says so. The bar along the bottom is
 world time: drag it and the graph becomes the network as it stood on that
 date, as the case records it today.
 
@@ -676,7 +676,7 @@ enforces it.
 
 ### Testing
 
-**8439 tests** (`def test_` functions across two pytest roots, maintained by
+**8442 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
