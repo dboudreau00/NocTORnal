@@ -77,11 +77,11 @@ _CONFIDENCE_ORDER = {"LOW": 0, "MODERATE": 1, "HIGH": 2}
 # assertion that carries it (`assertion.evidence_id`) and a direct attachment
 # (`core.evidence_link`). Both count.
 #
-# An element is EVIDENCED when an exhibit is attached to it by a live (unretracted) assertion OR by
-# an evidence_link row, and that exhibit is in the element's case, not purged, and visible at the
-# reader's clearance and compartments. The projection (`has_evidence`, and through it the coverage
-# figure and the report) and the inspector's evidence list (`routers/read.py`) both build on
-# `evidence_backing_sql`.
+# An element is EVIDENCED when an exhibit is attached to it by a live assertion (neither retracted nor
+# replaced by a dated copy) OR by an evidence_link row, and that exhibit is in the element's case, not
+# purged, and visible at the reader's clearance and compartments. The projection (`has_evidence`, and
+# through it the coverage figure and the report) and the inspector's evidence list (`routers/read.py`)
+# both build on `evidence_backing_sql`.
 #
 # The visibility leg is deliberate: `withheld()` below explains why a mark that localises withheld
 # material is the disclosure that matters, and a "yes" resting on an exhibit the reader cannot see
@@ -118,6 +118,7 @@ def evidence_backing_sql(column: str, element: str) -> str:
                  FROM core.assertion ba
                 WHERE ba.{column} = {element}
                   AND ba.retracted_at IS NULL
+                  AND ba.superseded_at IS NULL
                   AND ba.evidence_id IS NOT NULL"""
 
 

@@ -275,6 +275,42 @@ def test_a_document_supporting_an_unretracted_assertion_is_pinned_and_a_retracte
     assert not _purged(conn, pinned) and _purged(conn, free)
 
 
+def test_a_replaced_claim_does_not_pin_its_document_once_its_replacement_is_withdrawn(conn, owner):
+    """Dating a claim records a copy that cites the same document and stamps the old claim superseded. The
+    copy pins the document while it stands; withdraw it and no live claim rests on the document, so the pin
+    goes, as it does for a claim retracted outright. The old claim is history and cannot be retracted to
+    release it, so a pin that read only `retracted_at IS NULL` would hold the document for good."""
+    from noctornal_api.graph import GraphWriteService
+    from noctornal_api.retention import RetentionService
+
+    source = _source(conn)
+    case = _case(conn, owner)
+    doc = _doc(conn, source, "post:41")
+    node = uuid4()
+    with conn.transaction():
+        conn.execute("""INSERT INTO core.node (id, case_id, node_type, label, created_by)
+                        VALUES (%s, %s, 'IDENTITY', %s, %s)""",
+                     (node, case, f"cdrt-{node.hex[:6]}", owner))
+        claim = conn.execute(
+            """INSERT INTO core.assertion (case_id, node_id, basis, created_by, document_id)
+               VALUES (%s, %s, 'DIRECT_OBSERVATION', %s, %s) RETURNING id""",
+            (case, node, owner, doc)).fetchone()[0]
+    replacement = GraphWriteService(conn).supersede_assertion(
+        claim, case_id=case, observed_at=datetime(2026, 3, 1, 22, 30, tzinfo=timezone.utc),
+        rationale="Dated from the post's own timestamp.", created_by=owner)
+
+    def held():
+        return next(i for i in RetentionService(conn).due() if i.object_id == doc).held
+
+    assert held(), "the replacement cites the document and pins it"
+    GraphWriteService(conn).retract_assertion(
+        replacement, retracted_by=owner, reason="the date was wrong",
+        at=datetime.now(timezone.utc))
+    assert not held(), "a replaced claim went on pinning a document nothing live rests on"
+    _purge(conn, owner)
+    assert _purged(conn, doc)
+
+
 def test_the_hold_reason_never_names_the_case(conn, owner):
     from noctornal_api.retention import RetentionService
 

@@ -410,3 +410,70 @@ def test_every_new_string_is_free_of_dashes_and_bracketed_plurals():
             assert not re.search("[\u2013\u2014]| -- ", s), (name, s)
             assert not re.search(r"\w\((?:s|es)\)", s), (name, s)
     assert not re.search("[\u2013\u2014]", _const("ACH_STATUS"))
+
+
+# --- a claim a dated copy replaced -------------------------------------------
+
+@needs_node
+def test_a_replaced_claims_row_is_read_only_text_and_says_it_was_replaced(tmp_path):
+    """A stance on a replaced claim is kept and read, counts for nothing, and takes no new score (the
+    router answers 409), so its cells are text rather than buttons: a button disabled for it would be
+    switched back on when a closed case is reopened (`applyCaseReadOnly`)."""
+    names = ("renderAchMatrix", "achColumns", "achKey", "achEvidenceCell", "achSubject",
+             "achClaim", "achNum", "achAnd", "achUnknownWhy", "stanceText", "closeClause")
+    script = tmp_path / "run.js"
+    script.write_text(_DOM + """
+function renderAchHypothesisPicker() {}
+function withSafeLabel(e) { return e; }
+function achOpenElement() {}
+function openStanceChooser() {}
+const BASES = [];
+function gradingText() { return ''; }
+""" + _const("STANCE_CLASS") + chr(10) + chr(10).join(_fn(n) for n in names) + """
+const row = (id, label, stale) => ({
+  assertion_id: id, label: label, diagnosticity: stale ? 0 : 1.2, is_diagnostic: !stale,
+  is_incomplete: false, assessed_against: stale ? 0 : 2, spread: stale ? 0 : 2, weight: 0.5,
+  stale: stale });
+const cell = (a, h, stance, stale) => ({ assertion_id: a, hypothesis_id: h, stance: stance, stale: stale });
+const body = {
+  stance_scale: {'-2': 'strongly inconsistent', '-1': 'inconsistent', '0': 'neutral',
+                 '1': 'consistent', '2': 'strongly consistent'},
+  hypotheses: [{ id: 'h1', number: 1, statement: 'one', retired: false },
+               { id: 'h2', number: 2, statement: 'two', retired: false }],
+  evidence: [row('live', 'live row', false), row('old', 'old row', true)],
+  cells: [cell('live', 'h1', -1, false), cell('live', 'h2', 1, false),
+          cell('old', 'h1', -2, true), cell('old', 'h2', 2, true)],
+  refute_first: null,
+};
+renderAchMatrix(body);
+const kids = (tr, cls) => walk(tr, []).filter((n) => n.className.split(' ').includes(cls));
+const trs = walk($('ach-matrix'), []).filter((n) => n.tagName === 'TR' && kids(n, 'ach-el').length);
+const stale = trs.find((t) => t.className === 'row-stale');
+const live = trs.find((t) => t.className !== 'row-stale');
+console.log(JSON.stringify({
+  rows: trs.length,
+  staleButtons: kids(stale, 'ach-cell-btn').length,
+  staleText: kids(stale, 'ach-cell-text').map((n) => n.textContent),
+  staleDiag: kids(stale, 'ach-diag').map(text),
+  staleChip: kids(stale, 'chip').map((n) => n.textContent),
+  liveButtons: kids(live, 'ach-cell-btn').length,
+  liveChip: kids(live, 'chip').length,
+}));
+""", encoding="utf-8")
+    out = subprocess.run([NODE, str(script)], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60, check=False)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert got == {
+        "rows": 2, "staleButtons": 0,
+        "staleText": ["strongly inconsistent", "strongly consistent"],
+        "staleDiag": ["replaced"], "staleChip": ["replaced"],
+        "liveButtons": 2, "liveChip": 0}, got
+
+
+def test_the_pane_counts_replaced_rows_and_the_router_sends_the_flag():
+    assert "e.stale" in _code(_fn("renderAchMatrix"))
+    assert "replaced" in _code(_fn("loadAch"))
+    router = (SRC / "http" / "routers" / "ach.py").read_text(encoding="utf-8")
+    assert '"stale": c.stale' in router, "a cell must say it rests on a replaced claim"
+    assert "stale=cell.stale" in router, "the router must hand the flag to the scoring"

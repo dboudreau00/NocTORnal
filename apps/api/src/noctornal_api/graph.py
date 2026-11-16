@@ -830,6 +830,9 @@ class GraphWriteService:
         claim is never rewritten and the projection drops the row. A retraction withdraws a claim rather
         than replacing one; a correction is a new assertion.
 
+        A claim that a dated copy replaced is history, as `supersede_assertion` treats it, and is not
+        retracted: the claim that replaced it is the one to withdraw.
+
         A retracted correction gives its value back, in the same transaction. A correction writes its
         value onto the element, and every reader reads the element, so each field it set returns to the
         value the remaining live claims support: the newest live correction of that field, or, when none
@@ -840,13 +843,22 @@ class GraphWriteService:
                     """UPDATE core.assertion
                           SET retracted_at = %s, retracted_by = %s,
                               retraction_reason = %s
-                        WHERE id = %s AND retracted_at IS NULL""",
+                        WHERE id = %s AND retracted_at IS NULL
+                          AND superseded_at IS NULL""",
                     (at, retracted_by, reason, assertion_id),
                 )
-                # A 0-row update means the id is unknown or already retracted;
+                # A 0-row update means the id is unknown, already retracted or replaced;
                 # tell the caller rather than silently leaving a burned source
                 # live in the projection.
                 if cur.rowcount == 0:
+                    state = self._c.execute(
+                        "SELECT retracted_at IS NOT NULL, superseded_at IS NOT NULL "
+                        "FROM core.assertion WHERE id = %s", (assertion_id,)).fetchone()
+                    if state is not None and state[1] and not state[0]:
+                        raise GraphWriteError(
+                            f"assertion {assertion_id} has been replaced by a dated claim, "
+                            "so it is history and is not retracted. Retract the claim that "
+                            "replaced it")
                     raise GraphWriteError(
                         f"assertion {assertion_id} not found or already retracted"
                     )

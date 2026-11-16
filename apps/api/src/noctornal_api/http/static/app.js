@@ -25509,10 +25509,12 @@ async function loadAch() {
   renderAchMatrix(body);
   const live = body.hypotheses.filter((h) => !h.retired).length;
   const out = body.hypotheses.length - live;
+  const replaced = body.evidence.filter((e) => e.stale).length;
   $('ach-counts').textContent =
     countOf(live, 'hypothesis', 'hypotheses')
     + (out ? ' (and ' + out + ' ruled out)' : '') + ' · '
-    + countOf(body.evidence.length, 'item of evidence', 'items of evidence');
+    + countOf(body.evidence.length, 'item of evidence', 'items of evidence')
+    + (replaced ? ' (' + replaced + ' replaced)' : '');
 }
 
 function renderAchWarnings(body) {
@@ -25829,8 +25831,8 @@ function renderAchMatrix(body) {
     /* Three states, not two. "Settles nothing" and "we have not finished entering this row"
        both compute 0.00 and mean opposite things: one is a judgement about the evidence, the
        other is a gap in the matrix. */
-    const tr = el('tr', e.is_incomplete ? 'row-incomplete'
-      : (e.is_diagnostic ? '' : 'not-diagnostic'));
+    const tr = el('tr', e.stale ? 'row-stale' : (e.is_incomplete ? 'row-incomplete'
+      : (e.is_diagnostic ? '' : 'not-diagnostic')));
     tr.appendChild(achEvidenceCell(e));
     const isNext = String(e.assertion_id) === String(body.refute_first);
     const blanks = [];
@@ -25846,6 +25848,17 @@ function renderAchMatrix(body) {
         + (s === undefined ? 'st-none' : (STANCE_CLASS[String(s)] || 'st-n'))
         + (gap ? ' st-gap' : ''));
       const text = s === undefined ? '·' : stanceText(s, body);
+      if (e.stale) {
+        /* Not a control: a stance on a replaced claim is kept and read, and takes no new score
+           (the server refuses one). A span, not a disabled button, so reopening a closed case
+           cannot switch it back on. */
+        const span = el('span', 'ach-cell-text', text);
+        span.title = (s === undefined ? 'Not assessed.' : achKey(h) + ': ' + text + '.')
+          + ' This claim was replaced, so the stance is kept and counts for nothing.';
+        td.appendChild(span);
+        tr.appendChild(td);
+        continue;
+      }
       const btn = el('button', 'ach-cell-btn'
         + (cell && cell.note ? ' has-note' : ''), text);
       btn.type = 'button';
@@ -25869,9 +25882,13 @@ function renderAchMatrix(body) {
     }
     /* A word, not a dash: the warning above counts these rows as "unfinished", and a lone
        glyph in a numeric column reads as "no value" rather than "not finished". */
-    const diag = el('td', 'ach-diag',
-      e.is_incomplete ? 'unfinished' : achNum(e.diagnosticity));
-    if (e.is_incomplete) {
+    const diag = el('td', 'ach-diag', e.stale ? 'replaced'
+      : (e.is_incomplete ? 'unfinished' : achNum(e.diagnosticity)));
+    if (e.stale) {
+      diag.title = 'The claim behind this row was replaced by a dated one. Its stances are '
+        + 'kept in the record and count in no score. Score the claim that replaced it to '
+        + 'bring the evidence back.';
+    } else if (e.is_incomplete) {
       diag.title = achUnknownWhy(e, cols.filter((h) => !h.retired).length,
         blanks);
     } else if (!e.is_diagnostic) {
@@ -25931,6 +25948,11 @@ function achEvidenceCell(e) {
     claim.appendChild(el('span', 'ach-el-weight', 'weight ' + achNum(e.weight)));
   }
   claim.appendChild(el('span', 'ach-el-why', achClaim(e)));
+  if (e.stale) {
+    const chip = el('span', 'chip subtle small', 'replaced');
+    chip.title = 'A dated claim replaced this one. The stances are kept and not scored.';
+    claim.appendChild(chip);
+  }
   td.appendChild(claim);
   const basis = e.basis
     ? (BASES.find((b) => b[0] === e.basis) || [null, e.basis])[1] : '';

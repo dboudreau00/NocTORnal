@@ -586,7 +586,8 @@ class ReportBuilder:
         for cell in cells:
             item = items.setdefault(cell.assertion_id, EvidenceItem(
                 assertion_id=cell.assertion_id, label=cell.label,
-                reliability=cell.reliability, credibility=cell.credibility))
+                reliability=cell.reliability, credibility=cell.credibility,
+                stale=cell.stale))
             item.stances[cell.hypothesis_id] = cell.stance
         # A REJECTED hypothesis is printed for the record and scored as `retired`, never as a live competitor: a
         # ruled-out theory could otherwise head the ranking and hold rows "unfinished".
@@ -616,7 +617,8 @@ class ReportBuilder:
         statement = {r[0]: r[1] for r in rows}
         body["reasoning"] = [
             {"evidence": c.label, "hypothesis": statement[c.hypothesis_id],
-             "stance": STANCE_LABEL.get(c.stance, str(c.stance)),
+             "stance": STANCE_LABEL.get(c.stance, str(c.stance))
+             + (" (claim replaced, not scored)" if c.stale else ""),
              "note": c.note}
             for c in cells if c.note and c.hypothesis_id in statement]
         return _Matrix(
@@ -656,6 +658,9 @@ class AchCell:
     #: Why the analyst put the stance where it is. Read through the same filter as the rest of the cell, so a
     #: note travels only with a cell the reader may see.
     note: str | None = None
+    #: The claim behind the stance was replaced by a dated copy. The stance is kept and shown, and scores
+    #: nothing (`ach.score`).
+    stale: bool = False
 
 
 #: Whether a matrix cell's assertion is about something a reader at %(clearance)s, read into %(compartments)s,
@@ -691,8 +696,9 @@ _ACH_CELL_FROM = """
       LEFT JOIN core.node tie_src ON tie_src.id = e.src_node_id
       LEFT JOIN core.node tie_dst ON tie_dst.id = e.dst_node_id
      WHERE h.case_id = %(case_id)s
-       -- Only LIVE assertions: a retracted source must not leave its
-       -- conclusion standing (decision 24, applied to the matrix).
+       -- A retracted source must not leave its conclusion standing
+       -- (decision 24, applied to the matrix), so it leaves. A replaced
+       -- claim stays, marked stale (`ach_cells`), and scores nothing.
        AND a.retracted_at IS NULL"""
 
 
@@ -700,7 +706,10 @@ def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
               compartments: frozenset[str]) -> list[AchCell]:
     """The matrix cells a reader at `clearance`, read into `compartments`,
     may see. The ONE query both the report and GET /ach read the matrix
-    through, so the two cannot disagree about what a stance may reveal."""
+    through, so the two cannot disagree about what a stance may reveal.
+
+    A cell on a retracted claim is not here. A cell on a replaced claim is, flagged `stale`: the stance is
+    the analyst's record and is shown, and `ach.score` counts it nowhere."""
     # A tie is labelled by both its ends and its type, e.g. "vellum_ram -> leads -> Meridian crew", not by the
     # type alone, because the report's reasoning table names each row and one type can recur. The ends are
     # visible whenever the cell is: `_ACH_CELL_VISIBLE` admits a tie only when both are.
@@ -725,7 +734,7 @@ def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
                   coalesce(n.compartments,
                            e.compartments || tie_src.compartments
                            || tie_dst.compartments),
-                  he.note"""
+                  he.note, a.superseded_at IS NOT NULL"""
         + _ACH_CELL_FROM + " AND " + _ACH_CELL_VISIBLE
         + " ORDER BY he.assertion_id, he.hypothesis_id",
         {"case_id": case_id, "clearance": clearance,
@@ -733,14 +742,14 @@ def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
     return [AchCell(assertion_id=r[0], hypothesis_id=r[1], stance=r[2],
                     reliability=r[3], credibility=r[4], label=r[5],
                     classification=r[6], compartments=tuple(r[7] or ()),
-                    note=r[8])
+                    note=r[8], stale=r[9])
             for r in rows]
 
 
 def ach_cells_withheld(conn: psycopg.Connection, case_id: UUID, *,
                        clearance: str, compartments: frozenset[str]) -> int:
-    """How many live pieces of matrix evidence `ach_cells` leaves out for this reader. A count only: never
-    which, never where.
+    """How many pieces of matrix evidence `ach_cells` leaves out for this reader, a replaced claim's
+    included, as the matrix shows it. A count only: never which, never where.
 
     Counted on a system connection with this reader's ceiling: the stances it counts are the ones row-level
     security hides from the reader's own connection, so counted there it would always be zero, and the matrix

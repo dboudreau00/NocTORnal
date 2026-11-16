@@ -394,7 +394,8 @@ def _attached(column: str, ev: str) -> str:
                UNION
                SELECT ba.{column} FROM core.assertion ba
                 WHERE ba.evidence_id = {ev} AND ba.{column} IS NOT NULL
-                  AND ba.retracted_at IS NULL AND {unpurged}"""
+                  AND ba.retracted_at IS NULL AND ba.superseded_at IS NULL
+                  AND {unpurged}"""
 
 
 def _backs_counts(ev: str) -> str:
@@ -416,12 +417,12 @@ def _backs_nothing(alias: str) -> str:
     return f"""({alias}.purged_at IS NOT NULL OR NOT (
           EXISTS (SELECT 1 FROM core.assertion ba JOIN core.node bn ON bn.id = ba.node_id
                    WHERE ba.evidence_id = {alias}.id AND ba.retracted_at IS NULL
-                     AND {_live_node('bn')})
+                     AND ba.superseded_at IS NULL AND {_live_node('bn')})
           OR EXISTS (SELECT 1 FROM core.evidence_link bl JOIN core.node bn ON bn.id = bl.node_id
                       WHERE bl.evidence_id = {alias}.id AND {_live_node('bn')})
           OR EXISTS (SELECT 1 FROM core.assertion ba JOIN core.edge bg ON bg.id = ba.edge_id
                       WHERE ba.evidence_id = {alias}.id AND ba.retracted_at IS NULL
-                        AND {_live_edge('bg')})
+                        AND ba.superseded_at IS NULL AND {_live_edge('bg')})
           OR EXISTS (SELECT 1 FROM core.evidence_link bl JOIN core.edge bg ON bg.id = bl.edge_id
                       WHERE bl.evidence_id = {alias}.id AND {_live_edge('bg')})))"""
 
@@ -955,7 +956,8 @@ def backs(
                  CASE WHEN EXISTS (SELECT 1 FROM core.assertion va
                                     WHERE va.evidence_id = %(ev)s
                                       AND va.{col} = {el}.id
-                                      AND va.retracted_at IS NULL)
+                                      AND va.retracted_at IS NULL
+                                      AND va.superseded_at IS NULL)
                       THEN 'ASSERTION' END,
                  CASE WHEN EXISTS (SELECT 1 FROM core.evidence_link vl
                                     WHERE vl.evidence_id = %(ev)s

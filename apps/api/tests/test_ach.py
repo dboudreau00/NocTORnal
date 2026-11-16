@@ -498,3 +498,67 @@ def test_the_method_and_each_row_say_how_the_weighting_works():
     assert row["diagnosticity"] == round(row["spread"] * row["weight"], 4)
     # The weakest grade still prints above zero at two decimals.
     assert source_weight("F", "6") >= 0.01
+
+
+# --- a claim a newer one replaced ---------------------------------------
+
+def _stale_item(label, stances, reliability="A", credibility="1"):
+    return EvidenceItem(assertion_id=uuid4(), label=label,
+                        reliability=reliability, credibility=credibility,
+                        stances=dict(stances), stale=True)
+
+
+def test_a_stale_item_is_left_out_of_every_score_and_kept_in_the_answer():
+    """A stance on a claim that was replaced is history: it moves no score, fills no gap, makes no row
+    unfinished and is not the next test, and it is still in the answer, last, marked stale."""
+    from noctornal_api.ach import as_response
+    live = _item("live", {H1: STRONGLY_INCONSISTENT, H2: STRONGLY_CONSISTENT, H3: NEUTRAL})
+    old = _stale_item("replaced", {H1: STRONGLY_CONSISTENT, H2: STRONGLY_INCONSISTENT,
+                                   H3: NEUTRAL})
+    both, alone = score(HYPOTHESES, [live, old]), score(HYPOTHESES, [live])
+
+    def sums(m):
+        return [(h.hypothesis_id, h.inconsistency, h.support, h.assessed, h.unassessed)
+                for h in m.hypotheses]
+
+    assert sums(both) == sums(alone)
+    assert both.least_inconsistent == alone.least_inconsistent == H2
+    assert both.refute_first == alone.refute_first
+    assert [d.assertion_id for d in both.evidence] == [live.assertion_id]
+    assert both.stale == [old]
+
+    body = as_response(both)
+    assert [(e["assertion_id"], e["stale"]) for e in body["evidence"]] == [
+        (str(live.assertion_id), False), (str(old.assertion_id), True)]
+    stale_row = body["evidence"][1]
+    assert (stale_row["diagnosticity"], stale_row["is_diagnostic"],
+            stale_row["is_incomplete"], stale_row["assessed_against"]) == (0.0, False, False, 0)
+    [warning] = [w for w in both.warnings if "replaced" in w]
+    assert "1 item" in warning and "left out of every score" in warning
+
+
+def test_a_stale_item_alone_is_scored_as_an_empty_matrix_and_says_why():
+    old = _stale_item("replaced", {H1: STRONGLY_INCONSISTENT, H2: STRONGLY_CONSISTENT})
+    m = score(HYPOTHESES, [old])
+    assert m.least_inconsistent is None and m.refute_first is None and m.evidence == []
+    assert all(h.assessed == 0 and h.inconsistency == 0.0 for h in m.hypotheses)
+    assert any("replaced" in w for w in m.warnings)
+    none_live = score([], [old])
+    assert none_live.stale == [old]
+    assert any(w.startswith("No hypotheses.") for w in none_live.warnings)
+
+
+def test_the_warning_counts_stale_items_and_agrees_with_the_count():
+    one = score(HYPOTHESES, [_stale_item("a", {H1: CONSISTENT})])
+    two = score(HYPOTHESES, [_stale_item("a", {H1: CONSISTENT}), _stale_item("b", {H2: CONSISTENT})])
+    [w1] = [w for w in one.warnings if "replaced" in w]
+    [w2] = [w for w in two.warnings if "replaced" in w]
+    assert "1 item of evidence rests" in w1 and "It is" in w1
+    assert "2 items of evidence rest" in w2 and "They are" in w2
+
+
+def test_nothing_stale_adds_no_warning_and_no_stale_row():
+    from noctornal_api.ach import as_response
+    m = score(HYPOTHESES, [_item("live", {H1: CONSISTENT, H2: INCONSISTENT, H3: NEUTRAL})])
+    assert m.stale == [] and not any("replaced" in w for w in m.warnings)
+    assert [e["stale"] for e in as_response(m)["evidence"]] == [False]
