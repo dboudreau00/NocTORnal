@@ -80,6 +80,9 @@ def _caller(conn, client, *, clearance="AMBER", compartments=()):
     """A case owner at `clearance` with a case of their own: (token, case id, user id)."""
     uid, email = h.user(conn, P, clearance=clearance, roles=("CASE_OWNER",))
     if compartments:
+        for key in compartments:
+            conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, 'cacc') "
+                         "ON CONFLICT DO NOTHING", (key,))
         conn.execute("UPDATE iam.app_user SET compartments = %s WHERE id = %s",
                      (list(compartments), uid))
     token = h.session(conn, email)
