@@ -79,6 +79,11 @@ class UserStore(Protocol):
     # logins spend the same code.
     def get_recovery_hashes(self, user_id: UUID) -> list[str]: ...
     def consume_recovery_hash(self, user_id: UUID, code_hash: str) -> bool: ...
+    # Compare-and-set upgrades when the stored Argon2 parameters have lagged
+    # the current hasher. Each returns False when a concurrent change already
+    # moved the row, and the login that noticed still succeeds.
+    def update_password_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool: ...
+    def replace_recovery_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,30 @@ class AuthService:
 
         if success:
             self._users.clear_failed_logins(user.id, now)
+            # A hash written under older Argon2 parameters is upgraded only
+            # after a full success, never after a right password and a wrong
+            # second factor, and never against the dummy hash. The login
+            # already succeeded: a lost race on the compare-and-set, or a
+            # hasher error, is logged and does not fail the sign-in.
+            if user.password_hash and passwords.needs_rehash(user.password_hash):
+                try:
+                    self._users.update_password_hash(
+                        user.id, user.password_hash,
+                        passwords.hash_password(password),
+                    )
+                except Exception:
+                    log.exception("password rehash failed for user %s", user.id)
+            if (recovery_hash and not spend_recovery
+                    and passwords.needs_rehash(recovery_hash)):
+                try:
+                    refreshed = passwords.hash_recovery_code(
+                        recovery.normalise(totp_code))
+                    if self._users.replace_recovery_hash(
+                            user.id, recovery_hash, refreshed):
+                        recovery_hash = refreshed
+                except Exception:
+                    log.exception("recovery-code rehash failed for user %s",
+                                  user.id)
             # Carry the reason rather than a flat "ok": a login that spent a
             # RECOVERY CODE is a notable event -- it means someone could not
             # complete their normal second factor -- and the audit trail is

@@ -47,6 +47,12 @@ class _Store:
     def consume_recovery_hash(self, user_id, code_hash):
         return False
 
+    def update_password_hash(self, user_id, current_hash, new_hash):
+        return False
+
+    def replace_recovery_hash(self, user_id, current_hash, new_hash):
+        return False
+
 
 def test_a_wrong_password_never_reaches_the_secret():
     """The secret is opened only after the password verified."""

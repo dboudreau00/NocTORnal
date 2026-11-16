@@ -5,6 +5,7 @@ The caller-visible outcome is only OK or INVALID_CREDENTIALS; the internal
 `audit_reason` distinguishes causes for the audit trail and lets these
 tests assert the cause without that distinction ever reaching a client.
 """
+from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -26,6 +27,18 @@ def _make_user(*, active=True, enrolled=True, pw="right-password"):
         locked_until=None,
     )
     return user, (secret if enrolled else None)
+
+
+def _stale_hash(password: str) -> str:
+    """An Argon2id hash at weaker parameters than passwords._PH, so
+    needs_rehash() is true. The parameters are still legal for argon2."""
+    from argon2 import PasswordHasher, Type
+
+    hashed = PasswordHasher(
+        time_cost=1, memory_cost=8 * 1024, parallelism=1, type=Type.ID,
+    ).hash(password)
+    assert passwords.needs_rehash(hashed)
+    return hashed
 
 
 class FrozenClock:
@@ -144,3 +157,35 @@ def test_replay_rejected_across_authentication(user_store):
     )
     assert replay.outcome is AuthOutcome.INVALID_CREDENTIALS
     assert replay.audit_reason in ("bad_totp", "replay")
+
+
+def test_a_stale_password_hash_is_upgraded_after_a_successful_login(user_store):
+    user, secret = _register(user_store, "a@b.local")
+    stale = _stale_hash("right-password")
+    user_store.users["a@b.local"] = replace(user, password_hash=stale)
+    svc = AuthService(user_store, now=FrozenClock(T0))
+    result = svc.authenticate("a@b.local", "right-password", totp.code_at(secret, T0))
+    assert result.ok
+    stored = user_store.users["a@b.local"].password_hash
+    assert stored != stale
+    assert not passwords.needs_rehash(stored)
+    assert passwords.verify_password(stored, "right-password")
+
+
+def test_a_stale_password_hash_is_left_alone_when_the_second_factor_fails(user_store):
+    user, _secret = _register(user_store, "a@b.local")
+    stale = _stale_hash("right-password")
+    user_store.users["a@b.local"] = replace(user, password_hash=stale)
+    svc = AuthService(user_store, now=FrozenClock(T0))
+    result = svc.authenticate("a@b.local", "right-password", "000000")
+    assert result.outcome is AuthOutcome.INVALID_CREDENTIALS
+    assert user_store.users["a@b.local"].password_hash == stale
+
+
+def test_a_current_password_hash_is_not_rewritten(user_store):
+    user, secret = _register(user_store, "a@b.local")
+    before = user.password_hash
+    assert not passwords.needs_rehash(before)
+    svc = AuthService(user_store, now=FrozenClock(T0))
+    assert svc.authenticate("a@b.local", "right-password", totp.code_at(secret, T0)).ok
+    assert user_store.users["a@b.local"].password_hash is before

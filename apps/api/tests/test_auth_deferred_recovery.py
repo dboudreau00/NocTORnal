@@ -95,3 +95,29 @@ def test_a_totp_sign_in_has_nothing_to_spend_and_a_failure_spends_nothing(
                            spend_recovery=False)
     assert svc.spend(bad) is False
     assert len(user_store.get_recovery_hashes(user.id)) == 1
+
+
+def test_a_stale_recovery_hash_is_upgraded_before_it_is_handed_to_spend(user_store, clock):
+    """The code is still unspent after the check, so a lagged hash has to be
+    rewritten now: spend() consumes whatever hash authenticate returned."""
+    from argon2 import PasswordHasher, Type
+    from noctornal_api.security import passwords
+
+    codes = recovery.generate_set(1)
+    user = _enrolled(user_store, codes)
+    stale = PasswordHasher(
+        time_cost=1, memory_cost=8 * 1024, parallelism=1, type=Type.ID,
+    ).hash(recovery.normalise(codes[0]))
+    assert passwords.needs_rehash(stale)
+    user_store.recovery[user.id] = [stale]
+
+    svc = AuthService(user_store, now=clock)
+    checked = svc.authenticate("a@b.test", PASSWORD, codes[0],
+                               spend_recovery=False)
+    assert checked.ok
+    held = user_store.get_recovery_hashes(user.id)
+    assert held == [checked.recovery_hash]
+    assert held[0] != stale
+    assert not passwords.needs_rehash(held[0])
+    assert svc.spend(checked) is True
+    assert user_store.get_recovery_hashes(user.id) == []

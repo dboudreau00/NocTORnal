@@ -115,6 +115,28 @@ class PgUserStore(UserStore):
         )
         return cur.fetchone() is not None
 
+    def update_password_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool:
+        """Replace the password hash only if it is still `current_hash`."""
+        cur = self._c.execute(
+            """UPDATE iam.app_user
+                  SET password_hash = %s
+                WHERE id = %s AND password_hash = %s
+              RETURNING id""",
+            (new_hash, user_id, current_hash),
+        )
+        return cur.fetchone() is not None
+
+    def replace_recovery_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool:
+        """Swap one recovery hash for another if the current one is still held."""
+        cur = self._c.execute(
+            """UPDATE iam.app_user
+                  SET recovery_codes_hash = array_replace(recovery_codes_hash, %s, %s)
+                WHERE id = %s AND recovery_codes_hash @> ARRAY[%s]
+              RETURNING id""",
+            (current_hash, new_hash, user_id, current_hash),
+        )
+        return cur.fetchone() is not None
+
     def count_recovery_codes(self, user_id: UUID) -> int:
         return len(self.get_recovery_hashes(user_id))
 
