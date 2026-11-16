@@ -255,7 +255,7 @@ ingest route, unchanged. The integration is optional and off by default.
   refuses to start on any other value. It is
   read each time a record is parsed, and `GET /api/v1/ingest/maasspec` (permission
   `ingest.read`) answers `{enabled, switch, contract_versions, max_spectrum_bytes,
-  category, notice}`. There is no route that changes it.
+  category, notice}`, whether the switch is on or off. There is no route that changes it.
 - **Sending one.** The same request as any partner: `POST /api/v1/ingest` with a
   `noct_sk_` key, `Idempotency-Key` set to the spectrum's `analysis_id`,
   `Content-Type: application/json`, the raw bytes of the document as the body.

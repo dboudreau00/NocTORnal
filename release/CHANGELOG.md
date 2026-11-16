@@ -30,7 +30,7 @@ L1 to L5 are settled outside this codebase.
   the batch is stored as usual.
 - **Nothing becomes a graph element, a claim or a proposal.** The mapper writes no
   entity, tie, assertion or proposal, and scoring is unchanged.
-- **A status route.** `GET /api/v1/ingest/maasspec`, for `ingest.read`, answers
+- **A status route.** `GET /api/v1/ingest/maasspec`, for `ingest.read`, exists whether the switch is on or off and answers
   whether the switch is on, its name, the contract versions accepted (`0.1.0`),
   the 16 MiB spectrum cap, the category and a notice.
 - **A metadata block on the record.** `GET /api/v1/ingest/records/{id}` carries a
