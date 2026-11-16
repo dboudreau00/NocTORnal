@@ -125,6 +125,30 @@ it away would change what that database answers. Each counts and names no value.
    GROUP BY sample_id;
   ```
 
+## Revisions that change data and cannot be undone
+
+Some revisions rewrite rows and keep nothing to put back, and their downgrade changes nothing: among them
+0137 (credentials in stored URLs), 0138 (selector rows owned by a retired entity) and 0200. They never
+refuse, so there is no count to read; the way back is a backup taken before the revision.
+
+- **0200**, exhibits purged before a purge emptied them. An exhibit destroyed before 2026-11-15 still
+  carries its description, source address, extracted text and full-text vector, because the purge only
+  began to empty them then (docs/17, "a purged exhibit kept what it said"). 0200 empties those four on
+  every row with `purged_at` set, in two statements (the vector is rebuilt from the title whenever the
+  other three change), keeps the title, the hashes and every other column, touches no live exhibit, and
+  writes one `PURGED_EXHIBITS_EMPTIED` audit event with the count. It runs with the migration job as the
+  schema owner, changes no schema, and does nothing on a database with nothing to empty. What a purge
+  destroyed must not come back from a downgrade, so the downgrade is deliberately empty, and a backup
+  taken before 0200 still holds what it emptied. Before the upgrade this counts the exhibits it will
+  empty, and after it the count is zero:
+
+  ```sql
+  SELECT count(*) FROM core.evidence
+   WHERE purged_at IS NOT NULL
+     AND (description IS NOT NULL OR source_url IS NOT NULL
+          OR extracted_text IS NOT NULL OR search_tsv IS NOT NULL);
+  ```
+
 ## The roles
 
 A production deployment has four Postgres roles (docs/00 decision 138), and

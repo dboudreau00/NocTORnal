@@ -1,7 +1,7 @@
 # What is left
 
-**State (2026-10-29):** branch `main`, Alembic head `0199`,
-9442 tests counted as `def test_` functions across the two pytest roots,
+**State (2026-10-29):** branch `main`, Alembic head `0200`,
+9452 tests counted as `def test_` functions across the two pytest roots,
 version 0.9.6 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
@@ -119,7 +119,7 @@ section, and there was no Alpha 8 release.
 **Beta 1.6 (2026-11-15).**
 
 - **The findings of the review of 2026-11-14, closed** (Alembic 0185 to
-  0199, decisions 229 to 241): case membership is filtered for the request
+  0200, decisions 229 to 241): case membership is filtered for the request
   role, a missing id costs what a hidden one costs, lifting a legal hold
   takes two people, and the request role writes no column of a case and no
   queue or heartbeat.
