@@ -34,11 +34,21 @@ ENV PYTHONUNBUFFERED=1 \
 # Not snapshot.debian.org, which would also freeze libgcrypt and every other library at that day,
 # unpatched. To move it: take the version `apt-cache madison gnupg` prints inside the base image
 # (move the base digest at the same time), write it here, and build with --pull.
+# ca-certificates is upgraded in the same layer. The slim base is pinned by digest
+# (2026-10-03) and therefore still ships the bundle that contained the compromised
+# emSign ECC Root CA - G3; Debian DSA-6572-1 removed it in 20250419+deb13u1
+# (2026-10-20). Production builds SSL_CERT_FILE from this file, and the pinned
+# HTTP client uses the platform store, so a stale bundle would trust a cert a
+# compromised intermediate minted. Same pin style as gnupg: a superseded version
+# leaving the archive fails the build until the pin moves.
 ARG GNUPG_VERSION=2.4.7-21+deb13u1
+ARG CACERTS_VERSION=20250419+deb13u1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends "gnupg=${GNUPG_VERSION}" \
+        "ca-certificates=${CACERTS_VERSION}" \
     && test "$(dpkg-query -W -f='${Version}' gnupg)" = "${GNUPG_VERSION}" \
     && test "$(dpkg-query -W -f='${source:Version}' gpg)" = "${GNUPG_VERSION}" \
+    && test "$(dpkg-query -W -f='${Version}' ca-certificates)" = "${CACERTS_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # PYTHONUNBUFFERED: stdout is the cron loop's only channel to its operator, and block-buffered
