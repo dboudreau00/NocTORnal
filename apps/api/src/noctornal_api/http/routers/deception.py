@@ -5,7 +5,9 @@ It is guarded five ways: the gate at the capture's labels and again at the exhib
 ids checked in-case and readable at create; hostile markup refused, but only after those checks;
 the content type taken from the magic bytes, never the uploader's `media_type`; and a sandboxing
 CSP with `nosniff` and same-origin CORP. Permissions are `evidence.read` and `evidence.upload`, so
-the exhibit and the row describing it cannot drift apart.
+the exhibit and the row describing it cannot drift apart. A capture or a call can be labelled below
+an exhibit it cites, so a reader who may not see that exhibit is not given its id
+(`element_gate.withhold_cited`).
 """
 from __future__ import annotations
 
@@ -34,11 +36,10 @@ from noctornal_api.http.deps import (
     authorize_object,
     check_writable_labels,
     current_user,
-    element_labels,
     get_conn,
     user_ceiling,
 )
-from noctornal_api.http.element_gate import gate_element
+from noctornal_api.http.element_gate import gate_element, withhold_cited
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 
@@ -58,6 +59,12 @@ def _ceiling(conn: psycopg.Connection, user: CurrentUser, case_id: UUID):
     # to it counts here as it does on the graph.
     tlp, comps = user_ceiling(conn, user.user_id, case_id=case_id)
     return tlp.name, comps
+
+
+#: The exhibits a capture and a call cite, which can sit above the record's own labels.
+_CAPTURE_EXHIBITS = {"screenshot_evidence_id": "evidence", "dom_evidence_id": "evidence",
+                     "har_evidence_id": "evidence"}
+_CALL_EXHIBITS = {"evidence_id": "evidence", "recording_evidence_id": "evidence"}
 
 
 def _gate_the_item(conn: psycopg.Connection, user: CurrentUser,
@@ -308,13 +315,14 @@ def list_captures(
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
     clearance, comps = _ceiling(conn, user, case_id)
     svc = _svc(conn)
+    captures = svc.captures(case_id, clearance=clearance, compartments=comps,
+                            limit=min(limit, 500))
+    # An exhibit above this caller is not named by the capture citing it.
+    withhold_cited(conn, user, case_id, captures, _CAPTURE_EXHIBITS)
     # `also_seen` and `proposable` on every row, computed over what this caller may see, like the
     # rows themselves.
-    return {"captures": svc.annotate(
-        case_id, "capture",
-        svc.captures(case_id, clearance=clearance, compartments=comps,
-                     limit=min(limit, 500)),
-        clearance=clearance, compartments=comps)}
+    return {"captures": svc.annotate(case_id, "capture", captures,
+                                     clearance=clearance, compartments=comps)}
 
 
 @router.get("/captures/{capture_id}")
@@ -332,6 +340,7 @@ def get_capture(
         # existence oracle for a compartmented case.
         raise Problem(404, "Not found", "no such capture")
     _gate_the_item(conn, user, case_id, capture)
+    withhold_cited(conn, user, case_id, [capture], _CAPTURE_EXHIBITS)
     svc = _svc(conn)
     svc.annotate(case_id, "capture", [capture], clearance=clearance,
                  compartments=comps)
@@ -339,6 +348,10 @@ def get_capture(
     capture["first_lure"] = svc.first_lure(case_id, clearance=clearance,
                                            compartments=comps)
     return capture
+
+
+#: One answer for a capture whose screenshot is above the caller, in another case or not there.
+NO_SCREENSHOT = "this capture has no screenshot"
 
 
 @router.get("/captures/{capture_id}/screenshot")
@@ -357,35 +370,22 @@ def capture_screenshot(
     if capture is None or capture["case_id"] != str(case_id):
         raise Problem(404, "Not found", "no such capture")
     evidence_id = capture.get("screenshot_evidence_id")
-    if not evidence_id:
-        raise Problem(404, "Not found", "this capture has no screenshot")
+    exhibit = UUID(evidence_id) if evidence_id else None
 
-    # The exhibit's case and labels as facts (`deps.element_labels`), so an exhibit above the
-    # caller's labels meets the gate below rather than reading as missing; whether it is hostile is
-    # content, read only after the gate.
-    facts = element_labels(conn, "evidence", UUID(evidence_id))
-    if facts is None:
-        raise Problem(404, "Not found", "the screenshot exhibit is missing")
-    row = (None, facts[0], facts[1], facts[2])
-
-    # The exhibit's own case first, before anything else about it is revealed, including whether
-    # it is hostile, or the answers become an oracle over `core.evidence` (gate rule (b)).
-    if row[1] != case_id:
-        raise Problem(404, "Not found", "no such capture")
-
-    # The exhibit's own labels: `EvidenceService.view()` has no authorisation of its own, and a
-    # capture can cite an exhibit above its labels, so the gate runs here as in
-    # `routers/evidence._authorize_exhibit` (gate rule (a)). As a second gate it counts a
-    # break-glass use only when the route's gate did not: one screenshot served is one use.
-    authorize_object(conn, user, case_id=case_id,
-                     permission_key="evidence.read", after_case_gate=True,
-                     classification=row[2],
-                     compartments=frozenset(row[3] or []))
+    # The exhibit's own case and labels, through `gate_element`: `EvidenceService.view()` has no
+    # authorisation of its own, and a capture can cite an exhibit above its labels or in another
+    # case, so the gate runs here as in `routers/evidence._authorize_exhibit` (gate rules (a) and
+    # (b)). An exhibit above the caller, another case's and a capture with none are one 404 with
+    # one AUTHZ_DENIED row (decision 230), before anything else about the exhibit is revealed,
+    # including whether it is hostile. As a second gate it counts a break-glass use only when the
+    # route's gate did not: one screenshot served is one use.
+    gate_element(conn, user, case_id=case_id, kind="evidence", element_id=exhibit,
+                 permission_key="evidence.read", missing_detail=NO_SCREENSHOT)
     hostile = conn.execute(
         "SELECT is_hostile_markup FROM core.evidence WHERE id = %s",
-        (UUID(evidence_id),)).fetchone()
+        (exhibit,)).fetchone()
     if hostile is None:
-        raise Problem(404, "Not found", "the screenshot exhibit is missing")
+        raise Problem(404, "Not found", NO_SCREENSHOT)
 
     if hostile[0]:
         raise Problem(
@@ -394,8 +394,7 @@ def capture_screenshot(
             "download-only. Fetch it from the sample origin.")
 
     try:
-        data = EvidenceService(conn, EvidenceStorage()).view(
-            UUID(evidence_id), user.user_id)
+        data = EvidenceService(conn, EvidenceStorage()).view(exhibit, user.user_id)
     except IntegrityError as exc:
         raise Problem(409, "Integrity failure", safe_detail(exc)) from exc
 
@@ -627,6 +626,8 @@ def list_calls(
     svc = _svc(conn)
     calls = svc.calls(case_id, clearance=clearance,
                       compartments=comps, limit=min(limit, 500))
+    # An exhibit above this caller is not named by the call citing it.
+    withhold_cited(conn, user, case_id, calls, _CALL_EXHIBITS)
     for call in calls:
         # One row per selector, reasons merged, so a SIP URI arriving as From and as
         # P-Asserted-Identity is listed once.

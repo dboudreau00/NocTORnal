@@ -36,7 +36,11 @@ of case and element and the UNION of their compartments), so an element is
 never less protected than its case (decision 29). Anything unresolvable
 raises `AccessResolutionError`, which the HTTP layer turns into a 403:
 resolution fails closed, never 500. A failed assignment check answers 404,
-not 403, so a status code is not an existence oracle.
+not 403, so a status code is not an existence oracle. A case id that names
+nothing meets the same gate at the phantom's labels (decision 230), so it
+sends the statements and writes the AUTHZ_DENIED row, naming the id asked
+about, that a case the caller is not on does; only the row's list of failed
+checks, which the audit listing does not return, differs.
 
 ### Why not the engine
 

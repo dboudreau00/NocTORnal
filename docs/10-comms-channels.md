@@ -189,6 +189,14 @@ wholesale. The same block under two handles means *either* one operator
 Only `CONFIRMED` should carry weight in automatic identity resolution.
 `CLAIMED` is a lead.
 
+**What a block cites.** A block is held at its own labels, and the exhibit and
+the publisher's entity it cites can sit above them. A reader cleared for the
+block and not for one of those is given it as null, and so is the entity in
+an ATTRIBUTE proposal the parse raised; the impersonation list neither names
+nor counts such an entity as a publisher. The same text is parsed once per case:
+submitted again by someone who may not read the first parse, it is answered as
+any duplicate is, with a sentence and nothing of that block.
+
 **PGP signed messages are the strong case.** A message signed by a key
 whose fingerprint appears in the contact block is real cryptographic
 evidence of control, not a claim. Verify signatures where you can and

@@ -156,6 +156,21 @@ def test_only_the_phantom_is_decided_without_a_case():
         assert (refused.value.status, refused.value.detail) == (404, "case does not exist")
 
 
+def test_a_case_that_names_nothing_is_the_phantom_at_the_gate():
+    """`authorize_object` asks for a case id that names nothing at the phantom's labels, with the
+    element's compartments, so the gate refuses it after the statements a case the caller is not on
+    costs; every other reader of `effective_labels` is still told the case does not exist."""
+    for cls, comp in ((None, frozenset()), ("AMBER", frozenset({"OP-A"}))):
+        assert effective_labels(_Facts(None), CASE, cls, comp,
+                                missing_case_as_phantom=True) == (
+            "RED", element_gate.ABSENT_COMPARTMENTS | comp)
+        with pytest.raises(Problem) as refused:
+            effective_labels(_Facts(None), CASE, cls, comp)
+        assert (refused.value.status, refused.value.detail) == (404, "case does not exist")
+    with pytest.raises(Problem):
+        effective_labels(_Facts(None), None, None, frozenset(), missing_case_as_phantom=True)
+
+
 ROUTERS = Path(__file__).resolve().parents[3] / "apps" / "api" / "src" / "noctornal_api" / "http" / "routers"
 
 #: The router functions that may still read an element's facts with `deps.element_labels`, and why
@@ -164,8 +179,6 @@ _READS_FACTS_AFTER_A_GATE = {
     ("approvals.py", "_refuse_unless_lift_signer"):
         "the exhibit id is the lift request's own payload, read after the case gate, the request's"
         " visibility check and the signer's permission",
-    ("deception.py", "capture_screenshot"):
-        "the exhibit id is the capture's own, read after the capture passed its label predicate",
     ("governance.py", "_lift_within_reach"):
         "called after `_own_evidence` gated the id and refused an id that names nothing",
 }

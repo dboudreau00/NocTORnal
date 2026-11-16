@@ -230,9 +230,12 @@ const edge = { kind: 'EDGE',
   payload: { src_node_id: n1, dst_node_id: n2, edge_type: 'COMMUNICATES_WITH' },
   refs: { [n1]: { label: 'Meridian crew', node_type: 'IDENTITY' } } };
 const node = { kind: 'NODE', payload: { label: 'spectre_lynx' } };
+const withheld = { kind: 'EDGE',
+  payload: { src_node_id: n1, dst_node_id: null, edge_type: 'COMMUNICATES_WITH' },
+  refs: { [n1]: { label: 'Meridian crew', node_type: 'IDENTITY' } } };
 console.log(JSON.stringify([triageTitle(attr), triageClaimValue(attr),
   triageTitle(hidden), triageClaimValue(hidden), triageTitle(edge),
-  triageTitle(node), triageTitle({ kind: 'NODE', payload: {} })]));
+  triageTitle(node), triageTitle({ kind: 'NODE', payload: {} }), triageTitle(withheld)]));
 """, tmp_path)
     assert got[0] == "Meridian crew (Identity) gains comms.tox"
     assert got[1] == "ABCD"
@@ -243,6 +246,27 @@ console.log(JSON.stringify([triageTitle(attr), triageClaimValue(attr),
     assert got[5] == "spectre_lynx"
     assert "(no label)" not in _js().replace('read "(no label)"', "")
     assert got[6] == "unnamed suggestion"
+    # The server leaves out the id of an entity the reader may not see (independent review, ACCESS-05).
+    assert got[7] == ("Meridian crew (Identity) → COMMUNICATES_WITH → "
+                      "an entity not visible to you")
+
+
+@needs_node
+def test_a_duplicate_block_the_reader_may_not_open_is_drawn_as_its_sentence(tmp_path):
+    """A contact block parsed already at labels the reader does not hold comes back with no id
+    and no reading (independent review, ACCESS-06): the pane draws the server's sentence and nothing that reads as
+    an empty parse."""
+    got = _run([_const("ROLE_PILL"), _fn("renderContactBlock")], """
+const out = el('div');
+function $(id) { return out; }
+function clear(x) { x.children = []; }
+renderContactBlock({ id: null, already_parsed: true, entries: [], co_declaration: [],
+  notice: 'This block has already been parsed in this case, so it was not parsed again.' });
+const card = out.children[0];
+console.log(JSON.stringify(card.children.map((c) => c.textContent)));
+""", tmp_path)
+    assert got == ["Already parsed",
+                   "This block has already been parsed in this case, so it was not parsed again."]
 
 
 def test_an_attribute_card_shows_its_value_with_a_copy_button():

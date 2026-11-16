@@ -8,6 +8,7 @@ derives the proposals; bulk ingest has its own write-only key model (docs/12).
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from uuid import UUID
 
 import psycopg
@@ -29,6 +30,7 @@ from noctornal_api.http.element_gate import (
     ElementFacts,
     authorize_element,
     facts_or_phantom,
+    withhold_cited,
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.body_ceiling import raise_body_ceiling
@@ -143,6 +145,30 @@ def _named_ids(p: ProposalRow) -> set[str]:
     else:
         keys = ()
     return {str(payload[k]) for k in keys if payload.get(k)}
+
+
+#: The payload keys that name an entity: an ATTRIBUTE claim's, and a proposed tie's two ends.
+_NAMED_ENTITIES = {"node_id": "node", "src_node_id": "node", "dst_node_id": "node"}
+
+#: What an accept wrote: an entity, a tie or a claim, which a reviewer may have labelled above the
+#: proposal.
+_APPLIED = {"applied_node_id": "node", "applied_edge_id": "edge",
+            "applied_assertion_id": "assertion"}
+
+
+def _for_reader(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                rows: list[ProposalRow]) -> list[ProposalRow]:
+    """The proposals as this reader is shown them: every entity id a payload names, and every
+    element an accept wrote, that they may not see is left out (`element_gate.withhold_cited`). A
+    proposal is read at the labels of what it came from, which can sit below the entity it names, as
+    an ATTRIBUTE claim parsed from an AMBER contact block about a RED entity does, and below what its
+    accept wrote, since a reviewer may raise the label (`accepted_classification`). The card already
+    names such an entity only as one the reader cannot see (`refs`)."""
+    shown = [replace(p, payload=dict(p.payload or {})) for p in rows]
+    withhold_cited(conn, user, case_id, [p.payload for p in shown], _NAMED_ENTITIES)
+    applied = [{f: getattr(p, f) for f in _APPLIED} for p in shown]
+    withhold_cited(conn, user, case_id, applied, _APPLIED)
+    return [replace(p, **ids) for p, ids in zip(shown, applied, strict=True)]
 
 
 def _display_label(p: ProposalRow, labels: SourceLabels) -> str | None:
@@ -431,7 +457,7 @@ def queue(
     targets = store.entity_labels(case_id, set(refs))
     case = CaptureService(conn).case_labels(case_id)
     out = []
-    for p in rows:
+    for p, shown in zip(rows, _for_reader(conn, user, case_id, rows), strict=True):
         labels = labelled[p.id]
         blocked = None
         if p.kind == KIND_ATTRIBUTE:
@@ -441,7 +467,7 @@ def queue(
                     p.payload, labels, *target,
                     case_compartments=case.compartments)
         out.append(_out(
-            p, classification=_display_label(p, labels),
+            shown, classification=_display_label(p, labels),
             refs={k: v for k, v in refs.items() if k in _named_ids(p)},
             documents=docs, accept_blocked=blocked, lookups=origins))
     return {
@@ -549,7 +575,7 @@ def accept(
             classification=body.classification)
     except ProposalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    out = _out(accepted)
+    out = _out(_for_reader(conn, user, case_id, [accepted])[0])
     # Named only when this reader may see that entity, the rule create follows.
     owner = accepted.selector_owner_id
     if owner is not None and _node_visible(conn, user, case_id, owner):
@@ -567,10 +593,11 @@ def reject(
     found by reading rejections."""
     _owned(conn, case_id, proposal_id, user)
     try:
-        return _out(ProposalReview(conn).reject(
-            proposal_id, reviewed_by=user.user_id, note=body.note))
+        rejected = ProposalReview(conn).reject(
+            proposal_id, reviewed_by=user.user_id, note=body.note)
     except ProposalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _out(_for_reader(conn, user, case_id, [rejected])[0])
 
 
 @router.post("/{proposal_id}/defer", response_model=ProposalOut)
@@ -583,7 +610,8 @@ def defer(
     no forces a decision on items that do not deserve one yet."""
     _owned(conn, case_id, proposal_id, user)
     try:
-        return _out(ProposalReview(conn).defer(
-            proposal_id, reviewed_by=user.user_id, note=body.note))
+        deferred = ProposalReview(conn).defer(
+            proposal_id, reviewed_by=user.user_id, note=body.note)
     except ProposalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _out(_for_reader(conn, user, case_id, [deferred])[0])

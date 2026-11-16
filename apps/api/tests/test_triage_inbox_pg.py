@@ -280,10 +280,12 @@ def test_the_ring_is_the_queue_and_clears_when_decided(conn, client):
     body = _queue(client, conn, case_id, reader)
     assert body["pending_by_node"] == {str(amber): 1}, (
         "the ring named an entity the reader cannot see, or missed one")
-    cards = {p["payload"]["node_id"]: p for p in body["proposals"]}
-    assert cards[str(amber)]["refs"] == {
+    cards = {p["payload"]["claim_value"]: p for p in body["proposals"]}
+    assert cards["A" * 64]["refs"] == {
         str(amber): {"label": "ti4_meridian", "node_type": "IDENTITY"}}
-    assert cards[str(red)]["refs"] == {}, "a RED entity was named to an AMBER reader"
+    # The RED entity is named neither by label nor by id (independent review, ACCESS-05).
+    assert cards["B" * 64]["refs"] == {}, "a RED entity was named to an AMBER reader"
+    assert cards["B" * 64]["payload"]["node_id"] is None, "its id was named to an AMBER reader"
 
     r = client.post(f"/api/v1/cases/{case_id}/proposals/{on_amber}/reject",
                     headers=_auth(conn, reader), json={"note": "shared service"})
