@@ -3040,9 +3040,16 @@ async function enterEgo(nodeId, depth) {
       /* Built outward from the entity and stopped at what one view draws,
          the nearer entities kept: said, because a partial neighbourhood
          read as the whole one misleads. */
+      /* When one step read more ties than a view holds, what is kept at that distance is the
+         oldest recorded and a smaller depth may not help, so it says that instead. */
+      const byRows = (sub.cut_by || []).indexOf('row_cap') >= 0;
       banner('Neighbourhood cut',
-        'This entity has more neighbours within ' + (depth || 1) + ' hops than one ' +
-        'view draws, so the nearest are shown. A smaller depth shows all of them.',
+        byRows
+          ? 'One step from this entity reads more ties than a view holds, so the neighbours ' +
+            'shown at that distance are the oldest recorded and the newer ones are left ' +
+            'out. A narrower projection shows others.'
+          : 'This entity has more neighbours within ' + (depth || 1) + ' hops than one ' +
+            'view draws, so the nearest are shown. A smaller depth shows all of them.',
         'warn');
     }
   } catch (err) {
@@ -17166,6 +17173,13 @@ function decayWords(a) {
       ? ', ' + countOf(d.undated_edges, 'tie has', 'ties have')
         + ' no dates recorded and ' + agree(d.undated_edges, 'was', 'were')
         + ' not decayed'
+      : '')
+    /* A pair whose ties decayed to nothing is out of betweenness, closeness and the brokers, but
+       still a tie to the cohesion measures and the removal set. */
+    + (d.faded_dyads
+      ? ', ' + countOf(d.faded_dyads, 'connected pair', 'connected pairs')
+        + ' decayed to nothing and ' + agree(d.faded_dyads, 'is', 'are')
+        + ' left out of betweenness, closeness and the broker ranking'
       : '');
 }
 
@@ -17462,7 +17476,7 @@ function renderAnalyticsFlags(a) {
       !!(a.projection && a.projection.include_inferred))]);
     for (const flag of oneModeFlags(a.one_mode)) flags.push(flag);
   }
-  if (a.decay && a.decay.half_life_months && a.decay.undated_edges) {
+  if (a.decay && a.decay.half_life_months && (a.decay.undated_edges || a.decay.faded_dyads)) {
     flags.push(['note', 'Trust decay: ' + decayWords(a) + '.']);
   }
   for (const [kind, text] of flags) {
@@ -18180,6 +18194,17 @@ function renderKeyPlayer() {
     + 'only ' + pctOf(r.top_betweenness_fragmentation) + ' of pairs.'
     + (r.beats_top_betweenness ? '' : ' On this graph the two coincide.');
   card.appendChild(cmp);
+  /* A pair whose ties decayed to nothing is left out of that betweenness ranking, as it is out of
+     the suite's, and still counted as a tie by the removal set. A run stored before the result
+     carried this has no count, and is read as none. */
+  const faded = k.decay && k.decay.half_life_months ? Number(k.decay.faded_dyads) || 0 : 0;
+  if (faded) {
+    card.appendChild(el('p', 'muted small',
+      countOf(faded, 'connected pair', 'connected pairs') + ' decayed to nothing and '
+      + agree(faded, 'is', 'are') + ' left out of that betweenness ranking, while the removal '
+      + 'set still counts ' + agree(faded, 'it', 'them') + ' as ' + agree(faded, 'a tie', 'ties')
+      + '.'));
+  }
   card.appendChild(method());
   box.appendChild(card);
 }

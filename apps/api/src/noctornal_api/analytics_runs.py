@@ -36,6 +36,7 @@ from noctornal_api.analytics import (
     _least_constrained_first,
     _rank_and_percentile,
     assign_broker_leads,
+    decay_block,
     graph_hash,
     key_player,
     materialise,
@@ -250,6 +251,9 @@ class AnalyticsRunService:
                 # for.
                 "review_scope": review_scope_block(p, sub),
                 "one_mode": one_mode_block(sub),
+                # The top-betweenness comparison in `key_player` leaves out a pair that decayed to
+                # nothing, as the suite's betweenness does; the removal set counts it as a tie.
+                "decay": decay_block(params, m),
                 "key_player": out,
             }
         return self._run(p, params, KPP_NEG, {"n_remove": n_remove},

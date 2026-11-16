@@ -441,6 +441,20 @@ def test_key_player_names_the_broker(conn, world):
     assert out["fragments_after"] == [3, 3]
 
 
+def test_key_player_says_what_decay_left_out_of_its_betweenness_comparison(conn, world):
+    """The comparison set leaves out a pair that decayed to nothing, as the suite's betweenness
+    does, so the result carries the same decay block the suite does."""
+    case_id, uid, _, _ = world
+    svc = _svc(conn, uid)
+    off = svc.key_player(_proj(case_id), _params(), n_remove=1).payload
+    assert off["decay"]["half_life_months"] is None
+    assert off["decay"]["faded_dyads"] == 0 and off["decay"]["note"] == "decay is off"
+    on = svc.key_player(_proj(case_id), _params(decay_half_life_months=12),
+                        n_remove=1).payload
+    assert on["decay"]["half_life_months"] == 12
+    assert set(on["decay"]) == {"half_life_months", "undated_edges", "faded_dyads", "note"}
+
+
 def test_metric_history_is_scoped_to_the_callers_visibility(conn, world):
     case_id, uid, ids, _ = world
     _svc(conn, uid, clearance="RED").suite(_proj(case_id), _params())

@@ -126,6 +126,10 @@ def ego(
         # True when the neighbourhood was cut at the most one view draws
         # (`NEIGHBOURHOOD_MAX_NODES`), the nearer entities kept.
         "truncated": sub.truncated,
+        # Which bound cut it: "node_cap" (the entity bound, the nearer then the older kept) and/or
+        # "row_cap" (one step reached more ties than it reads, so the entities kept at that step
+        # are the oldest first and the newer ones at that distance are left out).
+        "cut_by": sub.cut_by,
         "nodes": [{**n, "id": str(n["id"])} for n in sub.nodes],
         "edges": [{**e, "id": str(e["id"]),
                    "src_node_id": str(e["src_node_id"]),

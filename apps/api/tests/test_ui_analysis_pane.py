@@ -753,6 +753,37 @@ console.log(JSON.stringify(out));
     assert "Fragmentation (F) goes from" in got["nothing"]
     assert "Looking for a stored 3-entity removal set..." == got["reading"]
     assert "Finding the 3-entity removal set..." == got["finding"]
+    assert "decayed to nothing" not in found, "a run with no decayed pair says nothing of it"
+
+
+def test_the_key_player_card_says_how_many_pairs_the_betweenness_comparison_left_out():
+    got = _run(_PRELUDE + _src("ageText", "pctOf", "andList", "piecesText",
+                               "graphButton", "renderKeyPlayer") + r"""
+function showSetOnGraph() {}
+$('an-kpp-n').value = '2';
+const kpp = { n_remove: 2, fragmentation_before: 0, fragmentation_after: 0.61,
+  fragments_after: [12, 9, 4, 2], removal_set: [{ node_id: 'a', label: 'a' }, { node_id: 'b', label: 'b' }],
+  top_betweenness_set: [{ label: 'c' }, { label: 'd' }], top_betweenness_fragmentation: 0.2,
+  beats_top_betweenness: true };
+for (const faded of [1, 3]) {
+  state.analyticsKpp = { key_player: kpp, decay: { half_life_months: 12, faded_dyads: faded } };
+  renderKeyPlayer();
+  out['faded' + faded] = text($('an-kpp'));
+}
+state.analyticsKpp = { key_player: kpp, decay: { half_life_months: null, faded_dyads: 0 } };
+renderKeyPlayer();
+out.off = text($('an-kpp'));
+state.analyticsKpp = { key_player: kpp };
+renderKeyPlayer();
+out.stored = text($('an-kpp'));
+console.log(JSON.stringify(out));
+""")
+    assert ("1 connected pair decayed to nothing and is left out of that betweenness ranking, "
+            "while the removal set still counts it as a tie.") in got["faded1"]
+    assert ("3 connected pairs decayed to nothing and are left out of that betweenness ranking, "
+            "while the removal set still counts them as ties.") in got["faded3"]
+    assert "decayed to nothing" not in got["off"]
+    assert "decayed to nothing" not in got["stored"], "a run stored before the count is read as none"
 
 
 def test_a_failed_rerun_keeps_the_results_and_says_why_in_plain_words():
@@ -812,6 +843,25 @@ console.log(JSON.stringify(out));
     assert "' | decay: ' + decayWords(a)" in render
     flags = _fn("renderAnalyticsFlags")
     assert "reviewCoverageText(rc)" in flags
+
+
+def test_the_decay_line_says_what_decayed_to_nothing_and_what_it_was_left_out_of():
+    """A pair whose ties decayed to nothing is out of betweenness, closeness and the broker
+    ranking (`analytics.path_view`), and a reader of those numbers has to be told."""
+    got = _run(_PRELUDE + _src("decayWords") + r"""
+out.one = decayWords({ decay: { half_life_months: 12, faded_dyads: 1 } });
+out.many = decayWords({ decay: { half_life_months: 6, undated_edges: 2, faded_dyads: 3 } });
+out.stored = decayWords({ decay: { half_life_months: 12, undated_edges: 0 } });
+console.log(JSON.stringify(out));
+""")
+    assert got["one"] == ("12 month half-life, 1 connected pair decayed to nothing and is left "
+                          "out of betweenness, closeness and the broker ranking")
+    assert got["many"] == ("6 month half-life, 2 ties have no dates recorded and were not "
+                           "decayed, 3 connected pairs decayed to nothing and are left out of "
+                           "betweenness, closeness and the broker ranking")
+    assert got["stored"] == "12 month half-life", "a run stored before this reads as it did"
+    assert "a.decay.faded_dyads" in _fn("renderAnalyticsFlags"), \
+        "the flags under the numbers say it too, and not only the undated ties"
 
 
 def test_the_pane_help_and_the_inspector_say_nothing_in_build_team_words():
