@@ -2,8 +2,8 @@
 
 ## Beta 1.6: 2026-11-15
 
-A remediation round on Beta 1.5c, version 0.9.6. The Alembic head is 0199, fifteen
-revisions on 0184 (0185 to 0199). It adds decisions 229 to 241 and builds what the review of
+A remediation round on Beta 1.5c, version 0.9.6. The Alembic head is 0200, sixteen
+revisions on 0184 (0185 to 0200). It adds decisions 229 to 241 and builds what the review of
 2026-11-14 and the owner's rulings of that day asked for. It has not been audited,
 and it is still not lawful to operate against real material until docs/16 L1 to L5
 are settled outside this codebase. Legal review is required before any active case
@@ -334,7 +334,7 @@ stack's file, behaviour and tests are unchanged. Nothing here has run on a clust
 
 ### The migrations
 
-Fifteen revisions, all on the way to head 0199, each with a downgrade:
+Sixteen revisions, all on the way to head 0200, each with a downgrade:
 
 - `0185` rewrites the comment on `core.node_merge_edge.deleted_by_merge` to name both
   reasons a merge sets a tie aside. No data changes.
@@ -359,6 +359,11 @@ Fifteen revisions, all on the way to head 0199, each with a downgrade:
 - `0199` adds `RESTORED` to the sample access actions, `lab.sample_current_preserved_version`
   and the same guard for a preserved sample. It refuses a downgrade over a restored
   sample.
+- `0200` empties the description, source address, extracted text and full-text vector
+  of every exhibit an earlier purge marked destroyed and left readable. It changes no
+  other row, counts any purged row that still holds content afterwards and rolls back
+  if there is one, and writes one audit event that holds a count and no value. Its
+  downgrade does nothing, because the content is meant to be gone.
 
 - **A migration's search path ends with its revision.** 77 statements in 53 released
   revisions said `SET search_path`, which outlives the transaction that ends a
@@ -469,6 +474,203 @@ Fifteen revisions, all on the way to head 0199, each with a downgrade:
   non-finite row is left out of the read, and the other float inputs were checked and
   already refuse them.
 
+### The independent review
+
+An independent review read the build after the rest of the round was done (27 findings
+across sign-in, access, evidence, outbound requests, transport, the console and the
+analysis paths; it read the code and ran nothing). Each finding was treated as a claim:
+a test had to fail for the stated reason before anything was changed, and a claim that
+did not hold, or was already stated in docs/17, was set aside. Every finding that held
+is closed in code except two, which are recorded as not fixed (below). The only
+migration is 0200; there is no new setting and no new dependency.
+
+- **Sign-in with a recovery code no longer shows whether the password was right**
+  (SIGNIN-01). A second factor shaped like a recovery code cost one Argon2id verify for
+  each recovery hash the account held on top of the password's, while a wrong password
+  or an address with no account cost one, so a caller who timed the answer learned that
+  the password was right although the status, the body and the audit row were the same.
+  A recovery-shaped code now costs one password verify and exactly ten recovery verifies
+  (the most an account holds) on every path: an unknown address, a wrong password, a
+  locked, inactive or unenrolled account, a wrong code and a right one, the dummy hash
+  padding what an account does not hold. A path that fails before the second factor
+  counts never reads the stored hashes. A six-digit authenticator code still costs one
+  verify, and Account, Change password, which checks the same two things, behaves the
+  same. The cost is that a recovery-shaped attempt takes about half a second longer than
+  before; a source's failed attempts are still capped by the failed-sign-in meter, so
+  one source can draw up to 495 verifies in the first five minutes where it drew 45,
+  which docs/17 lists.
+- **A refused password change at sign-in is recorded** (SIGNIN-02). A sign-in that
+  proved the password and the second factor and sent a new password for an account with
+  none pending was refused with a 409 and wrote no audit row, though the check had spent
+  an authenticator step. It now writes AUTH_PASSWORD_CHANGE_NOT_PENDING with outcome
+  DENIED, which names the factor that was checked and whether it was spent and nothing
+  that was typed. The status, the body and the failure count are as they were; the
+  review proposed clearing the count only where a session opens, which was not done and
+  is left to the owner in docs/17.
+- **A record names nothing above its reader** (ACCESS-02, ACCESS-05). A capture, a call
+  and a contact block are labelled at their own classification and may cite an exhibit,
+  and a block its publisher's entity, labelled above them. A reader cleared for the
+  record and not for what it cites now gets that field as null, and the same goes for
+  the entity an ATTRIBUTE or EDGE proposal names, in the Triage queue and in the answers
+  to accept, reject and defer, where the card says "an entity not visible to you". One
+  helper, `element_gate.visible_element_ids`, answers it for all of them. The screenshot
+  route gates its exhibit as the exhibit routes do: an exhibit above the caller (it
+  answered 403), another case's exhibit and a capture with no screenshot are one 404
+  with one AUTHZ_DENIED row. No record's labels are raised, so nothing an existing case
+  shows to a reader cleared for it changes.
+- **A grant by id is refused as a grant by address is** (ACCESS-01). A Lead who named a
+  colleague by user id was told the colleague's clearance level, the compartment keys
+  they lack, or that they hold a liaison assignment on another case, and nothing was
+  recorded. It now gets the address's two sentences and a CASE_SHARE_REFUSED row that
+  holds no level and no key.
+- **A case id that names nothing is recorded as a case the caller is not on**
+  (ACCESS-03). Both still answer 404 "case does not exist". The missing id now meets the
+  gate at the phantom's labels (decision 230), so it sends the same statements and
+  writes the same AUTHZ_DENIED row.
+- **A contact block parsed above the caller is answered as a duplicate** (ACCESS-06).
+  Submitting text the case had already parsed at labels the caller does not hold
+  answered 400 "at a label you do not hold". It now answers 201 with `already_parsed`,
+  no id, no reading and one sentence that names no label. On a development connection
+  that path returned the hidden block whole; it is now decided by the caller's own
+  ceiling on every connection.
+- **A purged exhibit keeps its name and nothing it said** (evidence). A purge deleted an
+  exhibit's bytes and marked the row, and left its description, source address,
+  extracted text and the full-text vector built from them, so a later reader of the
+  register read them and the search found the exhibit by words only its body held. The
+  update that marks the row destroyed now empties those four, in the scheduled sweep and
+  in the out-of-schedule purge alike, and keeps the title, the hashes, the size, the
+  media type and the storage key as the tombstone's name for it. An exhibit whose delete
+  the object store refused is neither marked nor emptied. Exhibits purged earlier are
+  emptied by 0200. docs/17 asks the owner whether the title should stay and whether the
+  records made from a purged exhibit (a parsed e-mail, a contact block) should be
+  emptied with it.
+- **A purge's preview says nothing a caller could not already count** (evidence). The
+  preview a dry run hands back, which a real run must present, was the sha256 of every
+  due item on the case, those above the caller included, so a caller could rebuild it
+  from the items they were shown and learn that something was left out. It is now an
+  HMAC-SHA256 of the same material under a key derived from the audit pepper, compared
+  in constant time. **Upgrading:** with no pepper a production server issues no preview
+  and refuses a real run (production already refuses to start without one), and rotating
+  the pepper voids a preview not yet confirmed, which is made again by running the dry
+  run again.
+- **The preservation check no longer credits a retention as a legal hold** (evidence).
+  It read a refused DELETE of its hold canary as the hold's, although an unexpired
+  retention of any mode refuses a plain DELETE with the same words, and it wrote "no
+  retention" in its evidence without reading one. It now reads the canary's retention
+  back before the DELETE and passes only on an answer of none; a canary that carries one
+  is passed over for a fresh one, and a bucket default retention or a credential that
+  cannot read one fails the check and says so.
+- **A purge no longer deletes collected markup a collector is attaching** (evidence).
+  Two documents of one source and one fragment share an object, and the purge deleted it
+  when no other live document named its key, a check that cannot see a document a
+  collector has inserted and not yet committed. The collector now takes an advisory lock
+  on the key before it puts the object, and the purge tries the same lock around its
+  check and its delete and keeps the object, with a warning, when it cannot have it.
+- **A key lookup is re-checked against what it cites** (OUT-01). A Web Key Directory
+  lookup is stored at the labels of the contact block and channel binding it cites, but
+  the second person's approval re-read only the case, so a cited row raised afterwards
+  by the schema owner or the worker left the case unchanged and the hash of the
+  address's local part was still sent. The approval now reads both cited rows again, as
+  the approver, and refuses with one sentence before anything is committed or sent; a
+  row the approver can no longer read is refused in the same words and the lookup keeps
+  waiting. The database guard on the update to SENDING still repeats only the case's
+  half of the check; closing that needs a migration and is in docs/17.
+- **An exhibit is marked attacker markup from what it is, not from what the upload
+  called it** (CONSOLE-01). `is_hostile_markup`, which keeps an exhibit's bytes off the
+  application origin, was set from the part's declared type, which the uploader writes,
+  so an HTML page, an SVG or an XML file sent as `application/octet-stream` was exported
+  from the application origin. The flag is now derived once, when the exhibit is lodged,
+  from the declared type, the first 2 KiB (text that opens with a tag, doctype, comment,
+  `<?xml` or SVG, a mail header block or an mbox line, in UTF-8 or UTF-16) or a markup
+  extension on the title or file name. A text file that starts with a tag is produced
+  through the sample origin, one extra click. An exhibit lodged before this change keeps
+  the flag it was given; docs/17 has the query that finds them.
+- **The saved report is the text the console previews** (CONSOLE-02). The preview
+  replaces bidirectional overrides and isolates, zero-width characters and
+  control characters with their code points, but the markdown file written from the same string
+  still held them, so a right-to-left override in an entity label could reorder the TLP
+  cell of its table row. The same replacement is now made where every label, title,
+  statement and case field enters the document, and a test holds the two equal.
+- **A sample origin that is not an origin is no longer quoted back** (CONSOLE-03). When
+  `NOCTORNAL_SAMPLE_ORIGIN` held userinfo, a path or a query, the refusal on the
+  download routes, which is asked before a session is read, and `sample_origin_problem`
+  of `GET /samples/policy` quoted it. Both now give one fixed sentence; the value is in
+  the server log, once, with its userinfo masked, and the readiness register masks it
+  too.
+- **Postgres, Redis and MinIO hold no key of the application's** (TRANSPORT-01). The
+  four services that run another project's image (`postgres`, `redis`, `minio`,
+  `minio-init`) were given the whole of `secrets.env`, so each held the TOTP key ring,
+  the ingest and audit peppers, the mail stamp key and the system role's DSN while
+  running as root and checking nothing. None reads `secrets.env` now: Postgres reads
+  `postgres-init.env` (which also holds `NOCTORNAL_APP_DB_PASSWORD`), Redis reads
+  `redis.env`, and MinIO and `minio-init` read `minio.env`. The installer step writes
+  the two new files from `secrets.env` with mode 600 and keeps them in step on every
+  run, and `compose.yml` holds every application secret blank on all four. Without its
+  file Redis refuses an empty password, and MinIO and `minio-init` refuse an empty root
+  pair, each naming the installer step. **Upgrading:** run `sudo bash release/install.sh
+  --production-secrets` (`install.ps1 -ProductionSecrets` on Windows) before `up -d`,
+  and again after any later change to a Redis or MinIO line of `secrets.env`, or the
+  service keeps the old value.
+- **A connection service counts as the network** (TRANSPORT-02). A DSN naming no host
+  was read as a unix socket, so `service=` in it, or `PGSERVICE`, could send a
+  production connection to a host named in `pg_service.conf` without TLS, and
+  `PGHOSTADDR` could do the same to a DSN naming a socket. A target libpq may take from
+  a service file or from `PGHOSTADDR` now counts as the network and is verified only by
+  the DSN's own `sslmode=verify-full`, at boot, in every job, in the egress proxy and in
+  `internal_hops_encrypted`.
+- **`add-ca` keeps the internal names to the deployment's CA** (TRANSPORT-03).
+  `tls/public/ca.crt` is the only trust anchor every DSN and `REDIS_URL` names, and a
+  second CA in it is not bound by the deployment CA's name constraints. `internal_tls.py
+  add-ca` now refuses a certificate that could vouch for `minio`, `postgres` or `redis`
+  and says how to get a constrained one, and `check` fails a bundle that already holds
+  one. A CA nobody will constrain cannot be added yet (docs/17).
+- **The DSN cannot switch the statement bound off** (TRANSPORT-04). The default bound
+  was placed before `DATABASE_URL`'s `options`, so `-c statement_timeout=0` there freed
+  every request. A `statement_timeout` in the DSN is now held to 5 to 3600 seconds and
+  the bound is always the last setting; production refuses a DSN whose options switch it
+  off or set a value that cannot be read, a number too large to hold included.
+- **Scripts hash only under a pepper the API accepts** (TRANSPORT-05). In production the
+  audit hashes are made only under a pepper the boot refusal accepts, and
+  `scripts/telegram_persona.py` and `scripts/egress_setup.py` run the boot refusal
+  before they ask anybody to sign in.
+- **Two merges at once, or a merge and a reversal at once, take turns** (INTEGRITY-01,
+  INTEGRITY-02). A merge read its two entities' redirects, and a reversal asked whether
+  a later merge held its ties, before their transactions and under no lock. Run at once,
+  A into B and B into C left the ties A brought on B, which was merged away and drawn
+  nowhere; A into B and B into A made a cycle with both entities off the canvas; a
+  second merge of one entity was a 500; and a reversal could write its old endpoints
+  over a tie a later merge had just recorded. A merge now locks its two entities in id
+  order and decides in the transaction that writes, then locks the ties it moves; a
+  reversal locks the merge's two entities and every tie it recorded before it asks its
+  later-merge question. The second of two operations that share an entity or a tie waits
+  and is then made on what the first left, or refused with the 409 it would get on its
+  own. The locks are FOR NO KEY UPDATE, the lock the update takes anyway: FOR UPDATE
+  deadlocked two merges that shared a tie.
+- **A tie that has decayed to nothing is no longer the cheapest path in the case**
+  (INTEGRITY-03). With trust decay on, a tie whose valid interval is about a thousand
+  half-lives old underflowed to a strength of zero and was given the path cost of a tie
+  of weight one, so the oldest tie became the cheapest link and the entities it appeared
+  to bypass lost their brokerage. Betweenness, closeness and the broker ranking now
+  leave such a pair out, the answer counts them (`decay.faded_dyads`) and says so, and
+  the components, bridges, communities and removal set still count the pair as a tie. An
+  analysis run stored with decay on reads as not current once.
+- **A binding and its audit row, and a message with its participant and counts, are
+  written in one transaction** (INTEGRITY-04). The request connection commits every
+  statement as it runs, so a failure between the two writes left a binding the audit
+  chain never recorded, or a message whose sender the contact graph never saw, and the
+  retry took the message as already held. Each is one transaction now, and storing a
+  held message again settles the participant row and the counts from the stored
+  messages, raising a count and never lowering one.
+- **A cut ego network keeps the oldest entities and says which bound cut it**
+  (INTEGRITY-06). One step read at most 20 ties for each of the 5,000 entities of the
+  bound with no order, so a hub past it kept whichever rows the database met first while
+  the banner said the nearest were shown. The step now orders by the far entity's
+  creation time and then its id before the limit, and the answer carries `cut_by`
+  (`node_cap`, `row_cap`, both, or empty) beside `truncated`.
+- **A statement timeout too large to hold is refused, not a crash.** `-c
+  statement_timeout=1e400` in the DSN raised OverflowError in the boot check and on
+  every connection. It now counts as a value that cannot be read.
+
 ### What the round did not do
 
 - It did not close lab-6, the 409 that tells a caller whether a sample is held, which
@@ -489,11 +691,24 @@ Fifteen revisions, all on the way to head 0199, each with a downgrade:
   residuals marked as decisions, as they were.
 - It did not guard the database against a retraction stamp on a replaced claim (a migration), and the console
   cannot read or clear the note of a stale ACH row (docs/17).
+- It did not change the row policy on `core.edge`, `core.assertion` and
+  `core.evidence_link` to look at a tie's two ends (ACCESS-04). The routes gate the
+  ends, and a policy that joins the node table on every read of a tie needs a migration
+  and a measured cost on large cases; docs/17 holds the residual.
+- It did not change the outbox from at-least-once (INTEGRITY-05): a notification the
+  relay accepted stays pending if recording it fails, so the next drain sends it again.
+  That is intended, and the receiver may see a duplicate; docs/17 lists it as an
+  accepted cost.
+- It did not weight the sign-in meters by the verifies an attempt costs, which needs the
+  route to read the body before the meters do (docs/17), and it did not start the
+  application services of the production stack after TRANSPORT-01: the four services it
+  changed were brought up under Docker on Linux and their environments checked, and the
+  application image was not built for that run.
 - It did not build the shared `api_client` test fixture, which touches about a hundred
   test files and waits for a round of its own (docs/17, the shared `client` fixture).
   Nothing a user sees depends on it.
 
-9380 tests (`def test_` functions). The whole suite runs in CI on every push, on a database built from nothing with every migration and with both runtime database roles present; its totals for this release are in the release notes.
+9534 tests (`def test_` functions). The whole suite runs in CI on every push, on a database built from nothing with every migration and with both runtime database roles present; its totals for this release are in the release notes.
 
 ### Upgrading from Beta 1.5c
 
@@ -529,6 +744,10 @@ sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --bu
   connection per request.
 - `withheld` is gone from the connection log's answer; `seq` and the verify answer's
   `rows` can be null.
+- Run the installer step before `up -d` this time too: it writes `redis.env` and `minio.env` and
+  moves `NOCTORNAL_APP_DB_PASSWORD` into `postgres-init.env`, and Redis, MinIO and `minio-init`
+  refuse to start without their file. A purge's dry run returns a keyed preview, which needs the
+  pepper. Migration 0200 is data only and runs with the rest.
 - On a development machine the installers write the pepper into `.env.local` and
   install pip from the hashed file; `psycopg-pool` joins the pinned set.
 
