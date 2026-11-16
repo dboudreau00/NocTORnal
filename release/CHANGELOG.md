@@ -1,5 +1,67 @@
 # Changelog
 
+## Beta 1.6a: 2026-11-16
+
+An optional integration on Beta 1.6, version 0.9.6, and one fix. There is no
+migration, so the Alembic head stays 0200, and no new dependency. It has not been
+audited, and it is still not lawful to operate against real material until docs/16
+L1 to L5 are settled outside this codebase.
+
+### MaaSSpec
+
+- **A host switch, `NOCTORNAL_MAASSPEC`, off by default.** Only `on` (case and
+  surrounding spaces do not matter) enables it; unset, empty, `off`, `true`, `1`
+  and `yes` all mean off. It is a host setting in `secrets.env`, passed through
+  compose and checked at start, like `NOCTORNAL_OUTBOUND_LOOKUPS`. It is read
+  each time a record is parsed.
+- **Off, nothing changes.** A MaaSSpec spectrum is categorised as any other JSON
+  body is.
+- **On, a spectrum is recognised at parse time.** A body that is a JSON object
+  with a top-level `maasspec_version` is checked strictly against the spectrum
+  contract: exact JSON types, no unknown key in any of its twelve models, every
+  required field, the enums, the hash, UUID and timestamp shapes, and bounds on
+  size, depth and counts. A valid one is filed as category IOC_FEED, confidence
+  1.0, category source STRUCTURE. The payload is stored whole and the record's
+  labels come from the key, never from the document. It waits in the ingest
+  queue like any record, and a person triages and attaches it as today.
+- **Invalid goes to the dead letters.** A refusal is a dead letter with the error
+  class `SpectrumRefused` and a text of the form `maasspec: <path> <rule>` that
+  names the place and the rule and never a value from the document. The rest of
+  the batch is stored as usual.
+- **Nothing becomes a graph element, a claim or a proposal.** The mapper writes no
+  entity, tie, assertion or proposal, and scoring is unchanged.
+- **A status route.** `GET /api/v1/ingest/maasspec`, for `ingest.read`, answers
+  whether the switch is on, its name, the contract versions accepted (`0.1.0`),
+  the 1 MiB cap, the category and a notice.
+- **A metadata block on the record.** `GET /api/v1/ingest/records/{id}` carries a
+  `maasspec` block only when the switch is on and the record is a valid
+  spectrum. It holds counts and names (findings by type, selectors by kind and
+  how many have no NocTORnal type, claimed and graded findings, grade counts,
+  artifacts, errors by severity) and never a value.
+- **Versions.** `maasspec_version` is the contract version and does not move when
+  the MaaSSpec package does. `tool.version` is the package version and is
+  informational.
+- **No outbound traffic.** NocTORnal never calls MaaSSpec; a spectrum arrives as
+  an ordinary POST to `/api/v1/ingest`, with the 1 MiB body cap that route has.
+
+### Ingest
+
+- **A repeated `Idempotency-Key` after 24 hours answers as a duplicate.** It
+  answered with a database error once the first batch was a day old. A repeat of
+  the same key on the same API key now always answers as the first batch, and
+  the new body is not stored. The same key on another API key stays independent.
+
+### What this release did not do
+
+- **No runtime toggle through the API.** The switch is a host setting, like the
+  outbound lookups switch.
+- **No proposals from a spectrum.** An ingest record has no collected document to
+  hang a proposal on.
+- **No scoring by typed selectors.** Scoring reads the payload text as it does for
+  any record.
+- **No values in the queue.** The detail block is counts only; a value is
+  readable only through the stored body.
+
 ## Beta 1.6: 2026-11-15
 
 A remediation round on Beta 1.5c, version 0.9.6. The Alembic head is 0200, sixteen
