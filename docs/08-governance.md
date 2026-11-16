@@ -68,6 +68,15 @@ past its review date rather than letting it roll on silently.
   never hides the destructions beside it, and each destroyed exhibit's own
   custody trail ends with a DESTROYED row naming who purged it and under
   which rule.
+- A purged exhibit keeps its row as the tombstone's name for it and nothing it
+  said. The update that marks it destroyed also empties its description, its
+  source address, its extracted text and its search vector, and keeps its
+  title, hashes, size, media type and storage key; an exhibit whose delete the
+  object store refused is neither marked nor emptied. What was made from an
+  exhibit (a parsed e-mail, a contact block) is the case's analysis, not part
+  of it, and stays (docs/17). The custody trail is append-only and keeps the
+  source address the exhibit was lodged with, so the custody route withholds
+  it once the exhibit is purged and shows the rest of the row.
 - A per-category retention rule is stamped onto each record when it is
   ingested. Confirming or changing a rule therefore applies to material
   ingested afterwards and recomputes no deadline already on file; the
@@ -76,7 +85,11 @@ past its review date rather than letting it roll on silently.
 - A real purge from the console takes two deliberate steps: a dry run of
   the same case under the same written authority, then a confirmation
   that repeats the dry run's counts and asks for the case code to be
-  typed. The dry run is the default every time the pane opens. A real run
+  typed. The dry run is the default every time the pane opens. Its preview,
+  which the real run must present, is a keyed value the server makes over
+  everything due on the case, the part above the caller included, so nothing
+  the caller is shown reproduces it; a server with no key issues none and
+  refuses the real run. A real run
   answers over what the caller may see, as the dry run does: its counts, its
   warnings and its tombstone ids leave out an exhibit above the caller's
   clearance, and the tombstone itself, the record of destruction, totals

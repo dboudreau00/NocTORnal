@@ -128,6 +128,7 @@ class FakeStore:
     version id. `refusal` overrides a retention refusal's shape.
     `retention_error` answers GetObjectRetention with that S3 error, and
     `list_raises` makes the listing raise that exception when iterated.
+    `bucket_default` is a bucket's default retention: a PUT that asks for none (a held canary) records it.
 
     The `_PERMISSIONS` flags are the account's. `account()` is another
     credential on the SAME store: the contents and behaviour are shared,
@@ -141,7 +142,7 @@ class FakeStore:
                  refusal=WORM, vanish_after_refusal=False, bucket_exists=True,
                  retention_error=None, list_raises=None, now=NOW,
                  on_call=None, profile="minio", makes_markers=True,
-                 **permissions):
+                 bucket_default=None, **permissions):
         self.enforces = enforces
         self.enforces_hold = enforces_hold
         self.records_hold = records_hold
@@ -165,6 +166,7 @@ class FakeStore:
         #: False: a DELETE naming no version adds no marker for an absent key (the s3 profile's control
         #: then cannot run).
         self.makes_markers = makes_markers
+        self.bucket_default = bucket_default
 
     def _set_permissions(self, permissions: dict) -> None:
         unknown = set(permissions) - set(_PERMISSIONS)
@@ -258,6 +260,8 @@ class FakeStore:
             raise _err("InvalidRequest",
                        "Bucket is missing ObjectLockConfiguration")
         recorded = retention if self.applies is _AS_ASKED else self.applies
+        if retention is None and self.bucket_default is not None:
+            recorded = self.bucket_default
         vid = self.seed(recorded, key=key,
                         hold=legal_hold and self.records_hold)
         return _Written(vid if self.versioned else None)
@@ -908,6 +912,88 @@ def test_a_hold_the_store_does_not_keep_fails(fake_store):
     assert check.ok is False
     assert "reported no hold on it" in check.evidence
     assert "every rejection is refused" in check.evidence
+
+
+def _default_retention(days: int = 30, mode=GOVERNANCE) -> Retention:
+    return Retention(mode, NOW + timedelta(days=days))
+
+
+def test_a_refusal_that_a_retention_explains_does_not_prove_the_hold(fake_store):
+    """A bucket whose default retention rides on the held canary refuses a plain DELETE for the retention,
+    with the same words as for a hold, and a store can enforce that and not the hold at all. The check
+    used to read the refusal as the hold's and to write "no retention" without reading one (independent review, AREA-02)."""
+    template, _ = fake_store
+    template["store"] = store = FakeStore(enforces_hold=False,
+                                          bucket_default=_default_retention())
+    check = readiness._preservation_bucket_object_lock(None)
+    assert check.ok is False, check
+    assert "legal hold PROVEN" not in check.evidence and "no retention," not in check.evidence
+    assert f"hold canary {HOLD_KEY}" in check.evidence
+    assert "GOVERNANCE retention" in check.evidence and "bucket default" in check.evidence
+    assert "docs/17 F2" in check.action
+    assert not [c for c in store.removes() if c[1] == HOLD_KEY], (
+        "a DELETE that a retention can explain was made and credited")
+
+
+def test_the_evidence_says_no_retention_only_because_a_credential_read_none(fake_store):
+    template, _ = fake_store
+    store = template["store"]
+    check = readiness._preservation_bucket_object_lock(None)
+    assert check.ok is True, check
+    held = store._b.latest[HOLD_KEY]
+    assert ("retention", HOLD_KEY, held) in store.calls, "the canary's retention was never read"
+    assert "no retention read back with MINIO_ACCESS_KEY" in check.evidence
+
+
+def test_a_hold_canary_that_carries_a_retention_is_replaced_and_the_fresh_one_is_tested(fake_store):
+    """A held version some other tool put a retention on is not a test of the hold. It stays where it is,
+    and a fresh held version, written the way a sample is, is the one whose DELETE is read."""
+    template, _ = fake_store
+    template["store"] = store = FakeStore()
+    stale = store.seed(_default_retention(), NOW - timedelta(days=3), key=HOLD_KEY, hold=True)
+    check = readiness._preservation_bucket_object_lock(None)
+    assert check.ok is True, check
+    fresh = store._b.latest[HOLD_KEY]
+    assert fresh != stale and fresh in store.holds and store.versions[fresh] is None
+    assert ("remove", HOLD_KEY, stale) not in store.removes()
+    assert ("remove", HOLD_KEY, fresh) in store.removes()
+    assert stale in store.versions, "the old version was neither deleted nor tidied"
+
+
+def test_the_production_preservation_account_that_may_not_read_a_retention_leaves_the_read_to_the_other_credential(
+        fake_store, monkeypatch):
+    """infra/production/compose.yml mints the preservation account without `s3:GetObjectRetention`, so its
+    own read of the canary is refused and the credential that makes the DELETE reads it."""
+    template, _ = fake_store
+    store = template["store"]
+    template["by_access"]["p-key"] = p = _production_preservation(monkeypatch, store)
+    check = readiness._preservation_bucket_object_lock(None)
+    assert check.ok is True, check
+    held = store._b.latest[HOLD_KEY]
+    assert ("retention", HOLD_KEY, held) in p.calls, "the account's own read was never tried"
+    assert ("retention", HOLD_KEY, held) in store.calls
+    assert "no retention read back with MINIO_ACCESS_KEY" in check.evidence
+
+
+def test_a_hold_canary_whose_retention_no_credential_here_may_read_cannot_be_proven(fake_store):
+    template, _ = fake_store
+    template["store"] = store = FakeStore(retention_denied=True)
+    check = readiness._preservation_bucket_object_lock(None)
+    assert check.ok is False, check
+    assert "MINIO_ACCESS_KEY may not read a retention" in check.evidence
+    assert "s3:GetObjectRetention" in check.evidence
+    assert "out of band" in check.action
+    assert not [c for c in store.removes() if c[1] == HOLD_KEY]
+
+
+def test_a_store_that_will_not_say_what_retention_the_hold_canary_carries_fails():
+    store = FakeStore(retention_error=("InternalError", "we encountered an internal error"))
+    proof = readiness._prove_hold(store, "b", writer="PRESERVE_ACCESS_KEY",
+                                  deleters=[("PRESERVE_ACCESS_KEY", lambda: store)],
+                                  deadline=1e18, clock=lambda: 0.0)
+    assert proof.ok is False
+    assert "would not say what retention" in proof.evidence and "InternalError" in proof.evidence
+    assert not store.removes()
 
 
 def test_an_account_that_may_not_set_a_hold_is_not_proven_around(

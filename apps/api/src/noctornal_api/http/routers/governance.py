@@ -10,7 +10,7 @@ a case id is supplied.
 """
 from __future__ import annotations
 
-import hashlib
+import hmac
 import json
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -53,6 +53,7 @@ from noctornal_api.http.routers.approvals import (
     _request_reach,
 )
 from noctornal_api.http.routers.search import _allowed_on_case
+from noctornal_api.security.audit_hash import purge_preview_mac
 from noctornal_api.security.access import (
     CHECK_STEP_UP,
     AccessResolutionError,
@@ -657,20 +658,31 @@ def _due_rows(conn: psycopg.Connection, user: CurrentUser,
 
 
 def _preview_digest(case_id: UUID, authority: str,
-                    items: list[DueItem]) -> str:
-    """What a dry run counted, as one value a real run must present again.
+                    items: list[DueItem]) -> str | None:
+    """What a dry run counted, as one value a real run must present again; None when the server holds
+    no key to make it with.
 
     It binds the irreversible act to the counts the person confirmed. The digest covers the case,
     the authority and every due item with whether it is held, so a newly due item, a hold placed or
-    lifted, or a different authority all change it. No secret is needed: it is not a credential,
-    and anyone able to send the real run can run the dry run.
+    lifted, or a different authority all change it. It is a keyed MAC (`audit_hash.purge_preview_mac`),
+    and the key is the point: the items include those above the caller, which the dry run does not
+    list, so a digest anybody could recompute from the list and the request would say whether
+    something was left out and whether a remembered id was due. It is not a credential, and anyone able
+    to send the real run can run the dry run; what they cannot do is make it from what they are shown.
     """
     material = json.dumps({
         "v": 1, "case_id": str(case_id), "authority": authority,
         "items": sorted(["held" if i.held else "due", i.object_type,
                          str(i.object_id)] for i in items),
     }, separators=(",", ":"))
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return purge_preview_mac(material)
+
+
+#: What a dry run says when the server has no key to make a preview with, so none is issued.
+_NO_PREVIEW_KEY = (
+    "no preview was issued: this server holds no key to bind a confirmation to what this dry run "
+    "counted (NOCTORNAL_AUDIT_PEPPER is not set), so a real run cannot follow it. Tell an "
+    "administrator.")
 
 
 def _counted(items: list[DueItem]) -> dict[str, int]:
@@ -776,6 +788,11 @@ def purge(
     items = purger.due(case_id=body.case_id, as_of=as_of)
     digest = _preview_digest(body.case_id, body.authority, items)
     if not body.dry_run:
+        if digest is None:
+            raise Problem(
+                503, "Preview unavailable",
+                "this server holds no key to check a confirmation against, so a real "
+                "purge cannot be confirmed. Nothing was destroyed. Tell an administrator.")
         if not body.preview:
             raise Problem(
                 428, "Preview required",
@@ -784,7 +801,10 @@ def purge(
                 "it returns: the destruction is refused unless what is due "
                 "is still exactly what that dry run counted. Nothing was "
                 "destroyed.")
-        if body.preview != digest:
+        # Bytes, constant time: `compare_digest` refuses a str with a character outside ASCII, and a
+        # lone surrogate does not encode without `surrogatepass`; either is a mismatch, not a 500.
+        if not hmac.compare_digest(body.preview.encode("utf-8", "surrogatepass"),
+                                   digest.encode("ascii")):
             raise Problem(
                 409, "Conflict",
                 "what is due on this case is not what the dry run you are "
@@ -818,7 +838,9 @@ def purge(
     same = _counted(items) == _result_counts(result)
     if body.dry_run:
         out["preview"] = digest if same else None
-        if not same:
+        if digest is None:
+            out["warnings"].append(_NO_PREVIEW_KEY)
+        elif not same:
             out["warnings"].append(
                 "what is due on this case changed while this dry run was "
                 "counting, so it issues no preview to confirm. Run it "

@@ -93,7 +93,9 @@ def test_the_router_requires_and_checks_the_preview():
     gov = (SRC / "http" / "routers" / "governance.py").read_text(encoding="utf-8")
     assert "preview: str | None = Field(None, max_length=128)" in gov
     assert 'raise Problem(\n                428, "Preview required"' in gov
-    assert "if body.preview != digest:" in gov
+    # Compared in constant time, as bytes: the preview is a keyed value (independent review, AREA-01), not a bare digest.
+    assert 'if not hmac.compare_digest(body.preview.encode("utf-8", "surrogatepass"),' in gov
+    assert 'digest.encode("ascii")' in gov
     assert 'out["preview"] = digest if same else None' in gov
 
 

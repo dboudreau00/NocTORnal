@@ -183,6 +183,21 @@ def document_raw_key(source_id, fragment: bytes) -> str:
     return f"collect/{digest[:2]}/{digest}"
 
 
+def raw_key_lock(key: str) -> str:
+    """The name of the advisory lock the two parties to a collected-markup key share, hashed with
+    `hashtextextended(name, 0)` in SQL.
+
+    A collector takes it shared (`pg_advisory_xact_lock_shared`) before it puts the object and holds it to
+    the end of the transaction that names the key on its document; the purge's document leg tries it
+    exclusively (`pg_try_advisory_lock`) around its check that no live document names the key and its delete
+    of the object, and keeps the object when it cannot have it
+    (`retention.RetentionService._purge_documents`). The key is content-addressed, so a re-fetch of the same
+    fragment is a new document naming an object another document already names, and the purge's check reads
+    committed rows only: without the lock the delete takes the object a collector has put and not yet
+    committed, and the new document keeps a key that points at nothing."""
+    return f"collect.raw_key:{key}"
+
+
 class DocumentRawStorage:
     """Collected raw markup through the object store seam (role `collect_raw`). No object lock, own
     bucket, and a delete, because the purge must be able to remove it. `store` is the `ObjectStore`."""

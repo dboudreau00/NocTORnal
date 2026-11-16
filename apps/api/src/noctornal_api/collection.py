@@ -3368,15 +3368,24 @@ class CollectionService:
         (key, None), or (None, 'unconfigured' | 'refused'). ONE order:
         the row was inserted with the key NULL, the
         object is put, then the key is written, all inside the item's
-        savepoint, so a rollback leaves no row naming a missing object."""
+        savepoint, so a rollback leaves no row naming a missing object.
+
+        The key's advisory lock is taken first, shared, and held to the end of the transaction, which is
+        what keeps a purge from deleting the object between the put and the commit that makes the key
+        visible to it (`rawstore.raw_key_lock`). Shared, so two collectors holding keys in opposite
+        orders never wait on each other; it waits only while a purge is deleting that very key, which
+        is the length of one object delete. A transaction is assumed: out of one, the lock would be
+        released by the statement that took it and guard nothing."""
         from noctornal_api.collection_context import _scrub_raw
-        from noctornal_api.rawstore import document_raw_key
+        from noctornal_api.rawstore import document_raw_key, raw_key_lock
 
         store = self.raw_store
         if store is None:
             return None, "unconfigured"
         data = _scrub_raw(fragment)
         key = document_raw_key(source_id, data)
+        self._c.execute("SELECT pg_advisory_xact_lock_shared(hashtextextended(%s, 0))",
+                        (raw_key_lock(key),))
         try:
             store.put(key, data)
         except Exception:  # noqa: BLE001 - a refused put is a named gap
