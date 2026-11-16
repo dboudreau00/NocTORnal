@@ -10,7 +10,9 @@ a distinct "now enter your code" would confirm the password for free).
 Defences, all exercised by tests:
 - Constant work: every attempt runs one Argon2id verify (the real hash if the user exists, a fixed dummy
   hash otherwise) before any state branch, so timing and outcome do not reveal whether an account exists or
-  its state (active/locked).
+  its state (active/locked). A recovery-shaped second factor adds exactly `recovery.CODE_COUNT` more, on every
+  path and whatever the account holds (the dummy hash pads the count), so a wait never says the password was
+  right; an authenticator-shaped one adds none.
 - Mandatory MFA: a correct password alone never authenticates, and a correct-password/no-code probe still
   consumes a lockout attempt, so it is not a free password oracle.
 - Replay protection is atomic at the store: the TOTP counter advance is a compare-and-set; if a concurrent
@@ -124,6 +126,16 @@ class AuthService:
         locked = bool(user and user.locked_until and now < user.locked_until)
         active = bool(user and user.is_active)
 
+        # 1b. A recovery-shaped code costs `recovery.CODE_COUNT` more verifies, the same on every path. They
+        #     run here, before any state branch, because how many hashes an account holds is a fact about
+        #     the account, and a wait that followed it would say the password was right. Only an account
+        #     that could sign in has its stored hashes read; every other path verifies the dummy hash alone.
+        recovery_shaped = bool(totp_code) and recovery.looks_like_code(totp_code)
+        matched: str | None = None
+        if recovery_shaped:
+            reachable = bool(user and password_ok and active and not locked and user.totp_enrolled)
+            matched = self._match_recovery(user.id if reachable else None, totp_code)
+
         # 2. Single decision point. Reason is internal (audit) only.
         success = False
         reason: str
@@ -139,11 +151,8 @@ class AuthService:
             reason = "not_enrolled"
         elif not totp_code:
             reason = "no_totp"
-        elif recovery.looks_like_code(totp_code):
-            # A recovery code, told apart from a TOTP code by shape. Only reachable once the password has
-            # been verified on a real, active, unlocked account, so the extra Argon2id work is not an
-            # enumeration oracle: a caller who reaches it already knows the password.
-            matched = self._match_recovery(user.id, totp_code)
+        elif recovery_shaped:
+            # A recovery code, told apart from a TOTP code by shape and already checked above.
             if matched is None:
                 reason = "bad_recovery_code"
             elif not spend_recovery:
@@ -216,23 +225,32 @@ class AuthService:
                                         self._now() + LOCKOUT_DURATION)
         return False
 
-    def _match_recovery(self, user_id: UUID, submitted: str) -> str | None:
-        """The stored hash a recovery code matches, or None.
+    def _match_recovery(self, user_id: UUID | None, submitted: str) -> str | None:
+        """The stored hash a recovery code matches, or None. `user_id` None is an attempt that may not
+        read an account's hashes (no account, a wrong password, a closed or unenrolled one).
 
-        Every stored hash is checked rather than stopping at the first match, so the work done does not
-        depend on which code was submitted: the position of a code in the set must not be timeable.
+        Always exactly `recovery.CODE_COUNT` verifies, the most an account can hold: each stored hash, and
+        the dummy hash for the rest of the count. Neither the number held nor the position of the code in
+        the set can be timed, and a failed attempt costs what a good one does. The padded verifies are work,
+        never candidates. Issuing never makes a set longer than the count; one that somehow is gets its first
+        `CODE_COUNT` hashes checked and no more, so the work stays fixed, and the owner reissues the set.
 
         Matching does not spend. The atomic consume that follows (here or in `spend`) decides the outcome:
         if it reports the hash was already gone, a concurrent login spent it first and this attempt fails.
         Single-use is enforced by the database, not by the order of statements here.
         """
         normalised = recovery.normalise(submitted)
-        if not normalised:
-            return None
+        held = self._users.get_recovery_hashes(user_id) if user_id is not None else []
+        if len(held) > recovery.CODE_COUNT:
+            log.warning("user %s holds %d recovery hashes; the first %d are checked",
+                        user_id, len(held), recovery.CODE_COUNT)
+            held = held[:recovery.CODE_COUNT]
         matched: str | None = None
-        for stored in self._users.get_recovery_hashes(user_id):
+        for stored in held:
             if passwords.verify_recovery_code(stored, normalised) and matched is None:
                 matched = stored
+        for _ in range(recovery.CODE_COUNT - len(held)):
+            passwords.verify_recovery_code(_DUMMY_HASH, normalised)
         return matched
 
 
