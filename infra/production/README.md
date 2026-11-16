@@ -75,7 +75,7 @@ must agree across files:
   own Redis user (see [The limiter's Redis](#the-limiters-redis));
 * the **audit pepper**, `NOCTORNAL_AUDIT_PEPPER`, which keys the hashes the
   audit log keeps of a client's address and of what a failed sign-in typed
-  as its email, when it is missing, the placeholder, shorter than 16
+  as its email, and the preview a purge's dry run hands back, when it is missing, the placeholder, shorter than 16
   characters or a copy of the ingest pepper or the TOTP key. One that is
   none of those is never replaced;
 * the **schema owner's password**, into `postgres-init.env` and inside

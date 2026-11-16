@@ -1716,9 +1716,24 @@ class RetentionService:
             # exists to end. A row left unmarked is due again on the next SCHEDULED sweep;
             # `purge_out_of_schedule` has no such sweep behind it and warns instead, because `due()` never
             # returns an exhibit whose case retention has not expired.
+            #
+            # The row keeps what names it: its title, which the register and the custody trail call the
+            # tombstone's exhibit by, and the hashes, size, media type and storage key that say what was
+            # lodged. What it said goes with the bytes, in the same update: the description, the source
+            # address and the extracted text, which a reader of the register or the search would otherwise
+            # read from an exhibit the product reports destroyed. The vectors are the trigger's
+            # (`evidence_vectors_follow` deletes them when `purged_at` moves). The full-text vector is
+            # emptied in a statement of its own, because `evidence_tsv_update` rebuilds it from the title
+            # whenever the description or the text changes, and would put the title and nothing else back
+            # over a NULL set in the same update. Both run in the caller's transaction.
             self._c.execute(
-                "UPDATE core.evidence SET purged_at = now() WHERE id = ANY(%s)",
-                (destroyed_ids,))
+                """UPDATE core.evidence
+                      SET purged_at = now(), description = NULL, source_url = NULL,
+                          extracted_text = NULL
+                    WHERE id = ANY(%s)""", (destroyed_ids,))
+            self._c.execute(
+                "UPDATE core.evidence SET search_tsv = NULL "
+                "WHERE id = ANY(%s) AND purged_at IS NOT NULL", (destroyed_ids,))
             if actor_id is not None:
                 # The exhibit's own custody trail ends with its destruction, in the transaction that marks it, so
                 # "who touched this exhibit, and when" says who destroyed it. The tombstone counts the batch;
@@ -1869,7 +1884,8 @@ class RetentionService:
         this transaction and a purge cannot race a hold; (b) the hold is
         rechecked under those locks and anything now held is kept; (c) raw
         markup is deleted with its document unless another unpurged
-        document still names the object, a failed delete keeps the document
+        document still names the object or a collector is attaching it to one
+        (`rawstore.raw_key_lock`), a failed delete keeps the document
         (it stays due) and names the key, and raw markup due with no store
         configured is refused rather than recorded as destroyed; (d) the row
         survives with its content, digest, title, address and author
@@ -1910,31 +1926,52 @@ class RetentionService:
         failed_ids: set[UUID] = set()
         deleted_ids: set[UUID] = set()
         shared = 0
+        attaching = 0
         if keys and self._document_raw is None:
             raise RetentionError(_NO_DOCUMENT_RAW_STORE)
         for document_id, key in keys:
-            still = self._c.execute(
-                """SELECT 1 FROM collect.document d
-                    WHERE d.body_html_key = %s AND d.purged_at IS NULL
-                      AND NOT (d.id = ANY(%s)) LIMIT 1""",
-                (key, unheld)).fetchone()
-            if still is not None:
-                shared += 1
+            # The key is held from the existence check to the delete's answer. The check reads committed
+            # rows, so it cannot see a document a collector has inserted and not yet committed, and the
+            # collector puts the object before it names the key: without the lock the delete takes the
+            # object the new document is about to name. A collector in flight holds the same lock to the end
+            # of its transaction, so a key this cannot have is one being attached right now, and is kept.
+            # Session scoped, and given back as soon as the delete has answered. Nothing else waits on a
+            # lock while it is held (the check is a plain read), so a collector's wait on it is only the
+            # length of one object delete, and a lock held to the end of this transaction, which goes on
+            # to write the audit chain, would be the opening for a deadlock with a collector's.
+            if not self._claim_raw_key(key):
+                attaching += 1
                 continue
             try:
-                self._document_raw.delete(key)
-                deleted_ids.add(document_id)
-            except Exception as exc:  # noqa: BLE001 - counted, and the row kept
-                failed_ids.add(document_id)
-                result.warnings.append(
-                    f"the object store refused to delete collected markup "
-                    f"{key!r} ({type(exc).__name__}); its document is not "
-                    f"marked purged and stays due, so the next sweep retries.")
+                still = self._c.execute(
+                    """SELECT 1 FROM collect.document d
+                        WHERE d.body_html_key = %s AND d.purged_at IS NULL
+                          AND NOT (d.id = ANY(%s)) LIMIT 1""",
+                    (key, unheld)).fetchone()
+                if still is not None:
+                    shared += 1
+                    continue
+                try:
+                    self._document_raw.delete(key)
+                    deleted_ids.add(document_id)
+                except Exception as exc:  # noqa: BLE001 - counted, and the row kept
+                    failed_ids.add(document_id)
+                    result.warnings.append(
+                        f"the object store refused to delete collected markup "
+                        f"{key!r} ({type(exc).__name__}); its document is not "
+                        f"marked purged and stays due, so the next sweep retries.")
+            finally:
+                self._release_raw_key(key)
         if shared:
             result.warnings.append(
                 f"{count_of(shared, 'markup object is', 'markup objects are')} "
                 f"still used by other documents and "
                 f"{agree(shared, 'was', 'were')} kept.")
+        if attaching:
+            result.warnings.append(
+                f"{count_of(attaching, 'markup object is', 'markup objects are')} "
+                f"being attached to a document that collection is storing and "
+                f"{agree(attaching, 'was', 'were')} kept.")
         targets = [i for i in unheld if i not in failed_ids]
         if not targets:
             return
@@ -1978,6 +2015,27 @@ class RetentionService:
                     result, case_id=None, object_type="document",
                     ids=stone_ids, authority=authority, actor_id=actor_id,
                     rule="retention_rule", storage_outcome=outcome)
+
+    def _claim_raw_key(self, key: str) -> bool:
+        """Take the advisory lock a raw-markup key's two parties share, or say a collector has it. Never
+        waits: a purge that waited on a collector would hold its document locks for the length of the
+        collector's transaction."""
+        from noctornal_api.rawstore import raw_key_lock
+        return bool(self._c.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+            (raw_key_lock(key),)).fetchone()[0])
+
+    def _release_raw_key(self, key: str) -> None:
+        """Give the key back. Guarded because this is SQL in a `finally`: when the connection is what
+        failed, an error from here would replace the one unwinding through it, and a session lock lives and
+        dies with its session, so a connection too broken to run this has already released it."""
+        from noctornal_api.rawstore import raw_key_lock
+        try:
+            self._c.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                            (raw_key_lock(key),))
+        except Exception:  # noqa: BLE001 - must not mask the real failure
+            log.warning("advisory unlock failed for a collected markup key; if the connection is "
+                        "still usable the lock is stranded until this process exits", exc_info=True)
 
     def set_document_legal_hold(self, document_id: UUID, *, actor_id: UUID,
                                 on: bool, reason: str | None, clearance: str,

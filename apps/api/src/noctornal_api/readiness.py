@@ -1743,6 +1743,13 @@ def _prove_hold(client, bucket: str, *, writer: str,
     account can do what a rejection needs. The DELETE goes to each of `deleters` in turn, `(variable, client
     factory)`, moving on only when one is refused on its own permissions, because the production preservation
     account may not delete by design. The budget is the caller's, shared with the proof above.
+
+    A refused DELETE is the hold's only when nothing else could have refused it. An unexpired retention, of any
+    mode, refuses a plain DELETE with the same words and the same code as a hold, and a bucket's default
+    retention rides on a PUT that asked for none, so the version's retention is read back before the DELETE
+    is made, by the first credential that may read one (the preservation account's own policy does not), and
+    the proof stands only on an answer of none. A held canary that carries one is not the test of a hold and
+    is passed over for a fresh one.
     """
     def budgeted(factory: Callable[[], object]) -> Callable[[], object]:
         return lambda: _Budgeted(factory(), deadline, clock)
@@ -1787,7 +1794,33 @@ def _prove_hold_steps(client, bucket: str, writer: str,
                 f"{HOLD_CANARY_KEY} version {version} is held ({exc.code}: "
                 f"{exc.message})"))
 
+    def retention_of(version: str):
+        """`(retention or None, who read it)`, or a failed proof. None is what the store answered, and is
+        the only answer the hold's proof stands on."""
+        denied: list[str] = []
+        tried: set[str] = set()
+        for label, make in [(writer, lambda: client), *deleters]:
+            if label in tried:
+                continue
+            tried.add(label)
+            try:
+                return make().get_retention(bucket, HOLD_CANARY_KEY, version_id=version), label
+            except StoreRefusal as exc:
+                if exc.code == _DENIED:
+                    denied.append(f"{label} may not read a retention (s3:GetObjectRetention)")
+                    continue
+                return _Proof(False, (
+                    f"the store would not say what retention hold canary {HOLD_CANARY_KEY} "
+                    f"version {version} carries ({exc.code}: {exc.message}), so a refusal of a "
+                    f"DELETE of it cannot be tied to the hold and not to a retention"))
+        return _Proof(False, (
+            f"no credential this process holds may read the retention of hold canary "
+            f"{HOLD_CANARY_KEY} version {version} ({'; '.join(denied)}), so a refusal of a DELETE "
+            f"of it cannot be tied to the hold and not to a retention"),
+            denied=True, step="may not read a retention")
+
     version = None
+    reader = ""
     try:
         stat = client.head(bucket, HOLD_CANARY_KEY)
     except StoreRefusal as exc:
@@ -1805,7 +1838,12 @@ def _prove_hold_steps(client, bucket: str, writer: str,
             if isinstance(answer, _Proof):
                 return answer
             if answer:
-                version, how = stat.version_id, "reused"
+                found = retention_of(stat.version_id)
+                if isinstance(found, _Proof):
+                    return found
+                if found[0] is None:
+                    version, how, reader = stat.version_id, "reused", found[1]
+                # else a held canary that also carries a retention: not reused, a fresh one is written
     if version is None:
         # Absent, or its hold no longer reads ON: a fresh held version, and the old one stays where it is.
         try:
@@ -1838,8 +1876,24 @@ def _prove_hold_steps(client, bucket: str, writer: str,
                 f"{version} under a legal hold and then reported no hold on "
                 f"it; a rejected sample is written and read back the same "
                 f"way, so every rejection is refused"))
+        found = retention_of(version)
+        if isinstance(found, _Proof):
+            return found
+        if found[0] is not None:
+            # Asked for none and given one: the bucket's default retention rides on every PUT. A rejected
+            # sample is written the same way, so it carries it too, and a refused DELETE here could be the
+            # retention's, which proves nothing about the hold.
+            return _Proof(False, (
+                f"hold canary {HOLD_CANARY_KEY} version {version} was written under a legal hold and "
+                f"asked for no retention; the store recorded a {found[0].mode} retention on it until "
+                f"{_stamp(_utc(found[0].until))} (read with {found[1]}): a bucket default retention is "
+                f"applied to a write that asked for none. A refusal of a DELETE of it could be the "
+                f"retention's and not the hold's, so the hold cannot be proven here, and a rejected "
+                f"sample written the same way carries that retention"))
         how = f"written by this probe with {writer}, as a rejected sample is"
+        reader = found[1]
 
+    how = f"{how}; no retention read back with {reader}"
     what = (f"hold canary {HOLD_CANARY_KEY} version {version} (legal hold ON "
             f"and no retention, {how})")
     passed_over: list[str] = []

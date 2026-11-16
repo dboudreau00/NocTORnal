@@ -86,6 +86,38 @@ def test_the_identifier_hash_is_16_hex_chars():
     assert audit_hash.identifier_hash("a") != audit_hash.identifier_hash("b")
 
 
+def test_the_purge_preview_mac_is_hmac_under_a_subkey_of_its_own():
+    """Pinned: a dry run's `preview` is this value over the canonical material, and nobody without the
+    pepper makes it. The subkey is the pepper's HMAC of the purpose's label, so a value MACed for one
+    purpose is not a MAC for another."""
+    material = '{"v":1,"items":[["due","evidence","0"]]}'
+    subkey = hmac.new(PEPPER.encode(), b"noctornal/retention/purge-preview/v1\0", "sha256").digest()
+    want = hmac.new(subkey, material.encode(), "sha256").hexdigest()
+    got = audit_hash.purge_preview_mac(material)
+    assert got == want and re.fullmatch(r"[0-9a-f]{64}", got)
+    assert got != hashlib.sha256(material.encode()).hexdigest(), "never the plain digest"
+    assert got != hmac.new(PEPPER.encode(), material.encode(), "sha256").hexdigest(), (
+        "not the pepper itself, whose label-prefixed uses are the audit rows'")
+
+
+def test_the_purge_preview_mac_follows_the_pepper_and_the_material_and_not_the_other_purposes(monkeypatch):
+    material = "same material"
+    first = audit_hash.purge_preview_mac(material)
+    assert audit_hash.purge_preview_mac(material) == first
+    assert audit_hash.purge_preview_mac(material + ".") != first
+    monkeypatch.setenv(audit_hash.PEPPER_ENV, OTHER)
+    assert audit_hash.purge_preview_mac(material) != first, "a rotated pepper voids an unspent preview"
+    assert audit_hash.purge_preview_mac(material)[:audit_hash.IDENT_HEX_CHARS] != (
+        audit_hash.identifier_hash(material))
+
+
+def test_a_production_process_with_no_pepper_issues_no_purge_preview_and_never_an_unkeyed_one(monkeypatch):
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+    monkeypatch.delenv(audit_hash.PEPPER_ENV, raising=False)
+    assert audit_hash.purge_preview_mac("anything") is None
+    assert audit_hash._development_key is None
+
+
 def test_a_production_process_with_no_audit_pepper_records_no_hash_and_never_falls_back_to_sha256(
         monkeypatch, caplog):
     monkeypatch.setenv("NOCTORNAL_ENV", "production")

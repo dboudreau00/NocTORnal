@@ -36,6 +36,50 @@ def test_the_digest_binds_case_authority_and_every_hold():
     assert _preview_digest(UUID(int=9), AUTHORITY, [a, b]) != base
 
 
+def _plain_digest(case_id, authority, items) -> str:
+    """What `_preview_digest` was before it was keyed: the sha256 of the canonical material, which anybody who
+    can list the items makes for themselves."""
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps({
+        "v": 1, "case_id": str(case_id), "authority": authority,
+        "items": sorted(["held" if i.held else "due", i.object_type, str(i.object_id)]
+                        for i in items),
+    }, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def test_the_digest_cannot_be_made_from_the_items_a_caller_can_list(monkeypatch):
+    """A dry run hands back `preview` beside the items the caller may see, and the digest covers every due
+    item, the ones above the caller included. As a plain hash it let a caller rebuild it from the list and
+    the request: a mismatch said an item was hidden, and a remembered id added to the list and rehashed
+    said whether that id was due. Keyed, it is the server's to make (independent review, AREA-01)."""
+    from noctornal_api.http.routers.governance import _preview_digest
+    monkeypatch.setenv("NOCTORNAL_AUDIT_PEPPER", "preview-test-pepper-not-a-real-one")
+    visible = [_item(2), _item(3, held=True)]
+    hidden = _item(4)
+    for actual in (visible, visible + [hidden]):
+        # Whether or not something is hidden, no list a caller can build gives the digest back.
+        for guess in (visible, visible + [hidden]):
+            assert _preview_digest(CASE, AUTHORITY, actual) != _plain_digest(CASE, AUTHORITY, guess)
+
+
+def test_a_digest_made_under_one_pepper_is_not_the_digest_under_another(monkeypatch):
+    from noctornal_api.http.routers.governance import _preview_digest
+    items = [_item(2)]
+    monkeypatch.setenv("NOCTORNAL_AUDIT_PEPPER", "preview-test-pepper-not-a-real-one")
+    first = _preview_digest(CASE, AUTHORITY, items)
+    assert _preview_digest(CASE, AUTHORITY, items) == first
+    monkeypatch.setenv("NOCTORNAL_AUDIT_PEPPER", "a-different-pepper-not-a-real-one")
+    assert _preview_digest(CASE, AUTHORITY, items) != first
+
+
+def test_a_production_process_with_no_key_issues_no_digest(monkeypatch):
+    from noctornal_api.http.routers.governance import _preview_digest
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+    monkeypatch.delenv("NOCTORNAL_AUDIT_PEPPER", raising=False)
+    assert _preview_digest(CASE, AUTHORITY, [_item(2)]) is None
+
+
 class _Purger:
     """Stands in for `RetentionService`: returns a fixed due list and
     records every `as_of` it is handed."""
@@ -126,3 +170,29 @@ def test_a_stale_or_missing_preview_never_reaches_the_sweep(route):
     assert stale.value.status == 409
     assert "Nothing was destroyed" in stale.value.detail
     assert purger.swept == swept
+
+
+def test_a_server_with_no_key_issues_no_preview_and_destroys_nothing_on_a_confirmation(route, monkeypatch):
+    """No key, no preview, and never a plain one: the dry run says why it gives none, and a real run, which
+    has nothing to be bound to, is refused before the sweep."""
+    governance, purger, call = route
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+    monkeypatch.delenv("NOCTORNAL_AUDIT_PEPPER", raising=False)
+    out = call(dry_run=True)
+    assert out["preview"] is None
+    assert any("NOCTORNAL_AUDIT_PEPPER" in w for w in out["warnings"]), out["warnings"]
+    swept = purger.swept
+    for preview in (None, "0" * 64, _plain_digest(CASE, AUTHORITY, purger.items)):
+        with pytest.raises(governance.Problem) as refused:
+            call(dry_run=False, preview=preview)
+        assert refused.value.status == 503
+        assert "Nothing was destroyed" in refused.value.detail
+    assert purger.swept == swept
+
+
+def test_a_preview_that_is_not_ascii_is_a_conflict_and_not_a_crash(route):
+    governance, purger, call = route
+    swept = purger.swept
+    with pytest.raises(governance.Problem) as stale:
+        call(dry_run=False, preview="\u00e9" * 64)
+    assert stale.value.status == 409 and purger.swept == swept

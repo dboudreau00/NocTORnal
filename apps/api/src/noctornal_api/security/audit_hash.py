@@ -1,7 +1,7 @@
 """Keyed hashes of what the audit log records about who asked: a peer's address and the identifier a
-failed sign-in typed.
+failed sign-in typed, and the one keyed value a purge's dry run hands back.
 
-The one place either is computed. Both are HMAC-SHA256 under `NOCTORNAL_AUDIT_PEPPER`, a secret of its own, each behind a label of its own, so an
+The one place any is computed. All are HMAC-SHA256 under `NOCTORNAL_AUDIT_PEPPER`, a secret of its own, each behind a label of its own, so an
 address hash and an identifier hash made from one value under one key are never equal and cannot be
 compared with each other. An unkeyed sha256 of an address is no secret at all: IPv4 is 2^32 values, so a
 table of every hash is an hour's work for anybody who can read the audit log, and a short typed password
@@ -24,7 +24,9 @@ The address hashed is the text `client_ip` returns, not canonicalised, as before
 address and its plain IPv4 form hash differently.
 
 Rotating the pepper is allowed and costs only correlation: rows written after it no longer match rows
-written before it for the same address or identifier. Nothing stored breaks, unlike the ingest pepper.
+written before it for the same address or identifier. Nothing stored breaks, unlike the ingest pepper. The
+one other thing it voids is a purge preview not yet confirmed (`purge_preview_mac`), which is made again by
+running the dry run again.
 """
 from __future__ import annotations
 
@@ -58,6 +60,7 @@ IDENT_HEX_CHARS = 16
 
 _IP_LABEL = b"noctornal/audit/ip/v1\0"
 _IDENT_LABEL = b"noctornal/audit/identifier/v1\0"
+_PURGE_PREVIEW_LABEL = b"noctornal/retention/purge-preview/v1\0"
 
 #: How often, at most, a production process with no pepper says so.
 UNSET_LOG_SECONDS = 60.0
@@ -101,7 +104,8 @@ def _say_unset() -> None:
             return
         _unset_said_at = now
     log.error("%s is not set in this production process, so the audit rows it writes carry no "
-              "address or identifier hash; set it in secrets.env and restart", PEPPER_ENV)
+              "address or identifier hash and a purge's dry run issues no preview; set it in "
+              "secrets.env and restart", PEPPER_ENV)
 
 
 def _random_development_key() -> bytes:
@@ -146,6 +150,23 @@ def identifier_hash(value: str) -> str | None:
     `hmac.new(pepper, b"noctornal/audit/identifier/v1\\0" + address.encode(), "sha256").hexdigest()[:16]`."""
     key = _key()
     return None if key is None else _mac(key, _IDENT_LABEL, value).hex()[:IDENT_HEX_CHARS]
+
+
+def purge_preview_mac(material: str) -> str | None:
+    """The 64 hex characters a purge's dry run hands back as its `preview`, and a real run must present
+    again: HMAC-SHA256 of `material`, the canonical text of what was counted, under a subkey the pepper
+    derives for this purpose alone. None for no key, and a caller then issues no preview and accepts none.
+
+    The preview binds the irreversible act to the count the person confirmed, and covers every due item of
+    the case, the ones above the caller included. An unkeyed digest of it is one the caller can rebuild from
+    the items they are shown, which says whether something is left out and whether a remembered id was due.
+    Keyed, it is the server's to make and to check, and nothing the caller holds reproduces it. A rotated
+    pepper voids a preview not yet confirmed: the dry run is run again."""
+    key = _key()
+    if key is None:
+        return None
+    subkey = hmac.new(key, _PURGE_PREVIEW_LABEL, hashlib.sha256).digest()
+    return hmac.new(subkey, material.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
 
 
 def typed_identifier(value: str) -> dict:

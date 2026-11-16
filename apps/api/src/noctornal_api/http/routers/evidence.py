@@ -1214,19 +1214,41 @@ _CUSTODY_DETAIL_KEYS = ("deduplicated", "acquisition_method",
                         "case_retention_until", "capped_at_horizon")
 
 
-def custody_detail(raw: dict | None) -> dict:
+def custody_detail(raw: dict | None, *, purged: bool = False) -> dict:
     """A custody row's detail as the console may draw it. Typed free text
     (the source, the authority reference) leaves as `defang_text` runs and
     never raw: a source is often the phishing URL itself, and a live link
     on the custody record is one click from announcing the investigation
-    (docs/19 section 5)."""
+    (docs/19 section 5).
+
+    The ACQUIRED row is append-only and keeps the source address it was lodged with, so a purged
+    exhibit's source is withheld here: the purge emptied it from the exhibit, and a reader of the
+    trail is not to have it back (docs/08). The authority reference stays, as the record of the
+    right to take it."""
     raw = raw or {}
     out = {k: raw[k] for k in _CUSTODY_DETAIL_KEYS if k in raw}
     for key, runs in (("source_url", "source_segments"),
                       ("authority_ref", "authority_segments")):
+        if key == "source_url" and purged:
+            continue
         if raw.get(key):
             out[runs] = defang_text(str(raw[key]))
     return out
+
+
+def custody_entries(conn: psycopg.Connection, evidence_id: UUID) -> list[CustodyOut]:
+    """The custody trail of an exhibit the caller has already been admitted to, as the console may
+    draw it: the exhibit's own `purged_at` decides whether its source address is still shown."""
+    row = conn.execute("SELECT purged_at IS NOT NULL FROM core.evidence WHERE id = %s",
+                       (evidence_id,)).fetchone()
+    purged = bool(row and row[0])
+    return [
+        CustodyOut(action=e.action, actor_id=str(e.actor_id),
+                   occurred_at=e.occurred_at, hash_verified=e.hash_verified,
+                   actor_name=e.actor_name,
+                   detail=custody_detail(e.detail, purged=purged))
+        for e in _svc(conn).custody_log(evidence_id)
+    ]
 
 
 @router.get("/{evidence_id}/custody", response_model=list[CustodyOut])
@@ -1237,12 +1259,7 @@ def custody(
 ) -> list[CustodyOut]:
     """The chain of custody — 'who touched this exhibit, and when'."""
     _authorize_exhibit(conn, user, case_id, evidence_id, "evidence.read")
-    return [
-        CustodyOut(action=e.action, actor_id=str(e.actor_id),
-                   occurred_at=e.occurred_at, hash_verified=e.hash_verified,
-                   actor_name=e.actor_name, detail=custody_detail(e.detail))
-        for e in _svc(conn).custody_log(evidence_id)
-    ]
+    return custody_entries(conn, evidence_id)
 
 
 class LinkBody(BaseModel):
