@@ -29885,6 +29885,10 @@ const WATCH_KIND_WORDS = {
 };
 const WATCH_CHAT_KIND = 'TELEGRAM_CHAT';
 const COL_WATCHES_NOT_LOADED = 'Not loaded for this case yet.';
+/* The priorities the Edit form offers, as the Add form's markup words them. */
+const WATCH_PRIORITIES = [['1', '1 (most urgent)'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5 (least urgent)']];
+/* The longest repeat window the server takes, in minutes (a week). */
+const WATCH_MAX_MINUTES = 10080;
 
 /* The last listing, for the form: the sources it may offer. Dropped with
    the case, so one case's source list is never offered on the next. */
@@ -29914,7 +29918,10 @@ async function loadWatches() {
     if (caseChanged(token)) return;
     const rows = body.watches || [];
     WATCH.form = body;
-    renderList('col-watch-list', 'col-watch-empty', rows, watchRow);
+    /* `can_create` is the global `watch.manage` answer. The same verb gates Stop, Resume and Edit,
+       so the listing says it once and the name is left as it is. */
+    renderList('col-watch-list', 'col-watch-empty', rows,
+      (w) => watchRow(w, body.can_create));
     $('col-watch-counts').textContent = rows.length
       ? countOf(rows.length, 'watch', 'watches') : '';
     if (!rows.length) {
@@ -29950,14 +29957,19 @@ function watchWindowText(seconds) {
   return 'one hit per thread each ' + countOf(s, 'second', 'seconds');
 }
 
-function watchRow(w) {
+function watchRow(w, may) {
   const card = el('div', 'card row-card');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', visibleText(w.name)));
   head.appendChild(el('span', 'chip small',
     WATCH_KIND_WORDS[w.target_kind] || visibleText(w.target_kind)));
   head.appendChild(el('span', 'chip small', 'priority ' + w.priority));
-  if (!w.is_active) head.appendChild(el('span', 'chip', 'stopped'));
+  if (!w.is_active) {
+    head.appendChild(el('span', 'chip', 'stopped'));
+    /* Read once, so behind an "i" and not on the row every visit. */
+    head.appendChild(infoTip('Stopped: it matches nothing and its patterns cost nothing. '
+      + 'Resume it to task it again.', 'About a stopped watch'));
+  }
   if (!w.source_active) {
     const chip = el('span', 'chip warn', 'source paused');
     chip.title = 'Nothing is read from this watch’s source until it is '
@@ -29993,7 +30005,123 @@ function watchRow(w) {
   }
   /* A poll's warning names a watch by its id. */
   card.appendChild(el('p', 'muted small mono', 'Watch ' + w.id));
+  if (may) card.appendChild(watchActions(card, w));
   return card;
+}
+
+/** Stop or Resume, and Edit, for a caller who holds `watch.manage`. Stop carries no `case-write`,
+ *  so it stays live on a read-only case: the collector keeps matching a closed case's watches, and
+ *  Stop is the only way to quieten them. Resume and Edit carry it, and a closed case turns them off
+ *  as it does every other write. */
+function watchActions(card, w) {
+  const actions = el('div', 'row-actions');
+  const name = visibleText(w.name);
+  let note = null;
+  /* One POST, then the list is read again; a refusal is said on the row, and a fault is not
+     swallowed. */
+  const move = (btn, verb, failed) => async () => {
+    btn.disabled = true;
+    if (note) { note.remove(); note = null; }
+    try {
+      await api(cpath('/collection/watches/' + encodeURIComponent(w.id) + '/' + verb),
+        { method: 'POST' });
+      loadWatches();
+    } catch (err) {
+      btn.disabled = false;
+      if (!(err instanceof ApiError)) { fail(err); return; }
+      note = el('p', 'form-error', failed + ': ' + (err.detail || err.title));
+      card.appendChild(note);
+    }
+  };
+  if (w.is_active) {
+    const stop = el('button', 'btn ghost small', 'Stop');
+    stop.type = 'button';
+    stop.title = 'Stop this watch. It matches nothing from the next poll of its source, '
+      + 'and its hits stay listed.';
+    stop.setAttribute('aria-label', 'Stop ' + name);
+    stop.addEventListener('click', move(stop, 'stop', 'Not stopped'));
+    actions.appendChild(stop);
+  } else {
+    const resume = el('button', 'btn small case-write', 'Resume');
+    resume.type = 'button';
+    resume.title = 'Task this watch again from the next poll of its source.';
+    resume.setAttribute('aria-label', 'Resume ' + name);
+    resume.addEventListener('click', move(resume, 'resume', 'Not resumed'));
+    actions.appendChild(resume);
+  }
+  const edit = el('button', 'btn ghost small case-write', 'Edit…');
+  edit.type = 'button';
+  edit.setAttribute('aria-label', 'Edit ' + name);
+  edit.addEventListener('click', () => editWatchForm(card, w));
+  actions.appendChild(edit);
+  return actions;
+}
+
+/** What a filled-in Edit form changes about the watch as it was drawn, and the sentence that
+ *  refuses it: only the fields that differ are sent, so two managers who edit different fields do
+ *  not overwrite each other. The rules are the Add form's. A repeat window that is not a whole
+ *  number of minutes (the API takes seconds) is left alone until the person changes it. */
+function watchEdit(w, values) {
+  const [name, keywords, selectors, regexes, priority, minutes] = values;
+  const json = {};
+  const lines = (text) => text.split('\n').map((line) => line.trim()).filter(Boolean);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  if (name.trim() !== w.name) {
+    json.name = name.trim();
+    if (json.name.length < 3) {
+      return { json, problem: 'Name the watch, in at least 3 characters.' };
+    }
+  }
+  const lists = ['keywords', 'selectors', 'regexes'];
+  const typed = { keywords, selectors, regexes };
+  for (const key of lists) {
+    const now = lines(typed[key]);
+    if (!same(now, w[key] || [])) json[key] = now;
+  }
+  if (w.target_kind !== WATCH_CHAT_KIND && lists.some((key) => key in json)
+      && !lists.some((key) => (key in json ? json[key] : (w[key] || [])).length)) {
+    return { json, problem: 'Give the watch a keyword, a selector or a pattern, or it '
+      + 'matches nothing.' };
+  }
+  if (Number(priority) !== w.priority) json.priority = Number(priority);
+  if (minutes.trim() !== String(w.suppress_window_s / 60)) {
+    const m = Number(minutes);
+    if (!(minutes.trim() !== '' && Number.isInteger(m) && m >= 0 && m <= WATCH_MAX_MINUTES)) {
+      return { json, problem: 'Thin repeats for a whole number of minutes, from 0 to '
+        + WATCH_MAX_MINUTES + '.' };
+    }
+    if (m * 60 !== w.suppress_window_s) json.suppress_window_s = m * 60;
+  }
+  return { json, problem: Object.keys(json).length ? null : 'Nothing changed.' };
+}
+
+/** The Edit form, in the row. It is filled from the watch's own lists and name, never from what
+ *  the row shows: the row draws terms through `visibleText`, which rewrites a deceptive character
+ *  as `<U+202E>`, and saving that rewrite would store it as a term. */
+function editWatchForm(card, w) {
+  const lines = (list) => (list || []).join('\n');
+  rowForm(card, {
+    kind: 'edit-watch', write: ' case-write', submit: 'Save',
+    help: 'The source and what it looks at cannot be changed. To aim a watch somewhere '
+      + 'else, stop it and add a new one.',
+    fields: [
+      { label: 'Name', grow: true, value: w.name },
+      { label: 'Keywords, one per line', grow: true, multiline: true, rows: 4,
+        value: lines(w.keywords) },
+      { label: 'Selectors, one per line', grow: true, multiline: true, rows: 4,
+        value: lines(w.selectors) },
+      { label: 'Patterns, one per line', grow: true, multiline: true, rows: 4,
+        value: lines(w.regexes) },
+      { label: 'Priority', options: WATCH_PRIORITIES, value: String(w.priority) },
+      { label: 'Thin repeats on a thread (minutes)', value: String(w.suppress_window_s / 60) },
+    ],
+    check: (values) => watchEdit(w, values).problem,
+    submitFn: async (values) => {
+      await api(cpath('/collection/watches/' + encodeURIComponent(w.id)),
+        { method: 'PATCH', json: watchEdit(w, values).json });
+      loadWatches();
+    },
+  });
 }
 
 /** The add form, once a listing has said whether the caller may use it. */

@@ -401,3 +401,77 @@ def test_production_with_no_worker_never_starts_a_local_watch_child(monkeypatch)
     verdicts = watch_regex.run({"a": ["a"]}, wall_s=2.0)
     assert "a" in verdicts.failed and verdicts.failed["a"][0] == watch_regex.LIMIT
     assert not verdicts.hits
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="the CPU limit is enforced on Linux and macOS only")
+def test_a_pattern_its_cpu_limit_stops_is_reported_as_its_time_limit(monkeypatch):
+    """The kernel ends a spinning child at its CPU limit, long before the wall clock."""
+    import signal
+
+    from noctornal_api import analysis_runner as ar
+    from noctornal_api import watch_regex
+
+    results = []
+    real = ar.run
+
+    def spy(*args, **kwargs):
+        result = real(*args, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(ar, "run", spy)
+    monkeypatch.setattr(watch_regex, "CHILD_CPU_S", 1)
+    began = time.monotonic()
+    verdicts = watch_regex.run({HOSTILE: [CRAFTED]}, wall_s=30.0)
+    assert time.monotonic() - began < 10, "the wall clock, not the CPU limit, ended it"
+    assert verdicts.failed[HOSTILE][0] == watch_regex.LIMIT
+    assert "time limit" in verdicts.failed[HOSTILE][1]
+    assert results and results[0].returncode == -signal.SIGXCPU
+    assert results[0].failure == "timeout"
+
+
+def test_a_stopped_pattern_is_tried_again_on_the_next_run():
+    """Nothing remembers a failure: a bad pattern costs its time on every run."""
+    from noctornal_api import watch_regex
+
+    jobs = {HOSTILE: [CRAFTED]}
+    first = watch_regex.run(jobs, wall_s=1.0)
+    second = watch_regex.run(jobs, wall_s=1.0)
+    assert first.failed[HOSTILE][0] == watch_regex.LIMIT
+    assert second.failed[HOSTILE][0] == watch_regex.LIMIT
+    assert "tried again" in second.failed[HOSTILE][1]
+
+
+@pg
+def test_one_pattern_in_two_watches_is_matched_once_and_fails_for_both(
+        conn, owner, monkeypatch, no_regex_in_process):
+    from noctornal_api import analysis_runner as ar
+    from noctornal_api import watch_regex
+    from noctornal_api.collection import CollectionService, FetchResult, Item
+
+    monkeypatch.setattr(watch_regex, "PATTERN_WALL_S", 1.0)
+    asked = []
+    real = ar.run
+
+    def spy(*args, **kwargs):
+        asked.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ar, "run", spy)
+    source = h.source(conn, P, kind="RSS", parser="rss", egress=None)
+    first = _watch(conn, source, owner, regexes=[HOSTILE])
+    second = _watch(conn, source, owner, regexes=[HOSTILE])
+
+    class Stub:
+        key, version = "rss", "test"
+
+        def fetch(self, **kw):
+            return FetchResult(items=[Item(external_id="post:1", body=CRAFTED)],
+                               http_status=200)
+
+    result = CollectionService(conn, {"rss": Stub()}).run_once(source, actor_id=None)
+    assert result.status == "PARTIAL"
+    assert len(asked) == 1, "one pattern in two watches must start one child"
+    text = " ".join(result.warnings)
+    assert f"watch {first}" in text and f"watch {second}" in text

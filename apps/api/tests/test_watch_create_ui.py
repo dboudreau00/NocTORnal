@@ -195,8 +195,9 @@ def test_the_new_copy_has_no_dash_and_no_bracketed_plural():
 
 @needs_node
 def test_a_listing_draws_the_rows_and_the_form_only_for_a_caller_who_may_add(tmp_path):
-    got = _run(["loadWatches", "watchRow", "watchWindowText", "paintWatchForm",
-                "paintWatchSources", "paintWatchRef"], PRELUDE + f"""
+    got = _run(["loadWatches", "watchRow", "watchActions", "watchEdit", "editWatchForm",
+                "watchWindowText", "infoTip", "paintWatchForm", "paintWatchSources",
+                "paintWatchRef"], PRELUDE + f"""
 const body = {{ watches: [{json.dumps(WATCH)}], count: 1, can_create: true,
   kinds: ['BOARD', 'TELEGRAM_CHAT'], sources: {json.dumps(SOURCES)} }};
 globalThis.apiAnswer = () => body;
@@ -223,6 +224,7 @@ console.log(JSON.stringify(out));
     assert got["drawn"][0][:2] == ["col-watch-list", "col-watch-empty"]
     row = got["drawn"][0][2][0]
     assert "nightjar" in row and "keywords: a, b" in row
+    assert "Stop" in row and "Edit…" in row, "a manager's row carries its controls"
     assert got["counts"] == "1 watch" and got["boxHidden"] is False
     assert got["kinds"] == ["BOARD=Board", "TELEGRAM_CHAT=Telegram chat"], (
         "the kinds are drawn once, however often the list is read")
@@ -295,7 +297,7 @@ console.log(JSON.stringify({{ list: $('col-watch-list').children.length,
 
 @needs_node
 def test_a_watch_row_says_what_it_looks_at_how_it_thins_and_what_it_names(tmp_path):
-    got = _run(["watchRow", "watchWindowText"], PRELUDE + f"""
+    got = _run(["watchRow", "watchWindowText", "infoTip"], PRELUDE + f"""
 const w = {json.dumps(WATCH)};
 const plain = watchRow(w);
 const stopped = watchRow({{ ...w, is_active: false, source_active: false,

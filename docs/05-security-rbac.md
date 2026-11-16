@@ -459,6 +459,9 @@ rows make (docs/16 D2).
 |---|---|---|---|
 | `GET /cases/{case_id}/collection/watches` | `collection.read` on the case | no | none |
 | `POST /cases/{case_id}/collection/watches` | the global `watch.manage` and `collection.read` on the case; refused on a closed case | no | `collection.config` |
+| `POST /cases/{case_id}/collection/watches/{watch_id}/stop` | the global `watch.manage` and `collection.read` on the case; allowed on a closed case | no | `collection.config` |
+| `POST /cases/{case_id}/collection/watches/{watch_id}/resume` | the global `watch.manage` and `collection.read` on the case; refused on a closed case | no | `collection.config` |
+| `PATCH /cases/{case_id}/collection/watches/{watch_id}` | the global `watch.manage` and `collection.read` on the case; refused on a closed case | no | `collection.config` |
 
 A watch is a standing tasking, and its terms are the case's content, so the
 list is read as the hits it produces are. Making one takes two things: the
@@ -473,7 +476,26 @@ unknown id does; a watch on a source above the reader is left out of the
 reader's list, as that source is from every other list. Each creation is
 audited as `WATCH_CREATED`, naming the case, with the counts of the terms and
 never the terms: the audit trail is read by people with no access to the
-case's content. There is no route that edits or stops a watch.
+case's content.
+
+Stopping, resuming and editing a watch take the same two checks, in the same
+order and under the same meter, and any collection manager on the case may
+change any watch of it: the creator stays its owner and the audit row names who
+acted. A watch is stopped by marking it stopped and never by deleting it,
+because the hits it raised point at it. Stopping is allowed on a closed case,
+because the collector keeps matching a closed case's watches and a closed case
+could otherwise never be quietened (the reasoning that lets a hit be
+acknowledged there); resuming and editing change or restart a tasking, and a
+closed case refuses them. A watch on a source above the caller answers the 404
+an unknown id does, for all three routes. Each change is audited as
+`WATCH_STOPPED`, `WATCH_RESUMED` or `WATCH_EDITED`, naming the case, in the
+transaction that made it. A stop and a resume say where the watch is aimed; an
+edit says which fields changed and the number of terms of each kind, the
+priority and the repeat window before and after. None says what a watch matches
+or what it is called. A change that changes nothing writes no row. That row is
+the only record of who stopped or edited a watch and when. An edit cannot
+change a watch's source, kind or target, and writes by compare-and-set, so a
+watch changed under it is a 409 and nothing is written.
 
 ## Authentication
 

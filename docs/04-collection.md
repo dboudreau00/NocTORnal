@@ -427,15 +427,84 @@ note for the people reading the list: the collector reads the source's own
 address and does not visit it. A watch applies from the next poll, and
 documents already collected are not matched again. Each is audited as
 `WATCH_CREATED` with the counts of its terms and never the terms, because the
-audit trail is read by people with no access to the case's content. Stopping or
-editing a watch is not built: only its creation is.
+audit trail is read by people with no access to the case's content. A watch is
+stopped, resumed and edited as the two paragraphs below say.
+
+**Stopping one (F53).** `POST /cases/{case_id}/collection/watches/{watch_id}/stop`
+and `.../resume` stop a watch and task it again. They sit behind the two checks
+that making one sits behind, in the same order (the global `watch.manage`, then
+`collection.read` on the case) and under the same meter, and any collection
+manager on the case may do either to any watch of it: the creator stays its
+owner and the audit row names who acted. A stopped watch is marked stopped and
+kept, never deleted, because the hits it raised point at it and stay listed.
+The collector reads a source's active watches once, at the start of a poll, and
+the scoring of feed records reads only active watches, so a stop applies from the
+next poll of the watch's source. A poll already under way may still raise hits
+from the watch just stopped, and a feed record already scored keeps its score
+until it is rescored. A stopped watch's patterns are not matched at all, so they
+cost nothing. Stopping is allowed on a closed case, because the collector keeps
+matching a closed case's watches and a closed case could otherwise never be
+quietened, the reasoning that lets a hit be acknowledged there; resuming tasks
+the collector again, is a content write, and a closed case refuses it. A watch
+whose source sits above the caller's clearance answers the 404 an id that does
+not exist answers, so a manager below the source cannot stop it and one with the
+clearance can. Each change is audited as `WATCH_STOPPED` or `WATCH_RESUMED`, with
+where the watch is aimed (its source and its kind) and never what it matches or
+what it is called. Stopping a watch that is stopped, or resuming one that is
+active, changes nothing and writes no row. Nothing records who stopped a watch
+and when except that row: there is no column for it. A watch's last hit moves
+only when that watch raised a hit in the poll.
+
+**Editing one (F53).** `PATCH /cases/{case_id}/collection/watches/{watch_id}`
+changes a watch's name, keywords, selectors, patterns, priority or repeat window,
+behind the same two checks and under the same meter, and any collection manager
+on the case may edit any watch of it. A list that is sent replaces the stored
+list whole and `[]` clears it, a field that is left out is left alone, and the
+body names at least one. The watch that results obeys every rule a new watch
+does: a name the case does not already hold (its own name, in any case of
+letters, is not a clash), patterns that parse, and, for every kind but a
+Telegram chat, at least one keyword, selector or pattern. The source, the kind
+and the target cannot be changed, because they say what a watch is and a chat
+watch's reference is its matching scope, and a request that names one of them
+is refused by name. To aim a watch somewhere else, stop it and add a new one.
+An edit is a content write, so a closed case refuses it. It applies from the next
+poll of the watch's source: hits already raised keep the reasons they were
+raised with, and a feed record already scored keeps its score until it is
+rescored. The write compares what it read with what is stored, so a watch
+changed by someone else in the same instant is a 409 and nothing is written.
+Each edit is audited as `WATCH_EDITED` with the names of the fields that
+changed and, before and after, the number of terms of each kind, the priority
+and the repeat window, never a term and never the name; an edit that changes
+nothing writes no row.
+
+In the console, a collection manager sees Stop and Edit on each watch of the
+Collected tab, and Resume and Edit on a stopped one; a reader sees none of them.
+A closed case turns Resume and Edit off with the other writes and leaves Stop
+live. The Edit form is filled from the watch's own name and lists, says that the
+source and what the watch looks at cannot be changed, and sends only the fields
+that were changed, so two managers who edit different fields do not overwrite
+each other.
+
+**How a pattern is bounded.** A pattern is a Python regular expression, and
+Python's matcher backtracks and cannot be interrupted from inside its own
+process, so a pattern is never matched in the API or the collector. Each pattern
+runs in a child process (in production the isolated analysis worker) with a CPU
+limit of 5 seconds, under a wall clock of 8 seconds for one batch of the run's
+texts and a budget of 30 seconds for every pattern of the run together. A
+pattern that does not finish within them is stopped, matches nothing in that run
+and is reported once on the run, which then reads PARTIAL; it is tried again, at
+the same cost, on every later run until its watch is edited or stopped. A
+pattern that is slow but finishes inside the limits is not reported and holds
+the run for as long as it takes. The figures are `CHILD_CPU_S`, `PATTERN_WALL_S`
+plus `STARTUP_S` and `RUN_BUDGET_S` in `watch_regex.py`, and a test holds this
+paragraph to them. On Windows only the wall clock applies.
 
 **Where it runs.** `collect.watch` and `collect.watch_hit` are under row-level
 security (0124). The poll, a manual run and a pasted capture read the watches
 and write the hits as the COLLECTION system purpose, which sees every case's
-watches; the watch list and the route that makes a watch, and the hit listing
-and its verbs, are the only users of them on the request connection, and they
-are scoped to the case. A purge of a document keeps a
+watches; the watch list and the routes that make, stop, resume and edit a
+watch, and the hit listing and its verbs, are the only users of them on the
+request connection, and they are scoped to the case. A purge of a document keeps a
 hit's reasons that are the watch's own configuration (its terms and the chat it
 names) and replaces what was read from the document (an author or forward id)
 with `[purged]`.

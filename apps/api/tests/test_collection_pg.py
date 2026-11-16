@@ -449,6 +449,55 @@ def test_a_watch_matches_and_records_what_matched(conn):
     assert any("selector:bank.example" in m for m in matched)
 
 
+def test_last_hit_at_moves_only_on_a_watch_that_hit(conn):
+    """The poll stamps `last_hit_at` on the watches that wrote a hit, and on no other. A watch of
+    the same source that matched nothing, one that is stopped, and another case's watch each keep
+    what they had: a stamp on them would tell an analyst a quiet watch had fired."""
+    from noctornal_api.collection import (CollectionService, FetchResult, Item,
+                                          parse_rss)
+
+    actor = _user(conn)
+    source_id = _source(conn)
+    case_id = _case(conn, actor)
+    other_case = _case(conn, actor)
+
+    def watch(case, name, term, *, active=True):
+        return conn.execute(
+            """INSERT INTO collect.watch
+                   (case_id, source_id, name, target_kind, target_ref,
+                    keywords, owner_user_id, is_active)
+               VALUES (%s, %s, %s, 'FEED', 'https://forum.test/feed',
+                       ARRAY[%s], %s, %s) RETURNING id""",
+            (case, source_id, name, term, actor, active)).fetchone()[0]
+
+    fired = watch(case_id, "fires", "selling")
+    quiet = watch(case_id, "quiet", "no-such-phrase")
+    stopped = watch(case_id, "stopped", "selling", active=False)
+    elsewhere = watch(other_case, "other case", "no-such-phrase")
+
+    def stamps():
+        return dict(conn.execute(
+            "SELECT id, last_hit_at FROM collect.watch WHERE source_id = %s",
+            (source_id,)).fetchall())
+
+    svc = CollectionService(conn, adapters={
+        "rss": StubAdapter(result=FetchResult(items=parse_rss(FEED)))})
+    assert svc.run_once(source_id, actor_id=actor).watch_hits == 1
+    first = stamps()
+    assert first[fired] is not None
+    assert (first[quiet], first[stopped], first[elsewhere]) == (None, None, None), (
+        "a watch that wrote no hit is not stamped because another watch of its source did")
+
+    later = [Item(external_id="t-3", title="no-such-phrase on the board", body="x")]
+    svc = CollectionService(conn, adapters={
+        "rss": StubAdapter(result=FetchResult(items=later))})
+    assert svc.run_once(source_id, actor_id=actor).watch_hits == 2
+    second = stamps()
+    assert second[quiet] is not None and second[elsewhere] is not None
+    assert second[fired] == first[fired], "the watch that did not hit this time keeps its stamp"
+    assert second[stopped] is None, "a stopped watch is never stamped"
+
+
 def test_a_broken_regex_does_not_stop_the_other_watches(conn):
     """One analyst's typo must not silence everybody else's watch."""
     from noctornal_api.collection import CollectionService, FetchResult, parse_rss

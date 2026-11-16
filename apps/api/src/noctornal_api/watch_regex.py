@@ -8,17 +8,44 @@ it would wedge a source's poll, its transaction and its lock.
 
 The only bound that holds is a process the parent can kill. Each pattern is matched in a child
 (`python -m noctornal_api.watch_regex`, started through lab_triage's bounded runner, as the forum
-parser is) that limits its own CPU and memory before it reads a byte, under a wall clock the
-collector enforces by killing it. A pattern that does not finish is abandoned for the run and
-REPORTED (a WATCH_PATTERN warning, so the run reads PARTIAL), never silently skipped: a dead watch
-that reads like a quiet one is worse than a noisy one.
+parser is; in production the isolated analysis worker) that limits its own CPU and memory before it
+reads a byte, and that the parent kills when its wall clock runs out. Three clocks can end a
+pattern, and a run reports all three in the same words, as a pattern that did not finish within its
+time limit.
+
+1. The child's CPU limit, CHILD_CPU_S: 5 seconds of CPU time from the start of the child process,
+   so interpreter start-up counts. The kernel ends the child with SIGXCPU at the soft limit and the
+   runner reads that as a timeout. This is what ends a pattern that spins, on Linux and macOS,
+   usually before the wall clock does. Windows has no such limit.
+2. The parent's wall clock for one batch of texts, PATTERN_WALL_S plus STARTUP_S: 8 seconds in all.
+   STARTUP_S pays for starting the interpreter, which this clock also counts, so a pattern killed
+   this way costs up to 8 seconds and not 5. It ends a child that is not using CPU (blocked, or on
+   a host so loaded that its CPU time accrues slowly) and, on Windows, is the only thing that ends
+   one.
+3. The run's budget, RUN_BUDGET_S: 30 seconds for every pattern of one run together. A child is
+   given the lesser of its 8 seconds and what is left of the budget, so the last pattern started
+   may be stopped sooner. A pattern the budget never reached is reported as that and is not matched
+   in the run at all.
+
+A pattern is matched once per run for every watch that carries it, over every item's text, and is
+tried again on the next run. One that never finishes therefore costs its seconds on every poll
+until its watch is edited or stopped, and fails for every watch that carries it. A pattern with
+more text than one batch (BATCH_BYTES) runs in one child per batch, each with its own clocks.
+
+A pattern that does not finish is abandoned for the run and REPORTED (a WATCH_PATTERN warning, so
+the run reads PARTIAL), never silently skipped: a dead watch that reads like a quiet one is worse
+than a noisy one.
 
 The collector asks for every verdict before it opens the persist transaction
 (`CollectionService._regex_verdicts`), so the database holds no transaction or row lock while a
-hostile pattern is being stopped. The poll's advisory lock is held for at most the budget below.
+hostile pattern is being stopped. The poll's advisory lock is held through this phase. The budget
+bounds the matching; it does not count the wait for a slot at the isolated worker
+(`analysis_runner.QUEUE_WAIT_S`, 30 seconds) or the transfers to and from it, which are the worker
+client's own bounds.
 
 Not closed here: a memory-safety defect in the interpreter's own matcher, and the cost of a pattern
-that is slow but finishes inside its limit. A collection manager writes patterns through the console
+that is slow but finishes inside its limits. That one is not reported: it holds the run for as long
+as it takes, up to the clocks above. A collection manager writes patterns through the console
 (`POST /cases/{case_id}/collection/watches`, behind `watch.manage` and the case). That route bounds
 a pattern's length and their number and only parses one; it never matches one, so this child is the
 only place a pattern meets text.
@@ -30,14 +57,22 @@ import re
 import sys
 from dataclasses import dataclass, field
 
-#: One pattern, all of the texts of one batch: how long the child may match.
+#: The wall clock for one pattern over one batch of texts, before the allowance below. A pattern
+#: that spins is ended sooner than this by CHILD_CPU_S on Linux and macOS; this is the bound for a
+#: child that is not using CPU, and the only bound on Windows.
 PATTERN_WALL_S = 5.0
 #: Added to that for starting the child's interpreter, which the runner's wall clock also counts.
-#: Small on purpose: a stopped pattern costs this much more, and the run's budget caps the sum.
+#: A pattern killed on the wall clock costs PATTERN_WALL_S plus STARTUP_S (8 seconds), and
+#: RUN_BUDGET_S caps the sum.
 STARTUP_S = 3.0
 #: Every pattern of one run together. A run with many slow patterns stops
-#: matching rather than holding its poll lock for ever.
+#: matching rather than holding its poll lock for ever. A child is given the lesser of its own
+#: clock and what is left of this, so the last pattern started may be stopped sooner.
 RUN_BUDGET_S = 30.0
+#: The child's own CPU limit, in seconds of CPU time counted from the start of its process,
+#: interpreter start-up included. It is set as a soft limit with a hard limit one second above
+#: (lab_static.apply_limits): at the soft limit the kernel sends SIGXCPU, which the runner reads as
+#: a timeout and never as a crash. Linux and macOS only.
 CHILD_CPU_S = 5
 CHILD_MEMORY_BYTES = 768 * 1024 * 1024
 #: A batch of texts sent to one child. A single text larger than this goes
@@ -65,13 +100,14 @@ LIMIT = "limit"
 
 _LIMIT_SENTENCES = {
     "timeout": ("it did not finish within its time limit on this run's text "
-                "and was stopped"),
+                "and was stopped, and it is tried again, at the same cost, on "
+                "every run until its watch is edited or stopped"),
     "output_too_large": "its answer passed its cap and it was stopped",
     "start_failed": "the matching process could not be started",
     "crashed": "the matching process stopped without an answer",
     "bad_output": "the matching process's answer could not be read",
     "budget": ("this run's time for watch patterns was used up before it was "
-               "reached"),
+               "reached, so it matched nothing in this run"),
 }
 
 

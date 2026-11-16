@@ -117,6 +117,10 @@ CONTENT = {
     # A new standing tasking: unlike the hits it raises, which are housekeeping, a closed case takes
     # no new watch.
     ("POST", "/cases/{case_id}/collection/watches"),
+    # Tasking a stopped watch again restarts a standing tasking, and an edit changes what one
+    # matches: content writes.
+    ("POST", "/cases/{case_id}/collection/watches/{watch_id}/resume"),
+    ("PATCH", "/cases/{case_id}/collection/watches/{watch_id}"),
 }
 
 #: Why a similarity route is a read.
@@ -158,6 +162,9 @@ NOT_CONTENT = {
         "queue housekeeping, as acknowledge",
     ("POST", "/cases/{case_id}/collection/watch-hits/{hit_id}/unsuppress"):
         "queue housekeeping, as acknowledge",
+    ("POST", "/cases/{case_id}/collection/watches/{watch_id}/stop"):
+        "withdraws a standing tasking: the collector keeps matching a closed case's "
+        "watches until one is stopped, so a closed case could otherwise never be quietened",
     ("POST", "/samples/{sample_id}/download-ticket"):
         "a read with a custody record, as exhibit export",
     ("POST", "/samples/{sample_id}/download"): "serves the bytes: a read",
@@ -667,6 +674,18 @@ CONSOLE_CONTENT = {
     ],
     # The Collected tab's Add a watch box, the whole box (the summary included), as Add a hypothesis is.
     "addWatch": [("id", "col-watch-box", "col-watch-btn")],
+    # A watch row's controls. Resume and Edit carry `case-write`, and so does the Edit form while it is
+    # open. Stop does not: it stays live on a read-only case (the server's half is in NOT_CONTENT),
+    # because it is the only way a closed case's watch is quietened; test_watch_change_ui.py holds both.
+    "watchActions": [("drawn", ".case-write", "watchActions",
+                      "el('button', 'btn small case-write', 'Resume')")],
+    "editWatchForm": [
+        ("drawn", ".case-write", "watchActions",
+         "el('button', 'btn ghost small case-write', 'Edit…')"),
+        ("drawn", ".case-write", "editWatchForm", "write: ' case-write'"),
+        ("drawn", ".case-write", "rowForm",
+         "el('div', 'row-inline' + (spec.write || ''))"),
+    ],
 }
 
 #: Console writes on one case that stay live, and why (NOT_CONTENT above

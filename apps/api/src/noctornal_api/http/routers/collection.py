@@ -14,7 +14,7 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from noctornal_api.collection import (
     _SOURCE_VISIBLE_HELD,
@@ -744,6 +744,21 @@ class WatchCreate(BaseModel):
     suppress_window_s: int = 3600
 
 
+class WatchEdit(BaseModel):
+    """What a change to a watch may carry: a field that is sent replaces the stored value, and a
+    field left out is left alone. No length or range constraints, as in `WatchCreate`: the limits
+    are the service's. A field the watch cannot change (`source_id`, `target_kind`, `target_ref`,
+    `is_active`) is refused by name with a 422 rather than ignored, so a caller who sends one learns
+    it did nothing: to aim a watch somewhere else, stop it and add a new one."""
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+    keywords: list[str] | None = None
+    selectors: list[str] | None = None
+    regexes: list[str] | None = None
+    priority: int | None = None
+    suppress_window_s: int | None = None
+
+
 @case_router.get("/watches", response_model=dict)
 def list_watches(
     case_id: UUID,
@@ -770,9 +785,16 @@ def list_watches(
 def _watch_next(watch: dict) -> str:
     """What happens to a watch that was just made, in words: when it starts,
     and the two cases the analyst should hear before the first hit."""
-    said = ["It applies from the next poll of its source, to what that poll "
-            "reads. Documents already collected are not matched again, and "
-            "its hits are listed for this case."]
+    return " ".join([
+        "It applies from the next poll of its source, to what that poll "
+        "reads. Documents already collected are not matched again, and "
+        "its hits are listed for this case.",
+        *_watch_next_notes(watch)])
+
+
+def _watch_next_notes(watch: dict) -> list[str]:
+    """The two things to hear about a watch whenever it is made, resumed or edited."""
+    said = []
     if not watch["source_active"]:
         said.append("Its source is paused, so nothing is read from it until "
                     "it is activated.")
@@ -781,7 +803,7 @@ def _watch_next(watch: dict) -> str:
         said.append("It has no keyword, selector or pattern, so it fires on "
                     "every message of that chat, thinned only by its repeat "
                     "window.")
-    return " ".join(said)
+    return said
 
 
 @case_router.post("/watches", response_model=dict, status_code=201,
@@ -815,6 +837,111 @@ def create_watch(
     except CollectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"watch": watch, "next": _watch_next(watch)}
+
+
+# Stopping, resuming and editing a watch sit behind the same two checks as making one, in the same
+# order and under the same meter. They differ in one thing: stopping is allowed on a read-only case
+# (the case gate without `content_write`), because the collector keeps matching a closed case's
+# watches and so a closed case could otherwise never be quietened, exactly the reasoning for
+# acknowledging and suppressing a hit. Resuming and editing change or restart a tasking, so each is
+# a content write and a closed case refuses it.
+
+_WATCH_STOP_NEXT = (
+    "It applies from the next poll of its source: a poll already under way may "
+    "still raise hits from it. Its old hits stay listed. Feed records already "
+    "scored keep their score until they are rescored.")
+
+
+def _watch_change_problem(exc: CollectionError) -> Problem:
+    """The answer a refusal from the watch writers gets: the 404 a missing, hidden or other-case
+    watch shares, a 409 for a conflict and a 400 with the sentence for the rest."""
+    if isinstance(exc, CollectionNotFound):
+        return Problem(404, "Not found", safe_detail(exc))
+    if isinstance(exc, CollectionConflict):
+        return Problem(409, "Conflict", safe_detail(exc))
+    return Problem(400, "Invalid request", safe_detail(exc))
+
+
+@case_router.post("/watches/{watch_id}/stop", response_model=dict,
+                  dependencies=[Depends(require_global("watch.manage")),
+                                Depends(rate_limit("collection.config"))])
+def stop_watch(
+    case_id: UUID,
+    watch_id: UUID,
+    user: CurrentUser = Depends(require("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Stop a watch. It is kept, marked stopped, with its hits: nothing is deleted. A watch the
+    caller cannot see, on another case or that does not exist is the same 404. Stopping a watch
+    that is stopped changes nothing and writes no audit row. Allowed on a read-only case. Audited
+    as WATCH_STOPPED, with where the watch is aimed and never what it matches."""
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        watch, changed = CollectionService(conn).stop_watch(
+            case_id, watch_id, actor_id=user.user_id, clearance=clearance.name,
+            compartments=held)
+    except CollectionError as exc:
+        raise _watch_change_problem(exc) from exc
+    return {"watch": watch, "changed": changed,
+            "next": _WATCH_STOP_NEXT if changed else "It was already stopped."}
+
+
+@case_router.post("/watches/{watch_id}/resume", response_model=dict,
+                  dependencies=[Depends(require_global("watch.manage")),
+                                Depends(rate_limit("collection.config"))])
+def resume_watch(
+    case_id: UUID,
+    watch_id: UUID,
+    user: CurrentUser = Depends(require("collection.read", content_write=True)),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Task a stopped watch again. A content write: a read-only case refuses it. Resuming a watch
+    that is active changes nothing and writes no audit row. Audited as WATCH_RESUMED."""
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        watch, changed = CollectionService(conn).resume_watch(
+            case_id, watch_id, actor_id=user.user_id, clearance=clearance.name,
+            compartments=held)
+    except CollectionError as exc:
+        raise _watch_change_problem(exc) from exc
+    return {"watch": watch, "changed": changed,
+            "next": _watch_next(watch) if changed else "It was already active."}
+
+
+_WATCH_EDIT_NEXT = (
+    "It applies from the next poll of its source. Hits already raised keep the "
+    "reasons they were raised with. Feed records already scored keep their "
+    "score until they are rescored.")
+
+
+@case_router.patch("/watches/{watch_id}", response_model=dict,
+                   dependencies=[Depends(require_global("watch.manage")),
+                                 Depends(rate_limit("collection.config"))])
+def edit_watch(
+    case_id: UUID,
+    watch_id: UUID,
+    body: WatchEdit,
+    user: CurrentUser = Depends(require("collection.read", content_write=True)),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Change a watch's name, keywords, selectors, patterns, priority or repeat window. A list that
+    is sent replaces the stored list, and `[]` clears it; a field left out is left alone, and the
+    body names at least one. The source, the kind and the target cannot be changed (a 422 names the
+    field): stop the watch and add a new one. The result obeys every rule a new watch does. A change
+    that changes nothing says so and writes no audit row. A content write: a read-only case refuses
+    it. Audited as WATCH_EDITED, with the fields that changed and the counts of terms before and
+    after, never a term and never the name."""
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        watch, changed = CollectionService(conn).edit_watch(
+            case_id, watch_id,
+            changes={field: getattr(body, field) for field in body.model_fields_set},
+            actor_id=user.user_id, clearance=clearance.name, compartments=held)
+    except CollectionError as exc:
+        raise _watch_change_problem(exc) from exc
+    said = ([_WATCH_EDIT_NEXT, *_watch_next_notes(watch)] if changed
+            else ["Nothing changed."])
+    return {"watch": watch, "changed": changed, "next": " ".join(said)}
 
 
 # ---------------------------------------------------------------------------

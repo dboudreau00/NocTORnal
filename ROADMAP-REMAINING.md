@@ -1,7 +1,7 @@
 # What is left
 
 **State (2026-10-29):** branch `main`, Alembic head `0197`,
-8720 tests counted as `def test_` functions across the two pytest roots,
+8789 tests counted as `def test_` functions across the two pytest roots,
 version 0.9.5 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
@@ -216,8 +216,6 @@ decision, or is hardening that needs a migration.
 - The request role's last operational writes: the three similarity vector
   tables, `lab.yara_compiled_rejected` and `collect.collection_run`. Each
   needs a migration (docs/17).
-- A way to stop or edit a watch. A watch is made from the console and the API
-  and has no verb after that (docs/17, Known residuals at Beta 1.1).
 
 **Records written under older rules** are listed and never filled or moved
 (decision 80). Claims accepted from Triage with no observation date are dated

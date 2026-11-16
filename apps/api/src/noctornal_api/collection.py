@@ -2062,6 +2062,74 @@ def _watch_terms(values, one: str, many: str, *,
     return out
 
 
+# The rules a watch obeys, one set for the two writers that hold them: `create_watch` and
+# `edit_watch`. Each says its refusal in a sentence, and a change to a rule is made here.
+
+def _clean_watch_name(name) -> str:
+    """A watch's name: one stripped line of 3 to 200 characters."""
+    return _watch_line(name, "A watch's name", 3, 200)
+
+
+def _clean_watch_terms(keywords, selectors, regexes
+                       ) -> tuple[list[str], list[str], list[str]]:
+    """The three lists a watch matches with, each cleaned, in the order the matcher reads them.
+    Patterns are parsed and never matched here."""
+    return (_watch_terms(keywords, "keyword", "keywords"),
+            _watch_terms(selectors, "selector", "selectors"),
+            _watch_terms(regexes, "pattern", "patterns", patterns=True))
+
+
+def _check_watch_terms(chat_watch: bool, terms) -> None:
+    """A watch of any kind but a Telegram chat needs one term. With none it matches nothing, and a
+    silent watch reads exactly like a quiet one."""
+    if not chat_watch and not any(terms):
+        raise CollectionError(
+            "A watch needs a keyword, a selector or a pattern: with none "
+            "it matches nothing. Only a Telegram chat watch may have "
+            "none, and it then fires on every message of that chat.")
+
+
+def _clean_watch_priority(priority) -> int:
+    if (isinstance(priority, bool) or not isinstance(priority, int)
+            or not 1 <= priority <= 5):
+        raise CollectionError(
+            "A watch's priority is a whole number from 1 (most urgent) "
+            "to 5.")
+    return priority
+
+
+def _clean_watch_window(window) -> int:
+    if (isinstance(window, bool) or not isinstance(window, int)
+            or not 0 <= window <= WATCH_MAX_SUPPRESS_S):
+        raise CollectionError(
+            "The time a watch folds repeat hits on one thread is "
+            f"between 0 and {WATCH_MAX_SUPPRESS_S} seconds.")
+    return window
+
+
+#: What an edit may change, in the order a change is reported. The source, the kind and the target
+#: are not here: they say what a watch is.
+_WATCH_EDITABLE = ("name", "keywords", "selectors", "regexes", "priority",
+                   "suppress_window_s")
+_WATCH_TERM_FIELDS = ("keywords", "selectors", "regexes")
+#: The column each editable field is written to (the selector list is `selector_watch`, as
+#: `_watch_dict` says), and the cast the array columns need. Both are read into SQL, so they are
+#: fixed here and never taken from a request.
+_WATCH_COLUMN_OF = {"name": "name", "keywords": "keywords", "selectors": "selector_watch",
+                    "regexes": "regexes", "priority": "priority",
+                    "suppress_window_s": "suppress_window_s"}
+_WATCH_CAST_OF = {"keywords": "::text[]", "selectors": "::text[]", "regexes": "::text[]"}
+
+
+def _watch_shape(values: dict) -> dict:
+    """What an audit row may say of a watch: how many terms of each kind and the two numbers.
+    Never a term and never the name, because the audit trail is read by people with no access to
+    the case's content."""
+    return {"keywords": len(values["keywords"]), "selectors": len(values["selectors"]),
+            "regexes": len(values["regexes"]), "priority": values["priority"],
+            "suppress_window_s": values["suppress_window_s"]}
+
+
 _WATCH_COLUMNS = (
     "w.id, w.source_id, s.name, s.kind::text, s.is_active, w.name, "
     "w.target_kind, w.target_ref, w.keywords, w.selector_watch, w.regexes, "
@@ -3012,6 +3080,7 @@ class CollectionService:
         verdicts = self._regex_verdicts(items, watches, adapter=adapter,
                                         categories=categories)
         slow: dict[tuple[UUID, str], str] = {}
+        hit_watches: set[UUID] = set()
         for watch in watches:
             for pattern in (watch[4] or []):
                 failed = verdicts.failed.get(pattern)
@@ -3050,9 +3119,11 @@ class CollectionService:
                                     persona_id=persona_id, item=clean,
                                     document_id=document_id,
                                     inserted=inserted)
+                        item_hit_watches: set[UUID] = set()
                         hits = self._match_watches(
                             source.id, result.run_id, clean, watches, broken,
-                            misaimed, regex_verdicts=verdicts)
+                            misaimed, regex_verdicts=verdicts,
+                            hit_watch_ids=item_hit_watches)
                 except _ItemInvalid as exc:
                     warnings.append(RunWarning(ITEM_SKIPPED, (
                         f"Item {_item_label(item)} was skipped: {exc}")))
@@ -3077,6 +3148,7 @@ class CollectionService:
                 if clocked and retain_days is None:
                     unclocked.add(category)
                 result.watch_hits += hits
+                hit_watches |= item_hit_watches
                 if naive_time:
                     naive += 1
             result.items_deleted = self._mark_deleted(
@@ -3085,10 +3157,12 @@ class CollectionService:
                 self._c, source_id=source.id, run_id=result.run_id,
                 persona_id=persona_id, stored=stored, existing=existing,
                 fetched=fetched)
-            if result.watch_hits:
+            if hit_watches:
+                # Only the watches that wrote a hit in this run: a watch of the same source that
+                # matched nothing (another case's, or one that is stopped) keeps its last hit.
                 self._c.execute(
                     "UPDATE collect.watch SET last_hit_at = now() "
-                    "WHERE source_id = %s", (source.id,))
+                    "WHERE id = ANY(%s::uuid[])", (sorted(hit_watches),))
             warnings.extend(RunWarning(WATCH_PATTERN, (
                 f"watch {wid} has a regex that will not compile and therefore "
                 f"matches nothing: {reason} (pattern {redact(pat)[:120]!r})"))
@@ -3370,7 +3444,8 @@ class CollectionService:
                        watches: list[tuple],
                        broken: dict[tuple[UUID, str], str],
                        misaimed: dict[UUID, str] | None = None,
-                       regex_verdicts: "watch_regex.Verdicts | None" = None) -> int:
+                       regex_verdicts: "watch_regex.Verdicts | None" = None,
+                       hit_watch_ids: set[UUID] | None = None) -> int:
         """Keyword, selector and regex matching into `watch_hit`, for one item, inside its
         savepoint.
 
@@ -3391,6 +3466,9 @@ class CollectionService:
         with no term of any kind fires on every message of that chat. A chat watch that names
         another chat, or meets an item that is no Telegram message, matches nothing and is reported
         once per run in `misaimed`.
+
+        A watch that wrote a hit is added to `hit_watch_ids`, so the run stamps `last_hit_at` on
+        those watches and on no other.
         """
         haystack, sig_haystack = _watch_texts(item)
         meta = item.meta if isinstance(item.meta, dict) else {}
@@ -3487,6 +3565,8 @@ class CollectionService:
                  10 - (priority or 3))).fetchone()
             if inserted is not None:
                 hits += 1
+                if hit_watch_ids is not None:
+                    hit_watch_ids.add(watch_id)
         return hits
 
     def _regex_verdicts(self, items: list[Item], watches: list[tuple], *, adapter,
@@ -4167,7 +4247,7 @@ class CollectionService:
         The audit row carries the counts and never the terms: the audit trail is read by people who
         have no access to the case's content.
         """
-        name = _watch_line(name, "A watch's name", 3, 200)
+        name = _clean_watch_name(name)
         if target_kind not in WATCH_TARGET_KINDS:
             raise CollectionError(
                 "A watch looks at one of " + ", ".join(WATCH_TARGET_KINDS) + ".")
@@ -4178,25 +4258,10 @@ class CollectionService:
                 "A Telegram chat is named by its typed id, c:<number> for a "
                 "channel or a supergroup and g:<number> for a basic group, "
                 "never by an @username: a username is recycled.")
-        terms = (_watch_terms(keywords, "keyword", "keywords"),
-                 _watch_terms(selectors, "selector", "selectors"),
-                 _watch_terms(regexes, "pattern", "patterns", patterns=True))
-        if not chat_watch and not any(terms):
-            raise CollectionError(
-                "A watch needs a keyword, a selector or a pattern: with none "
-                "it matches nothing. Only a Telegram chat watch may have "
-                "none, and it then fires on every message of that chat.")
-        if (isinstance(priority, bool) or not isinstance(priority, int)
-                or not 1 <= priority <= 5):
-            raise CollectionError(
-                "A watch's priority is a whole number from 1 (most urgent) "
-                "to 5.")
-        if (isinstance(suppress_window_s, bool)
-                or not isinstance(suppress_window_s, int)
-                or not 0 <= suppress_window_s <= WATCH_MAX_SUPPRESS_S):
-            raise CollectionError(
-                "The time a watch folds repeat hits on one thread is "
-                f"between 0 and {WATCH_MAX_SUPPRESS_S} seconds.")
+        terms = _clean_watch_terms(keywords, selectors, regexes)
+        _check_watch_terms(chat_watch, terms)
+        priority = _clean_watch_priority(priority)
+        suppress_window_s = _clean_watch_window(suppress_window_s)
         source = _source_row(self._c, source_id, clearance, compartments)
         if chat_watch:
             if source.kind != "TELEGRAM":
@@ -4267,6 +4332,164 @@ class CollectionService:
             {"case": case_id, "clearance": clearance,
              "held": _held(compartments)}).fetchall()
         return [_watch_dict(r) for r in rows]
+
+    # Stopping and resuming a watch. The same two checks as creating one have already run (the
+    # global `watch.manage`, then the case's own gate), and any collection manager on the case may
+    # stop or resume any watch of it: `owner_user_id` stays the creator, and the audit row names
+    # who acted. A watch is stopped by `is_active = false`, never by a delete (hits point at it),
+    # and who stopped it and when is the audit row, not a column.
+
+    def _watch_for_change(self, case_id: UUID, watch_id: UUID, clearance: str,
+                          compartments=None) -> tuple:
+        """The watch as `_WATCH_COLUMNS` reads it, or CollectionNotFound. A watch that does not
+        exist, one on another case and one whose source sits above the caller get one sentence, so
+        the 404 says nothing about which: hidden is missing, as in the list."""
+        row = self._c.execute(
+            f"""SELECT {_WATCH_COLUMNS}
+                  FROM collect.watch w
+                  JOIN collect.source s ON s.id = w.source_id
+                 WHERE w.id = %(watch)s AND w.case_id = %(case)s
+                   AND {_SOURCE_VISIBLE_HELD}""",
+            {"watch": watch_id, "case": case_id, "clearance": clearance,
+             "held": _held(compartments)}).fetchone()
+        if row is None:
+            raise CollectionNotFound(
+                "no such watch on this case, or its source is above your "
+                "clearance")
+        return row
+
+    def stop_watch(self, case_id: UUID, watch_id: UUID, *, actor_id: UUID,
+                   clearance: str, compartments=None) -> tuple[dict, bool]:
+        """Stop a watch: the collector and the feed scoring read only active watches, so a stopped
+        one matches nothing from its source's next poll. Its old hits stay listed.
+
+        Idempotent: a watch already stopped comes back with `changed` False and writes no audit
+        row, as `acknowledge_hit` does not re-stamp. A poll already under way read its watches
+        before this and may still raise hits from the one just stopped."""
+        return self._set_watch_active(case_id, watch_id, False, actor_id=actor_id,
+                                      clearance=clearance, compartments=compartments)
+
+    def resume_watch(self, case_id: UUID, watch_id: UUID, *, actor_id: UUID,
+                     clearance: str, compartments=None) -> tuple[dict, bool]:
+        """Task a stopped watch again. Its terms were valid when stored and are not checked again;
+        its source is read for visibility as for a stop."""
+        return self._set_watch_active(case_id, watch_id, True, actor_id=actor_id,
+                                      clearance=clearance, compartments=compartments)
+
+    def _set_watch_active(self, case_id: UUID, watch_id: UUID, active: bool, *,
+                          actor_id: UUID, clearance: str,
+                          compartments=None) -> tuple[dict, bool]:
+        row = self._watch_for_change(case_id, watch_id, clearance, compartments)
+        with self._c.transaction():
+            moved = self._c.execute(
+                """UPDATE collect.watch SET is_active = %s
+                    WHERE id = %s AND case_id = %s
+                      AND is_active IS DISTINCT FROM %s
+                RETURNING id""",
+                (active, watch_id, case_id, active)).fetchone()
+            if moved is not None:
+                # In the transaction that wrote it, so the change and its record stand or fall
+                # together. The detail is where the watch is aimed, never what it matches.
+                self._audit(actor_id, "WATCH_RESUMED" if active else "WATCH_STOPPED",
+                            "watch", watch_id,
+                            {"source_id": str(row[1]), "target_kind": row[6]},
+                            case_id=case_id)
+        watch = _watch_dict(row)
+        watch["is_active"] = active
+        return watch, moved is not None
+
+    # Editing a watch. Name, the three term lists, priority and the repeat window can change.
+    # The source, the kind and the target cannot: they say what the watch is, a chat watch's
+    # reference is its matching scope (0130 holds its shape), and to aim a watch somewhere else is
+    # to stop it and make a new one. A list in a change replaces the stored list whole, and `[]`
+    # clears it.
+
+    def edit_watch(self, case_id: UUID, watch_id: UUID, *, changes: dict, actor_id: UUID,
+                   clearance: str, compartments=None) -> tuple[dict, list[str]]:
+        """Change what a watch matches or how it is thinned. Returns the watch and the names of
+        the fields that really changed, in `_WATCH_EDITABLE` order.
+
+        What the change touches obeys every rule a created watch does, through the same helpers,
+        and the watch that results must still obey the rule that a watch other than a Telegram chat
+        carries a term. A field left out is not read again: a watch made before a rule was written
+        can still have its priority changed. A change that changes nothing writes nothing and no
+        audit row.
+
+        The write is a compare-and-set on the columns this reads, so two managers who edit one watch
+        at one moment cannot overwrite each other without either knowing: the later one is a
+        CollectionConflict and nothing is written. The poll's own stamp on `last_hit_at` is outside
+        that, so a running poll never fails an edit. The audit row carries the fields that changed
+        and the counts and numbers before and after, never a term and never the name."""
+        if not changes:
+            raise CollectionError(
+                "Say what to change: a name, keywords, selectors, patterns, a "
+                "priority or a repeat window.")
+        if any(key not in _WATCH_EDITABLE for key in changes):
+            raise CollectionError(
+                "The source and what a watch looks at cannot be changed. To "
+                "aim a watch somewhere else, stop it and add a new one.")
+        row = self._watch_for_change(case_id, watch_id, clearance, compartments)
+        chat_watch = row[6] == WATCH_TELEGRAM_CHAT
+        for key in _WATCH_TERM_FIELDS:
+            if key in changes and changes[key] is None:
+                raise CollectionError("Send a list, [] to clear it, not null.")
+        old = {"name": row[5], "keywords": list(row[8] or []),
+               "selectors": list(row[9] or []), "regexes": list(row[10] or []),
+               "priority": row[11], "suppress_window_s": row[12]}
+        new = dict(old)
+        if "name" in changes:
+            new["name"] = _clean_watch_name(changes["name"])
+        cleaned = _clean_watch_terms(*(changes.get(key) for key in _WATCH_TERM_FIELDS))
+        for key, terms in zip(_WATCH_TERM_FIELDS, cleaned, strict=True):
+            if key in changes:
+                new[key] = terms
+        if any(key in changes for key in _WATCH_TERM_FIELDS):
+            _check_watch_terms(chat_watch, [new[key] for key in _WATCH_TERM_FIELDS])
+        if "priority" in changes:
+            new["priority"] = _clean_watch_priority(changes["priority"])
+        if "suppress_window_s" in changes:
+            new["suppress_window_s"] = _clean_watch_window(changes["suppress_window_s"])
+        if "name" in changes and self._c.execute(
+                "SELECT 1 FROM collect.watch WHERE case_id = %s "
+                "AND lower(name) = lower(%s) AND id <> %s",
+                (case_id, new["name"], watch_id)).fetchone():
+            raise CollectionConflict(
+                "This case already has a watch with that name.")
+        changed = [key for key in _WATCH_EDITABLE
+                   if key in changes and new[key] != old[key]]
+        if not changed:
+            return _watch_dict(row), []
+        sets = ", ".join(f"{_WATCH_COLUMN_OF[key]} = %({key})s{_WATCH_CAST_OF.get(key, '')}"
+                         for key in changed)
+        values = {key: (new[key] or None) if key in _WATCH_TERM_FIELDS else new[key]
+                  for key in changed}
+        with self._c.transaction():
+            moved = self._c.execute(
+                f"""UPDATE collect.watch SET {sets}
+                     WHERE id = %(id)s AND case_id = %(case)s
+                       AND (name, keywords, selector_watch, regexes, priority,
+                            suppress_window_s)
+                           IS NOT DISTINCT FROM
+                           (%(was_name)s, %(was_keywords)s::text[],
+                            %(was_selectors)s::text[], %(was_regexes)s::text[],
+                            %(was_priority)s, %(was_window)s)
+                 RETURNING id""",
+                {**values, "id": watch_id, "case": case_id, "was_name": row[5],
+                 "was_keywords": row[8], "was_selectors": row[9], "was_regexes": row[10],
+                 "was_priority": row[11], "was_window": row[12]}).fetchone()
+            if moved is None:
+                raise CollectionConflict(
+                    "This watch was changed by someone else while you were "
+                    "editing it. Reload it and try again.")
+            self._audit(actor_id, "WATCH_EDITED", "watch", watch_id,
+                        {"changed": changed, "before": _watch_shape(old),
+                         "after": _watch_shape(new)},
+                        case_id=case_id)
+        fresh = list(row)
+        fresh[5], fresh[8], fresh[9], fresh[10] = (
+            new["name"], new["keywords"], new["selectors"], new["regexes"])
+        fresh[11], fresh[12] = new["priority"], new["suppress_window_s"]
+        return _watch_dict(fresh), changed
 
     def watch_sources(self, *, clearance: str, compartments=None) -> list[dict]:
         """The sources the caller can put a watch on, for the form: those
