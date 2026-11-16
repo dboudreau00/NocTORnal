@@ -1521,6 +1521,18 @@ class LookupService:
         return out
 
     def result(self, case_id: UUID, result_id: UUID, *, user_id: UUID) -> dict:
+        return self._result_and_labels(case_id, result_id, user_id=user_id)[0]
+
+    def result_labels(self, case_id: UUID, result_id: UUID, *,
+                      user_id: UUID) -> tuple[str, frozenset[str]]:
+        """The classification and the compartments it takes to read this answer: the case's, the node's and
+        the sample's. What is made of the answer (an exhibit) carries them, or it is a way round them.
+        NotVisible, as `result`, to a reader who is not read into all of them."""
+        got, compartments = self._result_and_labels(case_id, result_id, user_id=user_id)
+        return got["classification"], compartments
+
+    def _result_and_labels(self, case_id: UUID, result_id: UUID, *,
+                           user_id: UUID) -> tuple[dict, frozenset[str]]:
         clearance, held, _a, _n = self._user(user_id)
         row = self._c.execute(
             """SELECT r.id, r.outcome, r.fetched_at, r.summary, r.findings_total,
@@ -1537,18 +1549,19 @@ class LookupService:
                  LEFT JOIN LATERAL iam.element_facts('node', l.node_id) n ON true
                  LEFT JOIN LATERAL iam.element_facts('sample', l.sample_id) s ON true
                 WHERE r.id = %s AND r.case_id = %s""", (result_id, case_id)).fetchone()
-        if row is None or _above(row[8], clearance) or not frozenset(row[9] or []) <= held:
+        needed = frozenset(row[9] or []) if row is not None else frozenset()
+        if row is None or _above(row[8], clearance) or not needed <= held:
             raise NotVisible()
         return {"id": str(row[0]), "outcome": row[1], "fetched_at": row[2].isoformat(),
                 "summary": row[3], "findings_total": row[4], "findings_proposed": row[5],
                 "purged": row[6] is not None, "http_status": row[7], "classification": row[8],
                 "provider": row[10], "filed_evidence_id": str(row[11]) if row[11] else None,
-                "proposals_raised": self._readable_proposals(row[0], clearance, held)}
+                "proposals_raised": self._readable_proposals(row[0], clearance, held)}, needed
 
     def file_as_exhibit(self, case_id: UUID, result_id: UUID, *, user_id: UUID,
                         storage) -> UUID:
         from noctornal_api.evidence import EvidenceService
-        got = self.result(case_id, result_id, user_id=user_id)
+        got, compartments = self._result_and_labels(case_id, result_id, user_id=user_id)
         if got["purged"]:
             raise LookupRefused("purged", "Retention emptied this answer; nothing is left "
                                 "to file.")
@@ -1564,7 +1577,7 @@ class LookupService:
             title=f"{row[4]} {row[3]} {row[2]:%Y-%m-%d %H:%M} UTC",
             media_type=row[1] or "application/json", data=bytes(row[0]),
             acquired_by=user_id, acquisition_method="VENDOR_LOOKUP", acquired_at=row[2],
-            classification=got["classification"],
+            classification=got["classification"], compartments=sorted(compartments),
             description=(f"The raw answer of lookup {row[5]} (query fingerprint "
                          f"{bytes(row[6]).hex()[:16]}), kept as it came back."))
         evidence_id = result.evidence_id

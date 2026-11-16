@@ -1,12 +1,12 @@
 # What is left
 
 **State (2026-10-29):** branch `main`, Alembic head `0199`,
-9321 tests counted as `def test_` functions across the two pytest roots,
-version 0.9.5 single-sourced from `pyproject.toml`. Those four counters are
+9324 tests counted as `def test_` functions across the two pytest roots,
+version 0.9.6 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Beta 1.5c (2026-11-13) is the latest release. **Every roadmap item is built.** The
+Beta 1.6 (2026-11-15) is the latest release. **Every roadmap item is built.** The
 end-to-end check of the Telegram adapter is `scripts/telegram_live_check.py`,
 which an operator runs with the deployment's own Telegram account (docs/17
 F31). What stands between the product and a deployment is not software: it is
@@ -115,6 +115,26 @@ section, and there was no Alpha 8 release.
   critical), all fixed or stated: 77 fixed, one fixed for credentials and
   stated for the rest, and four stated and not fixed. docs/17, "The
   2026-10-03 review at Beta 1.1", lists each by area with its status.
+
+**Beta 1.6 (2026-11-15).**
+
+- **The findings of the review of 2026-11-14, closed** (Alembic 0185 to
+  0199, decisions 229 to 241): case membership is filtered for the request
+  role, a missing id costs what a hidden one costs, lifting a legal hold
+  takes two people, and the request role writes no column of a case and no
+  queue or heartbeat.
+- **Transport and secrets:** TLS on every internal hop, a keyed hash in the
+  audit log in place of what a failed sign-in typed, uploaded mail believed
+  only under the mail stamp, and a pooled request connection.
+- **Storage:** another S3 store can hold evidence (decision 235), and a
+  restore puts exhibits and preserved samples back with their locks and
+  holds, recorded as a RESTORED row (decision 240).
+- **A cluster, with no manifest:** a readiness endpoint, the analysis worker
+  over mutual TLS, an egress boundary a NetworkPolicy can express and
+  declared cluster networks (decision 239).
+- **The console:** lifting a hold in the place the hold is, minimisation
+  said where the case is, and Stop, Resume and Edit on a watch. The
+  readiness register has 51 checks.
 
 **Beta 1.5c (2026-11-13).**
 
@@ -263,6 +283,13 @@ decision, or is hardening that needs a migration.
 - The request role's last operational writes: the three similarity vector
   tables, `lab.yara_compiled_rejected` and `collect.collection_run`. Each
   needs a migration (docs/17).
+- Kubernetes manifests, which docs/17 holds as a specification: the
+  application's side is built (decision 239) and nothing has run on a
+  cluster. The later steps of storage without MinIO (decision 235) wait with
+  them.
+- One `api_client` fixture for the tests in place of the repeated set-up
+  (docs/17, the shared `client` fixture), which touches about a hundred test
+  files.
 
 **Records written under older rules** are listed and never filled or moved
 (decision 80). Claims accepted from Triage with no observation date are dated

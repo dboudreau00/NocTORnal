@@ -337,7 +337,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **9321 tests** (`def test_`
+With the containers up, expect **no failures** across **9324 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -701,7 +701,7 @@ enforces it.
 
 ### Testing
 
-**9321 tests** (`def test_` functions across two pytest roots, maintained by
+**9324 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -783,7 +783,19 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1.5c, release 0.9.5, tag `v0.9.5c-beta`: Beta 1.5b with a new look for
+This is Beta 1.6, release 0.9.6, tag `v0.9.6-beta`: Beta 1.5c with the findings of the
+review of 2026-11-14 closed, each with a test, and fifteen migrations, 0185 to 0199. Who
+is on a case is filtered in the database for a request, a missing id costs what a hidden
+one costs, and lifting a legal hold takes two people. Every internal hop is TLS, the
+audit log keeps a keyed hash and never the value of what a failed sign-in typed, and a
+request draws its connection from a pool. Evidence can sit in another S3 store, a backup
+can be restored into a new store with its locks and holds, and the application is laid
+out for a cluster, with no manifest shipped. A collection watch can be stopped, resumed
+and edited, and the readiness register has 51 checks. None of this makes it lawful to
+operate against real material: that still waits on the five items above, and it has not
+been audited.
+
+Beta 1.5c was Beta 1.5b with a new look for
 the sociogram and a quieter console, and no migration. The graph sits on a lit navy
 stage with a soft halo behind each entity, the rows of legend and keys under it are one
 row with a Key and a Shortcuts button, and what a pane says once (what a setting
@@ -827,7 +839,7 @@ reads, selectors, search and the audit log hold at 100,000 entities and
 about 5,000 entities a case, and the ego network and the path search stop at
 5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1.5c has entity merge under the two-person
+Beyond what the tour shows, Beta 1.6 has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery

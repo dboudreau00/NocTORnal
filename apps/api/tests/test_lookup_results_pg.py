@@ -16,9 +16,12 @@ from outbound_support import (
     DATABASE_URL,
     MISP_GREEN_BODY,
     FakeFetcher,
+    assign,
     fetched,
     lookup_world,
+    make_node,
     make_selector,
+    make_user,
     teardown,
 )
 
@@ -334,3 +337,63 @@ def test_a_withheld_answer_does_not_say_whether_it_could_be_read(conn):
     raw = conn.execute("SELECT state, error_class FROM ingest.lookup WHERE id = %s",
                        (first["lookup_id"],)).fetchone()
     assert raw == ("FAILED", "unreadable")
+
+
+def _register(conn, key):
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+                 (key, f"{key} (test)"))
+
+
+def _read_into(conn, user_id, key):
+    _register(conn, key)
+    conn.execute("UPDATE iam.app_user SET compartments = %s WHERE id = %s", ([key], user_id))
+
+
+def _answer_then_hold_the_node_in_sig(conn, w):
+    """A lookup on a selector is answered while its node is held in no compartment (one that is held in one is
+    refused at the request: compartmented material cannot leave). The node is then held in SIG, and the analyst,
+    read into SIG, is the one who may still see the answer."""
+    node = make_node(conn, w.case_id, w.owner, "the held person")
+    selector = make_selector(conn, w.case_id, "DOMAIN", "example.org", node_id=node)
+    got = _ask(w, conn, subject={"kind": "SELECTOR", "selector_id": str(selector)})
+    _register(conn, "SIG")
+    _read_into(conn, w.analyst, "SIG")
+    conn.execute("UPDATE core.node SET compartments = %s WHERE id = %s", (["SIG"], node))
+    return got
+
+
+def test_a_filed_answer_carries_the_compartments_it_took_to_read_it(conn):
+    """Once its node is held in SIG, the answer of a lookup is read only by someone read into SIG. Filing it keeps
+    the raw bytes as an exhibit, and the exhibit must carry SIG too, or it is a way round the compartment."""
+    w = _world(conn)
+    got = _answer_then_hold_the_node_in_sig(conn, w)
+    evidence_id = w.service(conn).file_as_exhibit(w.case_id, got["result_id"], user_id=w.analyst,
+                                                  storage=MemoryEvidence())
+    held = conn.execute("SELECT compartments FROM core.evidence WHERE id = %s",
+                        (evidence_id,)).fetchone()[0]
+    assert held == ["SIG"], held
+
+
+def test_an_answer_on_an_uncompartmented_subject_is_filed_as_it_always_was(conn):
+    w = _world(conn)
+    got = _ask(w, conn)
+    evidence_id = w.service(conn).file_as_exhibit(w.case_id, got["result_id"], user_id=w.analyst,
+                                                  storage=MemoryEvidence())
+    assert conn.execute("SELECT compartments FROM core.evidence WHERE id = %s",
+                        (evidence_id,)).fetchone()[0] == []
+
+
+def test_a_reader_not_in_the_compartment_cannot_open_the_exhibit_the_answer_was_filed_as(conn):
+    """Two analysts are on the case; only one is read into SIG. The one who is not is told nothing of the
+    exhibit, as of the answer it came from."""
+    from outbound_support import client as make_client, session
+    w = _world(conn)
+    got = _answer_then_hold_the_node_in_sig(conn, w)
+    evidence_id = w.service(conn).file_as_exhibit(w.case_id, got["result_id"], user_id=w.analyst,
+                                                  storage=MemoryEvidence())
+    other, other_email = make_user(conn, PREFIX, clearance="AMBER")
+    assign(conn, w.case_id, other, "ANALYST")
+    client = make_client()
+    path = f"/api/v1/cases/{w.case_id}/evidence/{evidence_id}/custody"
+    assert client.get(path, headers=session(conn, w.analyst_email)).status_code == 200
+    assert client.get(path, headers=session(conn, other_email)).status_code == 404

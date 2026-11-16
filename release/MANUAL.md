@@ -1,6 +1,6 @@
 # NocTORnal: the analyst and operator manual
 
-> Beta 1.5c (v0.9.5c-beta). Beta software. See [README.md](README.md) for the legal status: five decisions, L1 to L5, gate any use against real material, and until they are made this manual is for use on synthetic or published, non-personal data only.
+> Beta 1.6 (v0.9.6-beta). Beta software. See [README.md](README.md) for the legal status: five decisions, L1 to L5, gate any use against real material, and until they are made this manual is for use on synthetic or published, non-personal data only.
 
 ### About this manual
 
@@ -20,7 +20,7 @@ First time on a machine? [START-HERE.md](START-HERE.md) installs it in about fif
 
 #### What this edition changed
 
-Beta 1.5c gives the sociogram a lit stage, puts the canvas key and the keyboard shortcuts behind two buttons under the canvas, and moves what a pane says once behind a small **i** beside the heading it belongs to (The i buttons, in Part I). Beta 1.5 and 1.5b close the findings of a code review and leave every screen as it was; their changes are in the changelog. The screens went quiet in Beta 1.4. Every explanatory paragraph that used to open a pane was cut to a line, or removed, and its content moved here. If a screen no longer explains itself, that is deliberate and the explanation is in the chapter for that pane. Nothing that protects somebody was removed: a legal warning, a destruction warning, and the notices that keep you from misreading a number are still on screen, in one sentence each.
+Beta 1.6 closes the findings of a review and changes the console in a few places. Lifting a legal hold is four steps in the place the hold is, and takes two people. Closing or archiving a case says what is left to minimise. A collection watch's row carries Stop or Resume and Edit. The connection log says that some rows are withheld, and the readiness register has 51 checks (Appendix G). Most of the rest is behind the console: who may read a case's team, transport, storage and restoring a backup, and a layout for a cluster. The changelog lists each, and Part IV and the appendices carry the operator's side. Beta 1.5c gives the sociogram a lit stage, puts the canvas key and the keyboard shortcuts behind two buttons under the canvas, and moves what a pane says once behind a small **i** beside the heading it belongs to (The i buttons, in Part I). Beta 1.5 and 1.5b close the findings of a code review and leave every screen as it was; their changes are in the changelog. The screens went quiet in Beta 1.4. Every explanatory paragraph that used to open a pane was cut to a line, or removed, and its content moved here. If a screen no longer explains itself, that is deliberate and the explanation is in the chapter for that pane. Nothing that protects somebody was removed: a legal warning, a destruction warning, and the notices that keep you from misreading a number are still on screen, in one sentence each.
 
 ---
 

@@ -194,12 +194,13 @@ def file_result(
     from noctornal_api.evidence import EvidenceStorage
     svc = lookups.LookupService(conn)
     try:
-        got = svc.result(case_id, result_id, user_id=user.user_id)
+        classification, compartments = svc.result_labels(case_id, result_id, user_id=user.user_id)
     except lookups.NotVisible:
         raise _not_found() from None
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.upload",
-                     classification=got["classification"], after_case_gate=True)
-    check_writable_labels(conn, user, classification=got["classification"])
+                     classification=classification, compartments=compartments,
+                     after_case_gate=True)
+    check_writable_labels(conn, user, classification=classification, compartments=compartments)
     try:
         evidence_id = svc.file_as_exhibit(case_id, result_id, user_id=user.user_id,
                                           storage=EvidenceStorage())

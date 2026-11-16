@@ -40,7 +40,7 @@ services:
     profiles: [bundled-store]
 
   object-store-init:
-    image: noctornal-api:0.9.5
+    image: noctornal-api:0.9.6
     pull_policy: never
     # The administrator's credential, when the check should read with one (OBJECT_STORE_ADMIN_ACCESS_KEY,
     # OBJECT_STORE_ADMIN_SECRET_KEY). Optional, git- and docker-ignored like every *.env file.

@@ -1,11 +1,9 @@
 # Changelog
 
-## Unreleased: remediation round, 2026-11-15
+## Beta 1.6: 2026-11-15
 
-A remediation round on Beta 1.5c, still version 0.9.5. It is not a release yet and
-carries no release name or date: the owner names it at release time, and the word
-Unreleased is a placeholder. The Alembic head is 0199, fifteen revisions on 0184
-(0185 to 0199). It adds decisions 229 to 241 and builds what the review of
+A remediation round on Beta 1.5c, version 0.9.6. The Alembic head is 0199, fifteen
+revisions on 0184 (0185 to 0199). It adds decisions 229 to 241 and builds what the review of
 2026-11-14 and the owner's rulings of that day asked for. It has not been audited,
 and it is still not lawful to operate against real material until docs/16 L1 to L5
 are settled outside this codebase. Legal review is required before any active case
@@ -432,6 +430,14 @@ Fifteen revisions, all on the way to head 0199, each with a downgrade:
   names 1.5c the latest release. docs/17's "Known residuals at Beta 1.1" is "Known
   residuals". The README names the four blocking readiness checks in its first-run
   notes.
+- **A filed lookup answer keeps the compartments it took to read.** An answer is read
+  under the labels of its case, its node and its sample as they stand now, and a
+  lookup on a subject that is already held in a compartment is refused at the request.
+  When a node was held in a compartment after its answer came back, filing the answer
+  made an exhibit that carried the case's compartments only, so a reader who could not
+  see the answer could open the raw bytes. The exhibit now carries every compartment
+  the answer took to read, and the file route asks the caller for them as it asks for
+  the classification.
 
 ### What the round did not do
 
@@ -451,9 +457,11 @@ Fifteen revisions, all on the way to head 0199, each with a downgrade:
   application image end to end, or run a pooled load test. Its limits are in docs/17.
 - It leaves the owner's judgements in docs/17's Open section, and the Known
   residuals marked as decisions, as they were.
-- It did not run the whole suite on the integrated head; each unit ran the files it
-  touched and the files that read what it changed. The test count at this head is
-  9076 (`def test_` functions).
+- It did not build the shared `api_client` test fixture, which touches about a hundred
+  test files and waits for a round of its own (docs/17, the shared `client` fixture).
+  Nothing a user sees depends on it.
+
+9324 tests (`def test_` functions). The whole suite runs in CI on every push, on a database built from nothing with every migration and with both runtime database roles present; its totals for this release are in the release notes.
 
 ### Upgrading from Beta 1.5c
 
