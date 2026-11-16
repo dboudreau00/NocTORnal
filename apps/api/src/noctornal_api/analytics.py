@@ -149,8 +149,9 @@ def _edge_age_days(edge: dict, reference: datetime) -> float | None:
 
 def _decay_factor(age_days: float, half_life_months: float) -> float:
     """Exponential half-life: a tie one half-life old counts for half."""
-    if half_life_months <= 0:
-        raise AnalyticsError("decay half-life must be positive")
+    # Not `<= 0`: that is False for NaN, which would turn every decayed weight into NaN.
+    if not 0 < half_life_months < math.inf:
+        raise AnalyticsError("decay half-life must be positive and finite")
     return 0.5 ** (age_days / (half_life_months * _DAYS_PER_MONTH))
 
 
