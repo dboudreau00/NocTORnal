@@ -104,6 +104,23 @@ def test_an_unusable_public_origin_is_not_told_back_either(monkeypatch, caplog):
     assert len(lines) == 1 and SECRET not in lines[0] and "***@app.internal" in lines[0]
 
 
+@pytest.mark.parametrize("raw, masked", [
+    (f"https://svc:{SECRET}@samples.internal", "https://***@samples.internal"),
+    (f"https://svc:pa@ss{SECRET}@samples.internal", "https://***@samples.internal"),
+    (f"https://svc:pa/ss{SECRET}@samples.internal", "https://***@samples.internal"),
+    (f"svc:{SECRET}@samples.internal", "***@samples.internal"),
+    (f"https://svc:{SECRET}@samples.internal/lab?x=1", "https://***@samples.internal/lab?x=1"),
+    ("https://samples.internal/?x=a@b", "https://samples.internal/?x=a@b"),
+    ("https://samples.example/lab", "https://samples.example/lab"),
+])
+def test_the_logged_value_carries_no_credential_whatever_its_shape(raw, masked):
+    """The log is where the value goes, so the mask covers userinfo with an "@" or a "/" in it and userinfo
+    on a value with no scheme."""
+    from noctornal_api.samples import masked_origin
+    assert masked_origin(raw) == masked
+    assert SECRET not in masked_origin(raw)
+
+
 def test_a_usable_deployment_is_unchanged(monkeypatch, caplog):
     from noctornal_api.samples import origin_split
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
