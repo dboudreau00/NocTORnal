@@ -302,12 +302,21 @@ def effective_labels(
     Read through `iam.case_facts`, because the gate must decide and audit on the case's labels
     whether or not row-level security lets the caller read the case row: an assigned analyst
     asking for a case above their clearance gets the gate's 403 and its AUTHZ_DENIED row, never
-    a silent 404."""
+    a silent 404.
+
+    An id that names nothing on a route that takes its case from the element has no case: it is
+    decided at the phantom's labels alone (`element_gate.facts_or_phantom`, decision 230), which
+    no caller can hold, so the gate refuses it and records the refusal as it does a hidden
+    element's."""
     row = conn.execute(
         "SELECT classification, compartments FROM iam.case_facts(%s)",
         (case_id,),
     ).fetchone()
     if row is None:
+        from noctornal_api.http.element_gate import ABSENT_CLASSIFICATION, ABSENT_COMPARTMENTS
+        if (case_id is None and element_classification == ABSENT_CLASSIFICATION
+                and element_compartments == ABSENT_COMPARTMENTS):
+            return ABSENT_CLASSIFICATION, ABSENT_COMPARTMENTS
         raise Problem(404, "Not found", "case does not exist")
     case_cls, case_comp = row[0], frozenset(row[1] or [])
     if element_classification is None:

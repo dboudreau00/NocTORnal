@@ -231,9 +231,10 @@ def test_a_change_to_an_entity_above_the_caller_reads_as_a_missing_entity(
         miss = call(uuid4())
         assert g.answer(hit) == g.answer(miss), name
         assert hit.status_code == 404, (name, hit.text)
-        # The refusal is still on the record, as before; a missing id has none.
+        # The refusal is still on the record, as before, and a missing id writes the same row
+        # (decision 230): one each.
         assert recorded == 1, name
-        assert _denials(owner, w.analyst) - before == recorded, name
+        assert _denials(owner, w.analyst) - before == 2 * recorded, name
 
 
 def test_a_change_to_a_tie_or_claim_above_the_caller_reads_as_a_missing_one(

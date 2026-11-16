@@ -194,13 +194,15 @@ def test_accepting_within_clearance_still_works(conn, client, world):
 def test_an_attribute_claim_about_an_entity_above_the_reviewer_is_refused(
         conn, client, world):
     """CR7's rule on the graph route, held on this one: asserting about an
-    entity is a write against it, gated by ITS labels."""
+    entity is a write against it, gated by ITS labels. The refusal is the one a
+    missing entity gets (decision 230), so it does not confirm the hidden one."""
     w = world
     pid = _propose(conn, w["case"], "ATTRIBUTE",
                    {"node_id": str(w["red_node"]), "claim_path": "attrs.role",
                     "claim_value": {"role": "initial access broker"}})
     r = _accept(client, conn, w, pid)
-    assert r.status_code == 403, r.text
+    assert r.status_code == 409, r.text
+    assert "not in this case" in r.json()["detail"]
     assert _state(conn, pid)[0] == "PROPOSED"
     assert conn.execute(
         "SELECT count(*) FROM core.assertion WHERE node_id = %s "

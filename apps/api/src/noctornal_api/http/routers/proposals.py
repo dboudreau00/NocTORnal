@@ -20,13 +20,12 @@ from noctornal_api import notify_events
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
-    authorize_object,
     check_writable_labels,
-    element_labels,
     get_conn,
     require,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import authorize_element, facts_or_phantom
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.body_ceiling import raise_body_ceiling
 from noctornal_api.http.limits import rate_limit
@@ -186,6 +185,12 @@ def _owned(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID,
     return row
 
 
+#: What an accept is told when the entity its claim names is missing, in another case or above the
+#: reviewer.
+ENTITY_NOT_IN_CASE = ("the entity this proposal makes a claim about is not in "
+                      "this case; nothing was written")
+
+
 def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
                          case_id: UUID, row: ProposalRow,
                          requested: str | None) -> None:
@@ -223,18 +228,22 @@ def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
         raise Problem(409, "Conflict",
                       "this proposal does not name a valid entity to attach "
                       "its claim to; nothing was written") from exc
-    # The element's case and labels as facts (`deps.element_labels`), so the gate below answers an
-    # element above the caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
-    # row-level security. Content is read only after the gate.
-    labels = element_labels(conn, "node", target)
-    if labels is None or labels[0] != case_id:
-        raise Problem(409, "Conflict",
-                      "the entity this proposal makes a claim about is not in "
-                      "this case; nothing was written")
-    authorize_object(conn, user, case_id=case_id,
-                     permission_key="proposal.review", after_case_gate=True,
-                     classification=labels[1],
-                     compartments=frozenset(labels[2] or []))
+    # The element's case and labels as facts (`element_gate.facts_or_phantom`), so the gate below
+    # answers an element above the caller's labels with its AUTHZ_DENIED row, not a silent 404 from
+    # row-level security, and an entity missing or in another case at the phantom's labels with the
+    # same row. One answer for the three (decision 230): the sentence a missing entity always had,
+    # since a 403 would confirm the hidden entity. Content is read only after the gate.
+    labels = facts_or_phantom(conn, "node", target, case_id=case_id)
+    try:
+        authorize_element(conn, user, case_id=case_id,
+                          permission_key="proposal.review",
+                          classification=labels.classification,
+                          compartments=labels.compartments,
+                          missing_detail=ENTITY_NOT_IN_CASE, absent=labels.absent)
+    except Problem as exc:
+        if exc.status != 404:
+            raise
+        raise Problem(409, "Conflict", ENTITY_NOT_IN_CASE) from None
     # And the claim may not land below what it was found in: the assertion is read at the entity's
     # labels, so a RED contact block's identifier accepted onto a CLEAR entity would reach every
     # CLEAR reader of it. After the gate above, so only somebody who may see the entity is told its
@@ -242,7 +251,7 @@ def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
     # reader of it holds.
     problem = attribute_label_problem(
         row.payload, ProposalStore(conn).source_labels(row.id),
-        labels[1], labels[2],
+        labels.classification, labels.compartments,
         case_compartments=case_compartments(conn, case_id))
     if problem:
         raise Problem(409, "Conflict",

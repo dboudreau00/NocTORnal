@@ -32,6 +32,7 @@ from noctornal_api.http.deps import (
     system_conn,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import ElementFacts, phantom
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.body_ceiling import own_body_cap
 from noctornal_api.http.limits import rate_limit, read_body_capped
@@ -94,8 +95,8 @@ def _key_from_header(authorization: str | None) -> str:
         raise Problem(401, "Unauthenticated", "no ingest key presented")
     return authorization[7:].strip()
 
-def _own_record(conn: psycopg.Connection, record_id: UUID) -> tuple:
-    """(case_id, classification, compartments) for a record, or a 404.
+def _record_facts(conn: psycopg.Connection, record_id: UUID) -> ElementFacts:
+    """A record's case and labels, or the phantom's, with no case, for an id that names nothing.
 
     `ingest.record` carries its own labels, which `IngestService` writes but never reads, so the
     router checks them or a record's victims are visible to any holder of the global `ingest.read`.
@@ -106,18 +107,29 @@ def _own_record(conn: psycopg.Connection, record_id: UUID) -> tuple:
         """SELECT case_id, classification, compartments
              FROM iam.ingest_record_facts(%s)""", (record_id,)).fetchone()
     if row is None:
+        return phantom(None)
+    return ElementFacts(row[0], row[1], frozenset(row[2] or []))
+
+
+def _own_record(conn: psycopg.Connection, record_id: UUID) -> tuple:
+    """(case_id, classification, compartments) for a record, or a 404."""
+    facts = _record_facts(conn, record_id)
+    if facts.absent:
         raise Problem(404, "Not found", "no such record")
-    return row[0], row[1], frozenset(row[2] or [])
+    return facts.case_id, facts.classification, facts.compartments
 
 
-def _operator_may_see_quarantine(conn: psycopg.Connection, user: CurrentUser,
-                                 classification: str,
-                                 compartments: frozenset[str]) -> None:
-    """The gate for a record attached to no case. Raises 404 or returns.
+def _quarantine_refusal(conn: psycopg.Connection, user: CurrentUser,
+                        classification: str,
+                        compartments: frozenset[str]) -> Problem | None:
+    """The gate for a record attached to no case: the refusal, or None when the operator may see it.
 
     Not `require_global`, a dependency that runs before the record is read: the same three checks
     (verb through a global role, account active, step-up where required) plus the label check. 404
-    for every failure, since a distinct status would be an existence oracle (deps.py rule 2).
+    for every failure but a stale sign-in on a record the operator may see, since a distinct status
+    would be an existence oracle (deps.py rule 2). The labels are checked before step-up, so a stale
+    sign-in learns nothing of a record above the operator. The reads depend on the caller alone,
+    never on the record, so every record request can ask it (`_authorise_record`).
     """
     row = conn.execute(
         """SELECT bool_or(p.requires_step_up)
@@ -128,22 +140,22 @@ def _operator_may_see_quarantine(conn: psycopg.Connection, user: CurrentUser,
             WHERE ur.user_id = %s AND rp.permission_key = 'ingest.manage'
               AND u.is_active""", (user.user_id,)).fetchone()
     if row is None or row[0] is None:
-        raise Problem(404, "Not found", "no such record")
+        return Problem(404, "Not found", "no such record")
+    clearance, held = user_ceiling(conn, user.user_id)
+    # Unattached is not unclassified: the record carries the issuing key's
+    # ceiling, and `/quarantine` applies exactly this predicate in SQL.
+    # `Tlp` is an IntEnum ordered to match the SQL enum, so `>` here means
+    # the same thing as `<=` does in the query.
+    if tlp_from_name(classification) > clearance             or not frozenset(compartments).issubset(held):
+        return Problem(404, "Not found", "no such record")
     if row[0]:
         fresh = (
             user.session_mfa_at is not None
             and (datetime.now(user.session_mfa_at.tzinfo) - user.session_mfa_at)
             < STEP_UP_FRESHNESS)
         if not fresh:
-            raise Problem(403, "Forbidden", "re-authentication required")
-    clearance, held = user_ceiling(conn, user.user_id)
-    # Unattached is not unclassified: the record carries the issuing key's
-    # ceiling, and `/quarantine` applies exactly this predicate in SQL.
-    # `Tlp` is an IntEnum ordered to match the SQL enum, so `>` here means
-    # the same thing as `<=` does in the query.
-    if tlp_from_name(classification) > clearance \
-            or not frozenset(compartments).issubset(held):
-        raise Problem(404, "Not found", "no such record")
+            return Problem(403, "Forbidden", "re-authentication required")
+    return None
 
 
 def _authorise_record(conn: psycopg.Connection, user: CurrentUser,
@@ -152,23 +164,35 @@ def _authorise_record(conn: psycopg.Connection, user: CurrentUser,
 
     Answered as 404 either way: a status code must not be an existence
     oracle (deps.py rule 2), and "this record exists but is not yours" is
-    itself a disclosure about a compartmented case.
+    itself a disclosure about a compartmented case. One cost for every
+    refusal (decision 230): the operator's check is asked for every record,
+    and a refusal of any kind meets the case gate and writes its
+    AUTHZ_DENIED row. A record attached to no case that the operator's check
+    refuses, and an id that names no record, are gated at the phantom's
+    labels with no case; a record in a case the caller is not on is gated at
+    its own.
     """
-    case_id, classification, compartments = _own_record(conn, record_id)
-    if case_id is None:
+    facts = _record_facts(conn, record_id)
+    refusal = _quarantine_refusal(conn, user, facts.classification, facts.compartments)
+    if facts.case_id is None and not facts.absent:
         # Quarantine: no case assignment can reach it, so the operator verb `/quarantine` uses is
         # the gate, and the labels still apply. `rescore` writes `priority` through a method with no
         # label predicate, so this must not be skipped.
-        _operator_may_see_quarantine(conn, user, classification, compartments)
-        return None
+        if refusal is None:
+            return None
+        if refusal.status != 404:
+            raise refusal
+        facts = phantom(None)
     try:
-        authorize_object(conn, user, case_id=case_id,
+        authorize_object(conn, user, case_id=facts.case_id,
                          permission_key=permission,
-                         classification=classification,
-                         compartments=compartments)
+                         classification=facts.classification,
+                         compartments=facts.compartments)
     except Problem:
         raise Problem(404, "Not found", "no such record") from None
-    return case_id
+    if facts.absent:
+        raise Problem(404, "Not found", "no such record")
+    return facts.case_id
 
 
 def _decision_global(conn: psycopg.Connection, user: CurrentUser,

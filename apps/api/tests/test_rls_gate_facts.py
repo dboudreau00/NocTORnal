@@ -24,7 +24,7 @@ _FACT_READERS = {
     ("http/routers/live.py", "_may_read"): "iam.case_facts",
     ("http/routers/governance.py", "_assigned_case_code"): "iam.case_code",
     ("http/routers/governance.py", "unreviewed"): "iam.case_code",
-    ("http/routers/governance.py", "_own_evidence"): "element_labels",
+    ("http/routers/governance.py", "_own_evidence"): "facts_or_phantom",
     ("notify_events.py", "_case"): "iam.case_facts",
     ("projections.py", "_disclosure_mode"): "iam.case_facts",
     ("http/routers/ach.py", "_withheld"): "iam.case_facts",
@@ -32,13 +32,18 @@ _FACT_READERS = {
     # The refusal reads the ticket through its definer (0180), which takes the exhibit's case from
     # iam.element_facts.
     ("evidence.py", "_production_refusal"): "lab.ticket_by_hash",
-    ("http/routers/graph.py", "_element_labels"): "element_labels",
-    ("http/routers/graph.py", "_gate_for_change"): "element_labels",
-    ("http/routers/graph.py", "retract_assertion"): "element_labels",
-    ("http/routers/curation.py", "_node_for_write"): "element_labels",
-    ("http/routers/evidence.py", "_authorize_exhibit"): "element_labels",
-    ("http/routers/proposals.py", "_check_accept_labels"): "element_labels",
-    ("http/routers/evidence.py", "_authorize_export"): "element_labels",
+    # An id that names nothing is given the phantom's labels (decision 230) by
+    # `element_gate.facts_or_phantom`, which reads the element with `element_labels`.
+    ("http/element_gate.py", "facts_or_phantom"): "element_labels",
+    ("http/routers/graph.py", "_element_labels"): "facts_or_phantom",
+    ("http/routers/graph.py", "_gate_for_change"): "facts_or_phantom",
+    ("http/routers/graph.py", "retract_assertion"): "facts_or_phantom",
+    ("http/routers/graph.py", "supersede_assertion"): "facts_or_phantom",
+    ("http/routers/graph.py", "_gate_tie_endpoints"): "facts_or_phantom",
+    ("http/routers/curation.py", "_node_for_write"): "facts_or_phantom",
+    ("http/routers/evidence.py", "_authorize_exhibit"): "facts_or_phantom",
+    ("http/routers/proposals.py", "_check_accept_labels"): "facts_or_phantom",
+    ("http/routers/evidence.py", "_authorize_export"): "facts_or_phantom",
     # Comms are under policy (0122). The conversation's case is found as a fact before the gate's work
     # proceeds, through `element_gate.gate_element`, which reads it with `element_labels`.
     ("http/routers/comms.py", "_own_conversation"): "gate_element",
@@ -85,7 +90,7 @@ def test_an_element_pre_read_happens_before_its_content_read():
         code = _code(_function(rel, fn))
         # The element gate is `element_gate.authorize_element`: `authorize_object` with a refusal at the
         # element's labels answered as its absence.
-        assert code.index("element_labels(") < code.index("authorize_element(") \
+        assert code.index(_FACT_READERS[rel, fn] + "(") < code.index("authorize_element(") \
             < code.index("FROM core."), f"{rel}::{fn}"
     assert "authorize_object(" in _code(
         _function("http/element_gate.py", "authorize_element"))

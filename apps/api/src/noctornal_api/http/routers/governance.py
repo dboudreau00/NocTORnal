@@ -34,6 +34,7 @@ from noctornal_api.http.deps import (
     system_conn,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import facts_or_phantom
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import enforce, rate_limit
 from noctornal_api.evidence import EvidenceError, EvidenceStorage
@@ -160,19 +161,36 @@ def _lift_approver(sconn: psycopg.Connection, approval_request_id: UUID | None,
         document_ceiling=(doc_clearance.name, sorted(doc_held)))
 
 
-def _own_evidence(conn: psycopg.Connection, evidence_id: UUID) -> UUID:
-    """The case an exhibit belongs to, or a 404 that reveals nothing.
+def _own_evidence(conn: psycopg.Connection, user: CurrentUser,
+                  evidence_id: UUID) -> UUID:
+    """The case an exhibit belongs to, gated, or a 404 that reveals nothing.
 
     `evidence.py` established this pattern and this router did not adopt
     it: gate the case, then confirm the object is IN that case. Without
     it an exhibit id from anywhere was accepted on trust.
+
+    An exhibit in a case the officer is not on and an id that names no
+    exhibit get the same 404 and the same AUTHZ_DENIED row: the id that names
+    nothing is gated at the phantom's labels, with no case (decision 230).
     """
-    # Through `iam.element_facts`: which case an exhibit is in decides the gate, and a legal hold
-    # applies whatever the officer's own labels, so row-level security must not hide the answer.
-    facts = element_labels(conn, "evidence", evidence_id)
-    if facts is None:
+    # Through `element_gate.facts_or_phantom`, which reads `iam.element_facts`: which case an exhibit
+    # is in decides the gate, and a legal hold applies whatever the officer's own labels, so
+    # row-level security must not hide the answer.
+    facts = facts_or_phantom(conn, "evidence", evidence_id, case_id=None)
+    # Only the phantom's labels go to the case gate: a real exhibit's are not its business, since a
+    # hold is placed above the officer's own labels (decision 144).
+    labels = ({"classification": facts.classification, "compartments": facts.compartments}
+              if facts.absent else {})
+    try:
+        authorize_object(conn, user, case_id=facts.case_id,
+                         permission_key="retention.manage", **labels)
+    except Problem as exc:
+        if exc.status != 404:
+            raise
+        raise Problem(404, "Not found", "no such exhibit") from None
+    if facts.absent:
         raise Problem(404, "Not found", "no such exhibit")
-    return facts[0]
+    return facts.case_id
 
 
 # ---------------------------------------------------------------------------
@@ -1026,8 +1044,7 @@ def legal_hold(
     _meter_lift(request, response, conn, user, body.on)
     # The exhibit's own case, resolved from the row rather than taken on trust: without it a global
     # role could lift a court-ordered hold on any exhibit in the deployment and then purge it.
-    case_id = _own_evidence(conn, body.evidence_id)
-    _case_scoped(conn, user, case_id, "retention.manage")
+    case_id = _own_evidence(conn, user, body.evidence_id)
     approver = None
     if not body.on:
         _lift_within_reach(conn, user, case_id, body.evidence_id)
@@ -1069,8 +1086,7 @@ def request_exhibit_lift(
         lift_exhibit_payload,
     )
 
-    case_id = _own_evidence(conn, body.evidence_id)
-    _case_scoped(conn, user, case_id, "retention.manage")
+    case_id = _own_evidence(conn, user, body.evidence_id)
     facts = _lift_within_reach(conn, user, case_id, body.evidence_id)
     held = sconn.execute(
         """SELECT legal_hold, legal_hold_epoch FROM core.evidence

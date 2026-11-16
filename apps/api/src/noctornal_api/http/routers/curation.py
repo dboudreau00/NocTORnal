@@ -19,7 +19,6 @@ from noctornal_api.curation import CurationError, NodeSetService, TagService
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
-    element_labels,
     get_conn,
     require,
     user_ceiling,
@@ -27,6 +26,7 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.element_gate import (
     authorize_element,
     disclosure_mode,
+    facts_or_phantom,
     withheld_notice,
 )
 from noctornal_api.http.errors import Problem, safe_detail
@@ -114,24 +114,27 @@ def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
                     node_id: UUID, *, require_live: bool = True) -> None:
     """Same-case check, then the five-part gate against the node's own labels, then liveness.
 
-    The order matters: a wrong case is a 404 first, so this is no oracle for another case; the gate
-    is re-run at the node's labels because a RED node can live in an AMBER case (deps.py rule 1);
+    The order matters: a wrong case is the missing node's 404, gated at the phantom's labels as a
+    hidden node is at its own (decision 230), so this is no oracle for another case and costs what a
+    hidden node costs; the gate is re-run at the node's labels because a RED node can live in an
+    AMBER case (deps.py rule 1);
     liveness comes last, as a 409 for a soft-deleted node would confirm it to a caller not cleared
     to see it. `require_live=False` on the removal paths, so an overlay on a node later
     soft-deleted or merged away can still be cleared.
     """
-    # The element's case and labels as facts (`deps.element_labels`), so the gate below answers an
-    # element above the caller's labels with its AUTHZ_DENIED row and the missing element's 404,
-    # not a silent unrecorded 404 from row-level security. Content is read only after the gate.
-    facts = element_labels(conn, "node", node_id)
-    if facts is None or facts[0] != case_id:
-        raise Problem(404, "Not found", "no such node in this case")
+    # The element's case and labels as facts (`element_gate.facts_or_phantom`), so the gate below
+    # answers an element above the caller's labels with its AUTHZ_DENIED row and the missing
+    # element's 404, not a silent unrecorded 404 from row-level security, and an id that names
+    # nothing in the case with the same row and the same 404. Content is read only after the gate.
+    facts = facts_or_phantom(conn, "node", node_id, case_id=case_id)
     # A second gate: it counts a break-glass use only if the route's gate at the case's labels did
     # not. A refusal at the node's labels is the missing node's 404, its AUTHZ_DENIED row kept.
     authorize_element(conn, user, case_id=case_id,
                       permission_key="curation.manage",
-                      classification=facts[1], compartments=facts[2],
-                      missing_detail="no such node in this case")
+                      classification=facts.classification,
+                      compartments=facts.compartments,
+                      missing_detail="no such node in this case",
+                      absent=facts.absent)
     row = conn.execute(
         """SELECT case_id, classification, compartments, deleted_at, merged_into_id
              FROM core.node WHERE id = %s""",

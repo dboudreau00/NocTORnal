@@ -31,12 +31,16 @@ from noctornal_api.graph import (
 from noctornal_api.http.deps import (
     CurrentUser,
     check_writable_labels,
-    element_labels,
     get_conn,
     require,
     user_ceiling,
 )
-from noctornal_api.http.element_gate import authorize_element, gate_element
+from noctornal_api.http.element_gate import (
+    ElementFacts,
+    authorize_element,
+    facts_or_phantom,
+    gate_element,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.selectors import (
@@ -466,9 +470,10 @@ def _gate_endpoints(conn: psycopg.Connection, user: CurrentUser,
 # --- assertions on an existing element ----------------------------------
 
 
-def _element_labels(conn: psycopg.Connection, table: str,
-                    element_id: UUID) -> tuple[UUID, str, frozenset[str]] | None:
-    """The element's case and its own labels, for the gate.
+def _element_labels(conn: psycopg.Connection, table: str, element_id: UUID, *,
+                    case_id: UUID) -> ElementFacts:
+    """The element's case and its own labels, for the gate, or the phantom's for an id that names
+    nothing in the case.
 
     An element is protected by both its own labels and its case's (`deps.py` rule 1). This matters
     most on assertion writes: retracting an element's last live assertion dissolves it from every
@@ -477,10 +482,11 @@ def _element_labels(conn: psycopg.Connection, table: str,
     """
     if table not in ("node", "edge"):  # not `assert`: stripped under python -O, and this guards SQL text
         raise ValueError("refused identifier outside the allow-list")
-    # The element's case and labels as facts (`deps.element_labels`), so the gate still writes its
-    # AUTHZ_DENIED row for an element above the caller's labels rather than row-level security
-    # giving a silent 404; the answer is the missing element's 404. Content is read after the gate.
-    return element_labels(conn, table, element_id)
+    # The element's case and labels as facts (`element_gate.facts_or_phantom`), so the gate still
+    # writes its AUTHZ_DENIED row for an element above the caller's labels rather than row-level
+    # security giving a silent 404, and the same row for an id that names nothing in the case
+    # (decision 230); the answer is the missing element's 404. Content is read after the gate.
+    return facts_or_phantom(conn, table, element_id, case_id=case_id)
 
 
 def _gate_tie_endpoints(conn: psycopg.Connection, user: CurrentUser,
@@ -495,29 +501,30 @@ def _gate_tie_endpoints(conn: psycopg.Connection, user: CurrentUser,
         "SELECT src_node_id, dst_node_id FROM core.edge WHERE id = %s",
         (edge_id,)).fetchone()
     for node_id in ends or ():
-        facts = element_labels(conn, "node", node_id)
-        if facts is not None:
-            authorize_element(conn, user, case_id=case_id,
-                              permission_key=permission_key,
-                              classification=facts[1], compartments=facts[2],
-                              missing_detail="no such edge in this case")
+        facts = facts_or_phantom(conn, "node", node_id, case_id=case_id)
+        authorize_element(conn, user, case_id=case_id,
+                          permission_key=permission_key,
+                          classification=facts.classification,
+                          compartments=facts.compartments,
+                          missing_detail="no such edge in this case",
+                          absent=facts.absent)
 
 
 def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> IdOut:
     table = "node" if node_id else "edge"
-    found = _element_labels(conn, table, node_id or edge_id)
-    # The path's case_id is the one the gate authorised, so an element from
-    # another case must not be reachable through it.
-    if found is None or found[0] != case_id:
-        raise Problem(404, "Not found", f"no such {table} in this case")
+    # The path's case_id is the one the gate authorised, so an element from another case is the
+    # phantom, as a missing one is.
+    found = _element_labels(conn, table, node_id or edge_id, case_id=case_id)
     # Re-authorise against the element's labels, not just the case's: a RED node can live in an
     # AMBER case, and asserting about it is a write against the node. This second gate counts a
     # break-glass use only if the route's did not. A refusal is the missing element's 404, its
     # AUTHZ_DENIED row kept.
     authorize_element(conn, user, case_id=case_id,
                       permission_key="assertion.create",
-                      classification=found[1], compartments=found[2],
-                      missing_detail=f"no such {table} in this case")
+                      classification=found.classification,
+                      compartments=found.compartments,
+                      missing_detail=f"no such {table} in this case",
+                      absent=found.absent)
     if edge_id is not None:
         _gate_tie_endpoints(conn, user, case_id, edge_id, "assertion.create")
     _check_evidence(conn, case_id, body.evidence_id)
@@ -564,21 +571,21 @@ def retract_assertion(
     leg (`retracted_at IS NULL AND superseded_at IS NULL`) has no as-of term.
     """
     from fastapi import Response
-    # The element's case and labels as facts (`deps.element_labels`), so the gate still writes its
-    # AUTHZ_DENIED row for an element above the caller's labels rather than row-level security
-    # giving a silent 404; the answer is the missing element's 404. Content is read after the gate.
-    subject = element_labels(conn, "assertion", assertion_id)
-    if subject is None or subject[0] != case_id:
-        raise Problem(404, "Not found", "no such assertion in this case")
+    # The element's case and labels as facts (`element_gate.facts_or_phantom`), so the gate still
+    # writes its AUTHZ_DENIED row for an element above the caller's labels rather than row-level
+    # security giving a silent 404, and the same row for an id that names nothing in the case
+    # (decision 230); the answer is the missing element's 404. Content is read after the gate.
+    subject = facts_or_phantom(conn, "assertion", assertion_id, case_id=case_id)
     # The element's own labels gate the retraction (the assertion's facts are its subject's
     # labels): retracting the last live assertion dissolves the element from every projection, so a
     # caller must be able to see what they destroy. A refusal is the missing claim's 404, its
     # AUTHZ_DENIED row kept.
-    if subject is not None:
-        authorize_element(conn, user, case_id=case_id,
-                          permission_key="assertion.retract",
-                          classification=subject[1], compartments=subject[2],
-                          missing_detail="no such assertion in this case")
+    authorize_element(conn, user, case_id=case_id,
+                      permission_key="assertion.retract",
+                      classification=subject.classification,
+                      compartments=subject.compartments,
+                      missing_detail="no such assertion in this case",
+                      absent=subject.absent)
     try:
         restoration = GraphWriteService(conn).retract_assertion(
             assertion_id, retracted_by=user.user_id, reason=body.reason,
@@ -621,17 +628,18 @@ def supersede_assertion(
     instead. Gated on `assertion.retract` and `assertion.create` at the element's labels; the state
     refusals come after the gates, so a caller who may not see the claim is told nothing about it.
     """
-    subject = element_labels(conn, "assertion", assertion_id)
-    if subject is None or subject[0] != case_id:
-        raise Problem(404, "Not found", "no such assertion in this case")
-    # A refusal at the claim's labels is the missing claim's 404, its AUTHZ_DENIED row kept. The
+    subject = facts_or_phantom(conn, "assertion", assertion_id, case_id=case_id)
+    # A refusal at the claim's labels (or the phantom's, for an id that names nothing in the case)
+    # is the missing claim's 404, its AUTHZ_DENIED row kept. The
     # route's gate names assertion.retract only, so assertion.create is first asked at the case's
     # labels, and a caller without it still gets the gate's 403.
     for permission in ("assertion.retract", "assertion.create"):
         authorize_element(conn, user, case_id=case_id, permission_key=permission,
-                          classification=subject[1], compartments=subject[2],
+                          classification=subject.classification,
+                          compartments=subject.compartments,
                           missing_detail="no such assertion in this case",
-                          case_gated=permission == "assertion.retract")
+                          case_gated=permission == "assertion.retract",
+                          absent=subject.absent)
     # An offset is required, as `expires_at` on a grant requires one: a
     # naive time would be read in the database's zone, and this is the
     # instant First seen and Last seen are drawn from.
@@ -695,7 +703,9 @@ def _gate_for_change(
     element's current values.
 
     The order is the point: an element from another case gets the same 404 as a missing one, so ids
-    cannot be enumerated; only then do the element's own labels reach the gate; and the retired
+    cannot be enumerated, and both are gated at the phantom's labels as a hidden element is at its
+    own, so the three cost the same and write the same AUTHZ_DENIED row (decision 230); only then
+    do the element's own labels reach the gate; and the retired
     check comes after the gate so it leaks no state. Call this outside the write transaction: a
     denial appends an AUTHZ_DENIED row and raises, and inside the transaction that row would roll
     back. The cost is a TOCTOU window, where the service's `deleted_at IS NULL` clause gives a 400
@@ -703,18 +713,19 @@ def _gate_for_change(
     """
     if table not in _BEFORE_COLUMNS:  # not `assert`: stripped under python -O, and this guards SQL text
         raise ValueError("refused identifier outside the allow-list")
-    # The element's case and labels as facts (`deps.element_labels`), so the gate still writes its
-    # AUTHZ_DENIED row for an element above the caller's labels rather than row-level security
-    # giving a silent 404; the answer is the missing element's 404. Content is read after the gate.
-    facts = element_labels(conn, table, element_id)
-    if facts is None or facts[0] != case_id:
-        raise Problem(404, "Not found", f"no such {table} in this case")
+    # The element's case and labels as facts (`element_gate.facts_or_phantom`), so the gate still
+    # writes its AUTHZ_DENIED row for an element above the caller's labels rather than row-level
+    # security giving a silent 404, and the same row for an id that names nothing in the case; the
+    # answer is the missing element's 404. Content is read after the gate.
+    facts = facts_or_phantom(conn, table, element_id, case_id=case_id)
     # A refusal at the element's labels is the missing element's 404, its AUTHZ_DENIED row kept: a
     # 403 would tell a caller holding a leaked id that it names something in the case.
     authorize_element(conn, user, case_id=case_id,
                       permission_key=permission_key,
-                      classification=facts[1], compartments=facts[2],
-                      missing_detail=f"no such {table} in this case")
+                      classification=facts.classification,
+                      compartments=facts.compartments,
+                      missing_detail=f"no such {table} in this case",
+                      absent=facts.absent)
     if table == "edge":
         _gate_tie_endpoints(conn, user, case_id, element_id, permission_key)
     row = conn.execute(

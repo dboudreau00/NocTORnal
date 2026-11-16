@@ -36,14 +36,13 @@ from noctornal_api.http.deps import (
     counted_at_case_gate,
     current_user,
     effective_labels,
-    element_labels,
     get_conn,
     holds_global,
     require,
     user_ceiling,
 )
 from noctornal_api.http.body_ceiling import credential_in_body
-from noctornal_api.http.element_gate import authorize_element
+from noctornal_api.http.element_gate import authorize_element, facts_or_phantom
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 # The Lab's own door policy for the sample origin, shared by the exhibit production so that origin
@@ -95,22 +94,21 @@ def _authorize_exhibit(
     """Authorize an exhibit, deciding access before revealing existence.
 
     A caller who fails the case gate gets the same 403 whether or not the exhibit id is real. Once
-    it passes, a missing row is a 404, and the exhibit's own labels apply on top; an exhibit above
-    the caller's labels answers as a missing one, the same 404 and sentence
-    (`element_gate.authorize_element`), with its AUTHZ_DENIED row still written.
+    it passes, the exhibit's own labels apply on top; an exhibit above the caller's labels answers
+    as a missing one, the same 404 and sentence (`element_gate.authorize_element`), with its
+    AUTHZ_DENIED row still written, and an id that names no exhibit of the case is gated at the
+    phantom's labels, so it costs and records the same (decision 230).
     """
     authorize_object(conn, user, case_id=case_id, permission_key=permission_key)
-    # The element's case and labels as facts (`deps.element_labels`), so the gate below decides,
-    # and audits, an element above the caller's labels rather than row-level security hiding it.
-    # Content is read only after the gate.
-    facts = element_labels(conn, "evidence", evidence_id)
-    if facts is None or facts[0] != case_id:
-        raise Problem(404, "Not found", EXHIBIT_MISSING)
-    row = (facts[1], facts[2])
+    # The element's case and labels as facts (`element_gate.facts_or_phantom`), so the gate below
+    # decides, and audits, an element above the caller's labels rather than row-level security
+    # hiding it. Content is read only after the gate.
+    facts = facts_or_phantom(conn, "evidence", evidence_id, case_id=case_id)
     # The second gate: one open is one use of a break-glass grant, not one per gate.
     authorize_element(conn, user, case_id=case_id, permission_key=permission_key,
-                      classification=row[0], compartments=frozenset(row[1] or []),
-                      missing_detail=EXHIBIT_MISSING)
+                      classification=facts.classification,
+                      compartments=facts.compartments,
+                      missing_detail=EXHIBIT_MISSING, absent=facts.absent)
 
 
 #: What a stale sign-in is told when it is the ONLY thing between a caller
@@ -154,22 +152,22 @@ def _authorize_export(conn: psycopg.Connection, user: CurrentUser,
                          classification=classification, compartments=compartments)
 
     gate()
-    # The element's case and labels as facts (`deps.element_labels`), so the gate below decides,
-    # and audits, an element above the caller's labels. Content is read only after the gate.
-    facts = element_labels(conn, "evidence", evidence_id)
-    if facts is None or facts[0] != case_id:
-        raise Problem(404, "Not found", EXHIBIT_MISSING)
-    row = (facts[1], facts[2])
+    # The element's case and labels as facts (`element_gate.facts_or_phantom`), so the gate below
+    # decides, and audits, an element above the caller's labels, and an id that names no exhibit of
+    # the case at the phantom's labels (decision 230). Content is read only after the gate.
+    facts = facts_or_phantom(conn, "evidence", evidence_id, case_id=case_id)
     # The case's gate has passed, step-up included, so a refusal here is the
     # exhibit's labels: answered as a missing exhibit, as `_authorize_exhibit`
     # answers it.
     try:
-        gate(row[0], frozenset(row[1] or []),
+        gate(facts.classification, facts.compartments,
              count_use=not counted_at_case_gate(conn, user, case_id))
     except Problem as exc:
         if exc.status != 403:
             raise
         raise Problem(404, "Not found", EXHIBIT_MISSING) from None
+    if facts.absent:
+        raise Problem(404, "Not found", EXHIBIT_MISSING)
 
 
 #: Why a hostile exhibit's bytes are refused here, in the words the console shows beside it; the

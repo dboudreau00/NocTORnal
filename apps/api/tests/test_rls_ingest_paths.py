@@ -76,9 +76,10 @@ def test_the_retention_counts_read_on_the_system_connection():
 
 
 def test_the_gate_reads_a_record_and_a_batch_as_facts():
-    own = _function("http/routers/ingest.py", "_own_record")
-    assert "iam.ingest_record_facts(" in own
-    assert not re.search(r"FROM ingest\.record", own)
+    facts = _function("http/routers/ingest.py", "_record_facts")
+    assert "iam.ingest_record_facts(" in facts
+    assert not re.search(r"FROM ingest\.record", facts)
+    assert "_record_facts(" in _function("http/routers/ingest.py", "_own_record")
     for fn in ("dead_letters", "_dead_letter_reach"):
         code = _function("http/routers/ingest.py", fn)
         assert "iam.ingest_batch_reach(" in code, fn

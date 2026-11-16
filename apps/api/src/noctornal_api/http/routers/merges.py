@@ -10,7 +10,7 @@ mistake is how mistakes stay in a case file.
 from __future__ import annotations
 
 from dataclasses import replace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from fastapi import APIRouter, Depends, Query
@@ -299,6 +299,11 @@ def reverse(
     """Restore every edge's original endpoints and clear the redirect."""
     record = MergeService(sconn).get(merge_id)
     if record is None or record.case_id != case_id:
+        # A merge id that names nothing in the case meets the gate a hidden merge meets at its
+        # source: one entity, at the phantom's labels (decision 230), so it costs and records what
+        # a hidden one does. An id that names nothing names no entity either.
+        _gate_merge_nodes(conn, user, case_id, "graph.unmerge", (uuid4(),),
+                          "no such merge in this case")
         raise Problem(404, "Not found", "no such merge in this case")
     # Its two entities at their own labels, so a reader below either cannot reverse a merge they
     # cannot see; the same 404 as no merge at all.

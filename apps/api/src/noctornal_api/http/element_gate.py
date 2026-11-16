@@ -1,10 +1,13 @@
-"""One answer for a hidden element and a missing one, and a withheld count said only as the
-case allows.
+"""One answer and one cost for a hidden element and a missing one, and a withheld count said only
+as the case allows.
 
 `authorize_element` keeps the gate's decision and its AUTHZ_DENIED row but answers a refusal
 caused by the element's labels with the element's own 404, so a leaked id cannot confirm that
 it names something the caller is not cleared for (as `routers/ingest._authorise_record` does
-for records). `gate_element` is the whole check for a route that names an element in its
+for records). An id that names nothing in the case meets the same gate (decision 230):
+`facts_or_phantom` gives it the phantom's labels, which no caller can hold, so it runs the reads
+a hidden element runs and writes the AUTHZ_DENIED row a hidden element writes, and the refusal
+is the same 404. `gate_element` is the whole check for a route that names an element in its
 body: same case, the gate at the element's own labels, one 404. `withheld_notice` applies the
 graph's rule (`projections.Withheld`, migration 0030) to any count: NONE says nothing,
 PRESENCE says whether, COUNT says how many. The gate is not forked: every decision here is
@@ -12,6 +15,7 @@ PRESENCE says whether, COUNT says how many. The gate is not forked: every decisi
 """
 from __future__ import annotations
 
+from typing import NamedTuple
 from uuid import UUID
 
 import psycopg
@@ -29,11 +33,52 @@ from noctornal_api.projections import (
 )
 from noctornal_api.selectors import SelectorStore
 
+#: The labels an id that names nothing is gated at (decision 230): the top classification and a
+#: compartment nobody can be read into. A compartment key must match `^[A-Z0-9_-]{2,32}$`
+#: (`iam_admin.COMPARTMENT_KEY`, 0057) and every column that holds keys is bound to the registry
+#: (0059), so `~absent` can be neither registered nor held, and the gate refuses it to every
+#: caller, a RED one and one under a break-glass grant included. Its failed checks are the ones a
+#: hidden element above the caller fails: `tlp_clearance_dominates` and `compartments_subset`
+#: below RED, `compartments_subset` alone at RED.
+ABSENT_CLASSIFICATION = "RED"
+ABSENT_COMPARTMENT = "~absent"
+ABSENT_COMPARTMENTS: frozenset[str] = frozenset({ABSENT_COMPARTMENT})
+
+
+class ElementFacts(NamedTuple):
+    """An element's case and labels as the gate reads them. `absent` marks the phantom an id that
+    names nothing is given, which no gate may let through."""
+    case_id: UUID | None
+    classification: str
+    compartments: frozenset[str]
+    absent: bool = False
+
+
+def phantom(case_id: UUID | None) -> ElementFacts:
+    """The facts of an id that names nothing: the labels above, in `case_id`."""
+    return ElementFacts(case_id, ABSENT_CLASSIFICATION, ABSENT_COMPARTMENTS, True)
+
+
+def facts_or_phantom(conn: psycopg.Connection, kind: str, element_id: UUID, *,
+                     case_id: UUID | None) -> ElementFacts:
+    """The element's case and labels, read as facts (`deps.element_labels`), or the phantom for an
+    id that names nothing in `case_id`.
+
+    The one read a hidden element's refusal makes, so an id that is missing, in another case or
+    above the caller goes on to the same gate, which refuses the phantom as it refuses a hidden
+    element, with the same AUTHZ_DENIED row. `case_id` is the route's own case, which the element
+    must be in; None only on a route that takes its case from the element (`authorize_case_of`).
+    Labels only: content is read after the gate."""
+    facts = element_labels(conn, kind, element_id)
+    if facts is None or (case_id is not None and facts[0] != case_id):
+        return phantom(case_id)
+    return ElementFacts(facts[0], facts[1], facts[2])
+
 
 def authorize_element(
     conn: psycopg.Connection, user: CurrentUser, *, case_id: UUID,
     permission_key: str, classification: str, compartments: frozenset[str],
-    missing_detail: str, case_gated: bool = True,
+    missing_detail: str, case_gated: bool = True, absent: bool = False,
 ) -> None:
     """The gate at an element's own labels, after the case's, with a label refusal answered as
     the element's absence.
@@ -42,7 +87,9 @@ def authorize_element(
     the case's labels. When it has not, the case-level decision is asked first, so a caller who
     lacks the verb outright still gets the gate's 403 whether or not the element exists. Only a
     403 caused by the element's labels is turned into the 404: a stale sign-in cannot reach
-    here, and a read-only case's 409 tells a caller nothing the case gate did not."""
+    here, and a read-only case's 409 tells a caller nothing the case gate did not. `absent` is
+    `ElementFacts.absent`: the phantom is refused by the gate, and is refused here as well should
+    the gate ever let it through, so an id that names nothing never reaches a write."""
     if not case_gated:
         authorize_object(conn, user, case_id=case_id,
                          permission_key=permission_key, after_case_gate=True,
@@ -56,6 +103,8 @@ def authorize_element(
         if exc.status != 403:
             raise
         raise Problem(404, "Not found", missing_detail) from None
+    if absent:
+        raise Problem(404, "Not found", missing_detail)
 
 
 def gate_element(
@@ -65,22 +114,21 @@ def gate_element(
 ) -> tuple[str, frozenset[str]]:
     """Same case, then the gate at the element's own labels, one 404 for an
     element that is missing, in another case or above the caller. Returns
-    the element's (classification, compartments)."""
-    facts = element_labels(conn, kind, element_id)
-    if facts is None or facts[0] != case_id:
-        if not case_gated:
-            # The verb first, as `authorize_element` asks it, so a missing
-            # element and a present one get the same answer from a caller
-            # who lacks the verb.
-            authorize_object(conn, user, case_id=case_id,
-                             permission_key=permission_key,
-                             after_case_gate=True, count_use=False)
-        raise Problem(404, "Not found", missing_detail)
+    the element's (classification, compartments).
+
+    An id that names nothing in the case is gated at the phantom's labels
+    (`facts_or_phantom`), so it costs what a hidden element costs and writes
+    the same AUTHZ_DENIED row (decision 230). The verb is still asked first
+    when the route's own gate did not ask it, so a caller who lacks the verb
+    gets the same 403 for a missing element and a present one."""
+    facts = facts_or_phantom(conn, kind, element_id, case_id=case_id)
     authorize_element(conn, user, case_id=case_id,
-                      permission_key=permission_key, classification=facts[1],
-                      compartments=facts[2], missing_detail=missing_detail,
-                      case_gated=case_gated)
-    return facts[1], facts[2]
+                      permission_key=permission_key,
+                      classification=facts.classification,
+                      compartments=facts.compartments,
+                      missing_detail=missing_detail, case_gated=case_gated,
+                      absent=facts.absent)
+    return facts.classification, facts.compartments
 
 
 #: One sentence for a selector id that is missing, in another case or above
