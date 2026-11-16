@@ -3,8 +3,10 @@
 The endpoints are thin; the reasoning is in `ach.py`, which is pure so the scoring can be tested
 against hand-computed values. Evidence in the matrix is an assertion, never free text, so every
 cell inherits the Admiralty grading, the source and the retraction status of what it rests on,
-and a retracted assertion leaves the matrix (decision 24). GET returns, beside the scores, each
-hypothesis's stable number (its place in the order written, over every status), status, last
+and a retracted assertion leaves the matrix (decision 24). An assertion that a dated copy replaced
+stays as a stale row: its stances are kept and shown, nothing scores them, and a new stance goes on
+the claim that replaced it (docs/17, the ACH rule for a replaced claim). GET returns, beside the
+scores, each hypothesis's stable number (its place in the order written, over every status), status, last
 status note and confidence; each row's claim, grade and weight; and each cell's note with its
 author, time and the notes it replaced. Notes are versioned in the audit trail, whose `detail`
 the audit listing (`routers/audit.py`) never returns, so this widens no officer's view of case
@@ -101,11 +103,11 @@ def matrix(
                if include_rejected else [])
     shown = {h for h, _ in live} | {h for h, _ in retired}
 
-    # Only live assertions, since a retracted source must not leave its conclusion standing
-    # (decision 24), and only about what this caller may see, or labels above their ceiling
-    # would leak and move the scores. `ach_cells` is the one filter the report reads the matrix
-    # through too. The case is passed so a break-glass grant on it raises the ceiling here as on
-    # the graph.
+    # No retracted assertion, since a retracted source must not leave its conclusion standing
+    # (decision 24); a replaced one comes back marked stale and `score` counts it nowhere. Only
+    # about what this caller may see, or labels above their ceiling would leak and move the
+    # scores. `ach_cells` is the one filter the report reads the matrix through too. The case is
+    # passed so a break-glass grant on it raises the ceiling here as on the graph.
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     cells = [c for c in ach_cells(conn, case_id, clearance=clearance.name,
                                   compartments=compartments)
@@ -117,7 +119,7 @@ def matrix(
         if item is None:
             item = EvidenceItem(assertion_id=cell.assertion_id, label=cell.label,
                                 reliability=cell.reliability,
-                                credibility=cell.credibility)
+                                credibility=cell.credibility, stale=cell.stale)
             by_assertion[cell.assertion_id] = item
         item.stances[cell.hypothesis_id] = cell.stance
 
@@ -152,7 +154,7 @@ def matrix(
         body["cells"].append({
             "assertion_id": str(c.assertion_id),
             "hypothesis_id": str(c.hypothesis_id), "stance": c.stance,
-            "note": c.note,
+            "stale": c.stale, "note": c.note,
             "note_by_name": trail.by if c.note else None,
             "note_at": trail.at if c.note else None,
             "scored_by_name": trail.scored_by, "scored_at": trail.scored_at,
@@ -330,15 +332,23 @@ def set_stance(
         (hypothesis_id, case_id)).fetchone()
     if owned is None:
         raise Problem(404, "Not found", "no such hypothesis in this case")
-    live = conn.execute(
-        """SELECT 1 FROM core.assertion a
-            WHERE a.id = %s AND a.case_id = %s AND a.retracted_at IS NULL
+    claim = conn.execute(
+        """SELECT a.retracted_at IS NOT NULL, a.superseded_at IS NOT NULL
+             FROM core.assertion a
+            WHERE a.id = %s AND a.case_id = %s
               AND """ + _CLAIM_TIE_ENDS_SEEN,
         (body.assertion_id, case_id)).fetchone()
-    if live is None:
+    if claim is None or claim[0]:
         raise Problem(404, "Not found",
                       "no such live assertion in this case; a retracted "
                       "assertion cannot support a conclusion")
+    if claim[1]:
+        # History, as `supersede_assertion` calls it. Its stances stay and show stale; the
+        # replacement is the claim that takes a new one.
+        raise Problem(409, "Conflict",
+                      "that claim has been replaced by a dated one, so it takes no new "
+                      "stance and its old ones no longer score. Score the claim that "
+                      "replaced it")
     prior = conn.execute(
         """SELECT stance, note FROM core.hypothesis_evidence
             WHERE hypothesis_id = %s AND assertion_id = %s FOR UPDATE""",

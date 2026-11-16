@@ -42,8 +42,10 @@ Violating any of these is a bug even if tests pass.
    `assertion`: a claim's own columns are never written again. The one
    exception is that a retraction is a *marked row*, not a supersession.
    `retract_assertion` stamps `retracted_at`, `retracted_by` and
-   `retraction_reason` once, from NULL (`WHERE retracted_at IS NULL`; zero
-   rows is an error), and the projection drops the row. There is nothing to
+   `retraction_reason` once, from NULL (`WHERE retracted_at IS NULL AND
+   superseded_at IS NULL`; zero rows is an error, and a claim a dated copy has
+   replaced is history, so the claim that replaced it is the one to retract),
+   and the projection drops the row. There is nothing to
    supersede it with, a retraction withdraws a claim rather than replacing
    one. A correction is a new assertion. `superseded_at`/`superseded_by`
    exist (0007) and the read side honours them. One code path writes them: a

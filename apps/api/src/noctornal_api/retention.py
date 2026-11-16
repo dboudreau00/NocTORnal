@@ -360,12 +360,15 @@ class PurgeResult:
 
 #: (foreign key, SELECT document_id, case_id, pins). `pins` is true for a
 #: citation that pins the document whatever the holds say: an assertion that
-#: has not been retracted (docs/04, "documents supporting an accepted
-#: assertion are pinned regardless of retention"). A retracted or
-#: superseded assertion still cites for the case hold. APPEND-ONLY, marked.
+#: is live, neither retracted nor replaced by a dated copy (docs/04,
+#: "documents supporting an accepted assertion are pinned regardless of
+#: retention"). The copy cites the same document, so it pins it while it
+#: stands. A retracted or superseded assertion still cites for the case
+#: hold. APPEND-ONLY, marked.
 DOCUMENT_CITATIONS: tuple[tuple[str, str], ...] = (
     ("core.assertion.document_id",
-     "SELECT a.document_id, a.case_id, a.retracted_at IS NULL "
+     "SELECT a.document_id, a.case_id, "
+     "a.retracted_at IS NULL AND a.superseded_at IS NULL "
      "FROM core.assertion a WHERE a.document_id IS NOT NULL"),
     ("collect.proposal.document_id",
      "SELECT p.document_id, p.case_id, false "

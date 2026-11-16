@@ -8,11 +8,19 @@ hypotheses, zero when identical everywhere, so evidence consistent with every hy
 and the evidence that would settle the question rises. Each stance is weighted by the Admiralty
 grading of its assertion, the product of two 0..1 ramps over reliability (A..F) and credibility
 (1..6), floored above zero so the worst source is discounted, never deleted.
+
+A stance rests on a claim. A claim that was retracted leaves the matrix (decision 24). A claim that was
+replaced by a dated copy (`supersede_assertion`) is history too, but its stance is kept and shown: the row
+is `stale`, counts in no score and fills no gap, and the analyst scores the replacing claim to bring the
+evidence back. A stance is a judgement about a claim as recorded, and the copy carries a new date and a new
+rationale, so nothing moves a stance onto it.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from uuid import UUID
+
+from noctornal_api.wording import agree, count_of
 
 # Heuer's stance scale, as stored in core.hypothesis_evidence.stance.
 STRONGLY_INCONSISTENT = -2
@@ -58,6 +66,9 @@ class EvidenceItem:
     credibility: str | None
     #: hypothesis id -> stance in -2..2
     stances: dict[UUID, int] = field(default_factory=dict)
+    #: The claim behind the row was replaced. The row is kept and shown, and scored nowhere: `score`
+    #: takes it out before it counts anything.
+    stale: bool = False
 
     @property
     def weight(self) -> float:
@@ -140,6 +151,9 @@ class Matrix:
     #: Ruled-out hypotheses, scored the same way for the record and kept
     #: out of `hypotheses`, the ranking, the warnings and the next test.
     retired: list[HypothesisScore] = field(default_factory=list)
+    #: The rows whose claim was replaced, as they came in. In no score, no ranking and no warning but
+    #: their own.
+    stale: list[EvidenceItem] = field(default_factory=list)
 
 
 def _of_items(k: int, total: int) -> str:
@@ -151,6 +165,18 @@ def _of_items(k: int, total: int) -> str:
     if k == total:
         return "Both items" if total == 2 else f"All {total} items"
     return f"{k} of {total} items"
+
+
+def _stale_warning(n: int) -> list[str]:
+    """The one sentence about rows that rest on a replaced claim, or nothing when there are none."""
+    if not n:
+        return []
+    return [
+        f"{count_of(n, 'item', 'items')} of evidence {agree(n, 'rests', 'rest')} on "
+        f"{agree(n, 'a claim that has', 'claims that have')} since been replaced. "
+        f"{agree(n, 'It is', 'They are')} kept in the record, shown as stale and left out of every "
+        f"score. Score the {agree(n, 'claim', 'claims')} that replaced {agree(n, 'it', 'them')} "
+        f"to bring the evidence back."]
 
 
 def _sums(hid: UUID, statement: str, evidence: list[EvidenceItem],
@@ -188,7 +214,13 @@ def score(hypotheses: list[tuple[UUID, str]],
 
     `hypotheses` are the live competitors. `retired` are the ones ruled out
     (REJECTED, SUPERSEDED): scored with the same sums for the record, never
-    ranked, and never counted when asking whether a row is finished."""
+    ranked, and never counted when asking whether a row is finished.
+
+    An item whose claim was replaced (`stale`) is taken out first: it adds to no sum, assesses no
+    hypothesis, leaves no row unfinished and is never the next test. It is returned in `Matrix.stale`,
+    and one warning says how many."""
+    stale = [item for item in evidence if item.stale]
+    evidence = [item for item in evidence if not item.stale]
     warnings: list[str] = []
     diagnosticity = [_diagnosticity(item, hypotheses) for item in evidence]
     flat = {d.assertion_id for d in diagnosticity
@@ -202,8 +234,8 @@ def score(hypotheses: list[tuple[UUID, str]],
         # ruled each one out. With no live hypothesis every row reads unfinished at 0 and none is a
         # next test, so the one warning below is the whole story.
         return Matrix([], sorted(diagnosticity, key=lambda d: -d.score), None, None,
-                      ["No hypotheses. ACH needs at least two."],
-                      retired=ruled_out)
+                      ["No hypotheses. ACH needs at least two.", *_stale_warning(len(stale))],
+                      retired=ruled_out, stale=stale)
     if len(hypotheses) == 1:
         warnings.append(
             "Only one hypothesis. ACH needs at least two: add the "
@@ -282,10 +314,12 @@ def score(hypotheses: list[tuple[UUID, str]],
                    for item in evidence)]
     refute_first = max(gaps, key=lambda d: d.score).assertion_id if gaps else None
 
+    warnings.extend(_stale_warning(len(stale)))
+
     return Matrix(hypotheses=ranked, evidence=sorted(
         diagnosticity, key=lambda d: -d.score),
         least_inconsistent=least, refute_first=refute_first, warnings=warnings,
-        retired=ruled_out)
+        retired=ruled_out, stale=stale)
 
 
 def _diagnosticity(item: EvidenceItem,
@@ -334,8 +368,15 @@ def as_response(matrix: Matrix) -> dict:
              # things: one is a judgement about the evidence, the other is
              # a gap in the matrix.
              "is_incomplete": d.is_incomplete,
-             "spread": d.spread, "weight": d.weight}
-            for d in matrix.evidence],
+             "spread": d.spread, "weight": d.weight, "stale": False}
+            for d in matrix.evidence] + [
+            # A replaced claim's row, after the scored ones: kept and shown, and every number on it
+            # zero, because none of it counted. `is_incomplete` is False so the pane does not ask for
+            # a score the row can no longer take.
+            {"assertion_id": str(item.assertion_id), "label": item.label,
+             "diagnosticity": 0.0, "is_diagnostic": False, "assessed_against": 0,
+             "is_incomplete": False, "spread": 0, "weight": item.weight, "stale": True}
+            for item in matrix.stale],
         "least_inconsistent": (str(matrix.least_inconsistent)
                                if matrix.least_inconsistent else None),
         "refute_first": (str(matrix.refute_first)

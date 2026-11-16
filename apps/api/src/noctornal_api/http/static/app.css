@@ -2218,6 +2218,13 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 }
 .row-incomplete .ach-diag { color: var(--alert); }
 
+/* A row whose claim a dated copy replaced. Its stances are kept and read, and count nowhere, so
+   the row is dimmed like one that settles nothing, with a dashed rule where an unfinished row has
+   a solid one: not work to do, and not a verdict either. The cells are text, not buttons. */
+.row-stale { opacity: 0.6; border-left: 2px dashed var(--text-tertiary); }
+.row-stale .ach-el-name { text-decoration: line-through; }
+.ach-cell-text { display: block; padding: 5px 8px; text-align: center; cursor: help; }
+
 /* ── Brand mark ─────────────────────────────────────────────────────────
  * The SVG takes `currentColor` for its network and the accent for the crescent, so one file
  * serves the header and the login card. The favicon is a separate file, with what does not

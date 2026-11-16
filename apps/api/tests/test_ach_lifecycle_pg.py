@@ -467,3 +467,46 @@ def test_a_tie_row_marks_the_report_with_both_its_ends(conn, client):
     for report in (build("GREEN", frozenset({key})), build("AMBER")):
         assert "Amber end of the tie" not in render_markdown(report)
         assert report.redaction.built_at_tlp == "GREEN"
+
+
+# --- dating a claim: its stances wait for the claim that replaced it -----------
+
+def test_dating_a_claim_leaves_its_stances_stale_and_the_replacement_takes_the_next_one(
+        conn, client):
+    """The whole route, under the request role: date the claim a stance rests on, and the stance stays,
+    stale and unscored, with its note; the old claim takes no new stance and is not retracted; the
+    claim that replaced it takes the stance, and that one scores."""
+    owner, auth, case_id, aid, h1, h2 = _setup(conn, client)
+    _put(client, auth, case_id, h1, aid, -2, note="posts from two time zones")
+    _put(client, auth, case_id, h2, aid, 2)
+    scored = {h["id"]: h["inconsistency"] for h in _get(client, auth, case_id)["hypotheses"]}
+    assert scored[h1] > 0
+
+    r = client.post(f"/api/v1/cases/{case_id}/assertions/{aid}/supersede",
+                    json={"observed_at": "2026-03-01T22:30:00Z",
+                          "rationale": "Dated from the post's own timestamp."},
+                    headers=auth)
+    assert r.status_code == 201, r.text
+    new_id = r.json()["id"]
+
+    body = _get(client, auth, case_id)
+    assert [h["inconsistency"] for h in body["hypotheses"]] == [0.0, 0.0]
+    assert {e["assertion_id"]: e["stale"] for e in body["evidence"]} == {str(aid): True}
+    old = _cell(body, h1, aid)
+    assert (old["stale"], old["stance"], old["note"]) == (True, -2, "posts from two time zones")
+    assert any("replaced" in w for w in body["warnings"])
+
+    refused = client.put(f"/api/v1/cases/{case_id}/ach/hypotheses/{h1}/stance",
+                         json={"assertion_id": str(aid), "stance": 1}, headers=auth)
+    assert refused.status_code == 409 and "replaced" in refused.json()["detail"]
+    gone = client.post(f"/api/v1/cases/{case_id}/assertions/{aid}/retract",
+                       json={"reason": "wrong claim"}, headers=auth)
+    assert gone.status_code == 409 and "replaced" in gone.json()["detail"]
+    assert conn.execute("SELECT retracted_at FROM core.assertion WHERE id = %s",
+                        (aid,)).fetchone()[0] is None
+
+    _put(client, auth, case_id, h1, new_id, -2)
+    after = _get(client, auth, case_id)
+    assert {e["assertion_id"]: e["stale"] for e in after["evidence"]} == {
+        str(aid): True, new_id: False}
+    assert {h["id"]: h["inconsistency"] for h in after["hypotheses"]}[h1] > 0
