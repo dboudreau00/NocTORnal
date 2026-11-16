@@ -363,6 +363,14 @@ the caller and an id that names nothing are one 404 with one audit row
 (decision 230). The gate runs before anything is written, and before the
 lawful-basis sentence.
 
+A capture or a call is labelled at its own classification, never lower than its
+case, and not at the exhibits it cites, so whoever records it may cite an
+exhibit above the record. A reader cleared for the record and not for such an
+exhibit is given that field as null, as if nothing were cited, and the
+screenshot route gates its exhibit as the exhibit routes do: a hidden exhibit,
+another case's and a capture with no screenshot are one 404 with one audit row
+(decision 230).
+
 ### 3.4 Ontology: deliberately two additions, not twelve
 
 `CONVENTIONS.md` says ask before adding a node or edge type that duplicates an

@@ -839,12 +839,19 @@ class ContactBlockService:
                         evidence_id: UUID | None = None,
                         classification: str = "AMBER",
                         compartments: frozenset[str] = frozenset(),
-                        visible_case_ids: tuple[UUID, ...] = ()) -> dict:
+                        visible_case_ids: tuple[UUID, ...] = (),
+                        reader_ceiling: tuple[str, frozenset[str]] | None = None,
+                        ) -> dict:
         """Parse a block, store the reading, and raise proposals.
 
         Idempotent on `(case_id, raw_sha256)`: submitting the same artefact
         twice returns the first parse rather than creating a second, so a
         double-click does not double an actor's apparent co-declarations.
+
+        `reader_ceiling` is the caller's (clearance, compartments) on this case. The first parse is
+        handed back only when it is within it; one above it is answered as a duplicate with
+        `ALREADY_PARSED` and no field of its own (`hidden_duplicate`). Left out, the connection's
+        own view decides, which on a request connection is row security's answer.
         """
         if not (source_ref or "").strip():
             raise ContactBlockError(
@@ -892,13 +899,14 @@ class ContactBlockService:
                     """SELECT id FROM comms.contact_block
                         WHERE case_id = %s AND raw_sha256 = %s""",
                     (case_id, digest)).fetchone()
-                earlier = self.get(existing[0]) if existing else None
+                clearance, held = reader_ceiling or (None, frozenset())
+                earlier = (self.get(existing[0], clearance=clearance, compartments=held)
+                           if existing else None)
                 if earlier is None:
-                    # Parsed already in this case at labels the caller does not hold: row security
-                    # hides that block, and it is not handed back through this door.
-                    raise ContactBlockError(
-                        "this block has already been parsed in this case, at "
-                        "a label you do not hold")
+                    # Parsed already in this case at labels the caller does not hold. That block is
+                    # not handed back through this door, and the answer is a duplicate's: it names
+                    # no label, so it does not say the text is filed above the caller.
+                    return self.hidden_duplicate()
                 return {**earlier, "already_parsed": True}
             block_id = row[0]
 
@@ -959,6 +967,18 @@ class ContactBlockService:
                 "parser_version": PARSER_VERSION,
             })
         return self.get(block_id)
+
+    #: What a caller is told when the text was parsed in this case already, at labels they may not
+    #: see. A duplicate either way; whose it is and how it is labelled are not theirs.
+    ALREADY_PARSED = ("This block has already been parsed in this case, so it was not parsed "
+                      "again.")
+
+    @classmethod
+    def hidden_duplicate(cls) -> dict:
+        """The answer to a duplicate of a block the caller may not see: the shape a duplicate is
+        answered in, with no field of that block."""
+        return {"id": None, "already_parsed": True, "entries": [],
+                "co_declaration": [], "notice": cls.ALREADY_PARSED}
 
     def _require_same_case(self, case_id: UUID, table: str, what: str,
                            object_id: UUID | None) -> None:
@@ -1200,6 +1220,11 @@ class ContactBlockService:
         its publisher and source to any AMBER analyst holding `comms.read`. `clearance` is REQUIRED
         rather than defaulted: a caller who forgets an optional clearance argument becomes maximally
         privileged in silence (as with `SampleService.queue`).
+
+        A block can also be labelled below its publisher's entity, so that entity is named, and
+        counted as a publisher, only when it is at or below the same ceiling; otherwise the block
+        reads as one that names no entity, as `GET /contact-blocks/{id}` answers it
+        (`element_gate.withhold_cited`).
         """
         if clearance is None:
             raise ValueError(
@@ -1208,15 +1233,21 @@ class ContactBlockService:
                 "everything, which is how this method came to have no label "
                 "filter at all.")
         scope = list({case_id, *visible_case_ids})
+        held = list(compartments)
         rows = self._c.execute(
             """SELECT b.block_fingerprint,
                       count(DISTINCT b.id),
                       array_agg(DISTINCT coalesce(b.publisher_handle,
-                                                  b.publisher_identity_node_id::text,
+                                                  n.id::text,
                                                   '(unattributed)')),
                       array_agg(DISTINCT b.source_ref)
                  FROM comms.contact_block b
                  LEFT JOIN core."case" c ON c.id = b.case_id
+                 LEFT JOIN core.node n
+                        ON n.id = b.publisher_identity_node_id
+                       AND n.case_id = b.case_id
+                       AND n.classification <= %s::core.tlp
+                       AND n.compartments <@ %s::text[]
                 WHERE b.case_id = ANY(%s)
                   AND greatest(b.classification,
                                coalesce(c.classification, b.classification))
@@ -1225,9 +1256,9 @@ class ContactBlockService:
                        || coalesce(c.compartments, '{}')) <@ %s
                 GROUP BY b.block_fingerprint
                HAVING count(DISTINCT coalesce(
-                          b.publisher_identity_node_id::text,
+                          n.id::text,
                           lower(b.publisher_handle))) > 1""",
-            (scope, clearance, list(compartments))).fetchall()
+            (clearance, held, scope, clearance, held)).fetchall()
         return [
             {"block_fingerprint": r[0], "blocks": r[1],
              "publishers": sorted(r[2]), "sources": sorted(r[3]),

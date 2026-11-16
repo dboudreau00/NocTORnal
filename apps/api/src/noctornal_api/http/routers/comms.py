@@ -48,6 +48,7 @@ from noctornal_api.http.element_gate import (
     disclosure_mode,
     gate_element,
     withheld_notice,
+    withhold_cited,
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
@@ -312,6 +313,10 @@ def shared_devices(
 # Contact blocks
 # ---------------------------------------------------------------------------
 
+#: What a contact block cites, which can sit above the block's own labels.
+_BLOCK_CITES = {"evidence_id": "evidence", "publisher_identity_node_id": "node"}
+
+
 class ContactBlockBody(BaseModel):
     raw_text: str = Field(min_length=1)
     source_ref: str = Field(min_length=1)
@@ -338,17 +343,22 @@ def parse_contact_block(
     compartments = frozenset(body.compartments)
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=compartments)
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
     try:
-        return ContactBlockService(conn).parse_and_store(
+        block = ContactBlockService(conn).parse_and_store(
             case_id=case_id, raw_text=body.raw_text,
             source_ref=body.source_ref, created_by=user.user_id,
             publisher_handle=body.publisher_handle,
             publisher_identity_node_id=body.publisher_identity_node_id,
             document_id=body.document_id, evidence_id=body.evidence_id,
             classification=body.classification, compartments=compartments,
-            visible_case_ids=_visible_cases(conn, user, case_id))
+            visible_case_ids=_visible_cases(conn, user, case_id),
+            reader_ceiling=(clearance.name, held))
     except ContactBlockError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    # An earlier parse of the same text, handed back, can cite what this caller may not see.
+    withhold_cited(conn, user, case_id, [block], _BLOCK_CITES)
+    return block
 
 
 @router.get("/contact-blocks/{block_id}", response_model=dict)
@@ -366,6 +376,8 @@ def contact_block(
         block_id, clearance=clearance.name, compartments=compartments)
     if block is None or block["case_id"] != str(case_id):
         raise Problem(404, "Not found", "no such contact block")
+    # The block can be labelled below the exhibit and the entity it cites.
+    withhold_cited(conn, user, case_id, [block], _BLOCK_CITES)
     return block
 
 

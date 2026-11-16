@@ -480,12 +480,40 @@ def _audit_share_refused(conn: psycopg.Connection, user: CurrentUser,
 
     Sharing by address says, one address at a time, whether an active account uses it (404 or
     400), which cannot be hidden without making the Share dialog useless. So every refusal leaves
-    a trace, and a `case.grant` holder cannot walk a list of addresses unseen. Grants by id are
-    not recorded here: an id is not guessable, and the service's own refusal covers them.
+    a trace, and a `case.grant` holder cannot walk a list of addresses unseen. A grant by id that
+    the service refuses is recorded too (`_refuse_share`).
     """
     audit_auth_event(conn, "CASE_SHARE_REFUSED", user.user_id, case_id,
                      {"by": "email", "email": email.strip().lower(),
                       "reason": reason})
+
+
+#: What a refused grant is told, by address or by id. Neither names the colleague's clearance,
+#: their compartments or another case's assignment: an address can be guessed, and an id is on
+#: the roster of every case the colleague is on, so either would tell any `case.grant` holder
+#: those facts about anyone they can name.
+SHARE_REFUSED = {
+    "role_held_on_another_case": (
+        "that colleague cannot be given this role on this case. An "
+        "administrator can check their account."),
+    "labels": (
+        "that colleague could not open this case: their clearance is "
+        "below its classification, or they are not read into one of its "
+        "compartments. An administrator can check their account."),
+}
+
+
+def _refuse_share(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                  body: AssignUserBody, target: UUID, reason: str) -> Problem:
+    """The 400 for a grant the service refused, in the same words by address and by id, recorded
+    as CASE_SHARE_REFUSED with the colleague named as the request named them and the reason
+    alone."""
+    if body.email is not None:
+        _audit_share_refused(conn, user, case_id, body.email, reason)
+    else:
+        audit_auth_event(conn, "CASE_SHARE_REFUSED", user.user_id, case_id,
+                         {"by": "user_id", "user_id": str(target), "reason": reason})
+    return Problem(400, "Invalid request", SHARE_REFUSED[reason])
 
 
 @router.post("/cases/{case_id}/users", response_model=dict,
@@ -602,31 +630,14 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
                 granted_by=user.user_id, expires_at=body.expires_at,
             )
     except RoleHeldOnAnotherCase as exc:
-        if body.email is None:
-            raise
-        _audit_share_refused(conn, user, case_id, body.email,
-                             "role_held_on_another_case")
-        # Said without the reason, as the labels refusal below is: by a
-        # guessable address it would tell any `case.grant` holder whether a
-        # colleague or partner is a live liaison on some other case.
-        raise Problem(
-            400, "Invalid request",
-            "that colleague cannot be given this role on this case. An "
-            "administrator can check their account.",
-        ) from exc
+        # Said without the reason, as the labels refusal below is: it would tell any `case.grant`
+        # holder whether a colleague or partner is a live liaison on some other case.
+        raise _refuse_share(conn, user, case_id, body, target,
+                            "role_held_on_another_case") from exc
     except CaseError as exc:
-        if body.email is None:
-            raise
-        _audit_share_refused(conn, user, case_id, body.email, "labels")
-        # The service's refusal names the assignee's clearance; by a guessable address that would
-        # tell the caller any colleague's clearance, so this says it as the roster does, without
-        # the level.
-        raise Problem(
-            400, "Invalid request",
-            "that colleague could not open this case: their clearance is "
-            "below its classification, or they are not read into one of its "
-            "compartments. An administrator can check their account.",
-        ) from exc
+        # The service's refusal names the assignee's clearance or the compartment they lack; this
+        # says it as the roster does, without the level or the key.
+        raise _refuse_share(conn, user, case_id, body, target, "labels") from exc
     return {
         "case_id": str(case_id),
         "user_id": str(target),

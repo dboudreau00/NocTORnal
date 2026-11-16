@@ -103,6 +103,7 @@ class World:
         self._approvals: dict[UUID, UUID] = {}
         self._proposals: dict[UUID, UUID] = {}
         self._tie_proposals: dict[UUID, UUID] = {}
+        self._captures: dict[UUID, UUID] = {}
         from noctornal_api.curation import NodeSetService, TagService
         self.tag = TagService(owner).create_tag(namespace="g230", name="t", case_id=self.case_id)
         self.working_set = NodeSetService(owner).create_set(
@@ -143,6 +144,25 @@ class World:
                          "dst_node_id": str(self.visible)},
                 origin="g230_probe_v1", rationale="g230 probe", score=0.5)
         return self._tie_proposals[entity]
+
+    def capture_citing(self, exhibit: UUID) -> UUID:
+        """A capture the analyst may read whose screenshot is `exhibit`, or that has none when
+        `exhibit` names nothing (the column is a foreign key, so a stored id cannot name nothing).
+        Written as the owner: the create route refuses to cite an exhibit above its caller or in
+        another case, and a lead who may see both, or an older row, can."""
+        if exhibit not in self._captures:
+            named = self.owner.execute("SELECT id FROM core.evidence WHERE id = %s",
+                                       (exhibit,)).fetchone()
+            self._captures[exhibit] = self.owner.execute(
+                """INSERT INTO deception.capture
+                       (case_id, requested_url, requested_url_norm, capture_method,
+                        captured_by, screenshot_evidence_id, classification)
+                   VALUES (%s, 'https://lure.example/g230-shot',
+                           'https://lure.example/g230-shot', 'ANALYST_UPLOAD', %s, %s,
+                           'AMBER')
+                   RETURNING id""",
+                (self.case_id, self.boss, named[0] if named else None)).fetchone()[0]
+        return self._captures[exhibit]
 
     def headers(self, uid: UUID) -> dict:
         """A fresh session with a second factor, so a step-up route is decided by the gate."""
@@ -501,6 +521,13 @@ FAMILIES: list[Family] = [
     Family("an exhibit exported", "evidence", "lead",
            lambda wd, i: ("POST", wd.url(f"/evidence/{i}/export"), None),
            NO_EXHIBIT),
+    # `routers/deception.capture_screenshot`: the exhibit a capture the caller may read cites,
+    # gated with `gate_element`; a capture that cites none is asked as an id that names nothing.
+    Family("a capture's screenshot", "evidence", "analyst",
+           lambda wd, i: ("GET",
+                          wd.url(f"/deception/captures/{wd.capture_citing(i)}/screenshot"),
+                          None),
+           (404, NOT_FOUND, "this capture has no screenshot")),
     # `routers/proposals._check_accept_labels`: the entity an ATTRIBUTE claim names.
     Family("a claim proposed about an entity, accepted", "node", "lead",
            lambda wd, i: ("POST", wd.url(f"/proposals/{wd.proposal_for(i)}/accept"), {}),

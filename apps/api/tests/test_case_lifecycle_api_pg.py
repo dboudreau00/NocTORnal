@@ -771,7 +771,9 @@ def test_a_liaison_holds_one_case_at_a_time(conn, client):
     assert refused.status_code == 400, refused.text
     assert refused.headers["content-type"].startswith("application/problem+json")
     detail = refused.json()["detail"]
-    assert "another case" in detail and "liaison" in detail
+    # Said without the reason, by id as by address: the id is on every roster of the colleague's
+    # cases, so naming the other assignment there told any `case.grant` holder the same thing.
+    assert "another case" not in detail and "liaison" not in detail.lower()
     # The other case is named to nobody: its lead is not on this one.
     code_a = conn.execute('SELECT code FROM core."case" WHERE id = %s',
                           (case_a,)).fetchone()[0]
@@ -831,6 +833,54 @@ def test_a_liaison_named_by_address_is_refused_without_saying_why(conn, client):
             WHERE action = 'CASE_SHARE_REFUSED' AND case_id = %s ORDER BY seq""",
         (case_b,)).fetchall()
     assert rows == [("DENIED", "role_held_on_another_case", email)]
+
+
+def test_a_grant_by_id_is_refused_in_the_words_a_grant_by_address_is(conn, client):
+    """A colleague's user id is on the roster of every case they are on, so a grant by id names
+    nobody more privately than a grant by address does. The two are refused in one set of words,
+    which name no clearance level, no compartment key and no other assignment, and each refusal is
+    recorded as CASE_SHARE_REFUSED with the colleague and the reason alone (independent review, ACCESS-01)."""
+    _register_compartment(conn)
+    _, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",),
+                                   compartments=(TEST_COMPARTMENT,))
+    owner = _session(conn, owner_email)
+    case_id = _create_case(client, owner, compartments=[TEST_COMPARTMENT])   # AMBER
+    _, other_case = _open_case(conn, client)
+    green_id, green_email, _ = _make_user(conn, clearance="GREEN",
+                                          compartments=(TEST_COMPARTMENT,))
+    plain_id, plain_email, _ = _make_user(conn, clearance="AMBER")
+    liaison_id, liaison_email, _ = _make_user(conn, clearance="AMBER",
+                                              compartments=(TEST_COMPARTMENT,))
+    _assign(conn, other_case, liaison_id, "LIAISON", liaison_id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7))
+
+    def grant(**named):
+        if named.get("role_key") == "LIAISON":
+            return _grant_liaison(client, owner, case_id, **{
+                k: v for k, v in named.items() if k != "role_key"})
+        return client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),
+                           json={"role_key": "ANALYST", **named})
+
+    expected = []
+    for uid, email, role, reason in (
+            (green_id, green_email, "ANALYST", "labels"),
+            (plain_id, plain_email, "ANALYST", "labels"),
+            (liaison_id, liaison_email, "LIAISON", "role_held_on_another_case")):
+        by_id = grant(user_id=str(uid), role_key=role)
+        by_address = grant(email=email, role_key=role)
+        assert by_id.status_code == by_address.status_code == 400, (by_id.text, by_address.text)
+        detail = by_id.json()["detail"]
+        assert detail == by_address.json()["detail"]
+        for leak in ("GREEN", "AMBER", TEST_COMPARTMENT, "liaison", "another case"):
+            assert leak.lower() not in detail.lower(), (leak, detail)
+        assert _assignment_count(conn, case_id, uid) == 0
+        expected += [{"by": "user_id", "user_id": str(uid), "reason": reason},
+                     {"by": "email", "email": email.lower(), "reason": reason}]
+    rows = [r[0] for r in conn.execute(
+        """SELECT detail FROM audit.event
+            WHERE action = 'CASE_SHARE_REFUSED' AND case_id = %s ORDER BY seq""",
+        (case_id,)).fetchall()]
+    assert rows == expected
 
 
 def test_the_service_refuses_a_second_live_liaison_whoever_calls_it(conn):

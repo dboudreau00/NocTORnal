@@ -294,6 +294,8 @@ def effective_labels(
     case_id: UUID,
     element_classification: str | None = None,
     element_compartments: frozenset[str] = frozenset(),
+    *,
+    missing_case_as_phantom: bool = False,
 ) -> tuple[str, frozenset[str]]:
     """The labels an access decision must use: the stricter classification of case and element,
     and the union of their compartments. Raises 404 only for a case that does not exist
@@ -307,7 +309,13 @@ def effective_labels(
     An id that names nothing on a route that takes its case from the element has no case: it is
     decided at the phantom's labels alone (`element_gate.facts_or_phantom`, decision 230), which
     no caller can hold, so the gate refuses it and records the refusal as it does a hidden
-    element's."""
+    element's.
+
+    `missing_case_as_phantom` is the gate's own (`authorize_object`): a case id that names nothing
+    is decided at the phantom's labels too, with the element's compartments, rather than answered
+    here. Nobody holds the phantom's compartment and nobody can be assigned to a case that does not
+    exist, so the gate refuses it with the 404 and the AUTHZ_DENIED row a case the caller is not on
+    gets, after the same statements."""
     row = conn.execute(
         "SELECT classification, compartments FROM iam.case_facts(%s)",
         (case_id,),
@@ -317,6 +325,8 @@ def effective_labels(
         if (case_id is None and element_classification == ABSENT_CLASSIFICATION
                 and element_compartments == ABSENT_COMPARTMENTS):
             return ABSENT_CLASSIFICATION, ABSENT_COMPARTMENTS
+        if missing_case_as_phantom and case_id is not None:
+            return ABSENT_CLASSIFICATION, ABSENT_COMPARTMENTS | element_compartments
         raise Problem(404, "Not found", "case does not exist")
     case_cls, case_comp = row[0], frozenset(row[1] or [])
     if element_classification is None:
@@ -436,7 +446,10 @@ def authorize_object(
     Then, for a content write, the case's lifecycle: a verb in
     `CONTENT_WRITE_PERMISSIONS`, or `content_write=True` from a route whose
     verb also gates reads, is refused on a read-only case (rule 3 above)."""
-    eff_cls, eff_comp = effective_labels(conn, case_id, classification, compartments)
+    # A case id that names nothing meets the gate at the phantom's labels and is refused as a case
+    # the caller is not on is, with the same statements and the same row (decision 230).
+    eff_cls, eff_comp = effective_labels(conn, case_id, classification, compartments,
+                                         missing_case_as_phantom=True)
     if after_case_gate and count_use:
         count_use = not counted_at_case_gate(conn, user, case_id)
     ctx = PgAccessResolver(conn).resolve(

@@ -8,10 +8,13 @@ for records). An id that names nothing in the case meets the same gate (decision
 `facts_or_phantom` gives it the phantom's labels, which no caller can hold, so it runs the reads
 a hidden element runs and writes the AUTHZ_DENIED row a hidden element writes, and the refusal
 is the same 404. `gate_element` is the whole check for a route that names an element in its
-body: same case, the gate at the element's own labels, one 404. `withheld_notice` applies the
-graph's rule (`projections.Withheld`, migration 0030) to any count: NONE says nothing,
-PRESENCE says whether, COUNT says how many. The gate is not forked: every decision here is
-`deps.authorize_object`'s.
+body: same case, the gate at the element's own labels, one 404. `visible_element_ids` answers
+which ids a record cites its reader may see, and `withhold_cited` leaves the others out of a
+response, so a record labelled below an exhibit or an entity it cites does not hand that id to a
+reader who may not see it. `withheld_notice` applies the graph's rule
+(`projections.Withheld`, migration 0030) to any count: NONE says nothing, PRESENCE says whether,
+COUNT says how many. The gate is not forked: every refusal here is `deps.authorize_object`'s,
+and the label answers read the reader's ceiling as the gate does (`deps.user_ceiling`).
 """
 from __future__ import annotations
 
@@ -59,7 +62,7 @@ def phantom(case_id: UUID | None) -> ElementFacts:
     return ElementFacts(case_id, ABSENT_CLASSIFICATION, ABSENT_COMPARTMENTS, True)
 
 
-def facts_or_phantom(conn: psycopg.Connection, kind: str, element_id: UUID, *,
+def facts_or_phantom(conn: psycopg.Connection, kind: str, element_id: UUID | None, *,
                      case_id: UUID | None) -> ElementFacts:
     """The element's case and labels, read as facts (`deps.element_labels`), or the phantom for an
     id that names nothing in `case_id`.
@@ -68,7 +71,8 @@ def facts_or_phantom(conn: psycopg.Connection, kind: str, element_id: UUID, *,
     above the caller goes on to the same gate, which refuses the phantom as it refuses a hidden
     element, with the same AUTHZ_DENIED row. `case_id` is the route's own case, which the element
     must be in; None only on a route that takes its case from the element (`authorize_case_of`).
-    Labels only: content is read after the gate."""
+    `element_id` None is a stored reference that names nothing (a capture with no screenshot),
+    read as an id that names nothing is. Labels only: content is read after the gate."""
     facts = element_labels(conn, kind, element_id)
     if facts is None or (case_id is not None and facts[0] != case_id):
         return phantom(case_id)
@@ -109,7 +113,7 @@ def authorize_element(
 
 def gate_element(
     conn: psycopg.Connection, user: CurrentUser, *, case_id: UUID, kind: str,
-    element_id: UUID, permission_key: str, missing_detail: str,
+    element_id: UUID | None, permission_key: str, missing_detail: str,
     case_gated: bool = True,
 ) -> tuple[str, frozenset[str]]:
     """Same case, then the gate at the element's own labels, one 404 for an
@@ -177,19 +181,80 @@ def withheld_notice(mode: str, count: int, *, noun: str) -> dict:
     return out
 
 
-def visible_node_ids(conn: psycopg.Connection, user: CurrentUser,
-                     case_id: UUID, ids) -> set[UUID]:
-    """Which of `ids` are entities of this case the reader may see, by
-    labels alone (a merged-away or retired entity is still the reader's to
-    see in a history). The reader's ceiling for this one case, so a live
-    grant scoped to it counts, as every case-scoped read counts it."""
-    wanted = [i for i in ids if i is not None]
+#: The kinds a record can cite, and the rows each is read from: id, case and labels. A claim has no
+#: labels of its own and is read at its subject's, as `iam.element_facts` reads it. Literals, never
+#: caller input.
+_CITED_TABLES = {
+    "node": "SELECT id, case_id, classification, compartments FROM core.node",
+    "edge": "SELECT id, case_id, classification, compartments FROM core.edge",
+    "evidence": "SELECT id, case_id, classification, compartments FROM core.evidence",
+    "assertion": (
+        "SELECT a.id, a.case_id,"
+        " coalesce(n.classification, e.classification) AS classification,"
+        " coalesce(n.compartments, e.compartments) AS compartments"
+        " FROM core.assertion a"
+        " LEFT JOIN core.node n ON n.id = a.node_id"
+        " LEFT JOIN core.edge e ON e.id = a.edge_id"),
+}
+
+
+def _as_uuid(value) -> UUID | None:
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def visible_element_ids(conn: psycopg.Connection, user: CurrentUser,
+                        case_id: UUID, kind: str, ids) -> set[UUID]:
+    """Which of `ids` name an element of `kind` in this case that the reader passes the element
+    gate on: its labels within the reader's ceiling for this one case, so a live grant scoped to it
+    counts, as every case-scoped read counts it. By labels alone (a merged-away, retired or purged
+    element is still the reader's to see in a history).
+
+    The one answer for an id a record cites (an entity, a tie, a claim or an exhibit), asked after
+    the route's own gate passed at the case's labels: verb, assignment and step-up are the case's,
+    so the element's labels are what is left. An id that is hidden, in another case or names
+    nothing is not in the answer, so a caller leaving the others out cannot tell them apart. One
+    read for all of `ids`."""
+    table = _CITED_TABLES.get(kind)
+    if table is None:
+        raise ValueError(f"visible_element_ids: unknown kind {kind!r}")
+    wanted = sorted({u for u in map(_as_uuid, ids) if u is not None}, key=str)
     if not wanted:
         return set()
     clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
     return {r[0] for r in conn.execute(
-        """SELECT id FROM core.node
-            WHERE id = ANY(%s) AND case_id = %s
-              AND classification <= %s::core.tlp
-              AND compartments <@ %s::text[]""",
+        f"""SELECT c.id FROM ({table}) c
+             WHERE c.id = ANY(%s) AND c.case_id = %s
+               AND c.classification <= %s::core.tlp
+               AND c.compartments <@ %s::text[]""",   # noqa: S608 - a literal read
         (wanted, case_id, clearance.name, sorted(held))).fetchall()}
+
+
+def visible_node_ids(conn: psycopg.Connection, user: CurrentUser,
+                     case_id: UUID, ids) -> set[UUID]:
+    """`visible_element_ids` for entities."""
+    return visible_element_ids(conn, user, case_id, "node", ids)
+
+
+def withhold_cited(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                   rows, cited: dict[str, str]) -> None:
+    """Leave out of each of `rows` (dicts, changed in place) every id it cites that the reader may
+    not see. `cited` maps a field to the kind its id names.
+
+    A record can be labelled below what it cites: a capture or a call below its exhibit, a contact
+    block below its exhibit and its publisher's entity, a proposal raised from such a block below
+    the entity it names. Its reader passed the record's labels, not the cited element's, so a cited
+    id they fail `visible_element_ids` on is answered as null, as a record that cites nothing is."""
+    rows = list(rows)
+    for kind in set(cited.values()):
+        fields = [f for f, k in cited.items() if k == kind]
+        seen = visible_element_ids(conn, user, case_id, kind,
+                                   [row.get(f) for row in rows for f in fields])
+        for row in rows:
+            for field in fields:
+                if row.get(field) is not None and _as_uuid(row[field]) not in seen:
+                    row[field] = None

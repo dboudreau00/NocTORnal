@@ -14448,6 +14448,14 @@ function renderContactBlock(block) {
   clear(out);
 
   const card = el('div', 'card stack');
+  /* A duplicate of a block this reader may not open comes back with no id and no reading, only
+     the server's sentence. */
+  if (block.already_parsed && !block.id) {
+    card.appendChild(el('h3', 'h-sm', 'Already parsed'));
+    card.appendChild(el('p', 'hint', block.notice || ''));
+    out.appendChild(card);
+    return;
+  }
   const h = el('h3', 'h-sm', block.already_parsed
     ? 'Already parsed: showing the existing reading'
     : 'Parsed');
@@ -15797,6 +15805,8 @@ function triageOutcome(p) {
 /** An entity a proposal names, by label and type, or a plain statement
  *  that this reader cannot see it. Never a bare UUID as a name. */
 function triageRefName(p, id) {
+  /* The server leaves out the id of an entity this reader may not see. */
+  if (!id) return 'an entity not visible to you';
   const r = ((p && p.refs) || {})[id];
   if (r && r.label) return visibleText(r.label) + ' (' + typeName(r.node_type) + ')';
   return 'entity ' + shortId(id) + ', not visible to you';
