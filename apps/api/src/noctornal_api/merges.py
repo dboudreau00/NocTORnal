@@ -129,6 +129,10 @@ class MergeService:
         ties they cannot see exist, where a merge with none is made, so the duplicate is set aside instead:
         retired and recorded as the merge's own, as a tie between the two entities is, and given back by the
         reversal. Without a caller's labels nothing is set aside and the merge is refused.
+
+        Two merges, or a merge and a reversal, that share an entity or a tie take turns, and the second
+        decides on what the first left. Each locks its two entities, then the ties it moves, before it
+        reads anything it decides on; see `_lock_entities` for the order and the lock.
         """
         if not reason or not reason.strip():
             raise MergeError(
@@ -138,26 +142,35 @@ class MergeService:
         if source_node_id == target_node_id:
             raise MergeError("a node cannot be merged into itself")
 
-        src = self._node(case_id, source_node_id, "source")
-        dst = self._node(case_id, target_node_id, "target")
-
-        if src["merged_into_id"] is not None:
-            raise MergeError("the source node is already merged away")
-        if dst["merged_into_id"] is not None:
-            # Merging into a node that is itself a redirect would build a
-            # chain nothing resolves, and the projection excludes merged
-            # nodes -- so the result would be an actor that vanished.
-            raise MergeError(
-                "the target node is itself merged away; merge into the "
-                "surviving node instead")
-        if src["deleted_at"] is not None or dst["deleted_at"] is not None:
-            raise MergeError("a deleted node cannot take part in a merge")
-
-        self._check_layers(src["node_type"], dst["node_type"])
-        self._refuse_declassifying(src, dst)
-
-        now = datetime.now(timezone.utc)
         with self._c.transaction():
+            # Read under the lock, in the transaction that writes. Read before it, two merges that shared
+            # an entity (A into B and B into C, or B into A) each found it live and both committed: a
+            # chain whose ties stayed on an entity merged away, or a cycle with both entities off the
+            # canvas, and two merges of one entity met the unique index as a 500.
+            src, dst = self._lock_entities(case_id, source_node_id,
+                                           target_node_id)
+
+            if src["merged_into_id"] is not None:
+                raise MergeError("the source node is already merged away")
+            if dst["merged_into_id"] is not None:
+                # Merging into a node that is itself a redirect would build a
+                # chain nothing resolves, and the projection excludes merged
+                # nodes -- so the result would be an actor that vanished.
+                raise MergeError(
+                    "the target node is itself merged away; merge into the "
+                    "surviving node instead")
+            if src["deleted_at"] is not None or dst["deleted_at"] is not None:
+                raise MergeError("a deleted node cannot take part in a merge")
+
+            self._check_layers(src["node_type"], dst["node_type"])
+            self._refuse_declassifying(src, dst)
+
+            # Record BEFORE moving: after the update nothing in core.edge remembers the original endpoints.
+            edges = self._lock_ties(case_id, source_node_id)
+
+            # Stamped once the locks are held. A reversal finds "a later merge" by this time, so a merge
+            # that waited for a tie and took it second must not carry a time from before the wait.
+            now = datetime.now(timezone.utc)
             merge_id = self._c.execute(
                 """INSERT INTO core.node_merge
                        (case_id, source_node_id, target_node_id, reason,
@@ -168,15 +181,6 @@ class MergeService:
                  basis_selector_id, now, merged_by),
             ).fetchone()[0]
 
-            # Record BEFORE moving: after the update nothing in core.edge
-            # remembers the original endpoints.
-            edges = self._c.execute(
-                """SELECT id, src_node_id, dst_node_id, edge_type
-                     FROM core.edge
-                    WHERE case_id = %s AND deleted_at IS NULL
-                      AND (src_node_id = %s OR dst_node_id = %s)""",
-                (case_id, source_node_id, source_node_id),
-            ).fetchall()
             # Counted apart, because they are different things that happened to the graph: a merge whose
             # only effect was deleting the tie between the two entities must not be reported to the audit
             # log, the case owner's notification and the UI banner as "re-pointed 1 relationship".
@@ -310,6 +314,13 @@ class MergeService:
         So a merge whose edges a later live merge also recorded is refused, naming the merge to reverse
         first. The check is scoped to the overlapping edges rather than to merges in general: two unrelated
         merges in one case do not constrain each other's order.
+
+        The check is made in the reversal's own transaction, after it has locked the merge's two entities
+        and every tie the merge recorded, as a merge locks them (`_lock_entities`). Made before, a later
+        merge that was moving one of those ties was not yet visible, committed, and had its tie overwritten.
+        Now that merge is waited for and then seen, and one that reaches a tie after the reversal has it
+        waits and records the tie from where the reversal puts it. "Later" is by `merged_at`, which a merge
+        stamps once it holds its locks, so of two merges that took one tie the second is the later.
         """
         if not reason or not reason.strip():
             raise MergeError("a reversal must say why")
@@ -319,35 +330,46 @@ class MergeService:
         if not record.is_live:
             raise MergeError("this merge has already been reversed")
 
-        blocker = self._c.execute(
-            """SELECT m2.id, m2.merged_at, count(*) AS shared
-                 FROM core.node_merge_edge mine
-                 JOIN core.node_merge_edge theirs
-                      ON theirs.edge_id = mine.edge_id
-                     AND theirs.merge_id <> mine.merge_id
-                 JOIN core.node_merge m2 ON m2.id = theirs.merge_id
-                WHERE mine.merge_id = %s
-                  AND m2.reversed_at IS NULL
-                  AND m2.merged_at > %s
-                GROUP BY m2.id, m2.merged_at
-                ORDER BY m2.merged_at DESC
-                LIMIT 1""",
-            (merge_id, record.merged_at),
-        ).fetchone()
-        if blocker is not None:
-            raise MergeBlocked(blocker[0], blocker[2])
-
-        now = datetime.now(timezone.utc)
         with self._c.transaction():
+            self._lock_entities(record.case_id, record.source_node_id,
+                                record.target_node_id)
+            # Read again under the lock: a second reversal of this merge waited on the same two entities.
+            if not self._c.execute(
+                    "SELECT reversed_at IS NULL FROM core.node_merge WHERE id = %s",
+                    (merge_id,)).fetchone()[0]:
+                raise MergeError("this merge has already been reversed")
+            # Every tie the merge recorded, retired ones included, since the restore writes each of them.
             rows = self._c.execute(
                 """SELECT me.edge_id, me.original_src_node_id,
                           me.original_dst_node_id, me.deleted_by_merge,
                           x.edge_type
                      FROM core.node_merge_edge me
                      JOIN core.edge x ON x.id = me.edge_id
-                    WHERE me.merge_id = %s""",
+                    WHERE me.merge_id = %s
+                    ORDER BY x.id
+                      FOR NO KEY UPDATE OF x""",
                 (merge_id,),
             ).fetchall()
+
+            blocker = self._c.execute(
+                """SELECT m2.id, m2.merged_at, count(*) AS shared
+                     FROM core.node_merge_edge mine
+                     JOIN core.node_merge_edge theirs
+                          ON theirs.edge_id = mine.edge_id
+                         AND theirs.merge_id <> mine.merge_id
+                     JOIN core.node_merge m2 ON m2.id = theirs.merge_id
+                    WHERE mine.merge_id = %s
+                      AND m2.reversed_at IS NULL
+                      AND m2.merged_at > %s
+                    GROUP BY m2.id, m2.merged_at
+                    ORDER BY m2.merged_at DESC
+                    LIMIT 1""",
+                (merge_id, record.merged_at),
+            ).fetchone()
+            if blocker is not None:
+                raise MergeBlocked(blocker[0], blocker[2])
+
+            now = datetime.now(timezone.utc)
             # A tie retired after the merge gets its endpoints back and stays retired, so it is not counted
             # as restored; the audit row says how many stayed out of the graph.
             left_retired = 0
@@ -591,21 +613,70 @@ class MergeService:
 
     def _node(self, case_id: UUID, node_id: UUID, which: str) -> dict:
         row = self._c.execute(
-            """SELECT node_type, label, merged_into_id, deleted_at,
-                      classification, compartments
-                 FROM core.node WHERE id = %s AND case_id = %s""",
+            f"SELECT {_ENTITY_COLUMNS} FROM core.node WHERE id = %s AND case_id = %s",
             (node_id, case_id),
         ).fetchone()
         if row is None:
             raise MergeError(f"the {which} node is not in this case")
-        # The labels come back because the merge NOTIFICATION quotes both
-        # node labels in its body, and a node may be classified above its
-        # case (the floor trigger only stops it going below). Labelling that
-        # notification with the case's classification alone under-labels it.
-        return {"node_type": row[0], "label": row[1],
-                "merged_into_id": row[2], "deleted_at": row[3],
-                "classification": row[4],
-                "compartments": frozenset(row[5] or [])}
+        return _entity(row)
+
+    def lock_for_merge(self, case_id: UUID, source_node_id: UUID,
+                       target_node_id: UUID) -> None:
+        """Take a merge's locks ahead of it, in the caller's transaction: its two entities, then the ties
+        of its source, as `merge` takes them. A caller that writes an audit row before the merge, as the
+        consume of a dual-control approval does, takes the audit chain's lock with that row, and must hold
+        these first to keep the order `_lock_entities` sets. `merge` takes them again, and a lock this
+        transaction holds is not waited for."""
+        self._lock_entities(case_id, source_node_id, target_node_id)
+        self._lock_ties(case_id, source_node_id)
+
+    def _lock_ties(self, case_id: UUID, source_id: UUID) -> list:
+        """The live ties of a merge's source, locked in id order as they are read. A tie a reversal is
+        giving back, or another merge is moving, is waited for and read where that leaves it (READ
+        COMMITTED reads the row again once the lock is granted), so a tie given back to another entity is
+        not taken from it, and the reversal, which locks the same ties, cannot write over one this merge
+        has recorded."""
+        return self._c.execute(
+            """SELECT id, src_node_id, dst_node_id, edge_type
+                 FROM core.edge
+                WHERE case_id = %s AND deleted_at IS NULL
+                  AND (src_node_id = %s OR dst_node_id = %s)
+                ORDER BY id
+                  FOR NO KEY UPDATE""",
+            (case_id, source_id, source_id),
+        ).fetchall()
+
+    def _lock_entities(self, case_id: UUID, source_id: UUID,
+                       target_id: UUID) -> tuple[dict, dict]:
+        """The two entities of a merge or a reversal, locked, as `_node` reads them.
+
+        The lock order is the same for every merge and reversal: the two entities in one statement, in id
+        order, then the ties, in id order, then the audit chain's, which the audit row takes once the graph
+        and the ledger are written. Two that share an entity or a tie therefore cannot each hold one and
+        wait on the other. A merge under dual control writes an audit row before it, the approval's
+        consume, and so takes the chain's lock there: the route takes the merge's locks first
+        (`lock_for_merge`), or a reversal holding one of its entities, and waiting on the chain for its
+        own audit row, would deadlock with it.
+
+        NO KEY UPDATE, the lock the redirect's own update takes, and not FOR UPDATE. FOR UPDATE also
+        refuses the key-share lock every foreign-key check takes, and a merge of a third party takes one on
+        this entity, while it holds a tie between them, to record the tie's old end. It would then wait on
+        this merge while this merge waited on the tie: a deadlock, which
+        `test_merges_that_share_a_tie_wait_for_each_other_and_do_not_deadlock` holds against."""
+        # Keyed by text: a caller may pass an id as a string, which `WHERE id = %s` accepts as well.
+        rows = {str(row[0]): row[1:] for row in self._c.execute(
+            f"""SELECT id, {_ENTITY_COLUMNS}
+                  FROM core.node
+                 WHERE id IN (%s, %s) AND case_id = %s
+                 ORDER BY id
+                   FOR NO KEY UPDATE""",
+            (source_id, target_id, case_id)).fetchall()}
+        found = []
+        for node_id, which in ((source_id, "source"), (target_id, "target")):
+            if str(node_id) not in rows:
+                raise MergeError(f"the {which} node is not in this case")
+            found.append(_entity(rows[str(node_id)]))
+        return found[0], found[1]
 
     def _check_layers(self, src_type: str, dst_type: str) -> None:
         """Invariant 2, at the merge boundary."""
@@ -666,6 +737,22 @@ SELECT m.id, m.case_id, m.source_node_id, m.target_node_id,
    AND s.compartments <@ %(held)s::text[]
    AND t.classification <= %(clr)s::core.tlp
    AND t.compartments <@ %(held)s::text[]"""
+
+
+#: What `_node` and `_lock_entities` read of an entity. A literal, never client input.
+_ENTITY_COLUMNS = ("node_type, label, merged_into_id, deleted_at, "
+                   "classification, compartments")
+
+
+def _entity(row) -> dict:
+    # The labels come back because the merge NOTIFICATION quotes both
+    # node labels in its body, and a node may be classified above its
+    # case (the floor trigger only stops it going below). Labelling that
+    # notification with the case's classification alone under-labels it.
+    return {"node_type": row[0], "label": row[1],
+            "merged_into_id": row[2], "deleted_at": row[3],
+            "classification": row[4],
+            "compartments": frozenset(row[5] or [])}
 
 
 def _reader_params(key: UUID, clearance: str, compartments,
