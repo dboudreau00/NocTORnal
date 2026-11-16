@@ -95,6 +95,8 @@ def _with_options(options: str) -> str:
     ("-c statement_timeout=5\\ min", 300_000),
     ("-c statement_timeout=7s -c statement_timeout=0", 3_600_000),
     ("-c statement_timeout=nonsense", 120_000),
+    ("-c statement_timeout=1e400", 120_000),
+    ("-c statement_timeout=1e305d", 120_000),
     ("-c search_path=public", 120_000),
 ])
 def test_the_dsns_statement_timeout_is_held_to_the_limits_and_the_bound_goes_last(options, bound_ms):
@@ -113,6 +115,7 @@ def test_the_dsns_statement_timeout_is_held_to_the_limits_and_the_bound_goes_las
     ("--statement-timeout=0s", "switch statement_timeout off"),
     ("-c statement_timeout=nonsense", "not a bound this can read"),
     ("-c statement_timeout=-5", "not a bound this can read"),
+    ("-c statement_timeout=1e400", "not a bound this can read"),
     ("-c statement_timeout=7s", None),
     ("-c search_path=public", None),
 ])
