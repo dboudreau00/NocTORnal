@@ -323,10 +323,10 @@ def test_a_content_key_another_sender_shares_settles_nothing_for_the_other_sende
     nothing is not made a participant of the room with a count of none."""
     svc = _service(conn)
     _actor, case_id, convo = _room(conn, svc)
-    assert svc.add_message(convo, sender_handle="x", body="Noneb") is not None
-    assert hashlib.sha256("xNoneNoneb".encode()).digest() ==         _digest("xNone", None, "b"), "the fixture must make the two keys one"
+    assert svc.add_message(convo, sender_handle="x", body="None\x1fb") is not None
+    assert hashlib.sha256("x\x1fNone\x1fNone\x1fb".encode()).digest() ==         _digest("x\x1fNone", None, "b"), "the fixture must make the two keys one"
     before = (_participants(conn, convo), _conversation(conn, convo))
-    assert svc.add_message(convo, sender_handle="xNone", body="b") is None
+    assert svc.add_message(convo, sender_handle="x\x1fNone", body="b") is None
     assert (_participants(conn, convo), _conversation(conn, convo)) == before
     assert [h for h, *_ in _participants(conn, convo)] == ["x"]
     assert svc.contact_graph(case_id)[0]["participants"] == ["x"]
