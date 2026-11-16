@@ -1,6 +1,6 @@
 # NocTORnal: the analyst and operator manual
 
-> Beta 1.6a (v0.9.6a-beta). Beta software. See [README.md](README.md) for the legal status: five decisions, L1 to L5, gate any use against real material, and until they are made this manual is for use on synthetic or published, non-personal data only.
+> Beta 1.6c (v0.9.6c-beta). Beta software. See [README.md](README.md) for the legal status: five decisions, L1 to L5, gate any use against real material, and until they are made this manual is for use on synthetic or published, non-personal data only.
 
 ### About this manual
 

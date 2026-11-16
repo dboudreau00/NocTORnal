@@ -337,7 +337,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **9629 tests** (`def test_`
+With the containers up, expect **no failures** across **9644 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -701,7 +701,7 @@ enforces it.
 
 ### Testing
 
-**9629 tests** (`def test_` functions across two pytest roots, maintained by
+**9644 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -783,7 +783,8 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1.6a, release 0.9.6, tag `v0.9.6a-beta`: Beta 1.6 with one optional
+This is Beta 1.6c, release 0.9.6, tag `v0.9.6c-beta`: Beta 1.6a with seven fixes from a
+review of 2026-11-16 (listed in release/CHANGELOG.md), and no migration. Beta 1.6a was Beta 1.6 with one optional
 integration and one fix, and no migration. A host switch, `NOCTORNAL_MAASSPEC`, off
 by default, lets the ingest parser recognise the JSON spectrum that MaaSSpec emits,
 check it strictly and file it in the ingest queue as an IOC feed record; nothing in
@@ -844,7 +845,7 @@ reads, selectors, search and the audit log hold at 100,000 entities and
 about 5,000 entities a case, and the ego network and the path search stop at
 5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1.6a has entity merge under the two-person
+Beyond what the tour shows, Beta 1.6c has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery
