@@ -13,6 +13,9 @@ What these hold:
   switches the limit off;
 - an operator's own `statement_timeout` in DATABASE_URL is not loosened by the default, and their explicit
   setting wins over it;
+- a `statement_timeout` in DATABASE_URL is held to the same 5 to 3600 seconds and the bound always goes
+  last, so the DSN cannot switch it off, and production refuses a DSN whose options try (the independent review
+  TRANSPORT-04);
 - a real overrun is a 504 problem whichever way the router meets it: raised as it is, wrapped by a service
   error, or turned into a `Problem` through `safe_detail`; and the answer names nothing of the statement.
 
@@ -56,20 +59,86 @@ def test_the_setting_is_a_whole_number_of_seconds_and_nothing_switches_it_off(
 def test_a_request_connection_is_opened_with_the_limit_and_the_others_without():
     url = "postgresql://u@h:5432/d"
     assert db.session_options(url) == "-c jit=off"
-    assert db.session_options(url, for_request=True) == "-c statement_timeout=120000 -c jit=off"
+    assert db.session_options(url, for_request=True) == "-c jit=off -c statement_timeout=120000"
 
 
 def test_an_operators_statement_timeout_in_the_dsn_is_not_loosened_by_the_default(monkeypatch):
-    """The latest wins in the server's options: the default goes first, the
-    operator's own after it; and an explicit setting goes last of all."""
+    """The latest wins in the server's options, and the bound goes last: the operator's own value
+    when it is within the limits, and their explicit setting over it."""
     named = "postgresql://u@h:5432/d?options=-c%20statement_timeout%3D7s"
     assert db.session_options(named, for_request=True) == \
-        "-c statement_timeout=120000 -c statement_timeout=7s -c jit=off"
+        "-c statement_timeout=7s -c jit=off -c statement_timeout=7000"
     monkeypatch.setenv(db.REQUEST_STATEMENT_TIMEOUT_ENV, "30")
     assert db.session_options(named, for_request=True) == \
         "-c statement_timeout=7s -c jit=off -c statement_timeout=30000"
     assert db.session_options(named) == "-c statement_timeout=7s -c jit=off", \
         "a connection that is not a request's is opened as it was"
+
+
+def _with_options(options: str) -> str:
+    from urllib.parse import quote
+    return "postgresql://u@h:5432/d?options=" + quote(options, safe="")
+
+
+@pytest.mark.parametrize("options, bound_ms", [
+    ("-c statement_timeout=0", 3_600_000),
+    ("-c statement_timeout=0ms", 3_600_000),
+    ("-c statement_timeout=0x0", 3_600_000),
+    ("-cstatement_timeout=0", 3_600_000),
+    ("--statement-timeout=0", 3_600_000),
+    ("-c STATEMENT_TIMEOUT=0", 3_600_000),
+    ("-c statement_timeout=2h", 3_600_000),
+    ("-c statement_timeout=86400000", 3_600_000),
+    ("-c statement_timeout=1s", 5_000),
+    ("-c statement_timeout=1500", 5_000),
+    ("-c statement_timeout=90s", 90_000),
+    ("-c statement_timeout=5\\ min", 300_000),
+    ("-c statement_timeout=7s -c statement_timeout=0", 3_600_000),
+    ("-c statement_timeout=nonsense", 120_000),
+    ("-c search_path=public", 120_000),
+])
+def test_the_dsns_statement_timeout_is_held_to_the_limits_and_the_bound_goes_last(options, bound_ms):
+    """the independent review TRANSPORT-04: the default went BEFORE the DSN's options, so `statement_timeout=0` there
+    switched the bound off for every request connection, while the setting meant to be the one control
+    could not. Each spelling the server reads is held to 5 to 3600 seconds, one that is off is the
+    longest bound, one that cannot be read is the default, and the bound is the last word on the line,
+    which the server applies."""
+    built = db.session_options(_with_options(options), for_request=True)
+    assert built.endswith(f" -c statement_timeout={bound_ms}"), built
+    assert db.request_statement_timeout_ms(_with_options(options)) == bound_ms
+
+
+@pytest.mark.parametrize("options, refused", [
+    ("-c statement_timeout=0", "switch statement_timeout off"),
+    ("--statement-timeout=0s", "switch statement_timeout off"),
+    ("-c statement_timeout=nonsense", "not a bound this can read"),
+    ("-c statement_timeout=-5", "not a bound this can read"),
+    ("-c statement_timeout=7s", None),
+    ("-c search_path=public", None),
+])
+def test_production_refuses_a_dsn_whose_options_switch_the_timeout_off(options, refused):
+    from test_config_boot import _production
+
+    from noctornal_api import config
+
+    from urllib.parse import quote
+
+    # The compose shape, `postgresql+psycopg://` and its TLS query, so the reader is the one a
+    # deployment's DSN meets.
+    env = _production()
+    env["DATABASE_URL"] += "&options=" + quote(options, safe="")
+    assert env["DATABASE_URL"].startswith("postgresql+psycopg://")
+    said = [p for p in config.verify_environment(env) if "statement_timeout" in p]
+    if refused is None:
+        assert said == []
+    else:
+        assert len(said) == 1, said
+        assert said[0].startswith("DATABASE_URL's options ") and refused in said[0]
+        assert db.REQUEST_STATEMENT_TIMEOUT_ENV in said[0]
+    development = {**env, "NOCTORNAL_ENV": "development"}
+    assert config.verify_environment(development) == []
+    assert config.request_timeout_problems(development) == config.request_timeout_problems(env), \
+        "pure and mode-blind: verify_environment applies it in production"
 
 
 @needs_db
@@ -83,6 +152,19 @@ def test_a_request_connection_runs_with_the_limit(monkeypatch):
     conn = db.connect_request()
     try:
         assert conn.execute("SHOW statement_timeout").fetchone()[0] == "45s"
+    finally:
+        conn.close()
+
+
+@needs_db
+def test_a_dsn_that_switches_the_timeout_off_still_runs_bounded(monkeypatch):
+    """Against the server: before the bound went last, this connection ran with `0`."""
+    url = db.dsn()
+    sep = "&" if "?" in url else "?"
+    monkeypatch.setenv("DATABASE_URL", url + sep + "options=-c%20statement_timeout%3D0")
+    conn = db.connect_request()
+    try:
+        assert conn.execute("SHOW statement_timeout").fetchone()[0] == "1h"
     finally:
         conn.close()
 

@@ -49,8 +49,10 @@
 .PARAMETER ProductionSecrets
     For the production deployment (infra/production, read its README.md
     first): bring its secrets files to this release's layout, moving the
-    schema owner's credential out of secrets.env and writing the Redis
-    password and REDIS_URL, with a backup of every file it changes.
+    schema owner's credential out of secrets.env, writing the Redis
+    password and REDIS_URL, and writing redis.env and minio.env for the
+    Redis and MinIO services from it, with a backup of every file it
+    changes.
     Installs and starts nothing. Run it as the user who owns those files.
     What it does and the way back: release/secrets-upgrade/README.md.
 
@@ -350,7 +352,7 @@ library only:
     if ($env:OS -eq 'Windows_NT' -and (Test-Path -LiteralPath $target)) {
         $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         Get-ChildItem -LiteralPath $target -File | Where-Object {
-            $_.Name -in @('secrets.env', 'postgres-init.env', 'migrate.env') -or $_.Name -like '*.env.backup-*'
+            $_.Name -in @('secrets.env', 'postgres-init.env', 'migrate.env', 'redis.env', 'minio.env') -or $_.Name -like '*.env.backup-*'
         } | ForEach-Object {
             $acl = Invoke-Capture 'icacls' @($_.FullName, '/inheritance:r', '/grant:r', "${me}:(F)")
             if ($acl.Code -ne 0) { Write-Note "could not restrict $($_.Name) to $me; do it by hand" }

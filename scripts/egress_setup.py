@@ -28,7 +28,9 @@ and an issued password nobody has replaced yet is refused), requires
 egress.manage, and records that person with the host and the operating
 system user in each audit row. A failed sign-in writes AUTH_FAILED exactly
 as the console's does. `list` needs egress.log.read. keygen, dev-env,
-role-sql and preflight read no database and need no sign-in.
+role-sql and preflight read no database and need no sign-in. In production
+a command that signs in refuses first, before it asks for anything, in any
+environment the API would refuse to start in (`config.verify_environment`).
 
 ## An exit's credentials never touch the command line
 
@@ -62,7 +64,7 @@ if _HERE not in sys.path:
 from _env import load_env_local  # noqa: E402
 from psycopg.types.json import Json  # noqa: E402
 from noctornal_api import egress, egress_ledger  # noqa: E402
-from noctornal_api.config import published_credentials  # noqa: E402
+from noctornal_api.config import published_credentials, verify_environment  # noqa: E402
 from noctornal_api.egress_admin import EgressAdminError, EgressAdminService  # noqa: E402
 from noctornal_api.security import egress_seal  # noqa: E402
 from noctornal_api.security.access import TLP_NAMES  # noqa: E402
@@ -466,6 +468,15 @@ def run(argv: list[str], *, ask=input, secret=getpass.getpass, stdin=None,
         raise SetupError("dev-smtp is for development: in production the relay is another "
                          "service, reached through an smtp route an administrator "
                          "creates.")
+    # Every command from here signs its operator in, so every refusal the API starts with comes
+    # first: a failed sign-in is recorded under the audit pepper, and a process that never ran the
+    # boot refusal must not hash under a pepper the API would not start with. keygen, dev-env,
+    # role-sql and preflight above read no database and sign nobody in, and keygen runs before the
+    # egress keys this would ask for exist. Nothing outside production.
+    problems = verify_environment()
+    if problems:
+        raise SetupError("This environment would not start the API, so nobody was asked to "
+                         "sign in: " + "; ".join(problems))
     conn = _connect()
     try:
         need = "egress.log.read" if args.command == "list" else "egress.manage"

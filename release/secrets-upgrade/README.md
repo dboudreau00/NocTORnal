@@ -14,6 +14,8 @@ one command before `up`, and refuses to start without it.
 | `migrate` | `migrate.env` is missing, so it has no owner DSN | `NOCTORNAL_MIGRATION_DATABASE_URL is not set for the migration job ...` |
 | `redis` | `REDIS_URL` names this Redis (host `redis`) and does not sign in as `noctornal_limiter` over TLS | `REDIS_URL does not sign in to this Redis as noctornal_limiter with REDIS_PASSWORD over TLS (rediss://) ...` |
 | `api`, `sample-origin`, `collector`, the Lab's workers | `NOCTORNAL_AUDIT_PEPPER` is missing, the placeholder, shorter than 16 characters or a copy of another secret (from 2026-11-15) | `NOCTORNAL_AUDIT_PEPPER is not set, so the hashes the audit log keeps ...` |
+| `redis` | `redis.env` is missing, so it has no `REDIS_PASSWORD` (from 2026-11-15: it reads no `secrets.env`) | `REDIS_PASSWORD is empty: refusing to start. ...` |
+| `minio`, `minio-init` | `minio.env` is missing, so the root pair is empty (from 2026-11-15) | `MINIO_ROOT_USER or MINIO_ROOT_PASSWORD is empty: refusing to start, ...` |
 
 Every service that waits on `migrate` or on a healthy `redis` stays down
 with them. Each sentence names the command below and none quotes a value.
@@ -43,7 +45,9 @@ or later on the host and no virtual environment. In `infra/production` it:
 * moves `POSTGRES_PASSWORD` from `secrets.env` into `postgres-init.env` and
   `NOCTORNAL_MIGRATION_DATABASE_URL` into a new `migrate.env`, leaving a
   comment where each line was, and takes the old template's comment above
-  each line with it;
+  each line with it; `NOCTORNAL_APP_DB_PASSWORD` moves into
+  `postgres-init.env` the same way, since the database reads no
+  `secrets.env` (2026-11-15);
 * keeps `REDIS_PASSWORD` when it is URL-safe (generates one when it is not)
   and rewrites `REDIS_URL` as
   `rediss://noctornal_limiter:PASSWORD@redis:6379/0?ssl_ca_certs=/certs/ca.crt`,
@@ -60,6 +64,12 @@ or later on the host and no virtual environment. In `infra/production` it:
   `NOCTORNAL_EGRESS_DATABASE_URL` in `egress-proxy.env` when it exists),
   replacing an `sslmode` that would not check the server and keeping any other
   parameter; a DSN naming another host is left alone and named;
+* writes `redis.env` (`REDIS_PASSWORD` and `REDIS_URL`) and `minio.env`
+  (MinIO's root pair and any other `MINIO_` setting of the server's, the
+  `SAMPLE_` and `PRESERVE_` account keys and the bucket names) from
+  `secrets.env`, mode 600, which Redis, MinIO and `minio-init` read instead
+  of `secrets.env`; run it again whenever you change one of those lines in
+  `secrets.env`;
 * prints each change by name, and exits non-zero with a `still to do:`
   line for anything left to you.
 
@@ -103,6 +113,9 @@ ACL GETUSER reads users' rules, which the row says.
 
 Copy each `NAME.backup-UTCSTAMP` over its file and check out the previous
 release, together: the new compose file refuses the old layout, and the old
-one does not read `migrate.env`. `infra/production/README.md`,
+one does not read `migrate.env`, `redis.env` or `minio.env`. A release from
+before 2026-11-15 gives the database `NOCTORNAL_APP_DB_PASSWORD` from
+`secrets.env`, which only matters on a new volume: put the line back there
+from `postgres-init.env` if you start one on the older release. `infra/production/README.md`,
 Upgrading, has the commands. Nothing in the database changes in either
 direction.

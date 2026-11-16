@@ -1,8 +1,9 @@
 """Bring the production secrets files in infra/production to the layout
 this release reads: the schema owner's credential out of secrets.env, a
 Redis password and REDIS_URL for the limiter's own Redis user, the pepper the
-audit log's hashes are keyed with, and TLS that checks the server on every DSN
-naming the bundled database. Nothing it prints carries a value.
+audit log's hashes are keyed with, TLS that checks the server on every DSN
+naming the bundled database, and the env files of Redis and MinIO, which read
+no secrets.env. Nothing it prints carries a value.
 
     python3 scripts/production_secrets.py [--dir infra/production] [--new-database]
 
@@ -13,9 +14,11 @@ release/install.sh --production-secrets and release/install.ps1
    (mode 600).
 2. Moves POSTGRES_PASSWORD from secrets.env to postgres-init.env, which only the database reads,
    and NOCTORNAL_MIGRATION_DATABASE_URL to migrate.env, which only the migration job reads: the
-   owner is not bound by row-level security and can switch off the append-only triggers. A
-   destination that already holds a different value is a refusal, because which one the database
-   was initialised with is the operator's question, not a script's guess.
+   owner is not bound by row-level security and can switch off the append-only triggers. Moves
+   NOCTORNAL_APP_DB_PASSWORD to postgres-init.env too, since only initdb reads it and the database
+   no longer reads secrets.env. A destination that already holds a different value is a refusal,
+   because which one the database was initialised with is the operator's question, not a script's
+   guess.
 3. Writes REDIS_PASSWORD when it is missing, a placeholder or not URL-safe (the production Redis
    rebuilds its ACL from it at every start), and makes REDIS_URL sign in as noctornal_limiter with
    it over TLS (rediss://, naming the deployment's CA), since the production Redis disables its
@@ -35,6 +38,12 @@ release/install.sh --production-secrets and release/install.ps1
    sslmode=verify-full against the deployment's CA, since that database admits the network over
    TLS alone and production refuses any other sslmode. A DSN naming another host is the operator's
    own database, left alone and said.
+7. Writes redis.env and minio.env from secrets.env, mode 600: redis.env with REDIS_PASSWORD and
+   REDIS_URL, minio.env with MinIO's root pair and every other MINIO_ setting but the four the
+   application's store clients read, and the SAMPLE_ and PRESERVE_ account keys and bucket names
+   minio-init makes. Postgres, Redis and MinIO read no secrets.env (docs/17, 2026-11-15), so a
+   value changed in secrets.env reaches them when this runs again. A line it does not carry is left
+   as the operator wrote it, and one secrets.env no longer sets is taken out.
 
 Every file it changes is first copied to NAME.backup-UTCSTAMP (mode 600), the way back
 (release/secrets-upgrade/README.md). It writes nothing when it refuses. Exit 0 when the files are
@@ -77,7 +86,38 @@ URL_SAFE = re.compile(r"^[A-Za-z0-9_.~-]+$")
 SECRETS = "secrets.env"
 POSTGRES_INIT = "postgres-init.env"
 MIGRATE = "migrate.env"
-MOVES = (("POSTGRES_PASSWORD", POSTGRES_INIT), ("NOCTORNAL_MIGRATION_DATABASE_URL", MIGRATE))
+#: Each line that leaves secrets.env: the file it moves to, and when and why, for the note left behind.
+MOVES = (("POSTGRES_PASSWORD", POSTGRES_INIT, "docs/17 F52, 2026-10-02"),
+         ("NOCTORNAL_MIGRATION_DATABASE_URL", MIGRATE, "docs/17 F52, 2026-10-02"),
+         ("NOCTORNAL_APP_DB_PASSWORD", POSTGRES_INIT, "docs/17, 2026-11-15"))
+
+#: The env files of the services that run another project's image, written from secrets.env with the
+#: names each reads and no other (docs/17, 2026-11-15): compose gives none of them secrets.env.
+REDIS = "redis.env"
+STORE = "minio.env"
+DERIVED = {
+    REDIS: ("REDIS_PASSWORD", "REDIS_URL"),
+    STORE: ("MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD", "SAMPLE_ACCESS_KEY", "SAMPLE_SECRET_KEY",
+            "PRESERVE_ACCESS_KEY", "PRESERVE_SECRET_KEY", "EVIDENCE_BUCKET", "INGEST_BUCKET",
+            "SAMPLE_BUCKET", "COLLECT_RAW_BUCKET", "PRESERVE_BUCKET"),
+}
+#: minio.env also takes every other MINIO_ setting, the server's own, but these four, which the
+#: application's store clients read and the server must not (MINIO_ACCESS_KEY and MINIO_SECRET_KEY
+#: are MinIO's legacy names for its root pair).
+MINIO_CLIENT = ("MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_SECURE")
+#: The comment each derived file opens with.
+DERIVED_HEADER = {
+    REDIS: ("# Written from secrets.env by `sudo bash release/install.sh --production-secrets`, and NOT in",
+            "# git. Read by the redis service alone (infra/production/compose.yml): the limiter's",
+            "# password, and the URL the application signs in with, so that the service can refuse one",
+            "# that would not sign in. Change them in secrets.env and run the installer step again."),
+    STORE: ("# Written from secrets.env by `sudo bash release/install.sh --production-secrets`, and NOT in",
+            "# git. Read by minio and minio-init alone (infra/production/compose.yml): MinIO's root pair",
+            "# and any other MINIO_ setting of the server's, and the account keys and bucket names",
+            "# minio-init makes. Change them in secrets.env and run the installer step again."),
+}
+#: The services each derived file is read by, for what the script says.
+DERIVED_READERS = {REDIS: "the redis service", STORE: "minio and minio-init"}
 #: The compose service the bundled Redis answers as.
 BUNDLED_REDIS_HOST = "redis"
 #: The audit pepper and what the API asks of it (security/audit_hash.py, held equal by a test): the
@@ -107,6 +147,7 @@ REDIS_FALSE = ("0", "F", "FALSE", "N", "NO")
 STALE_COMMENTS = {
     "POSTGRES_PASSWORD": "The OWNER role's password, given to the Postgres image",
     "NOCTORNAL_MIGRATION_DATABASE_URL": "What Alembic connects as. Read ONLY by",
+    "NOCTORNAL_APP_DB_PASSWORD": "The APP role's password. Read by the initdb script",
     "REDIS_PASSWORD": "What `redis-server --requirepass` is started with",
     "REDIS_URL": "Note the empty username before the colon",
 }
@@ -202,6 +243,16 @@ class EnvFile:
     def drop(self, key: str, note: str) -> None:
         for index in self._where(key):
             self.lines[index] = note
+            self.changed = True
+
+    def keys(self) -> list:
+        """Every name the file sets, in its order."""
+        return [m.group(1) for line in self.lines if (m := self._LINE.match(line))]
+
+    def remove(self, key: str) -> None:
+        found = set(self._where(key))
+        if found:
+            self.lines = [line for i, line in enumerate(self.lines) if i not in found]
             self.changed = True
 
     def comment_above(self, key: str) -> list:
@@ -371,6 +422,37 @@ def _template_comment(directory: Path, key: str) -> list:
         return []
 
 
+def _derived_names(name: str, key: str) -> bool:
+    """Whether the derived file `name` carries the variable `key`."""
+    return key in DERIVED[name] or (name == STORE and key.startswith("MINIO_")
+                                    and key not in MINIO_CLIENT)
+
+
+def _derive(files: dict, path: Path, said: list) -> None:
+    """Bring the derived file at `path` (redis.env or minio.env) to what secrets.env says: each line
+    it carries copied whole, one secrets.env no longer sets taken out, and any other line left as
+    the operator wrote it (compose blanks every application secret on those services anyway)."""
+    name, sec = path.name, files[SECRETS]
+    wanted = [key for key in sec.keys() if _derived_names(name, key)]
+    for key in wanted:
+        sec.get(key)  # a name set twice is a refusal, as everywhere here
+    target = files.get(name)
+    if target is None:
+        target = EnvFile(path, list(DERIVED_HEADER[name]), sec.newline, False, None)
+        target.changed = True
+        files[name] = target
+        said.append(f"created {name} from secrets.env (mode 600): only "
+                    f"{DERIVED_READERS[name]} read it")
+    for key in [k for k in target.keys() if _derived_names(name, k) and k not in wanted]:
+        target.remove(key)
+        said.append(f"removed {key} from {name}: secrets.env no longer sets it")
+    for key in wanted:
+        had = target.line(key) if target.get(key) is not None else None
+        target.put(key, sec.line(key))
+        if target.existed and had != sec.line(key):
+            said.append(f"copied {key} from secrets.env into {name}")
+
+
 def plan(directory: Path, *, new_database: bool = False):
     """(files, said, left): the files as they should be written, the lines
     saying what changed, and what is left for the operator. Writes
@@ -390,23 +472,24 @@ def plan(directory: Path, *, new_database: bool = False):
             # A root-owned mode 600 file read by anybody else: one sentence and the fix, not a
             # traceback.
             raise Refused(_cannot("read", Path(exc.filename or path), exc)) from None
-    egress_path = directory / EGRESS
-    try:
-        if egress_path.is_file():
-            files[EGRESS] = EnvFile.load(egress_path)
-    except OSError as exc:
-        raise Refused(_cannot("read", egress_path, exc)) from None
+    for name in (EGRESS, REDIS, STORE):
+        path = directory / name
+        try:
+            if path.is_file():
+                files[name] = EnvFile.load(path)
+        except OSError as exc:
+            raise Refused(_cannot("read", path, exc)) from None
     sec = files[SECRETS]
 
-    # 2. The owner's credential leaves secrets.env.
-    for key, home in MOVES:
+    # 2. The owner's credential, and the request role's password only initdb reads, leave secrets.env.
+    for key, home, why in MOVES:
         theirs = sec.get(key)
         if theirs is None:
             continue
         dest = files[home]
         ours = dest.get(key)
         reader = "the database" if home == POSTGRES_INIT else "the migration job"
-        note = f"# {key} moved to {home} (docs/17 F52, 2026-10-02): only {reader} reads it."
+        note = f"# {key} moved to {home} ({why}): only {reader} reads it."
         # A DSN step 5 already gave its TLS query (a run that stopped before secrets.env was
         # written) is the same DSN, not a second one.
         if ours is not None and not _published(ours) and ours != theirs \
@@ -528,6 +611,11 @@ def plan(directory: Path, *, new_database: bool = False):
                              + _template_comment(directory, AUDIT_PEPPER))
         sec.put(AUDIT_PEPPER, f"{AUDIT_PEPPER}={_generate()}")
         said.append(f"generated {AUDIT_PEPPER} (it was {why})")
+
+    # 7. The env files of Redis and MinIO, from secrets.env as it is now written (after 3, so a Redis
+    # password generated above is the one copied).
+    for name in (REDIS, STORE):
+        _derive(files, directory / name, said)
 
     for name in (SECRETS, POSTGRES_INIT, MIGRATE):
         envfile = files[name]

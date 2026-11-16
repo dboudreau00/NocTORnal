@@ -136,6 +136,33 @@ def test_a_production_process_with_no_audit_pepper_records_no_hash_and_never_fal
     assert audit_hash.PEPPER_ENV in errors[0].getMessage()
 
 
+@pytest.mark.parametrize("pepper, also", [
+    ("Sh0rt-pepper-15", {}),
+    ("an-ingest-pepper-copied-twice", {"NOCTORNAL_INGEST_PEPPER": "an-ingest-pepper-copied-twice"}),
+    ("the-totp-key-pasted-as-pepper", {"NOCTORNAL_TOTP_KEK": "the-totp-key-pasted-as-pepper"}),
+    ("replace-me-audit-pepper", {}),
+])
+def test_a_production_process_hashes_only_under_a_pepper_the_boot_refusal_accepts(
+        pepper, also, monkeypatch, caplog):
+    """the independent review TRANSPORT-05: `_key` took any pepper that was not empty, so a script that signs an operator
+    in and never runs the boot refusal (telegram_persona.py, egress_setup.py) keyed `email_hmac` under
+    a short pepper, a copy of another secret or the template's placeholder, all of which the API
+    refuses to start with. Now no hash is made under one, and the reason is logged, never the value."""
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+    monkeypatch.setenv(audit_hash.PEPPER_ENV, pepper)
+    for name, value in also.items():
+        monkeypatch.setenv(name, value)
+    with caplog.at_level(logging.ERROR, logger="noctornal.audit_hash"):
+        assert audit_hash.identifier_hash("someone@example.test") is None
+        assert audit_hash.ip_hash(ADDRESS) is None
+        assert audit_hash.typed_identifier("someone@example.test") == {"email_length": 20}
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1 and errors[0].startswith(audit_hash.PEPPER_ENV), errors
+    assert pepper not in errors[0]
+    monkeypatch.setenv(audit_hash.PEPPER_ENV, "a-usable-audit-pepper-of-its-own")
+    assert audit_hash.identifier_hash("someone@example.test") is not None
+
+
 def test_the_production_error_line_is_said_again_once_the_window_has_passed(monkeypatch, caplog):
     monkeypatch.setenv("NOCTORNAL_ENV", "production")
     monkeypatch.delenv(audit_hash.PEPPER_ENV, raising=False)

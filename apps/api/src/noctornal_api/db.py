@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -69,7 +70,9 @@ SESSION_OPTIONS = "-c jit=off"
 #: The most one statement on a REQUEST connection may run before the database cancels it, in seconds
 #: (docs/17, Load and performance). `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` sets it; a value that is
 #: not a whole number from 5 to 3600 is ignored and the default holds, so a typo bounds requests
-#: rather than freeing them, and nothing switches it off.
+#: rather than freeing them, and nothing switches it off. A `statement_timeout` in the options of
+#: DATABASE_URL is held to the same limits, the bound always goes last, where the server's last word
+#: wins (`session_options`), and production refuses a DSN whose options switch it off.
 #:
 #: The default is 120 seconds, measured with the whole load plan against a case of 101,000 entities,
 #: 300,000 ties and 1,000,000 claims: the slowest single statement a request made, as the request
@@ -100,23 +103,101 @@ def request_statement_timeout() -> tuple[int, bool]:
     return seconds, True
 
 
+#: Milliseconds in each unit Postgres takes for a time setting; a bare number is milliseconds.
+_TIME_UNITS_MS = {"": 1.0, "us": 0.001, "ms": 1.0, "s": 1000.0, "min": 60000.0,
+                  "h": 3600000.0, "d": 86400000.0}
+_TIME_VALUE = re.compile(r"^\s*([+-]?(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?))"
+                         r"\s*(us|ms|s|min|h|d)?\s*$")
+
+
+def _option_words(options: str) -> list[str]:
+    """`options` split as libpq splits it for the server: on white space a backslash does not
+    escape."""
+    words: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for ch in options:
+        if escaped:
+            current.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch.isspace():
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        words.append("".join(current))
+    return words
+
+
+def named_statement_timeout(conninfo: str) -> tuple[bool, int | None]:
+    """`(named, milliseconds)` for the `statement_timeout` the `options` of `conninfo` set last, read
+    as the server reads `-c name=value`, `-cname=value` and `--name=value` (a dash in the name is an
+    underscore, and case does not count): `(False, None)` when they set none, `(True, None)` when the
+    value is not one this can read, and 0 when it switches the limit off."""
+    from psycopg.conninfo import conninfo_to_dict
+    try:
+        options = conninfo_to_dict(conninfo.strip().replace(
+            "postgresql+psycopg://", "postgresql://", 1)).get("options") or ""
+    except psycopg.ProgrammingError:
+        return False, None
+    words = _option_words(str(options))
+    found: tuple[bool, int | None] = (False, None)
+    for index, word in enumerate(words):
+        if word == "-c":
+            setting = words[index + 1] if index + 1 < len(words) else ""
+        elif word.startswith("--") or (word.startswith("-c") and len(word) > 2):
+            setting = word[2:]
+        else:
+            continue
+        name, equals, value = setting.partition("=")
+        if not equals or name.replace("-", "_").lower() != "statement_timeout":
+            continue
+        match = _TIME_VALUE.match(value)
+        if not match:
+            found = (True, None)
+            continue
+        number, unit = match.group(1), match.group(2) or ""
+        amount = int(number, 16) if number.lstrip("+-")[:2].lower() == "0x" else float(number)
+        found = (True, int(amount * _TIME_UNITS_MS[unit]))
+    return found
+
+
+def request_statement_timeout_ms(conninfo: str) -> int:
+    """The bound, in milliseconds, a request connection to `conninfo` runs under. The setting when
+    the operator made it; else a `statement_timeout` the DSN's options name, held to the same 5 to
+    3600 seconds (one that switches the limit off is the longest, and one that cannot be read is the
+    default), so a stricter bound of the operator's is kept and none is loosened past the limits;
+    else the default."""
+    seconds, explicit = request_statement_timeout()
+    if explicit:
+        return seconds * 1000
+    named, milliseconds = named_statement_timeout(conninfo)
+    if not named or milliseconds is None:
+        return REQUEST_STATEMENT_TIMEOUT_DEFAULT * 1000
+    if milliseconds <= 0:
+        return REQUEST_STATEMENT_TIMEOUT_MAX * 1000
+    return min(max(milliseconds, REQUEST_STATEMENT_TIMEOUT_MIN * 1000),
+               REQUEST_STATEMENT_TIMEOUT_MAX * 1000)
+
+
 def session_options(conninfo: str, *, for_request: bool = False) -> str:
     """The `options` a connection to `conninfo` is opened with: whatever the
     DSN already names, then SESSION_OPTIONS, so an operator's own settings
     in DATABASE_URL are kept rather than replaced.
 
-    A request connection also gets its statement timeout. The operator's own
-    word decides, the latest first: the setting when they made it, else a
-    `statement_timeout` the DSN names (a stricter bound of theirs is not
-    loosened by a default), else the default."""
+    A request connection also gets its statement timeout, LAST, where the
+    server's last word wins, so nothing the DSN names can loosen it past the
+    limits or switch it off (`request_statement_timeout_ms`)."""
     from psycopg.conninfo import conninfo_to_dict
     named = conninfo_to_dict(conninfo).get("options")
     options = f"{named} {SESSION_OPTIONS}" if named else SESSION_OPTIONS
     if not for_request:
         return options
-    seconds, explicit = request_statement_timeout()
-    limit = f"-c statement_timeout={seconds * 1000}"
-    return f"{options} {limit}" if explicit else f"{limit} {options}"
+    return f"{options} -c statement_timeout={request_statement_timeout_ms(conninfo)}"
 
 
 def connect_timeout_seconds() -> int:

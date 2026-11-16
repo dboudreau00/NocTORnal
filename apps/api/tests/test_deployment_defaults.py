@@ -71,7 +71,9 @@ def _minio_init(tmp_path: Path, **given: str) -> list[str]:
     log = tmp_path / "mc.log"
     log.write_text("", encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k not in _BUCKET_VARS}
-    env.update({"MINIO_ROOT_USER": "test-root", "SAMPLE_ACCESS_KEY": "test-sample-ak",
+    # Both halves of the root pair: minio-init refuses to start on an empty one (minio.env missing).
+    env.update({"MINIO_ROOT_USER": "test-root", "MINIO_ROOT_PASSWORD": "test-root-password",
+                "SAMPLE_ACCESS_KEY": "test-sample-ak",
                 "SAMPLE_SECRET_KEY": "TEST-SAMPLE-SECRET-q9Zx", "MCLOG": log.as_posix(), **given})
     done = subprocess.run([shell, path.as_posix()], capture_output=True, text=True, env=env,
                           timeout=60)

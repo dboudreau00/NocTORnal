@@ -13,6 +13,9 @@ against temporary directories only:
   not exist yet;
 * the audit pepper is written when it is missing, a placeholder, too short or a copy of another secret,
   and one the API accepts is never replaced;
+* redis.env and minio.env are written from secrets.env with what Redis, MinIO and minio-init read and
+  nothing else, kept in step on every run, and the app role's password moves to postgres-init.env, since
+  none of those services reads secrets.env (the independent review TRANSPORT-01);
 * nothing printed carries a value;
 * install.sh --production-secrets runs the same helper as install.ps1 -ProductionSecrets. The PowerShell
   run exists on Windows only; what is held about install.ps1 everywhere is its text (no test here skips:
@@ -439,7 +442,8 @@ def test_the_old_templates_comments_go_with_the_lines_they_described(prod):
     assert "Nothing compares them" not in text
     # What still describes a line that is still there stays.
     assert "There are TWO roles on purpose" in text
-    assert "# The APP role's password." in text
+    assert "# NOCTORNAL_APP_DB_PASSWORD moved to postgres-init.env (docs/17, 2026-11-15)" in text
+    assert _env(prod / "postgres-init.env")["NOCTORNAL_APP_DB_PASSWORD"] == APP
     assert "# POSTGRES_PASSWORD moved to postgres-init.env (docs/17 F52" in text
     # The Redis lines now carry the current template's comments.
     lines = text.splitlines()
@@ -520,8 +524,8 @@ _LAST = ("secrets.env is written last, so it still holds every line it had; once
     ("migrate.env",
      f"Already changed, each with its backup beside it: postgres-init.env. {_LAST}"),
     ("secrets.env",
-     f"Already changed, each with its backup beside it: postgres-init.env, migrate.env. "
-     f"{_LAST}"),
+     f"Already changed, each with its backup beside it: postgres-init.env, migrate.env, "
+     f"redis.env, minio.env. {_LAST}"),
 ])
 def test_a_file_it_cannot_write_stops_it_naming_the_file_and_what_changed(
         prod, monkeypatch, failing, changed):
@@ -658,9 +662,91 @@ def test_every_file_and_backup_is_created_and_left_mode_600(prod, monkeypatch):
     # A file is chmodded as the temporary it is written to, before the rename, so ".NAME.tmp-PID" stands
     # for NAME.
     assert {re.sub(r"^\.(.+)\.tmp-\d+$", r"\1", name) for name, _ in recording.chmodded} == {
-        "secrets.env", "postgres-init.env", "migrate.env",
+        "secrets.env", "postgres-init.env", "migrate.env", "redis.env", "minio.env",
         f"secrets.env.backup-{STAMP}", f"postgres-init.env.backup-{STAMP}"}
     assert all(mode == 0o600 for _, mode in recording.chmodded), recording.chmodded
+
+
+# ---------------------------------------------------------------------------
+# The env files of Redis and MinIO, which read no secrets.env
+# ---------------------------------------------------------------------------
+
+ROOT_USER = "Mr4-root-user"
+ROOT_PASS = "Mp2-root-password"
+SAMPLE_SECRET = "Ss1-sample-secret"
+STORE_SECRETS = f"""MINIO_ROOT_USER={ROOT_USER}
+MINIO_ROOT_PASSWORD={ROOT_PASS}
+MINIO_ENDPOINT=minio:9000
+MINIO_ACCESS_KEY={ROOT_USER}
+MINIO_SECRET_KEY={ROOT_PASS}
+MINIO_SECURE=true
+MINIO_BROWSER=off
+EVIDENCE_BUCKET=noctornal-evidence
+SAMPLE_ACCESS_KEY=sample-acct
+SAMPLE_SECRET_KEY={SAMPLE_SECRET}
+NOCTORNAL_TOTP_KEK=QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=
+"""
+
+
+def _store_layout(prod: Path) -> Path:
+    _old_layout(prod)
+    with (prod / "secrets.env").open("a", encoding="utf-8") as fh:
+        fh.write(STORE_SECRETS)
+    return prod
+
+
+def test_redis_and_minio_get_files_of_their_own_holding_what_they_read_and_nothing_else(prod):
+    status, said = _run(_store_layout(prod))
+    assert status == 0, said
+    for value in (ROOT_PASS, SAMPLE_SECRET):
+        assert not any(value in line for line in said)
+    secrets = _env(prod / "secrets.env")
+    redis, store = _env(prod / "redis.env"), _env(prod / "minio.env")
+    assert redis == {"REDIS_PASSWORD": secrets["REDIS_PASSWORD"], "REDIS_URL": secrets["REDIS_URL"]}
+    assert store == {"MINIO_ROOT_USER": ROOT_USER, "MINIO_ROOT_PASSWORD": ROOT_PASS,
+                     "MINIO_BROWSER": "off", "EVIDENCE_BUCKET": "noctornal-evidence",
+                     "SAMPLE_ACCESS_KEY": "sample-acct", "SAMPLE_SECRET_KEY": SAMPLE_SECRET}
+    assert "created redis.env from secrets.env (mode 600): only the redis service read it" in said
+    assert "created minio.env from secrets.env (mode 600): only minio and minio-init read it" in said
+    # The request role's password leaves secrets.env for the one file the database reads.
+    assert "NOCTORNAL_APP_DB_PASSWORD" not in secrets
+    assert _env(prod / "postgres-init.env")["NOCTORNAL_APP_DB_PASSWORD"] == APP
+    assert "moved NOCTORNAL_APP_DB_PASSWORD from secrets.env to postgres-init.env" in said
+    if os.name == "posix":
+        for name in ("redis.env", "minio.env"):
+            assert (prod / name).stat().st_mode & 0o777 == 0o600, name
+    assert _run(prod)[1] == ["nothing to change: the files are already in this release's layout"]
+
+
+def test_a_line_changed_in_secrets_env_reaches_its_service_on_the_next_run(prod):
+    _run(_store_layout(prod))
+    with (prod / "minio.env").open("a", encoding="utf-8") as fh:
+        fh.write("# the operator's own note\nTZ=UTC\nMINIO_PROMETHEUS_AUTH_TYPE=public\n")
+    text = (prod / "secrets.env").read_text(encoding="utf-8")
+    text = text.replace(f"MINIO_ROOT_PASSWORD={ROOT_PASS}", "MINIO_ROOT_PASSWORD=Nw9-new-root-pass")
+    text = text.replace("MINIO_BROWSER=off\n", "")
+    (prod / "secrets.env").write_text(text, encoding="utf-8")
+    before = (prod / "minio.env").read_bytes()
+    status, said = _run(prod)
+    assert status == 0, said
+    store = _env(prod / "minio.env")
+    assert store["MINIO_ROOT_PASSWORD"] == "Nw9-new-root-pass" and "MINIO_BROWSER" not in store
+    assert "copied MINIO_ROOT_PASSWORD from secrets.env into minio.env" in said
+    assert "removed MINIO_BROWSER from minio.env: secrets.env no longer sets it" in said
+    # A line it does not carry stays as the operator wrote it, a MINIO_ setting only secrets.env may
+    # make goes, and a backup was taken first.
+    assert store["TZ"] == "UTC" and "MINIO_PROMETHEUS_AUTH_TYPE" not in store
+    assert "# the operator's own note" in (prod / "minio.env").read_text(encoding="utf-8")
+    assert (prod / f"minio.env.backup-{STAMP}").read_bytes() == before
+    assert not any("Nw9-new-root-pass" in line for line in said)
+
+
+@pytest.mark.skipif(posix_shell() is None, reason="no POSIX sh on this machine")
+def test_the_redis_file_it_writes_is_one_the_redis_service_starts_on(prod, tmp_path):
+    _run(_store_layout(prod))
+    code, out, err, acl = run_start_script(_env(prod / "redis.env"), tmp_path)
+    assert code == 0, err
+    assert out.startswith("redis-server ") and "noctornal_limiter" in acl
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +1001,7 @@ def test_the_installers_say_a_stop_the_same_true_way_and_lock_the_same_files():
     names = re.search(r"\$_\.Name -in @\(([^)]*)\)", ps1)
     assert names, "install.ps1 no longer names the files it restricts to its user"
     assert set(re.findall(r"'([^']+)'", names.group(1))) == {
-        helper.SECRETS, helper.POSTGRES_INIT, helper.MIGRATE}
+        helper.SECRETS, helper.POSTGRES_INIT, helper.MIGRATE, helper.REDIS, helper.STORE}
     assert "*.env.backup-*" in ps1
     # Each hands the helper's own verdict back as its exit status.
     assert "production_secrets.py" in ps1 and "'--dir'" in ps1 and "exit $status" in ps1

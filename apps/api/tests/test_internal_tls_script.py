@@ -10,8 +10,10 @@ Held here, against temporary directories and the host's openssl:
   mounts, holds the bundle and no key;
 * `init` replaces nothing, `migrate` takes the old self-signed pair out of the public mount and
   leaves the old layout whole when it fails part way, `renew` refuses without the CA's key,
-  `add-ca` refuses a key or anything but certificates, and `check` fails a leaf inside its last
-  thirty days;
+  `add-ca` refuses a key or anything but certificates, and a certificate that could vouch for minio,
+  postgres or redis (a CA whose name constraints leave one of them in, or a certificate that names one),
+  since the clients take every certificate in the bundle as a trust anchor for those names; `check`
+  fails a bundle already holding one, and a leaf inside its last thirty days;
 * nothing printed carries a key, and the script stays runnable on a host python 3.8 with the
   standard library alone.
 """
@@ -236,6 +238,15 @@ def test_a_run_that_is_not_root_says_minio_cannot_read_its_key(tmp_path):
 # init, migrate, renew and add-ca refuse what would break a running stack
 # ---------------------------------------------------------------------------
 
+def test_a_relative_dir_issues_as_an_absolute_one_does(tmp_path, monkeypatch):
+    """openssl ca runs in the staging directory, so a relative --dir named a request it could not find
+    and init stopped at the CA (found running the stack in WSL for TRANSPORT-01)."""
+    monkeypatch.chdir(tmp_path)
+    status, said = _run("--dir", "relative/tls", "init")
+    assert status == 0, said
+    assert _run("--dir", "relative/tls", "check")[0] == 0
+
+
 def test_init_refuses_to_overwrite_a_ca(tls):
     before = {p: p.read_bytes() for p in tls.rglob("*") if p.is_file()}
     status, said = _run("--dir", str(tls), "init")
@@ -351,10 +362,8 @@ def test_add_ca_refuses_a_certificate_beside_a_key(tls, issued, tmp_path):
 def test_add_ca_appends_another_ca_once(tls, tmp_path):
     other = tmp_path / "agency"
     other.mkdir()
-    done = _openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "30",
-                    "-keyout", str(other / "k.pem"), "-out", str(other / "ca.pem"),
-                    "-config", str(_config(other)))
-    assert done.returncode == 0, done.stderr
+    _agency_ca(other, "basicConstraints = critical, CA:TRUE\n"
+                      "nameConstraints = critical, permitted;DNS:.agency.example\n")
     status, said = _run("--dir", str(tls), "add-ca", str(other / "ca.pem"))
     assert status == 0 and said[0].startswith("added 1 certificate from ca.pem"), said
     bundle = (tls / "public" / "ca.crt").read_text()
@@ -365,11 +374,135 @@ def test_add_ca_appends_another_ca_once(tls, tmp_path):
     assert _run("--dir", str(tls), "check")[0] == 0
 
 
-def _config(directory: Path) -> Path:
+def _config(directory: Path, extensions: str = "") -> Path:
     path = directory / "req.cnf"
-    path.write_text("[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = Agency CA\n",
-                    encoding="ascii")
+    path.write_text("[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = Agency CA\n"
+                    + (f"[ext]\n{extensions}" if extensions else ""), encoding="ascii")
     return path
+
+
+def _agency_ca(directory: Path, extensions: str) -> Path:
+    """A self-signed certificate with `extensions`, as an agency's CA (or a server's own) is made:
+    ca.pem and its key k.pem in `directory`."""
+    done = _openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                    "-nodes", "-days", "30", "-keyout", str(directory / "k.pem"),
+                    "-out", str(directory / "ca.pem"),
+                    "-config", str(_config(directory, extensions)), "-extensions", "ext")
+    assert done.returncode == 0, done.stderr
+    return directory / "ca.pem"
+
+
+def _issued_by(directory: Path, san: str) -> Path:
+    """A server certificate for `san` signed by the CA in `directory`, as whoever holds its key
+    could make one."""
+    key, csr, cert, config = (directory / f"leaf.{ext}" for ext in ("key", "csr", "crt", "cnf"))
+    config.write_text("[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = leaf\n"
+                      "[v3_leaf]\nbasicConstraints = critical, CA:FALSE\n"
+                      "keyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\n"
+                      f"subjectAltName = {san}\nsubjectKeyIdentifier = hash\n"
+                      "authorityKeyIdentifier = keyid\n", encoding="ascii")
+    for args in (("genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256",
+                  "-out", str(key)),
+                 ("req", "-new", "-key", str(key), "-config", str(config), "-out", str(csr)),
+                 ("x509", "-req", "-in", str(csr), "-CA", str(directory / "ca.pem"),
+                  "-CAkey", str(directory / "k.pem"), "-set_serial", "0x7e58", "-days", "30",
+                  "-sha256", "-extfile", str(config), "-extensions", "v3_leaf",
+                  "-out", str(cert))):
+        done = _openssl(*args)
+        assert done.returncode == 0, done.stderr
+    return cert
+
+
+#: A CA as an agency makes one, with no name constraints.
+UNCONSTRAINED = ("basicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\n"
+                 "subjectKeyIdentifier = hash\n")
+
+
+def test_a_second_ca_in_the_bundle_is_not_bound_by_the_deployment_cas_constraints(tls, tmp_path):
+    """the independent review TRANSPORT-03's premise, run: the deployment CA's name constraints bind its own signatures
+    alone, so a CA appended to the bundle as add-ca appended one signs a certificate for DNS:postgres
+    that verifies against the very file every DSN names as sslrootcert, and Python's client (redis-py's
+    and the store client's) completes a handshake with it as `postgres`."""
+    agency = tmp_path / "agency"
+    agency.mkdir()
+    _agency_ca(agency, UNCONSTRAINED)
+    bundle = tmp_path / "bundle.crt"
+    bundle.write_text((tls / "public" / "ca.crt").read_text() + (agency / "ca.pem").read_text(),
+                      encoding="ascii")
+    forged = _issued_by(agency, "DNS:postgres")
+    assert _verifies(forged, bundle)
+    assert _handshake(forged, agency / "leaf.key", bundle, "postgres") == "TLSv1.3"
+
+
+@pytest.mark.parametrize("extensions, vouched", [
+    (UNCONSTRAINED, "minio, postgres, redis"),
+    # Constraints of another type leave DNS names unconstrained.
+    (UNCONSTRAINED + "nameConstraints = critical, permitted;IP:10.0.0.0/255.0.0.0\n",
+     "minio, postgres, redis"),
+    (UNCONSTRAINED + "nameConstraints = critical, excluded;DNS:postgres\n", "minio, redis"),
+    (UNCONSTRAINED + "nameConstraints = critical, permitted;DNS:redis\n", "redis"),
+    # A base with no leading dot covers the name itself.
+    (UNCONSTRAINED + "nameConstraints = critical, permitted;DNS:minio, permitted;DNS:.agency.example\n",
+     "minio"),
+    ("basicConstraints = critical, CA:FALSE\nsubjectAltName = DNS:relay.agency.example, DNS:Postgres\n",
+     "postgres"),
+])
+def test_add_ca_refuses_a_certificate_that_could_vouch_for_an_internal_server(
+        tls, tmp_path, extensions, vouched):
+    agency = tmp_path / "agency"
+    agency.mkdir()
+    source = _agency_ca(agency, extensions)
+    before = (tls / "public" / "ca.crt").read_bytes()
+    status, said = _run("--dir", str(tls), "add-ca", str(source))
+    assert status == 1, said
+    assert said[0].startswith(f"refused: certificate 1 of 1 in ca.pem could vouch for {vouched}, "
+                              f"and the database, Redis and object store clients trust"), said
+    assert "excluded;DNS:postgres" in said[0] and said[0].endswith("Nothing was written.")
+    assert (tls / "public" / "ca.crt").read_bytes() == before
+
+
+@pytest.mark.parametrize("extensions", [
+    UNCONSTRAINED + "nameConstraints = critical, permitted;DNS:.agency.example\n",
+    UNCONSTRAINED + "nameConstraints = critical, permitted;DNS:agency.example, permitted;IP:10.0.0.0/255.0.0.0\n",
+    UNCONSTRAINED + ("nameConstraints = critical, excluded;DNS:postgres, excluded;DNS:redis, "
+                     "excluded;DNS:minio\n"),
+    # Its own names alone, none of them an internal server's.
+    "basicConstraints = critical, CA:FALSE\nsubjectAltName = DNS:relay.agency.example\n",
+])
+def test_add_ca_takes_a_certificate_that_leaves_the_internal_servers_out(tls, tmp_path, extensions):
+    agency = tmp_path / "agency"
+    agency.mkdir()
+    source = _agency_ca(agency, extensions)
+    status, said = _run("--dir", str(tls), "add-ca", str(source))
+    assert status == 0 and said[0].startswith("added 1 certificate from ca.pem"), said
+    assert _run("--dir", str(tls), "check")[0] == 0
+
+
+def test_what_add_ca_takes_cannot_answer_as_an_internal_server(tls, tmp_path):
+    """The other half of the reading: what passes is what OpenSSL and the Python client refuse."""
+    agency = tmp_path / "agency"
+    agency.mkdir()
+    _agency_ca(agency, UNCONSTRAINED + ("nameConstraints = critical, excluded;DNS:postgres, "
+                                        "excluded;DNS:redis, excluded;DNS:minio\n"))
+    assert _run("--dir", str(tls), "add-ca", str(agency / "ca.pem"))[0] == 0
+    bundle = tls / "public" / "ca.crt"
+    forged = _issued_by(agency, "DNS:postgres")
+    assert not _verifies(forged, bundle)
+    assert _handshake(forged, agency / "leaf.key", bundle, "postgres").startswith("refused:")
+
+
+def test_check_fails_a_bundle_that_already_holds_such_a_certificate(tls, tmp_path):
+    """A bundle an earlier add-ca grew, before it asked."""
+    agency = tmp_path / "agency"
+    agency.mkdir()
+    _agency_ca(agency, UNCONSTRAINED)
+    bundle = tls / "public" / "ca.crt"
+    bundle.write_text(bundle.read_text() + (agency / "ca.pem").read_text(), encoding="ascii")
+    status, lines = _run("--dir", str(tls), "check")
+    assert status == 1
+    failed = [line for line in lines if line.startswith("FAILED: certificate 2 of 2 in tls/public")]
+    assert len(failed) == 1 and "could vouch for minio, postgres, redis" in failed[0], lines
+    assert lines[-1] == "check FAILED"
 
 
 # ---------------------------------------------------------------------------

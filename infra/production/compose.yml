@@ -13,6 +13,9 @@
 #     ALTER TABLE ... DISABLE TRIGGER, which only the owner may. The owner's password and DSN live
 #     in postgres-init.env and migrate.env (x-no-owner-credential); an older secrets.env has them
 #     moved out by `sudo bash release/install.sh --production-secrets`.
+#   * Postgres, Redis and MinIO never read secrets.env, which holds the application's keys: each reads
+#     an env file of its own, postgres-init.env, redis.env and minio.env, the last two written from
+#     secrets.env by the same installer step, and holds every other secret blank (x-no-app-secret).
 #   * Redis runs `noeviction`, as dev does, but with an ACL and reachable only from the compose
 #     network.
 #   * The evidence bucket has a COMPLIANCE default retention where dev keeps GOVERNANCE (see
@@ -116,6 +119,41 @@ x-noctornal-app: &noctornal-app
 x-no-owner-credential: &no-owner-credential
   POSTGRES_PASSWORD: ""
   NOCTORNAL_MIGRATION_DATABASE_URL: ""
+
+# The application's secrets, blanked on the four services that run another project's image:
+# postgres, redis, minio and minio-init. None of them reads secrets.env (each reads an env file of
+# its own: postgres-init.env, redis.env, minio.env), and none reads one of these, so a line pasted
+# into its file reaches nothing: their processes start as root and check nothing, and a key they
+# held would be readable to anybody who ran code in one of them (docs/17, 2026-11-15). Each service
+# also blanks the other three's secrets, so it holds its own alone. Merged with `<<:`; a test holds
+# that every secret an env template names is blanked on each of the four but what that one reads.
+x-no-app-secret: &no-app-secret
+  NOCTORNAL_MIGRATION_DATABASE_URL: ""
+  DATABASE_URL: ""
+  NOCTORNAL_WORKER_DATABASE_URL: ""
+  NOCTORNAL_EGRESS_DATABASE_URL: ""
+  NOCTORNAL_TOTP_KEK: ""
+  NOCTORNAL_TOTP_KEK_RETIRED: ""
+  NOCTORNAL_PERSONA_KEK: ""
+  NOCTORNAL_PERSONA_KEK_RETIRED: ""
+  NOCTORNAL_INGEST_PEPPER: ""
+  NOCTORNAL_AUDIT_PEPPER: ""
+  NOCTORNAL_MAIL_STAMP_KEY: ""
+  NOCTORNAL_MAIL_STAMP_KEY_RETIRED: ""
+  NOCTORNAL_SETUP_TOKEN: ""
+  NOCTORNAL_SANDBOX_TOKEN: ""
+  NOCTORNAL_WEBHOOK_SECRET: ""
+  NOCTORNAL_EGRESS_CLIENT_KEY: ""
+  NOCTORNAL_EGRESS_FINGERPRINT_KEY: ""
+  NOCTORNAL_EGRESS_SEAL_KEY: ""
+  NOCTORNAL_EGRESS_SEAL_KEY_RETIRED: ""
+  SMTP_PASSWORD: ""
+  MINIO_ACCESS_KEY: ""
+  MINIO_SECRET_KEY: ""
+  OBJECT_STORE_ACCESS_KEY: ""
+  OBJECT_STORE_SECRET_KEY: ""
+  OBJECT_STORE_ADMIN_ACCESS_KEY: ""
+  OBJECT_STORE_ADMIN_SECRET_KEY: ""
 
 services:
 
@@ -241,15 +279,24 @@ services:
     # outgrows it under load and fails with DiskFull, an HTTP 500 to the
     # analyst (measured at 50 concurrent users on a case of a million claims).
     shm_size: 1gb
-    # postgres-init.env carries the passwords only initdb reads (the owner's POSTGRES_PASSWORD,
-    # the system role's and the egress role's NOCTORNAL_EGRESS_DB_PASSWORD), and only this
-    # service reads it. It is optional because an existing volume needs none of them; the image
-    # itself refuses a new volume without POSTGRES_PASSWORD.
+    # postgres-init.env carries the passwords only initdb reads (the owner's POSTGRES_PASSWORD, the
+    # request role's NOCTORNAL_APP_DB_PASSWORD, the system role's and the egress role's), and only
+    # this service reads it. It is optional because an existing volume needs none of them; the image
+    # itself refuses a new volume without POSTGRES_PASSWORD. Not secrets.env: the server runs on
+    # none of the application's keys, and its entrypoint starts as root.
     env_file:
-      - secrets.env
       - path: postgres-init.env
         required: false
     environment:
+      <<: *no-app-secret
+      REDIS_PASSWORD: ""
+      REDIS_URL: ""
+      MINIO_ROOT_USER: ""
+      MINIO_ROOT_PASSWORD: ""
+      SAMPLE_ACCESS_KEY: ""
+      SAMPLE_SECRET_KEY: ""
+      PRESERVE_ACCESS_KEY: ""
+      PRESERVE_SECRET_KEY: ""
       POSTGRES_DB: noctornal
       # The owner role and bootstrap superuser: Alembic runs as it, nothing at runtime does. Its
       # password, from postgres-init.env, must be the one in migrate.env's
@@ -285,8 +332,8 @@ services:
       -c hba_file=/etc/postgresql/pg_hba.conf
     # db/init, as in dev: CREATE EXTENSION needs superuser, so extensions load here and the
     # schema comes from Alembic alone. 10-app-role.sh creates the least-privilege role from
-    # NOCTORNAL_APP_DB_PASSWORD (env_file, with the other secrets); when that is absent it creates
-    # none and says so, which suits dev and CI but not this deployment.
+    # NOCTORNAL_APP_DB_PASSWORD (postgres-init.env, with the other role passwords); when that is
+    # absent it creates none and says so, which suits dev and CI but not this deployment.
     #
     #   * Init scripts run once, on an empty data directory: changing NOCTORNAL_APP_DB_PASSWORD
     #     later needs ALTER ROLE by hand.
@@ -314,7 +361,11 @@ services:
   # Redis refuses writes and each limit falls to its own on_backend_failure, which is visible.
   #
   # The password is read from the container environment (`$$`), not interpolated by compose, so
-  # `docker compose config` never prints it and the operator need not export it.
+  # `docker compose config` never prints it and the operator need not export it. That environment is
+  # redis.env, which holds REDIS_PASSWORD and REDIS_URL alone, both written from secrets.env by
+  # `release/install.sh --production-secrets`; never secrets.env, since this runs as root and needs
+  # none of the application's keys. Without the file the password is empty and the service refuses
+  # to start, naming the installer step.
   #
   # The ACL turns `default` off, so an unauthenticated client is refused, and makes
   # `noctornal_limiter` the only user: keys under `rl:`, the commands of
@@ -323,7 +374,7 @@ services:
   # password hashes (ACL GETUSER). In production readiness reads the ACL back and fails
   # `redis_limiter_isolated` when it differs. The file is written at each start into /tmp under
   # umask 077 and holds the password's SHA-256, never the password, so it cannot drift from
-  # secrets.env and a new password costs a restart.
+  # redis.env and a new password costs a restart.
   #
   # TLS 1.3 alone: `--port 0` closes the plain listener and 6379 is the TLS port. The certificate
   # and key are ./tls/redis (scripts/internal_tls.py, DNS:redis), the one service that mounts
@@ -349,9 +400,21 @@ services:
     restart: unless-stopped
     logging: *logging
     networks: [noctornal]
-    env_file: [secrets.env]
+    env_file:
+      - path: redis.env
+        required: false
     environment:
-      <<: *no-owner-credential
+      <<: *no-app-secret
+      POSTGRES_PASSWORD: ""
+      NOCTORNAL_APP_DB_PASSWORD: ""
+      NOCTORNAL_WORKER_DB_PASSWORD: ""
+      NOCTORNAL_EGRESS_DB_PASSWORD: ""
+      MINIO_ROOT_USER: ""
+      MINIO_ROOT_PASSWORD: ""
+      SAMPLE_ACCESS_KEY: ""
+      SAMPLE_SECRET_KEY: ""
+      PRESERVE_ACCESS_KEY: ""
+      PRESERVE_SECRET_KEY: ""
     cap_drop: [ALL]
     cap_add: [DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
@@ -366,7 +429,10 @@ services:
         if [ -z "$$REDIS_PASSWORD" ]; then
           echo 'REDIS_PASSWORD is empty: refusing to start.' >&2
           echo 'It is the password of noctornal_limiter, the only user this' >&2
-          echo 'Redis has, and an empty one would let any container in.' >&2
+          echo 'Redis has, and an empty one would let any container in. This' >&2
+          echo 'service reads it from redis.env, which sudo bash release/install.sh' >&2
+          echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows)' >&2
+          echo 'writes from secrets.env (release/secrets-upgrade/README.md).' >&2
           exit 1
         fi
         if [ ! -r /tls/server.crt ] || [ ! -r /tls/server.key ]; then
@@ -444,14 +510,20 @@ services:
   # trusts; this is the one service that mounts that key. With ./tls/minio empty MinIO serves
   # plain HTTP and every client fails its handshake.
   #
-  # MINIO_ACCESS_KEY and MINIO_SECRET_KEY are the API's client credentials and also MinIO's
-  # legacy names for its root pair, which this image still reads. env_file cannot filter them,
-  # so they are unset before the server starts: once the client account is split off, the
-  # server would otherwise hold a credential that is not its own. The rest of secrets.env still
-  # reaches it.
+  # It reads minio.env, never secrets.env: the root pair, any other MINIO_ setting of the server's,
+  # and minio-init's account keys and bucket names, which the server's own copy blanks below, all
+  # written from secrets.env by `release/install.sh --production-secrets`. MinIO runs as root, so
+  # an application key in its environment would be anybody's who ran code in it. Without the file
+  # the root pair is empty, and the entrypoint refuses to start rather than come up on MinIO's
+  # published default pair.
   #
-  # Not an `environment:` block: these values are secrets, so it would interpolate
-  # `${MINIO_ROOT_USER}` from secrets.env, which compose reads only under `--env-file`. Without
+  # MINIO_ACCESS_KEY and MINIO_SECRET_KEY are the API's client credentials and also MinIO's
+  # legacy names for its root pair, which this image still reads. They are blank here
+  # (x-no-app-secret) and unset again before the server starts: once the client account is split
+  # off, the server would otherwise hold a credential that is not its own.
+  #
+  # The root pair is not written into `environment:`: these values are secrets, so it would
+  # interpolate `${MINIO_ROOT_USER}` from a file compose reads only under `--env-file`. Without
   # that flag compose substitutes an empty string and MinIO starts on its built-in
   # minioadmin:minioadmin; `${MINIO_ROOT_USER:?}` would refuse `ps` and `logs` as well.
   #
@@ -469,9 +541,21 @@ services:
     restart: unless-stopped
     logging: *logging
     networks: [noctornal]
-    env_file: [secrets.env]
+    env_file:
+      - path: minio.env
+        required: false
     environment:
-      <<: *no-owner-credential
+      <<: *no-app-secret
+      POSTGRES_PASSWORD: ""
+      NOCTORNAL_APP_DB_PASSWORD: ""
+      NOCTORNAL_WORKER_DB_PASSWORD: ""
+      NOCTORNAL_EGRESS_DB_PASSWORD: ""
+      REDIS_PASSWORD: ""
+      REDIS_URL: ""
+      SAMPLE_ACCESS_KEY: ""
+      SAMPLE_SECRET_KEY: ""
+      PRESERVE_ACCESS_KEY: ""
+      PRESERVE_SECRET_KEY: ""
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     entrypoint:
@@ -479,6 +563,14 @@ services:
       - -c
       - |
         unset MINIO_ACCESS_KEY MINIO_SECRET_KEY
+        if [ "$${#MINIO_ROOT_USER}" -eq 0 ] || [ "$${#MINIO_ROOT_PASSWORD}" -eq 0 ]; then
+          echo 'MINIO_ROOT_USER or MINIO_ROOT_PASSWORD is empty: refusing to start, rather than' >&2
+          echo "on MinIO's published default pair. This service reads them from minio.env, which" >&2
+          echo 'sudo bash release/install.sh --production-secrets (release/install.ps1' >&2
+          echo '-ProductionSecrets on Windows) writes from secrets.env' >&2
+          echo '(release/secrets-upgrade/README.md).' >&2
+          exit 1
+        fi
         exec minio server /data --console-address ":9001"
     volumes:
       - prod-miniodata:/data
@@ -508,6 +600,10 @@ services:
   # account, which cannot reach the bucket, so a rejection is refused rather than destroying
   # anything.
   #
+  # It reads minio.env, as minio does, and never secrets.env: the root pair, the SAMPLE_ and
+  # PRESERVE_ account keys and the bucket names, written there from secrets.env by the installer
+  # step, so the buckets it makes are the ones the API reads. Without the file it refuses by name.
+  #
   # The sample account is a service account confined to the samples bucket, minted with the keys
   # the operator chose in secrets.env. Each policy is one printf format line, since a
   # single-quoted shell string cannot be folded. The `svcacct info` guard makes a rerun a no-op.
@@ -536,9 +632,17 @@ services:
     image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780
     depends_on: [minio]
     networks: [noctornal]
-    env_file: [secrets.env]
+    env_file:
+      - path: minio.env
+        required: false
     environment:
-      <<: *no-owner-credential
+      <<: *no-app-secret
+      POSTGRES_PASSWORD: ""
+      NOCTORNAL_APP_DB_PASSWORD: ""
+      NOCTORNAL_WORKER_DB_PASSWORD: ""
+      NOCTORNAL_EGRESS_DB_PASSWORD: ""
+      REDIS_PASSWORD: ""
+      REDIS_URL: ""
     restart: "no"
     logging: *logging
     cap_drop: [ALL]
@@ -551,9 +655,13 @@ services:
       - -c
       - |
         set -e
+        if [ "$${#MINIO_ROOT_USER}" -eq 0 ] || [ "$${#MINIO_ROOT_PASSWORD}" -eq 0 ]; then
+          echo "minio-init: MINIO_ROOT_USER or MINIO_ROOT_PASSWORD is empty, so there is no account to make the buckets with. This service reads them from minio.env, which sudo bash release/install.sh --production-secrets (release/install.ps1 -ProductionSecrets on Windows) writes from secrets.env (release/secrets-upgrade/README.md)." >&2
+          exit 1
+        fi
         keylen() {
           if [ "$${#2}" -lt "$$3" ] || [ "$${#2}" -gt "$$4" ]; then
-            echo "minio-init: $$1 is $${#2} characters and MinIO takes $$3 to $$4 for a service account, so the account cannot be created. Choose another in secrets.env (infra/production/README.md, step 1)." >&2
+            echo "minio-init: $$1 is $${#2} characters and MinIO takes $$3 to $$4 for a service account, so the account cannot be created. Choose another in secrets.env and run the installer step again (infra/production/README.md, step 1)." >&2
             return 1
           fi
         }

@@ -107,7 +107,11 @@ def test_the_owner_variables_are_blanked_where_a_secrets_file_reaches():
     anchor = anchor[:anchor.index("\n\n")]
     assert anchor.splitlines()[1:] == ['  POSTGRES_PASSWORD: ""',
                                        '  NOCTORNAL_MIGRATION_DATABASE_URL: ""']
-    assert text.count("<<: *no-owner-credential") == 13
+    # Ten services merge it. redis, minio and minio-init merge x-no-app-secret instead, which blanks the
+    # owner's DSN with every other application secret, and each blanks the owner's password beside it
+    # (test_third_party_services_hold_no_app_secret.py); the test above holds the outcome on all of them.
+    assert text.count("<<: *no-owner-credential") == 10
+    assert text.count("<<: *no-app-secret") == 4
 
 
 def test_the_templates_put_each_owner_variable_where_it_lives():
@@ -157,11 +161,12 @@ def _gitignored(path: str) -> bool:
 
 
 @pytest.mark.parametrize("name", [
-    "secrets.env", "postgres-init.env", "migrate.env",
-    "secrets.env.backup-20261002T120000Z",
+    "secrets.env", "postgres-init.env", "migrate.env", "redis.env", "minio.env",
+    "secrets.env.backup-20261002T120000Z", "minio.env.backup-20261115T120000Z",
     # The helper's temporary file holds a whole new secrets file for the instant before the rename and
     # survives a kill or a power cut, so git must ignore it.
     ".secrets.env.tmp-4242", ".postgres-init.env.tmp-17", ".migrate.env.tmp-9",
+    ".redis.env.tmp-5", ".minio.env.tmp-6",
 ])
 def test_the_helpers_files_and_its_temporaries_are_ignored_by_git(name):
     assert _gitignored(f"infra/production/{name}"), name
@@ -207,6 +212,7 @@ def _dockerignored(path: str) -> bool:
     "secrets.env", "postgres-init.env", "migrate.env", "egress-proxy.env",
     "egress-client.env", "secrets.env.backup-20261002T120000Z",
     "migrate.env.backup-20261002T120000Z-2", ".secrets.env.tmp-4242",
+    "redis.env", "minio.env", "redis.env.backup-20261115T120000Z", ".minio.env.tmp-6",
 ])
 def test_no_secrets_file_or_backup_reaches_the_image(name):
     """Every secrets file and backup is excluded from the image, not only secrets.env: otherwise

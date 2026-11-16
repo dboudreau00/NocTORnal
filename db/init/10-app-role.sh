@@ -58,7 +58,7 @@ if [ -z "${NOCTORNAL_APP_DB_PASSWORD:-}" ]; then
 	echo "10-app-role: NOCTORNAL_APP_DB_PASSWORD is not set, so no least-privilege"
 	echo "10-app-role: role was created. A development stack connects as the owner"
 	echo "10-app-role: ${_NOC_SUPERUSER} and needs none. A production deployment refuses to"
-	echo "10-app-role: start on the owner. Set the variable (infra/production/secrets.env)"
+	echo "10-app-role: start on the owner. Set the variable (infra/production/postgres-init.env)"
 	echo "10-app-role: and initialise a FRESH volume, or on this one run"
 	echo "10-app-role: python scripts/runtime_roles.py ensure --production and give the"
 	echo "10-app-role: role a password (infra/production/README.md, step 2). initdb"

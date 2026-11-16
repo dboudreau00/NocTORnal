@@ -73,6 +73,10 @@ must agree across files:
 
 * the **Redis password** and `REDIS_URL`, which signs in as the limiter's
   own Redis user (see [The limiter's Redis](#the-limiters-redis));
+* **`redis.env` and `minio.env`**, mode 600, from the Redis and MinIO lines
+  of `secrets.env`: Postgres, Redis and MinIO read no `secrets.env`, so each
+  holds what it reads and nothing else. Run the step again whenever you
+  change one of those lines, or the service keeps the old value;
 * the **audit pepper**, `NOCTORNAL_AUDIT_PEPPER`, which keys the hashes the
   audit log keeps of a client's address and of what a failed sign-in typed
   as its email, and the preview a purge's dry run hands back, when it is missing, the placeholder, shorter than 16
@@ -91,15 +95,23 @@ listed as a `note:` line and does not change the exit status; every one of
 them needs a real value before `up`. Run it again once you have filled them
 in: it changes only what still needs changing, and the notes are gone.
 
-Four files so far, because four different readers must hold four different
+Six files so far, because six different readers must hold six different
 things (the two egress files are in [Egress](#egress-the-only-way-out)):
 
 | File | Read by | Holds |
 |---|---|---|
-| `secrets.env` | every service but Caddy, the migrate job, the egress proxy and the analysis worker | everything below that a running process needs |
+| `secrets.env` | api, sample-origin, cron, the collector, lab-triage, lab-cron and embed-pass | everything below that a running process needs |
 | `caddy.env` | Caddy alone | the two hostnames and the TLS mode |
-| `postgres-init.env` | postgres alone | the passwords initdb takes: the owner's `POSTGRES_PASSWORD`, the system role's, the egress role's |
+| `postgres-init.env` | postgres alone | the passwords initdb takes: the owner's `POSTGRES_PASSWORD`, the request role's, the system role's, the egress role's |
 | `migrate.env` | the migrate job alone | `NOCTORNAL_MIGRATION_DATABASE_URL`, the owner's DSN |
+| `redis.env` | redis alone | `REDIS_PASSWORD` and `REDIS_URL`, written from `secrets.env` by the installer step |
+| `minio.env` | minio and minio-init alone | MinIO's root pair and any other `MINIO_` setting of the server's, the sample and preservation account keys and the bucket names, written from `secrets.env` by the installer step |
+
+Postgres, Redis and MinIO run as root and check nothing, so a key in their
+environment would be readable to anybody who ran code in one of them: none
+reads `secrets.env`, and `compose.yml` holds every secret of the
+application's blank on each of them whatever its own file says
+(`docs/17`, 2026-11-15).
 
 The owner `noctornal` is the Postgres image's bootstrap superuser. Row-level
 security does not bind it, and it can switch off the append-only triggers
@@ -208,8 +220,8 @@ by whoever ran it, which with `sudo` is root already; this makes all of them
 root's:
 
 ```sh
-sudo chown root:root infra/production/secrets.env infra/production/caddy.env infra/production/postgres-init.env infra/production/migrate.env
-sudo chmod 600      infra/production/secrets.env infra/production/caddy.env infra/production/postgres-init.env infra/production/migrate.env
+sudo chown root:root infra/production/secrets.env infra/production/caddy.env infra/production/postgres-init.env infra/production/migrate.env infra/production/redis.env infra/production/minio.env
+sudo chmod 600      infra/production/secrets.env infra/production/caddy.env infra/production/postgres-init.env infra/production/migrate.env infra/production/redis.env infra/production/minio.env
 ```
 
 Every `.env` file in this directory is excluded from the image build
@@ -251,7 +263,8 @@ sudo docker compose -p noctornal-prod -f infra/production/compose.yml build
 
 `POSTGRES_PASSWORD` (`postgres-init.env`) also appears inside
 `NOCTORNAL_MIGRATION_DATABASE_URL` (`migrate.env`), and
-`NOCTORNAL_APP_DB_PASSWORD` also appears inside `DATABASE_URL`. The
+`NOCTORNAL_APP_DB_PASSWORD` (`postgres-init.env`) also appears inside
+`DATABASE_URL` (`secrets.env`). The
 installer step compares the first pair and says so when they differ;
 nothing compares the second. A mismatch surfaces on first boot as the
 migration job failing to authenticate, which reads like a bug in the
@@ -394,6 +407,18 @@ or a mail relay with a private CA) joins the same file:
 `sudo python3 scripts/internal_tls.py add-ca FILE` appends the certificates
 in `FILE` and refuses one that carries a private key or anything that is not
 a certificate. Restart the services to read it.
+
+That file is also the only trust anchor every DSN and `REDIS_URL` names, and
+the CA's name constraints bind its own signatures and no other CA's, so
+`add-ca` refuses a certificate that could vouch for `minio`, `postgres` or
+`redis`: a CA must carry name constraints that leave all three out, and a
+certificate that is not a CA must not name one. Ask the CA's owner for one
+permitted only your own names (`permitted;DNS:.agency.example`), or with the
+three excluded (`excluded;DNS:postgres`, `excluded;DNS:redis`,
+`excluded;DNS:minio`). A CA nobody will constrain does not go in this file:
+the services that need it would need a bundle of their own, which this
+release does not build (`docs/17`). `check` fails a bundle that already holds
+such a certificate, from an `add-ca` before this release; take it out.
 
 `infra/production/tls/` is gitignored and left out of the image's build
 context.
@@ -1532,8 +1557,9 @@ services that run the application's code (the API and the sample origin, the
 cron loop, the Lab workers, the embedding pass) and the egress proxy refuse
 to start if they find it, and so does the migration job, which reads
 `migrate.env` alone. The database, the object store and Redis run none of
-that code and check nothing: they read `secrets.env`, so a key put there
-would simply be carried. Caddy reads `caddy.env` alone. The collector
+that code and check nothing: they read files of their own and never
+`secrets.env`, and `compose.yml` holds the key blank on each of them, so it
+reaches none of them. Caddy reads `caddy.env` alone. The collector
 refuses to start without it, by name, **whether or not the deployment has a
 persona**. The collector also runs every scheduled poll (the cron loop does
 not poll), so a deployment without `collector.env` polls **nothing at all**,
@@ -1957,7 +1983,7 @@ with its key pair.
 The second command of the backup script runs `mc` in a one-off container of the `minio-init`
 service, because that service already has what `mc` needs: the compose
 network (MinIO publishes no port), the root credentials and bucket names
-from `secrets.env`, the CA from step 3, and `mc-alias.sh`, which
+from `minio.env`, the CA from step 3, and `mc-alias.sh`, which
 gives `mc` the root credential through its environment and trusts that
 CA. The credential is deliberately not an argument of any command,
 because an argument is readable by every local account on the host for as long
@@ -2035,6 +2061,14 @@ sudo bash release/install.sh --production-secrets      # release\install.ps1 -Pr
 sudo docker compose -p noctornal-prod -f infra/production/compose.yml down
 sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
+
+The installer step in those commands also moves `NOCTORNAL_APP_DB_PASSWORD`
+from `secrets.env` into `postgres-init.env` and writes `redis.env` and
+`minio.env` from `secrets.env`, because Postgres, Redis and MinIO no longer
+read `secrets.env`. Skipped, `redis` refuses to start on an empty
+`REDIS_PASSWORD`, and `minio` and `minio-init` on an empty root pair, each
+naming the step, and everything that waits on them stays down; Postgres on an
+existing volume needs none of it.
 
 Under the ACME override, add `-f infra/production/compose.acme.yml` to both
 compose commands. Do not skip the `down`: this release adds two networks and
@@ -2460,8 +2494,10 @@ both names resolve to the same digest, which is how that is checked.
 * **No secrets management.** `secrets.env` is a file on disk in plain text.
   There is no Vault, no KMS, and the TOTP key-encrypting key sits in it.
   Every container built from the application image, except the migrate job,
-  the egress proxy and the analysis worker, receives the whole file, and so
-  do Postgres, Redis and MinIO. The analysis worker receives none of it.
+  the egress proxy and the analysis worker, receives the whole file.
+  Postgres, Redis and MinIO do not: each reads a file of its own with what
+  it needs (`postgres-init.env`, `redis.env`, `minio.env`). The analysis
+  worker receives none of it.
   Caddy does not: it has `caddy.env`, with its three values. The schema
   owner's credential is the one thing kept out of it (`postgres-init.env`
   and `migrate.env`, each read by one service).
