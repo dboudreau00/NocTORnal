@@ -21,7 +21,7 @@ mc_setup() {
     *:*)
       echo "mc-alias: MINIO_ROOT_USER and MINIO_ROOT_PASSWORD must not contain a colon;" >&2
       echo "mc-alias: mc reads them from a URL, where a colon ends the access key. Choose" >&2
-      echo "mc-alias: new values in secrets.env and start MinIO again." >&2
+      echo "mc-alias: new values in secrets.env, run the installer step again and start MinIO again." >&2
       return 1
       ;;
   esac

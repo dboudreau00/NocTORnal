@@ -877,8 +877,9 @@ compares the two as text and refuses to start when they disagree, because a
 URL with no user name signs in as the disabled default user and every limit
 that fails closed, the login among them, would then refuse everyone; it
 refuses a `redis://` URL too, since it has no plain port to answer one. The
-installer step writes both. Changing the password costs a restart and
-nothing else: no data is stored with it. In production the API refuses a
+installer step writes both. Changing the password costs the installer step
+(it copies the new value into `redis.env`) and a restart, and nothing else:
+no data is stored with it. In production the API refuses a
 `REDIS_URL` that is not `rediss://` (or `unix://`), and one that switches
 off the check of the server (`ssl_cert_reqs` other than `required`,
 `ssl_check_hostname` false), whichever Redis it names.
@@ -2093,7 +2094,10 @@ every DSN naming the bundled `postgres` service, in `secrets.env`,
 changes, and prints each change by name. A DSN naming another host is your
 own database: it is left alone and named, and production refuses to start
 on it until it asks for `sslmode=verify-full` against a CA the services
-trust (`internal_tls.py add-ca`). Postgres reads `pg_hba.conf` from this
+trust. `internal_tls.py add-ca` adds only a CA whose name constraints leave
+out `minio`, `postgres` and `redis`, so ask the database's owner for one
+that has them (docs/17 says what a CA nobody will constrain costs).
+Postgres reads `pg_hba.conf` from this
 checkout from its next start, whatever the data volume holds, so a client
 still asking for plain text is refused from then on.
 
