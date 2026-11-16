@@ -377,8 +377,11 @@ owner's credential goes in `postgres-init.env` and `migrate.env`, each
 read by one service, and never in `secrets.env`, which every application
 service reads (`docs/17` F52). The rate limiter's Redis gets a password and a
 `REDIS_URL` that signs in as the limiter's own user, the only one that
-Redis has. It prints the name of each change and never a value, and keeps
-a backup of every file before it changes it.
+Redis has. Postgres, Redis and MinIO read no `secrets.env`: it writes
+`redis.env` and `minio.env` from it with what those services read, and puts
+the request role's password in `postgres-init.env`. It prints the name of
+each change and never a value, and keeps a backup of every file before it
+changes it.
 
 Run it after every `git pull`, before `up`. Coming from Alpha 7a or an
 earlier release it is required: it moves the owner's credential out of an

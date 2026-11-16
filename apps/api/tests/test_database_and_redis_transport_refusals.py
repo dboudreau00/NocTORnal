@@ -62,6 +62,54 @@ def test_a_dsn_naming_no_host_is_held_to_where_pghost_sends_it():
     assert config.database_hop("host=/tmp hostaddr=10.0.0.5 dbname=x", {}) == "unverified"
 
 
+@pytest.mark.parametrize("dsn, env", [
+    ("service=agency dbname=noctornal user=noctornal_app", {}),
+    ("dbname=noctornal user=noctornal_app", {"PGSERVICE": "agency"}),
+    ("postgresql://noctornal_app@/noctornal?service=agency", {}),
+    ("postgresql://noctornal_app@/noctornal", {"PGSERVICE": "agency", "PGHOST": "/run/pg"}),
+    # A socket the DSN names is not enough: the service's file may set hostaddr, which wins.
+    ("host=/run/postgresql dbname=noctornal", {"PGSERVICE": "agency"}),
+])
+def test_a_target_a_connection_service_may_supply_is_the_network(dsn, env):
+    """libpq fills what the DSN leaves out from the service's pg_service.conf, which nothing here reads,
+    before PGHOST and the default socket: the independent review TRANSPORT-02 read such a DSN as a socket, so production
+    started on a hop to whatever host the file named, without TLS. Only the DSN's own
+    sslmode=verify-full, which a service file cannot change, makes it a verified hop."""
+    assert config.database_hop(dsn, env) == "unverified"
+    sep = ("&" if "?" in dsn else "?") if "://" in dsn else " "
+    assert config.database_hop(dsn + sep + "sslmode=verify-full", env) == "verified"
+
+
+def test_a_socket_the_dsn_pins_whole_stays_a_socket_beside_a_service():
+    """With host a socket path and hostaddr named empty, nothing a service file says can move it."""
+    dsn = "host=/run/postgresql hostaddr='' dbname=noctornal"
+    assert config.database_hop(dsn, {"PGSERVICE": "agency"}) == "socket"
+
+
+def test_pghostaddr_is_the_network_whatever_host_says():
+    """hostaddr decides TCP in libpq whatever host names, and PGHOSTADDR fills it when the DSN does
+    not."""
+    assert config.database_hop("host=/run/postgresql dbname=x", {"PGHOSTADDR": "10.1.2.3"}) == \
+        "unverified"
+    assert config.database_hop("host=/run/postgresql dbname=x", {}) == "socket"
+
+
+@pytest.mark.parametrize("variable", ["DATABASE_URL", WORKER_DSN_ENV])
+def test_production_refuses_a_service_dsn_without_verify_full(variable):
+    service_dsn = f"service=agency dbname=noctornal user=noctornal_app password={PASSWORD}"
+    env = {**_production(), variable: service_dsn}
+    refused = _hop_refusals(config.verify_environment(env))
+    assert len(refused) == 1, refused
+    assert refused[0].startswith(f"{variable} may reach its database over the network, since a "
+                                 f"connection service")
+    assert PASSWORD not in refused[0] and "agency" not in refused[0]
+    env = {**_production(), "PGSERVICE": "agency",
+           variable: "postgresql://noctornal_app@/noctornal"}
+    assert len(_hop_refusals(config.verify_environment(env))) == 1
+    env[variable] += "?sslmode=verify-full&sslrootcert=/certs/ca.crt"
+    assert _hop_refusals(config.verify_environment(env)) == []
+
+
 def test_pgsslmode_does_not_stand_in_for_the_dsn():
     """The sslmode is read from the DSN alone, the one place an operator and readiness look."""
     env = {**_production(), "DATABASE_URL": _dsn(""), "PGSSLMODE": "verify-full"}

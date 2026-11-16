@@ -561,7 +561,8 @@ def _run_minio_init(tmp_path: Path, **extra: str):
     body = script.replace(". /mc-alias.sh", ":", 1)
     path = tmp_path / "minio-init.sh"
     path.write_text(_MC_STUB + body + "\n", encoding="utf-8", newline="\n")
-    env = {**os.environ, "MINIO_ROOT_USER": "test-root", "EVIDENCE_BUCKET": "ev", "INGEST_BUCKET": "in",
+    env = {**os.environ, "MINIO_ROOT_USER": "test-root", "MINIO_ROOT_PASSWORD": "test-root-password",
+           "EVIDENCE_BUCKET": "ev", "INGEST_BUCKET": "in",
            "SAMPLE_BUCKET": "smp", "PRESERVE_BUCKET": "pres",
            "SAMPLE_ACCESS_KEY": "test-sample-ak", "SAMPLE_SECRET_KEY": "TEST-SAMPLE-SECRET-q9Zx",
            "PRESERVE_ACCESS_KEY": "test-pres-ak", "PRESERVE_SECRET_KEY": "TEST-PRESERVE-SECRET-w3Lm", **extra}

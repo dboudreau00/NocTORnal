@@ -23,6 +23,9 @@ the persona before its lock is released. It writes no file (the library only eve
 held in memory), prints no secret and exactly one line, reads a session to import from stdin and
 never from the command line, and stores neither the phone number nor the two-step password.
 
+In production it runs only where the collector would start (`config.verify_environment` for the
+collector), and refuses before it asks for anything otherwise.
+
 Exit 0 on success, 1 on a refusal, 2 when the environment is unusable.
 """
 from __future__ import annotations
@@ -478,6 +481,17 @@ def main(argv: list[str] | None = None) -> int:
         enforce_persona_key_boundary(collector=True)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
+        return 2
+    # Then every refusal the collector itself starts with, before anybody is asked to sign in: a
+    # failed sign-in is recorded under the audit pepper, and a process that never ran the boot
+    # refusal must not hash under a pepper the services would not start with. Nothing outside
+    # production.
+    from noctornal_api.config import verify_environment
+
+    problems = verify_environment(collector=True)
+    if problems:
+        print("This environment would not start the collector, so nothing was asked of "
+              "anyone: " + "; ".join(problems), file=sys.stderr)
         return 2
     # The boundary above does nothing outside production, so the ring is read here too, before
     # anybody is asked to sign in: without NOCTORNAL_PERSONA_KEK a login would burn a code and only

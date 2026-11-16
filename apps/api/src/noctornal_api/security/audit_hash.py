@@ -14,8 +14,9 @@ Those rows are history: `audit.event` is append-only and its chain hashes the va
 rewrites them, and they stay as guessable as they were.
 
 No key, no hash, and never an unkeyed one. A production start refuses without a usable pepper
-(`config.verify_environment`); should the variable still be empty when a row is written, the hash is None,
-and an error line names the variable, at most once a minute. In development an unset pepper is replaced by
+(`config.verify_environment`); should the pepper still be one `pepper_state` refuses when a row is written
+(empty, short, or a copy of another secret, in a process that never ran that refusal), the hash is None,
+and an error line names the variable and why, at most once a minute. In development an unset pepper is replaced by
 a random key of this process's own, with one warning, so the hashes correlate only until the process
 restarts (and not across uvicorn workers), and there is still no default value in code (CONVENTIONS:
 Secrets).
@@ -40,7 +41,7 @@ import time
 from collections.abc import Mapping
 from typing import NamedTuple
 
-from noctornal_api.config import is_production
+from noctornal_api.config import is_production, published_credentials
 from noctornal_api.wording import count_of
 
 log = logging.getLogger("noctornal.audit_hash")
@@ -96,16 +97,16 @@ def pepper_state(env: Mapping[str, str] | None = None) -> PepperState:
     return PepperState(True, len(raw), "")
 
 
-def _say_unset() -> None:
+def _say_unusable(why: str) -> None:
     global _unset_said_at
     now = time.monotonic()
     with _lock:
         if _unset_said_at is not None and now - _unset_said_at < UNSET_LOG_SECONDS:
             return
         _unset_said_at = now
-    log.error("%s is not set in this production process, so the audit rows it writes carry no "
-              "address or identifier hash and a purge's dry run issues no preview; set it in "
-              "secrets.env and restart", PEPPER_ENV)
+    log.error("%s in this production process, so the audit rows it writes carry no address or "
+              "identifier hash and a purge's dry run issues no preview; set a usable %s in "
+              "secrets.env and restart", why, PEPPER_ENV)
 
 
 def _random_development_key() -> bytes:
@@ -119,14 +120,22 @@ def _random_development_key() -> bytes:
 
 
 def _key() -> bytes | None:
-    """The key, read on every call as `ingest._pepper` reads its own, so a test can set the variable;
-    None in production when it is empty."""
+    """The key, read on every call as `ingest._pepper` reads its own, so a test can set the variable.
+    In production it is the pepper only when the boot refusal would take it (`pepper_state`, and no
+    published value), so a process that never ran that refusal (a script that signs an operator in)
+    cannot hash under a pepper the API would not start with: None otherwise, with the reason logged."""
     raw = os.environ.get(PEPPER_ENV, "").strip()
+    if is_production():
+        state = pepper_state()
+        why = state.why if not state.ok else (
+            f"{PEPPER_ENV} still carries a value somebody has published"
+            if published_credentials({PEPPER_ENV: raw}) else "")
+        if why:
+            _say_unusable(why)
+            return None
+        return raw.encode("utf-8")
     if raw:
         return raw.encode("utf-8")
-    if is_production():
-        _say_unset()
-        return None
     return _random_development_key()
 
 

@@ -40,7 +40,11 @@ let MinIO's key vouch for any name. The pair is kept, mounted nowhere, in legacy
 
 `add-ca` appends another CA to public/ca.crt, for a store or a database of the agency's own that
 the services must trust; it refuses a file holding a private key or anything but certificates.
-Such a CA carries whatever constraints its owner gave it.
+That file is also what every database and Redis client names as its only trust anchor (sslrootcert,
+ssl_ca_certs), and a second CA in it is not bound by this CA's constraints, so `add-ca` refuses a
+certificate that could vouch for minio, postgres or redis: a CA must carry name constraints that
+leave the three out (permitted only other names, or the three excluded), and a certificate that is
+not a CA must not name one of them. `check` fails a bundle that already holds such a certificate.
 
 Standard library and the `openssl` binary (1.1.1 or later) only, so it runs on the host's python3,
 3.8 or later, with no virtual environment, as the installer step does. openssl is run with a list
@@ -492,6 +496,65 @@ def _fingerprint(block: str) -> str:
     return out.strip().partition("=")[2].upper()
 
 
+def _extension(block: str, name: str) -> list:
+    """The lines openssl prints for the extension `name` of the certificate in `block`, stripped and
+    without the heading; [] when the certificate does not carry it."""
+    lines = _openssl("x509", "-noout", "-ext", name, input_text=block).splitlines()
+    heading = next((i for i, line in enumerate(lines) if line.startswith("X509v3 ")), None)
+    return [] if heading is None else [line.strip() for line in lines[heading + 1:] if line.strip()]
+
+
+def _dns_within(name: str, base: str) -> bool:
+    """Whether the DNS name constraint `base` covers `name`, as OpenSSL matches one: an empty base
+    covers every name; otherwise the name is the base, or ends with it after a dot, and a base that
+    starts with a dot covers only the names below it. Case does not count."""
+    name, base = name.lower(), base.lower()
+    if not base:
+        return True
+    if len(name) < len(base) or not name.endswith(base):
+        return False
+    return len(name) == len(base) or base.startswith(".") or name[-len(base) - 1] == "."
+
+
+def _servers_vouched_for(block: str) -> list:
+    """Which of the internal servers' names (SERVERS) the certificate in `block` could vouch for from
+    the clients' bundle, where libpq, redis-py and the store's client take every certificate as a
+    trust anchor. A certificate that is not a CA vouches only for itself: for the DNS names in its
+    subjectAltName, or its common name when it has none. One that is a CA, or does not say (a
+    version 1 root, which OpenSSL takes as one), vouches for every name its name constraints leave
+    in: a permitted DNS subtree must cover the name when there is any, and no excluded one may."""
+    if "CA:FALSE" in " ".join(_extension(block, "basicConstraints")):
+        names = [part.strip()[4:] for line in _extension(block, "subjectAltName")
+                 for part in line.split(",") if part.strip().startswith("DNS:")]
+        if not names:
+            subject = _openssl("x509", "-noout", "-subject", "-nameopt", "RFC2253",
+                               input_text=block).strip().partition("=")[2]
+            names = [field[3:] for field in subject.split(",") if field.startswith("CN=")]
+        own = {name.lower() for name in names}
+        return [server for server in SERVERS if server in own]
+    permitted: list = []
+    excluded: list = []
+    section = None
+    for line in _extension(block, "nameConstraints"):
+        if line in ("Permitted:", "Excluded:"):
+            section = permitted if line == "Permitted:" else excluded
+        elif section is not None and line.startswith("DNS:"):
+            section.append(line[4:])
+    return [server for server in SERVERS
+            if (not permitted or any(_dns_within(server, b) for b in permitted))
+            and not any(_dns_within(server, b) for b in excluded)]
+
+
+#: What add-ca and check say about a certificate that could vouch for an internal server.
+CONSTRAIN = ("the database, Redis and object store clients trust every certificate in "
+             f"tls/{PUBLIC}/{BUNDLE} for those names, so whoever holds its key could answer as "
+             "one of them. Add a CA whose name constraints leave them out instead: one its owner "
+             "issues permitted only your own names (permitted;DNS:.agency.example), or excluding "
+             "postgres, redis and minio (excluded;DNS:postgres, excluded;DNS:redis, "
+             "excluded;DNS:minio). A CA nobody will constrain is not for this file "
+             "(infra/production/README.md, step 3)")
+
+
 def add_ca(base: Path, source: Path) -> list:
     bundle = base / PUBLIC / BUNDLE
     if not bundle.is_file():
@@ -523,6 +586,13 @@ def add_ca(base: Path, source: Path) -> list:
     if not new:
         return [f"nothing to change: tls/{PUBLIC}/{BUNDLE} already trusts every certificate in "
                 f"{source.name}"]
+    for block in new:
+        vouched = _servers_vouched_for(block)
+        if vouched:
+            position = certificates.index(block) + 1
+            raise Refused(f"certificate {position} of {len(certificates)} in {source.name} could "
+                          f"vouch for {', '.join(vouched)}, and {CONSTRAIN}. Nothing was "
+                          f"written.")
     with _Staging(base) as staging:
         written = staging / BUNDLE
         current = bundle.read_text(encoding="ascii")
@@ -595,6 +665,19 @@ def check(base: Path) -> tuple:
     if files["ca_key"].is_file():
         lines.append(f"note: tls/{CA}/{CA_KEY} is on this host; it is needed only to renew, "
                      f"so keep it elsewhere between renewals")
+    if bundle.is_file():
+        # Another certificate in the clients' bundle that could vouch for an internal server: an
+        # add-ca from before add-ca asked (the deployment's CA is the first, as init writes it).
+        held = [block for label, block in _pem_blocks(bundle.read_text(encoding="ascii"))
+                if label == "CERTIFICATE"]
+        own = _fingerprint(ca_cert.read_text(encoding="ascii")) if ca_cert.is_file() else None
+        for position, block in enumerate(held, 1):
+            if (own is None and position == 1) or _fingerprint(block) == own:
+                continue
+            vouched = _servers_vouched_for(block)
+            if vouched:
+                fail(f"certificate {position} of {len(held)} in tls/{PUBLIC}/{BUNDLE} could vouch "
+                     f"for {', '.join(vouched)}, and {CONSTRAIN}; take it out of the file")
     for name, (cert_name, key_name) in SERVERS.items():
         directory, cert, key = base / name, base / name / cert_name, base / name / key_name
         if not (cert.is_file() and key.is_file()):
@@ -646,7 +729,8 @@ def main(argv=None, *, out=print) -> int:
     add = sub.add_parser("add-ca", help="trust another CA as well")
     add.add_argument("file", type=Path)
     args = parser.parse_args(argv)
-    base = args.dir
+    # Absolute: openssl ca runs in the staging directory, where a relative --dir names nothing.
+    base = args.dir.resolve()
     # Every file this process creates is private from its first byte; each is then given its own
     # mode explicitly, so the operator's umask decides nothing.
     previous = os.umask(0o077)

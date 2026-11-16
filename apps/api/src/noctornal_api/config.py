@@ -584,6 +584,7 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
     from noctornal_api.db import WORKER_DSN_ENV
 
     problems.extend(database_hop_problems(env, names=("DATABASE_URL", WORKER_DSN_ENV)))
+    problems.extend(request_timeout_problems(env))
 
     base_url = env.get("NOCTORNAL_BASE_URL", "").strip()
     if not base_url:
@@ -886,26 +887,55 @@ DATABASE_CA_FILE = "/certs/ca.crt"
 DATABASE_TLS_QUERY = f"sslmode={DATABASE_SSLMODE}&sslrootcert={DATABASE_CA_FILE}"
 
 
+def _dsn_params(dsn: str) -> dict | None:
+    """The parameters `dsn` names, as libpq parses them and before it fills in any it leaves out;
+    None when the driver cannot read it."""
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict
+
+    try:
+        return conninfo_to_dict(dsn.strip().replace("postgresql+psycopg://", "postgresql://", 1))
+    except psycopg.ProgrammingError:
+        return None
+
+
+def _dsn_service(params: dict, env: Mapping[str, str]) -> str:
+    """The connection service libpq reads for a DSN: its own `service`, else PGSERVICE."""
+    return str(params.get("service") or env.get("PGSERVICE", "")).strip()
+
+
 def database_hop(dsn: str, env: Mapping[str, str] | None = None) -> str:
     """How a connection made with `dsn` reaches its database: "socket" (a unix socket, on this
     host), "verified" (TCP under sslmode=verify-full), "unverified" (TCP under any other sslmode,
     or none, which libpq takes as `prefer` and lets anything on the path downgrade to plain text) or
     "unreadable" (not a connection string the driver reads). The sslmode must be in the DSN itself:
-    PGSSLMODE is not read, so the one place an operator looks is the one this checks. A DSN naming
-    no host connects where PGHOST says, or to the default socket when that is unset."""
-    import psycopg
-    from psycopg.conninfo import conninfo_to_dict
+    PGSSLMODE is not read, so the one place an operator looks is the one this checks.
 
+    The target is read as libpq fills it in. A parameter the DSN leaves out comes first from a
+    connection service, named by `service` or by PGSERVICE, whose pg_service.conf this does not read,
+    and then from PGHOSTADDR and PGHOST; with none of them, the default socket. `hostaddr` decides
+    TCP whatever `host` says. So a target a service may supply is not known to be a socket and is
+    read as the network: "verified" only when the DSN itself asks for sslmode=verify-full, which a
+    service file cannot change."""
     env = os.environ if env is None else env
-    try:
-        params = conninfo_to_dict(dsn.strip().replace("postgresql+psycopg://", "postgresql://", 1))
-    except psycopg.ProgrammingError:
+    params = _dsn_params(dsn)
+    if params is None:
         return "unreadable"
-    hosts = [h.strip() for h in str(params.get("host") or env.get("PGHOST", "")).split(",")]
-    tcp = bool(params.get("hostaddr")) or any(h and not h.startswith("/") for h in hosts)
-    if not tcp:
-        return "socket"
-    return "verified" if params.get("sslmode") == DATABASE_SSLMODE else "unverified"
+    verified = "verified" if params.get("sslmode") == DATABASE_SSLMODE else "unverified"
+    service = _dsn_service(params, env)
+
+    def filled(name: str, variable: str) -> str | None:
+        # What libpq connects with for `name`: the DSN's own value, even an empty one, which nothing
+        # replaces; else the service's, unknown here; else the environment's.
+        if name in params:
+            return str(params[name] or "")
+        return None if service else env.get(variable, "")
+
+    hostaddr, host = filled("hostaddr", "PGHOSTADDR"), filled("host", "PGHOST")
+    if hostaddr is None or hostaddr.strip() or host is None:
+        return verified
+    hosts = [h.strip() for h in host.split(",")]
+    return verified if any(h and not h.startswith("/") for h in hosts) else "socket"
 
 
 def database_hop_problems(env: Mapping[str, str] | None = None, *,
@@ -929,14 +959,43 @@ def database_hop_problems(env: Mapping[str, str] | None = None, *,
                 f"{name} is not a connection string the database driver can read, so "
                 f"where it connects, and whether that hop is encrypted, cannot be told.")
         elif hop == "unverified":
+            params = _dsn_params(dsn) or {}
+            reach = ("may reach its database over the network, since a connection service "
+                     "(`service` in it, or PGSERVICE) can name the host, and it asks for no "
+                     if _dsn_service(params, env) else
+                     "reaches its database over the network without ")
             problems.append(
-                f"{name} reaches its database over the network without "
-                f"sslmode={DATABASE_SSLMODE}, so every query and every row it returns can "
-                f"cross that hop in clear text, and nothing checks that the server "
+                f"{name} {reach}sslmode={DATABASE_SSLMODE}, so every query and every row it "
+                f"returns can cross that hop in clear text, and nothing checks that the server "
                 f"answering is the database: add ?{DATABASE_TLS_QUERY} (for the compose "
                 f"deployment, {SECRETS_STEP} does it, and infra/production/README.md, "
                 f"step 3, issues the database's certificate).")
     return problems
+
+
+def request_timeout_problems(env: Mapping[str, str] | None = None) -> list[str]:
+    """The refusal for a DATABASE_URL whose `options` switch off the bound on a request's statements,
+    or set it to something that cannot be read as one (`db.named_statement_timeout`). A request
+    connection puts its own bound last, which the server applies, so this names the setting rather
+    than leaving it to be overridden in silence. Pure and mode-blind; `verify_environment` applies it
+    in production. An unreadable DSN is refused for that already. Names the variable, never a value."""
+    from noctornal_api.db import REQUEST_STATEMENT_TIMEOUT_ENV, named_statement_timeout
+
+    if env is None:
+        env = os.environ
+    dsn = env.get("DATABASE_URL", "").strip()
+    if not dsn:
+        return []
+    named, milliseconds = named_statement_timeout(dsn)
+    if not named or (milliseconds is not None and milliseconds > 0):
+        return []
+    how = ("switch statement_timeout off" if milliseconds == 0 else
+           "set statement_timeout to something that is not a bound this can read")
+    return [
+        f"DATABASE_URL's options {how}, so a request whose statement never finishes would "
+        f"hold an API worker and a database connection until its client went away: remove it "
+        f"from the DSN, and set {REQUEST_STATEMENT_TIMEOUT_ENV} (a whole number of seconds from "
+        f"5 to 3600) for a bound other than the default."]
 
 
 #: Where the compose deployment's clients find the CA that signed the bundled Redis's certificate:
