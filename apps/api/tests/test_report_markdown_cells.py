@@ -379,7 +379,7 @@ def test_what_the_file_keeps_is_what_it_kept_before():
     byte."""
     from noctornal_api.reports import _line
     cyrillic = "".join(chr(code) for code in (0x434, 0x430, 0x20, 0x442, 0x435, 0x441, 0x442))
-    hebrew = "".join(chr(code) for code in (0x5E9, 0x5DC, 0x5D5, 0x5DD))
+    hebrew = "".join(chr(code) for code in (1513, 1500, 1493, 1501))
     for text in ("plain label", "tab" + chr(9) + "here", cyrillic, hebrew,
                  "emoji " + chr(0x1F600), PLAIN_BACKSLASHES):
         assert _line(text) == text

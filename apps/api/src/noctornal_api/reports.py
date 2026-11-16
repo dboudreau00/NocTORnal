@@ -811,7 +811,7 @@ def content_digest(report: Report) -> str:
 
 
 #: Characters that change what a string looks like without changing what it is: bidirectional overrides and
-#: isolates, the zero-width family, and the C0 and C1 controls but for the tab and the line breaks. This is the
+#: isolates, the zero-width family, and the control characters but for the tab and the line breaks. This is the
 #: set the console's `visibleText` replaces (`_DECEPTIVE` in app.js), written as escapes for the same reason
 #: it is there, and `test_the_saved_report_is_the_text_the_console_previews` runs the two against each other.
 _DECEPTIVE = re.compile(
