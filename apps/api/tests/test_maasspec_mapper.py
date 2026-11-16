@@ -487,7 +487,8 @@ def test_an_integer_too_large_for_a_float_is_a_refusal_not_an_overflow():
     assert text.startswith("maasspec: ") and "confidence" in text
 
 
-def test_a_document_that_cannot_be_checked_is_a_refusal_and_never_another_exception():
+def test_a_document_that_cannot_be_checked_is_a_refusal_and_never_another_exception(monkeypatch):
+    from types import SimpleNamespace
     nested = current = {}
     for _ in range(5000):
         current["a"] = {}
@@ -495,8 +496,15 @@ def test_a_document_that_cannot_be_checked_is_a_refusal_and_never_another_except
     document = rich()
     document["metadata"] = nested
     refused(document)
+
+    def too_deep(*args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    # Whether the interpreter's encoder gives up on a deep document depends on the build; what is pinned here is
+    # that when it does, the answer is a refusal and not a RecursionError.
+    monkeypatch.setattr(maasspec, "json", SimpleNamespace(dumps=too_deep))
     with pytest.raises(maasspec.SpectrumRefused):
-        maasspec.compact_size(document)
+        maasspec.compact_size(rich())
 
 
 def test_a_lone_surrogate_is_measured_and_checked_without_an_encoding_error():
