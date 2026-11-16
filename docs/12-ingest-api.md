@@ -251,14 +251,16 @@ MaaSSpec is a provenance-first malware spectrometer that emits one JSON
 ingest route, unchanged. The integration is optional and off by default.
 
 - **The switch.** `NOCTORNAL_MAASSPEC` in `secrets.env`. Only `on` (stripped,
-  any case) enables it; unset, empty, `off`, `true`, `1` and `yes` mean off. It is
+  any case) enables it; unset, empty and `off` mean off, and a production API
+  refuses to start on any other value. It is
   read each time a record is parsed, and `GET /api/v1/ingest/maasspec` (permission
   `ingest.read`) answers `{enabled, switch, contract_versions, max_spectrum_bytes,
   category, notice}`. There is no route that changes it.
 - **Sending one.** The same request as any partner: `POST /api/v1/ingest` with a
   `noct_sk_` key, `Idempotency-Key` set to the spectrum's `analysis_id`,
   `Content-Type: application/json`, the raw bytes of the document as the body.
-  The route's 1 MiB (1,048,576 byte) cap applies.
+  The route's own cap applies (the key's `max_bytes_per_request`, 32 MiB by default);
+  at parse, with the switch on, a spectrum over 16 MiB (16,777,216 bytes) is a dead letter.
 - **When it happens.** At parse time, `POST /ingest/batches/{id}/parse` by an
   `ingest.manage` holder. `POST /ingest` parses nothing.
 - **Off, or not a spectrum.** Categorised exactly as before. A spectrum is a
@@ -278,8 +280,10 @@ ingest route, unchanged. The integration is optional and off by default.
   `analysis_id`, `input_type`, `tool_name`, `tool_version`, `findings_total`,
   `findings_by_type`, `selectors_total`, `selectors_by_kind`,
   `selectors_unmapped`, `claimed_findings`, `graded_findings`, `grade_counts`,
-  `artifacts_total`, `errors_by_severity` and `family_claimed`. Counts and names
-  only; a value is never shown.
+  `artifacts_total`, `errors_by_severity` and `family_claimed`. Counts and kinds,
+  plus `analysis_id`, `tool_name` and `tool_version`, which are text the sender
+  chose (the last two cut to 64 characters). No finding, selector, hash, file or
+  family value is shown.
 
 ### Parity matrix
 
@@ -298,15 +302,15 @@ Every contract element of the spectrum, and what NocTORnal does with it.
 | `input.size_bytes`, `c2_count` | Integers, 0 or more. |
 | `findings[].type` | One of ten finding types. |
 | `confidence` | A number from 0 to 1. |
-| `source.reliability` | A to F. |
-| `source.credibility` | The strings `"1"` to `"6"`. |
+| `proposed_grade.source_reliability` | A to F. |
+| `proposed_grade.information_credibility` | The strings `"1"` to `"6"`. |
 | `errors[].severity` | `info`, `warning` or `error`. |
 | `selectors[].kind` | Mapped to a NocTORnal selector type where one exists (next table). |
 | `Artifact.type` | A free string. Known: `input`, `feed_record`, `sample_reference`, `submitted_sample`, `unpacked_layer`, `sandbox_payload`. Any other value is accepted. |
-| Free-form fields (`value`, `normalized`, `context`, `family_data`, `metadata`, `Artifact.type`) | Any JSON up to 24 levels deep, string keys without NUL. |
-| Size | At most 1,048,576 bytes a spectrum. |
+| Free-form fields (`value`, `normalized`, `context`, `family_data`, `metadata`) | Any JSON up to 24 levels deep, string keys without NUL. |
+| Size | At most 16 MiB (16,777,216 bytes) a spectrum, compact JSON. |
 | Counts | At most 250,000 JSON values; 10,000 findings; 10,000 artifacts; 1,000 errors; 100 selectors a finding; 1,000 tags, 1,000 capabilities and 1,000 risk signals each. |
-| Strings | None over 1,048,576 characters, and no NUL anywhere. |
+| Strings | None over 16,777,216 characters, and no NUL anywhere. |
 | The summary | Metadata only, as listed above. Never a value. |
 | Claims, proposed grades | Counted (`claimed_findings`, `graded_findings`, `grade_counts`), never turned into a claim or a grade in the graph. |
 | Artifacts and errors | Counted by total and by severity. |

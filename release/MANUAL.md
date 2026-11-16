@@ -917,8 +917,8 @@ Records that partner feeds sent, **scored and prioritised**.
 
 MaaSSpec, a malware spectrometer, emits one JSON document, a spectrum, for each input. When the host operator has set `NOCTORNAL_MAASSPEC=on`, a partner key can send one to the ingest endpoint unchanged and the queue takes it in as a record of category **IOC feed**, confidence 1.0, with no case. Nothing else happens: no entity, tie, claim or proposal is made, and the score is read from the payload text as for any record. With the switch off, which is the default, a spectrum is an ordinary JSON body.
 
-- **Open** shows a spectrum's counts and names only: findings by type, selectors by kind and how many have no NocTORnal type, claimed and graded findings, artifacts, errors by severity. A value is never shown. A person who needs one reads the stored body.
-- **A spectrum that fails the contract** is a dead letter, and the text names the place and the rule (`maasspec: ...`), never a value. Repair it at the source and send it again.
+- **Open** shows a spectrum's counts and names only: findings by type, selectors by kind and how many have no NocTORnal type, claimed and graded findings, artifacts, errors by severity, with the analysis id and the tool's name and version, which are the sender's own text. No finding, selector, hash or file value is shown. A person who needs one reads the stored body.
+- **A spectrum that fails the contract** is a dead letter, and the text names the place and the rule (`maasspec: ...`), never a value. Repair it with Repair and replay, or at the source and send it under a new analysis id.
 - The switch is a host setting. Administration cannot change it, but the status route `GET /api/v1/ingest/maasspec` says whether it is on.
 
 #### Dead letters
@@ -1420,7 +1420,7 @@ A provider that refuses its key is **locked** until somebody replaces the key or
 
 #### Host switch: MaaSSpec spectra
 
-`NOCTORNAL_MAASSPEC` in `secrets.env` is the second host switch, beside the outbound lookups one, and it ships off. Only `on` enables it; `true`, `1` and `yes` do not. It is read each time a batch is parsed, so the API and the cron should hold the same value. On, a MaaSSpec spectrum is checked and filed in the ingest queue as an IOC feed record (Part III, Feeds); off, nothing about ingest changes. It sends nothing anywhere and needs no egress. `GET /api/v1/ingest/maasspec` shows its state to a holder of `ingest.read`.
+`NOCTORNAL_MAASSPEC` in `secrets.env` is the second host switch, beside the outbound lookups one, and it ships off. Only `on` enables it; any value other than `on`, `off` or blank stops a production start. It is read each time a batch is parsed, so the API and the cron should hold the same value. On, a MaaSSpec spectrum is checked and filed in the ingest queue as an IOC feed record (Part III, Feeds); off, nothing about ingest changes. It sends nothing anywhere and needs no egress. `GET /api/v1/ingest/maasspec` shows its state to a holder of `ingest.read`.
 
 ### 35. Installing, upgrading and what to keep
 
@@ -1991,7 +1991,7 @@ The numbers the console enforces or quotes. A deployment may declare different o
 | Lookups | Provider exposure change | a second administrator, within 72 hours | No |
 | Two-person changes | The seven-day rule | a countersigner may not sign within seven days of changing or taking over the other party's account | No |
 | Two-person changes | The second person on a case's merge switch | must have held `case.update` on the case for seven days | Yes: `NOCTORNAL_RELAX_SEASONING_DAYS`, 0 turns it off, at most 365 |
-| Ingest | A MaaSSpec spectrum | at most 1 MiB (1,048,576 bytes), 250,000 JSON values, 10,000 findings, 10,000 artifacts, 1,000 errors, 100 selectors a finding, 24 levels of nesting | No |
+| Ingest | A MaaSSpec spectrum | at most 16 MiB (16,777,216 bytes), 250,000 JSON values, 10,000 findings, 10,000 artifacts, 1,000 errors, 100 selectors a finding, 24 levels of nesting | No |
 | Collector | Persona act not started | not run after 15 minutes | Yes |
 | Database | Request connections | a pool of up to 10 for each process in production; a request waits 10 seconds for one, then is answered 503 | Yes: `NOCTORNAL_DB_POOL`, `NOCTORNAL_DB_POOL_MAX` (1 to 50), `NOCTORNAL_DB_POOL_TIMEOUT` (1 to 60) |
 | Database | A request's statement | cancelled after 120 seconds; the setting takes 5 to 3600 | Yes: `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` |
@@ -2071,7 +2071,7 @@ None of these is a bug. A refusal you do not understand looks like one, which is
 | **"An archived case is a record and cannot be reopened."** | A closed case moves back to Active or on to Archived, and an archived one only to Purged; any other move is refused. Only the Lead investigator, who holds `case.close`, moves a case. |
 | **"Retention can only be extended"**, **"Classification can only be raised"** | One-way on purpose: an exhibit's storage lock cannot be shortened, and lowering a label would let material through it was written to stop. |
 | **"the batch was refused: this key is no longer live"** | An ingest key was revoked or expired between the moment it was recognised and the moment its batch was created. The partner needs a live key. |
-| **A dead letter that reads "maasspec: ..." followed by a place and a rule** | `NOCTORNAL_MAASSPEC` is on and the body was a MaaSSpec spectrum that failed the contract: a field of the wrong type, an unknown key, a missing field, a version other than 0.1.0, or a bound exceeded. The text never carries a value. Repair the spectrum at the source and send it again; the rest of its batch was stored. |
+| **A dead letter that reads "maasspec: ..." followed by a place and a rule** | `NOCTORNAL_MAASSPEC` is on and the body was a MaaSSpec spectrum that failed the contract: a field of the wrong type, an unknown key, a missing field, a version other than 0.1.0, or a bound exceeded. The text never carries a value. Repair it with Repair and replay, or at the source and send it under a new analysis id; the rest of its batch was stored. |
 | **A repeated Idempotency-Key answered as the first batch** | The same key on the same API key always answers as the first batch, at any age, and a different body under it is not stored. Use a new key for new content. |
 | **"This case is CLOSED"** | Content writes are refused on a closed, archived or purged case. Reopen it if the work is genuinely resuming. |
 | **"This watch was changed by someone else while you were editing it."** (a 409) | A collection manager saved a change to the same watch between your opening it and your saving. Nothing of yours was written, and the other change stands, even if you touched different fields. Reload the watch and make your change again. |
