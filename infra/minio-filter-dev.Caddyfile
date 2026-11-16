@@ -1,0 +1,21 @@
+# Development counterpart of infra/production/minio-filter.Caddyfile. The
+# development MinIO speaks HTTP, and 9000/9001 are published on 127.0.0.1,
+# so the same unsigned-trailer refusal sits in front of the published ports.
+{
+	auto_https off
+	servers {
+		protocols h1 h2
+	}
+}
+
+:9000 {
+	@unsigned_trailer header X-Amz-Content-Sha256 STREAMING-UNSIGNED-PAYLOAD-TRAILER
+	handle @unsigned_trailer {
+		respond 403
+	}
+	reverse_proxy 127.0.0.1:19000
+}
+
+:9001 {
+	reverse_proxy 127.0.0.1:19001
+}

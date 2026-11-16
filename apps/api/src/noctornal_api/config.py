@@ -68,21 +68,41 @@ _CREDENTIAL_NAME_MARKERS = (
 
 
 def _carries_credential(name: str) -> bool:
-    return any(marker in name.upper() for marker in _CREDENTIAL_NAME_MARKERS)
+    upper = name.upper()
+    return (any(marker in upper for marker in _CREDENTIAL_NAME_MARKERS)
+            or upper in _ACCESS_KEY_NAMES)
 
 
-#: Names that hold the IDENTITY half of a credential pair, not its secret: MinIO's access key is the
-#: account name, a `_KEK_ID` labels a key without being one. `_KEY` marks them as credentials above,
-#: but a published identity opens nothing without the secret beside it, which is scanned in its own
-#: variable, so the published-value rule below passes over them. A secret word in the name wins over
-#: the suffix: `AWS_SECRET_ACCESS_KEY` ends like an access key and is the secret.
-#: `apps/api/tests/test_published_credentials.py` classifies the files it scans with this same
-#: function.
-_IDENTITY_SUFFIXES = ("_ACCESS_KEY", "_USER", "_USERNAME", "_ROLE", "_ID")
+#: Names that hold the IDENTITY half of a credential pair, not its secret: a
+#: `_KEK_ID` labels a key without being one, a `_USER` names an account.
+#: `_KEY` marks a KEK id as a credential above, but a published identity
+#: opens nothing without the secret beside it, which is scanned in its own
+#: variable, so the published-value rule below passes over them. A secret
+#: word in the name wins over the suffix: `AWS_SECRET_ACCESS_KEY` ends like
+#: an access key and is the secret.
+#:
+#: An access key is the exception. The pinned MinIO lets a caller who knows
+#: only the access key write an object through
+#: STREAMING-UNSIGNED-PAYLOAD-TRAILER (GHSA-hv4r-mvr4-25vw,
+#: GHSA-9c4q-hq6p-c237), so `MINIO_ACCESS_KEY` (and the SAMPLE_ and
+#: PRESERVE_ keys, and `MINIO_ROOT_USER`, which is MinIO's root access key)
+#: are scanned like the secret half. `apps/api/tests/test_published_credentials.py`
+#: classifies the files it scans with this same function.
+_IDENTITY_SUFFIXES = ("_USER", "_USERNAME", "_ROLE", "_ID")
 _SECRET_WORDS = ("PASSWORD", "SECRET")
+_ACCESS_KEY_NAMES = frozenset({"MINIO_ROOT_USER"})
+
+
+def _names_an_access_key(name: str) -> bool:
+    upper = name.upper()
+    if any(word in upper for word in _SECRET_WORDS):
+        return False
+    return upper.endswith("_ACCESS_KEY") or upper in _ACCESS_KEY_NAMES
 
 
 def _names_identity(name: str) -> bool:
+    if _names_an_access_key(name):
+        return False
     upper = name.upper()
     return (upper.endswith(_IDENTITY_SUFFIXES)
             and not any(word in upper for word in _SECRET_WORDS))
@@ -114,9 +134,8 @@ _PUBLISHED_MARKERS: tuple[tuple[str, str], ...] = (
 
 #: Whole values a COMPONENT publishes rather than this repository: MinIO starts on `minioadmin` for
 #: both halves of its root credential when given none (infra/production/compose.yml says why that
-#: matters). Matched as the whole value and only in the secret half: `minioadmin` as the root USER
-#: is MinIO's customary name and harmless beside a strong password, which is where MinIO's own
-#: default-credential warning draws the line (see `_names_identity`).
+#: matters). Matched as the whole value, including on the access-key half: a caller who knows only
+#: that name can write through STREAMING-UNSIGNED-PAYLOAD-TRAILER on the pinned build.
 _PUBLISHED_VALUES: dict[str, str] = {
     "minioadmin": "'minioadmin', the root credential MinIO starts on when it "
                   "is given none",

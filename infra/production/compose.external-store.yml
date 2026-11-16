@@ -36,6 +36,9 @@ services:
   minio:
     profiles: [bundled-store]
 
+  minio-filter:
+    profiles: [bundled-store]
+
   minio-init:
     profiles: [bundled-store]
 

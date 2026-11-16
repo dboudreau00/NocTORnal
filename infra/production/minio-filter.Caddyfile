@@ -1,0 +1,34 @@
+# In front of the bundled MinIO, on the same network namespace. MinIO itself
+# binds only loopback (compose.yml); this is the only listener on 9000 and
+# 9001 of the compose network.
+#
+# The pinned community build allows an unauthenticated object write through
+# STREAMING-UNSIGNED-PAYLOAD-TRAILER when the caller knows only an access
+# key (GHSA-hv4r-mvr4-25vw, GHSA-9c4q-hq6p-c237). The name match is exact;
+# Caddy compares header names case-insensitively. TLS 1.3 only, with the
+# certificate issued for DNS:minio (scripts/internal_tls.py). HTTP/3 is off
+# as on the public terminator: 9000/udp is not published.
+{
+	auto_https off
+	servers {
+		protocols h1 h2
+	}
+}
+
+:9000 {
+	tls /certs/public.crt /certs/private.key {
+		protocols tls1.3
+	}
+	@unsigned_trailer header X-Amz-Content-Sha256 STREAMING-UNSIGNED-PAYLOAD-TRAILER
+	handle @unsigned_trailer {
+		respond 403
+	}
+	reverse_proxy 127.0.0.1:19000
+}
+
+:9001 {
+	tls /certs/public.crt /certs/private.key {
+		protocols tls1.3
+	}
+	reverse_proxy 127.0.0.1:19001
+}

@@ -24,7 +24,8 @@ SCRIPT = ROOT / "scripts" / "internal_tls.py"
 
 #: Each server that terminates TLS inside the compose network, and the directory under tls/ that
 #: holds its key (scripts/internal_tls.py SERVERS).
-KEY_DIRECTORIES = {"minio": "tls/minio", "postgres": "tls/postgres", "redis": "tls/redis"}
+KEY_DIRECTORIES = {"minio": "tls/minio", "minio-filter": "tls/minio",
+                   "postgres": "tls/postgres", "redis": "tls/redis"}
 
 
 def _text(path: Path) -> str:
@@ -72,6 +73,8 @@ def test_each_server_mounts_only_its_own_key_directory(services):
     minio = dict(_bind_mounts(services["minio"]))
     assert minio == {"tls/minio": "/root/.minio/certs"}, minio
     assert "./tls/minio:/root/.minio/certs:ro" in services["minio"]["volumes"]
+    assert dict(_bind_mounts(services["minio-filter"]))["tls/minio"] == "/certs"
+    assert "./tls/minio:/certs:ro" in services["minio-filter"]["volumes"]
     assert "./tls/postgres:/pg-tls-src:ro" in services["postgres"]["volumes"]
     assert "./tls/redis:/tls:ro" in services["redis"]["volumes"]
 

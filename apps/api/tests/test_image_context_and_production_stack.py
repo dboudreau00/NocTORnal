@@ -246,7 +246,7 @@ _KEPT = {
 
 def test_every_service_drops_all_capabilities_and_keeps_only_what_is_listed():
     services = _services()
-    assert set(services) == set(APP_ONLY) | {"caddy", "caddy-init", "egress-proxy", "analysis-worker"}
+    assert set(services) == set(APP_ONLY) | {"caddy", "caddy-init", "egress-proxy", "analysis-worker", "minio-filter"}
     for name, service in services.items():
         assert service.get("cap_drop") == ["ALL"], name
         assert set(service.get("cap_add") or []) == _KEPT.get(name, set()), name
@@ -361,7 +361,7 @@ _DIGEST = re.compile(r"^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
 def test_every_image_the_production_stack_pulls_is_pinned_by_digest():
     pulled = {name: s["image"] for name, s in _services().items()
               if "build" not in s and s.get("pull_policy") != "never"}
-    assert set(pulled) == {"caddy", "caddy-init", "postgres", "redis", "minio", "minio-init"}, pulled
+    assert set(pulled) == {"caddy", "caddy-init", "postgres", "redis", "minio", "minio-init", "minio-filter"}, pulled
     unpinned = {n: i for n, i in pulled.items() if not _DIGEST.match(i)}
     assert not unpinned, unpinned
 
@@ -813,7 +813,8 @@ def test_the_readme_checks_the_modes_the_containers_read_before_up():
     step = text[text.index("## 4. Start it"):text.index("### If the API refuses to start")]
     assert step.index("find infra/production/Caddyfile") < step.index("up -d --build")
     check = step.split("up -d --build")[0]
-    for path in ("infra/production/Caddyfile", "infra/production/mc-alias.sh",
+    for path in ("infra/production/Caddyfile", "infra/production/minio-filter.Caddyfile",
+                 "infra/production/mc-alias.sh",
                  "infra/production/tls/public", "infra/production/pg_hba.conf", "db/init"):
         assert path in check, path
     assert "chmod go+rX" in step
@@ -828,6 +829,7 @@ def test_the_readme_checks_the_modes_the_containers_read_before_up():
                 mounts.add(os.path.normpath(os.path.join("infra/production", source)).replace("\\", "/"))
     private = {f"infra/production/tls/{name}" for name in ("minio", "postgres", "redis")}
     assert mounts - private == {"infra/production/tls/public", "infra/production/Caddyfile",
+                                "infra/production/minio-filter.Caddyfile",
                                 "db/init", "infra/production/mc-alias.sh",
                                 "infra/production/pg_hba.conf"}, mounts
     for path in private:
@@ -955,7 +957,8 @@ def test_the_mode_check_names_what_a_container_could_not_read(tmp_path):
     prod = tmp_path / "infra" / "production"
     for directory in (prod / "tls" / "public", prod / "tls" / "minio", tmp_path / "db" / "init"):
         directory.mkdir(parents=True)
-    files = {prod / "Caddyfile": 0o644, prod / "mc-alias.sh": 0o644, prod / "pg_hba.conf": 0o644,
+    files = {prod / "Caddyfile": 0o644, prod / "minio-filter.Caddyfile": 0o644,
+             prod / "mc-alias.sh": 0o644, prod / "pg_hba.conf": 0o644,
              prod / "tls" / "public" / "ca.crt": 0o644, prod / "tls" / "minio" / "private.key": 0o600,
              tmp_path / "db" / "init" / "10-app-role.sh": 0o644}
     for path, mode in files.items():
@@ -1215,10 +1218,10 @@ def _readme_digest_table() -> dict[str, str]:
 
 
 def test_every_image_the_development_stack_pulls_is_pinned_by_digest():
-    """docs/17 "unpinned inputs": the development compose file names its five images by digest, as
+    """docs/17 "unpinned inputs": the development compose file names its six images by digest, as
     production does, so a developer's `up` does not run whatever the registry says that day."""
     images = _image_refs(DEV_COMPOSE)
-    assert len(images) == 5, images
+    assert len(images) == 6, images
     unpinned = [i for i in images if not _DIGEST.match(i)]
     assert not unpinned, f"the development stack pulls these by tag: {unpinned}"
 

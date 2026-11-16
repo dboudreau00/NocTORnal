@@ -430,14 +430,15 @@ context.
 First check the modes of the files the containers read from this checkout.
 A clone or a `git pull` made under a restrictive `umask` (some hardened hosts
 default to `077`) leaves them `0600`, and the containers cannot read what they
-do not own: Caddy reads `Caddyfile`, `minio-init` reads `mc-alias.sh`, the
+do not own: Caddy reads `Caddyfile` and `minio-filter.Caddyfile`, `minio-init` reads `mc-alias.sh`, the
 application reads `tls/public`, and Postgres reads `db/init` and `pg_hba.conf`.
 This prints nothing when they are right (the key directories under `tls/` are
 left out on purpose: they are root's and 700, and `internal_tls.py check`
 reads them):
 
 ```sh
-find infra/production/Caddyfile infra/production/mc-alias.sh infra/production/pg_hba.conf \
+find infra/production/Caddyfile infra/production/minio-filter.Caddyfile \
+  infra/production/mc-alias.sh infra/production/pg_hba.conf \
   infra/production/tls/public db/init \
   \( -type f ! -perm -o=r -o -type d ! -perm -o=rx \) -print
 ```
@@ -2445,7 +2446,7 @@ both names resolve to the same digest, which is how that is checked.
   that class, and needs the compose file's `context` pointed at the export,
   which this file does not do.
 * **Images and tools that are not digest pinned.** The development stack
-  (`infra/docker-compose.yml`) pins all five of its images by digest, as
+  (`infra/docker-compose.yml`) pins all six of its images by digest, as
   `compose.yml` does (2026-10-08), and so does the CI workflow, for its two
   service containers and every `docker run` step, each with the digest the
   compose files pin for that tag; its two actions (`actions/checkout`,
@@ -2469,6 +2470,7 @@ both names resolve to the same digest, which is how that is checked.
   | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack, `compose.yml`, CI | `sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb` |
   | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack, `compose.yml`, CI | `sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780` |
   | `axllent/mailpit:v1.31.0` | development stack, CI | `sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24` |
+  | `caddy:2-alpine` | development stack, `compose.yml` | `sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648` |
 
   A test holds this table to the three files, so moving a pin in the
   development file, in `compose.yml` or in the workflow without the table fails
