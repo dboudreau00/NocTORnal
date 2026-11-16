@@ -20,7 +20,7 @@ First time on a machine? [START-HERE.md](START-HERE.md) installs it in about fif
 
 #### What this edition changed
 
-Beta 1.6 closes the findings of a review and changes the console in a few places. Lifting a legal hold is four steps in the place the hold is, and takes two people. Closing or archiving a case says what is left to minimise. A collection watch's row carries Stop or Resume and Edit. The connection log says that some rows are withheld, and the readiness register has 51 checks (Appendix G). Most of the rest is behind the console: who may read a case's team, transport, storage and restoring a backup, and a layout for a cluster. The changelog lists each, and Part IV and the appendices carry the operator's side. Beta 1.5c gives the sociogram a lit stage, puts the canvas key and the keyboard shortcuts behind two buttons under the canvas, and moves what a pane says once behind a small **i** beside the heading it belongs to (The i buttons, in Part I). Beta 1.5 and 1.5b close the findings of a code review and leave every screen as it was; their changes are in the changelog. The screens went quiet in Beta 1.4. Every explanatory paragraph that used to open a pane was cut to a line, or removed, and its content moved here. If a screen no longer explains itself, that is deliberate and the explanation is in the chapter for that pane. Nothing that protects somebody was removed: a legal warning, a destruction warning, and the notices that keep you from misreading a number are still on screen, in one sentence each.
+Beta 1.6 closes the findings of an independent review and changes the console in a few places. Lifting a legal hold is four steps in the place the hold is, and takes two people. Closing or archiving a case says what is left to minimise. A collection watch's row carries Stop or Resume and Edit. The connection log says that some rows are withheld, and the readiness register has 51 checks (Appendix G). Most of the rest is behind the console: who may read a case's team, transport, storage and restoring a backup, and a layout for a cluster. The changelog lists each, and Part IV and the appendices carry the operator's side. Beta 1.5c gives the sociogram a lit stage, puts the canvas key and the keyboard shortcuts behind two buttons under the canvas, and moves what a pane says once behind a small **i** beside the heading it belongs to (The i buttons, in Part I). Beta 1.5 and 1.5b close the findings of a code review and leave every screen as it was; their changes are in the changelog. The screens went quiet in Beta 1.4. Every explanatory paragraph that used to open a pane was cut to a line, or removed, and its content moved here. If a screen no longer explains itself, that is deliberate and the explanation is in the chapter for that pane. Nothing that protects somebody was removed: a legal warning, a destruction warning, and the notices that keep you from misreading a number are still on screen, in one sentence each.
 
 ---
 
@@ -81,9 +81,9 @@ Signing in takes two things: **your password** and **a six-digit code from an au
 
 #### The first administrator
 
-A new deployment has no accounts. Its first page offers to **create the first administrator**, and it asks for the value of `NOCTORNAL_SETUP_TOKEN`, which the person running the server set. This door closes permanently once the first account exists.
+A new deployment has no accounts. Its first page, **First-run setup**, offers to create the first administrator, and where the server has a setup token it asks for the **Setup token**: the value of `NOCTORNAL_SETUP_TOKEN`, which the person running the server set. A production deployment with no setup token offers no first-run page, and its first account is made from a shell on the server. This door closes permanently once the first account exists.
 
-1. Enter your email and a display name, and the setup token.
+1. Enter your **Work email**, a **Display name** and, if it is asked for, the **Setup token**, then press **Create administrator**.
 2. The page then shows a generated **password** and an **authenticator secret**, once, as text and as a QR code. They are not recoverable. Have an authenticator app ready, scan the code, and save the password somewhere safe.
 3. Sign in on the same page with them. They stay on screen until that works, so a mistyped secret is caught while it can still be fixed.
 4. The page then shows your **recovery codes**, once. Save them.
@@ -92,7 +92,7 @@ If you leave before saving the password and the secret, the console asks first: 
 
 #### A normal sign-in
 
-Enter your email, your password and the code from your app. A recovery code can stand in for the app code.
+Enter your **Work email**, your **Password** and the code from your app in **Authenticator or recovery code**. A recovery code can stand in for the app code, in the same field.
 
 - **A code works once.** Two sign-ins inside the same 30-second step fail on the replay guard, not on the code. Wait for the next code.
 - **The time on your phone matters.** A code is a function of the clock. The server allows 30 seconds either way. If your code keeps failing and the secret is right, set the phone to take its time automatically. An operator can check which side is wrong with `python scripts/bootstrap.py totp-diagnose --email you@example.org --code 123456`.
@@ -105,6 +105,7 @@ A recovery code signs you in once, in place of an authenticator code: for a lost
 - You issue your own from **Account** (your name, top right) while signed in. A new set replaces any earlier one, and it needs a sign-in from the last 15 minutes.
 - A recovery code is used up only when you finish choosing a new password, so one you just used to reset a password still works if the reset did not complete.
 - With neither your app nor a recovery code, an administrator can re-enrol your authenticator: Administration, Accounts, **Re-enrol TOTP**. Their old secret stops working at once.
+- **A recovery code takes about half a second longer to check than an authenticator code.** It takes exactly as long whether the password is right or wrong, so that the wait tells nobody anything. Nothing about the card changes, and the longer wait is not a sign that anything is wrong. The same applies where Account, **Change your password**, asks for the current password and a code.
 
 #### A password an administrator issued
 
@@ -112,7 +113,7 @@ An administrator can reset your password. What they issue is a one-time password
 
 #### How long a session lasts
 
-A session ends after **30 minutes without activity**, or **12 hours** after you signed in, whichever comes first. When it does, anything you had typed but not saved stays on screen, but saving it needs a fresh sign-in, and the console says plainly when a change you just made was **not** saved. Some actions need more than a valid session: merging, exporting, purging, downloading a sample, and most administration ask for a **sign-in from the last 15 minutes** ("step-up"). When the last one is older, the pane asks again in place and nothing else on screen changes.
+A session ends after **30 minutes without activity**, or **12 hours** after you signed in, whichever comes first. Five minutes before either limit the console says so, with **Stay signed in** for the idle limit and **Sign in again now** for the 12-hour one. When it does, anything you had typed but not saved stays on screen, but saving it needs a fresh sign-in, and the console says plainly when a change you just made was **not** saved. Some actions need more than a valid session: merging, exporting, purging, downloading a sample, and most administration ask for a **sign-in from the last 15 minutes** ("step-up"). When the last one is older, the pane asks again in place and nothing else on screen changes.
 
 > **Warning.** If the console is reached over plain HTTP at an address that is not this computer, your password and code are accepted but the browser refuses to keep the sign-in, because the session cookies are marked Secure. Nothing is opened, and no error says so beyond a line on the sign-in form. Use the HTTPS address, or reach the console at `localhost`.
 
@@ -122,7 +123,7 @@ A session ends after **30 minutes without activity**, or **12 hours** after you 
 
 #### The rail
 
-The column down the left is the rail. Each tile opens a pane. A badge on a tile is a count of work waiting: **Triage** counts suggestions awaiting review, **Inbox** counts unread notifications and stays up while an urgent one is not acknowledged, **Admin** counts blocking checks that fail, and **Lab** counts samples in the queue. The rail caption is the name the palette answers to.
+The column down the left is the rail. Each tile opens a pane. A badge on a tile is a count of work waiting: **Triage** counts suggestions awaiting review and second-signature requests you could sign, **Inbox** counts unread notifications and stays up while an urgent one is not acknowledged, **Feeds** counts feed records that match a watched selector and have not been triaged, **Admin** counts blocking checks that fail, and **Lab** counts samples awaiting triage or assignment. The rail caption is the name the palette answers to.
 
 | Tile | What it opens | Chapter |
 |---|---|---|
@@ -147,7 +148,7 @@ The column down the left is the rail. Each tile opens a pane. A badge on a tile 
 
 Along the top, left to right: the case you have open with its **TLP** label and **status**; the **as-of** control (Chapter 8); the live-channel dot; **Jump to** (<kbd>Ctrl</kbd> <kbd>K</kbd>); then **Case...** (the case record), **Share...** (who is on it), **Status...** (move it between draft, active, dormant, closed, archived), **Hold...** (legal hold on the whole case), **All cases**, **Inbox**, **Help**, your account, and **Log out**.
 
-The **live dot** is the channel that brings other analysts' changes to you without a refresh. Green means it is connected. Grey means it is not, and you should refresh by hand. It is a convenience, never a correctness feature: the data is the same either way, and the console says "Paused while nobody is using this console" when it has stopped on purpose so that your session can still time out.
+The **live dot** is the channel that brings other analysts' changes to you without a refresh. Green means it is connected. A pulsing dot means it is connecting. Grey means it is not, and you should refresh by hand. It is a convenience, never a correctness feature: the data is the same either way, and the console says "Paused while nobody is using this console" when it has stopped on purpose so that your session can still time out. If your session ends while a live view is open, the console closes the view at the next update, or at the latest about 25 seconds later, the dot's hover text says you are signed out, and the sign-in is offered in place.
 
 When the case is not in an ordinary working state a line under the strip says so. A **draft** case has not been opened for work: move it to active before working it. A **dormant** case was put to sleep: reactivate it before adding material, so the record shows when work resumed. A **closed** case is read-only: its graph, evidence, captures, proposals, comms, analysis, tags and samples cannot be changed and the controls that would change them are off, while status, legal holds, retention, sharing and break-glass still work. An **archived** case is a record, not a workspace: read-only, and it cannot be reopened.
 
@@ -182,7 +183,7 @@ This chapter walks one small case through every step that matters, so the other 
 - a **code** and a **title**. The code is intelligence: it is in notification subject lines unless the notification is above what email may carry, when the subject is a stub with no code, and a report prepared below the case's level leaves it out with the rest of the header;
 - a **lawful basis**: the authority, statute or instruction that permits this case. It is recorded on the case and shown on a report whenever the case header is within the level prepared at;
 - a **classification** (TLP: `CLEAR`, `GREEN`, `AMBER`, `AMBER_STRICT`, `RED`), which can later be raised but not lowered;
-- a **retention** date and a **review** date. Retention can only be extended, and extending it lengthens the storage lock on every exhibit permanently, so check the year. Review must fall on or before retention.
+- **Retention until** and **Review due** dates. Retention can only be extended, and extending it lengthens the storage lock on every exhibit permanently, so check the year. Review must fall on or before retention.
 
 A case starts as a **draft**. Move it to **active** from **Status...** before working it.
 
@@ -192,16 +193,16 @@ Open **Add entity**. Choose the type (a persona is an `IDENTITY`, a human you ha
 
 - **Basis**: direct observation, third-party report, analyst inference, automated inference, self claim, or legal process. An inference must state its reasoning, in the rationale; the server rejects one that does not.
 - **Confidence** in ICD 203 words: low, moderate or high.
-- **Source reliability** from A to F and **information credibility** from 1 to 6 (Chapter 5). Nothing is preselected: you grade the claim yourself, so an ungraded claim cannot pass for a graded one.
-- An **exhibit**, optional but the difference between a defensible claim and an opinion. Upload on **Evidence** first to see it listed here.
-- **Observed at** (UTC) and a **source reference**, for example `Received hop 2`.
-- A **valid interval**: calendar days in UTC, blank if there is no known start or end. This drives the timeline scrubber and trust decay; it is not when you recorded the claim.
+- **Source reliability** from A to F and **Info credibility** from 1 to 6 (Chapter 5). Nothing is preselected: you grade the claim yourself, so an ungraded claim cannot pass for a graded one.
+- A **Supporting exhibit**, optional but the difference between a defensible claim and an opinion. Upload on **Evidence** first to see it listed here.
+- **Observed at (UTC)** and a **Source reference**, for example `Received hop 2`.
+- A **Valid interval (world time)**: calendar days in UTC, in **From (UTC day)** and **Until (UTC day)**, blank if there is no known start or end. This drives the timeline scrubber and trust decay; it is not when you recorded the claim.
 
 ![Add entity: the entity, then the claim that justifies it.](../docs/images/15-add-node.png)
 
 #### Step 3: add the exhibit first, if you have one
 
-**Evidence**, then choose the file, give it a title, say how it was acquired and when, and **Upload exhibit**. The server computes its SHA-256 and BLAKE3 on receipt and locks the object. Chapter 13 explains custody, verification and legal holds. Upload before you make the claim and the claim can cite it.
+**Evidence**, then **Upload an exhibit**: choose the file, give it a title, say how it was acquired (**Acquisition**) and when (**Acquired at (UTC)**), and press **Upload exhibit**. The server computes its SHA-256 and BLAKE3 on receipt and locks the object. Chapter 13 explains custody, verification and legal holds. Upload before you make the claim and the claim can cite it.
 
 #### Step 4: link two entities
 
@@ -211,7 +212,7 @@ Open **Add entity**. Choose the type (a persona is an `IDENTITY`, a human you ha
 
 #### Step 5: capture text and review the suggestions
 
-**Triage**, then **Capture text**: paste a thread, a chat export or a listing. Selectors in it are extracted with their offsets and raised as suggestions. Nothing enters the graph. Go down the queue with <kbd>J</kbd> and <kbd>K</kbd>, accept with <kbd>A</kbd> (it asks first), reject with <kbd>R</kbd> or defer with <kbd>D</kbd> (both ask for a reason).
+**Triage**, then **Capture text**: paste a thread, a chat export or a listing, and press **Extract and propose**. Selectors in it are extracted with their offsets and raised as suggestions. Nothing enters the graph. Go down the queue with <kbd>J</kbd> and <kbd>K</kbd>, accept with <kbd>A</kbd> (it asks first), reject with <kbd>R</kbd> or defer with <kbd>D</kbd> (both ask for a reason).
 
 ![Triage: the capture form and the queue.](../docs/images/04-triage.png)
 
@@ -225,7 +226,7 @@ The **Graph** now shows what you built. Click an element: the inspector says why
 
 #### Step 8: close it
 
-When the work ends, move the case to **closed** from **Status...**. A closed case is read-only but still governed: legal holds, retention and sharing still work, and the retention dates you set in Step 1 now decide when its material falls due.
+When the work ends, move the case to **closed** from **Status...**. A closed case is read-only but still governed: legal holds, retention and sharing still work, and the retention dates you set in Step 1 now decide when its material falls due. If some of the case's conversations are above everyone assigned to it, the case still closes: Chapter 26 says what you are told.
 
 > **Tip.** A demonstration case is a good place to make mistakes. Retract a claim, run an analysis before and after, and watch what the inspector says changed. Nothing is overwritten in NocTORnal: a retracted claim stays on the record, marked, and an element that loses its last live claim leaves the graph at every as-of date.
 
@@ -233,7 +234,7 @@ When the work ends, move the case to **closed** from **Status...**. A closed cas
 
 ## Part II. Ideas you need
 
->> The six ideas behind the console's behaviour: claims and grades, handles and people, handling labels, views and time, retention, and who may do what. Each one explains something the screens used to explain and now leave to this chapter.
+>> The six ideas behind the console's behaviour: claims and grades, handles and people, handling labels, views and time, retention, and who may do what. Each one explains something a screen leaves to this chapter.
 
 ### 5. Claims, grades and confidence
 
@@ -242,13 +243,13 @@ Every attribute and every relationship in NocTORnal rests on one or more **asser
 | Part | What it records |
 |---|---|
 | **Claim** | What is being said: this entity has this label, this selector, this type; this tie exists between these two. |
-| **Basis** | How you know. One of: **direct observation**, **third-party report**, **analyst inference**, **automated inference**, **self claim** (the actor said it of themselves), **legal process** (obtained under a warrant, order or other instrument; the reference is required). |
+| **Basis** | How you know. One of: **direct observation**, **third-party report**, **analyst inference**, **automated inference**, **self claim** (the actor said it of themselves), **legal process** (obtained under a warrant, order or other instrument; name the instrument in the source reference). |
 | **Confidence** | Your confidence in the claim, in ICD 203 analytic words: **low**, **moderate** or **high**. |
 | **Source reliability** | How far the source can be trusted, **A** to **F**. |
-| **Information credibility** | How far this piece of information can be trusted, **1** to **6**. |
+| **Info credibility** | How far this piece of information can be trusted, **1** to **6**. |
 | **Rationale** | Why you grade it so. Required for an inference. |
-| **Exhibit** | The captured page, file or message that backs it. Optional, and the difference between a defensible claim and an opinion. |
-| **Observed at**, **reference** | When you saw it (UTC) and where: a header line, a post number, a file path. |
+| **Supporting exhibit** | The captured page, file or message that backs it. Optional, and the difference between a defensible claim and an opinion. |
+| **Observed at (UTC)**, **Source reference** | When you saw it (UTC) and where: a header line, a post number, a file path. |
 | **Valid interval** | The days the thing was true in the world, as calendar days in UTC. Blank if unknown or still current. It drives the timeline scrubber and trust decay. It is not when you recorded the claim. |
 
 An inference must state its reasoning. The server rejects one that does not, because an unreasoned inference is a guess the graph would then treat as evidence.
@@ -296,7 +297,7 @@ To lower a tie's confidence, add the lower claim under **Assertions** and retrac
 Nothing in NocTORnal is overwritten. History is superseded or retracted, never edited, and each of these is a different act:
 
 - **Retract** withdraws one claim. The row is stamped and kept, with your reason. If it was the last live claim behind the element, the element leaves the graph, and it stays out at every as-of position, earlier ones included, because the graph leaves out a retracted claim at every date. **Include retracted** lists them.
-- **Date this claim** is offered on a claim with no observation date, which **First seen** and **Last seen** therefore ignore. Dating it records a new claim with the date and your reason, and marks the old one superseded. Nothing is rewritten.
+- **Date this claim** is offered on a claim with no observation date, which **First seen** and **Last seen** therefore ignore. Dating it records a new claim with the date and your reason, and marks the old one superseded. Nothing is rewritten. Dating a claim replaces it: the old claim is kept as history, is not offered **Retract**, and cannot be retracted by the API either, so if the date was wrong, retract the claim that replaced it. An exhibit the old claim carried backs the entity or relationship only through the claim that replaced it, so withdrawing the replacement leaves the exhibit backing nothing there.
 - **Correct...** fixes a label, or records when a tie ended. The corrected label is recorded as a claim with the basis and grading you choose, the label it replaces stays in the audit record, and retracting the correction puts it back. A date in **Stopped being true on** records that the thing ended without retiring it, so the as-of view still shows it before then. Nothing is graded for you.
 - **Retire** removes the element from every view, including as-of queries into the past. Nothing is destroyed: the row, its assertions and its evidence links stay in the database and the act is recorded against your name. But it cannot be undone from the console. To say instead "this stopped being true in March", cancel and use **Correct...** with a date.
 
@@ -338,6 +339,8 @@ A merge folds one entity (the loser) into another (the survivor) of the **same t
 - it is **reversible** from the entity resolution panel;
 - it is a **dual-control** operation where the case, or the deployment, has put it behind two people.
 
+If someone else merges or reverses a merge of one of the same entities at the same moment, one waits for the other. The second is then made on what the first left, or refused with the reason it would be given on its own: for example, that the entity you are merging into has itself been merged away, or that a later merge has to be reversed first.
+
 By default a case takes one signature for merges. A Lead investigator can press **Require a second signature** on the Triage pane, and from then on a merge is a **request** that another person with `graph.merge` on the case must approve. Turning that off again is itself a request, and needs a person who has held `case.update` on the case for the window (seven days unless the deployment declares another; the console tells you the date they qualify). If the deployment requires a second signature for every merge, a case cannot turn it off.
 
 An approval request names the entities, shows the justification, the parameters exactly, who asked, when it expires, and what approving does. It authorises **one execution** of the exact parameters it was raised over, not the operation in general; it is spent when used (the card says **spent**), and the requester presses **Execute merge** to spend it. Rejected and withdrawn requests stay listed, because a request that vanished would hide the fact that somebody once asked. You cannot decide your own request, and approving means you have checked the specific parameters, not that you trust the person asking.
@@ -372,11 +375,11 @@ A **compartment** is a need-to-know lock on a case, a record or a document: only
 
 Being cleared is not being assigned. You see a case only if you are **assigned** to it, and what you may do there is decided by your **role on that case**: Lead investigator, Analyst, Reviewer, Contributor, Read only, External liaison. Appendix B says what each holds. Access is the intersection: the case, its classification, its compartments and your role on it must all reach.
 
-An assignment row is only half of access, which is why the case's **Share...** panel shows everyone assigned **and whether their access works**. When you grant someone access the grant is checked: a colleague whose clearance or compartments do not reach the case is refused, not written and then silently filtered out of every read.
+An assignment row is only half of access, which is why the case's **Share...** panel shows everyone assigned **and whether their access works**. When you grant someone access the grant is checked: a colleague whose clearance or compartments do not reach the case is refused, not written and then silently filtered out of every read. The refusal says only that the colleague's clearance or compartments do not reach the case, or that the role cannot be given on this case. It names no level, no compartment and no other case, whether the colleague was named by address or by id, and every refused grant is recorded.
 
 #### Why you get a 404 for a thing you know exists
 
-If you are not assigned to a case, or not read into its compartment, or the material is above you, the answer is the same as for something that does not exist: **404**. It is deliberate. A different status for "exists but not yours" would be an existence oracle for a compartmented operation.
+If you are not assigned to a case, or not read into its compartment, or the material is above you, the answer is the same as for something that does not exist: **404**. It is deliberate. A different status for "exists but not yours" would be an existence oracle for a compartmented operation. An id that names nothing, or names another case's element, is treated the same way: the server does the same work, gives the same answer and writes the same denial row in the audit log as for something hidden from you, so a stale link or a mistyped id appears there as a denial. A tie to an entity above your clearance is never drawn, and an id or link that names one is answered as a tie that does not exist.
 
 #### What may leave
 
@@ -402,7 +405,7 @@ The graph on screen and every number beside it describe a **view** of the case, 
    - **Financial**: payments, laundering, escrow and wallet control. It usually names different leaders than the trust network does.
 2. **How confident?** A **confidence floor**: low and above, moderate and above, or high.
 3. **Inferred ties in or out?** In while **Include inferred** is ticked, which it is when the console opens; untick it to leave them out.
-4. **Trust decay**: off, or a half-life in months. Where it is on, a claim loses weight as its valid interval recedes. Claims with no dates are not decayed, and the view says how many were left alone.
+4. **Trust decay**: off, or a half-life in months. Where it is on, a claim loses weight as its valid interval recedes. Claims with no dates are not decayed, and the view says how many were left alone. The half-life is a positive number of months (the console offers 6, 12 and 24): zero, a negative value and a value that is not a number are refused, and the analysis does not run. A tie whose valid interval is so far back that its weight has decayed to nothing is left out of betweenness, closeness and the broker lists, and the line under the numbers says how many connected pairs were left out; the components, bridges, communities and the removal set still count it as a tie.
 5. **As of when?** A moment in world time. **Now** is the default.
 
 Change any answer and the numbers change, correctly. The commonest misreading in the whole tool is quoting a metric without its view.
@@ -438,9 +441,9 @@ Each ingest category has a rule with a period in days and a rationale. Until som
 | `CHAT_EXPORT` | 730 days | May contain the messages of uninvolved third parties in group channels. Whether those may be kept at all, and for how long, is for counsel to settle. |
 | `TELEMETRY` | 180 days | High volume, low individual value. |
 
-A category with **no rule at all** runs on a **fallback of 365 days**, a period nobody chose. The Retention page lists every category in use on your cases, ruled or not, because a category with no rule used to be on no screen at all.
+A category with **no rule at all** runs on a **fallback of 365 days**, a period nobody chose. The Retention page lists every category in use on your cases, ruled or not, so that a category with no rule is never out of sight.
 
-A **confirmed** rule applies to material ingested **from then on**, in every case. Nothing already on file is recomputed: records keep the deadline they were stamped with when they arrived. Confirming needs `retention.manage` and a sign-in from the last 15 minutes, a rationale, and a name; confirming again replaces the earlier decision and says whose it was.
+A **confirmed** rule applies to material ingested **from then on**, in every case. Nothing already on file is recomputed: records keep the deadline they were stamped with when they arrived. Confirming needs `retention.manage`, a sign-in from the last 15 minutes and a rationale of at least 10 characters, and it records who confirmed; confirming again replaces the earlier decision and says whose it was.
 
 #### The case's own clocks
 
@@ -470,6 +473,8 @@ Everyone who can open a held exhibit or case sees a **LEGAL HOLD** chip.
 - It needs an **authority** of at least 10 characters, which the **tombstone** keeps after the material is gone, and the confirmation asks you to type the case code.
 - Nothing schedules it. A purge that runs on a timer nobody watches is how data disappears on a Sunday: the Due list reports what has expired, and a person acts, a case at a time. A **purge out of schedule**, of exhibits whose retention has not expired, takes a second person under dual control, and the approval is consumed inside the purge transaction.
 - If the object store refuses a delete under a retention lock, **those exhibits keep their bytes and are not marked purged**. A tombstone recording a purge that did not happen is a false record, so the pane says what was refused and why, and the rows are not touched. If no object store was contacted at all, the pane says so and says **not to report it as a destruction**.
+- A destroyed exhibit keeps its row as the tombstone's name for it, and nothing it said. The purge empties the exhibit's description, its source address, its extracted text and its search index in the same step that marks it destroyed, and keeps its title, its digest, its size, its media type and its custody trail. An exhibit the object store refused to delete is not marked and not emptied: it is still readable, and so is what it said. What the exhibit gave rise to (a parsed email, a contact block) is the case's analysis and stays.
+- The preview a dry run returns is a keyed value only the server can make, over everything due on the case, including what you may not see. It says nothing about what is left out. If the server has no key for it, the dry run says so and returns no preview, and a real purge cannot be confirmed until an administrator sets `NOCTORNAL_AUDIT_PEPPER`.
 
 The **Destroyed** page is the **tombstone ledger**: what was destroyed, how much, by whom, under whose authority, and whether the object store actually let go of the bytes. It is append-only and outlives the thing it records, otherwise a destruction and a deletion of the record of it look identical.
 
@@ -498,6 +503,7 @@ Some acts take two different people on purpose, so that one person's mistake or 
 | Destroy evidence outside the retention schedule | A Lead investigator | A different Lead investigator; the approval is spent inside the purge |
 | Lift a legal hold (an exhibit's, a case's or a collected document's) | A holder of `retention.manage`, cleared for what it releases | A different holder of `retention.manage`, cleared for the same material, approves within 72 hours; the one who asked lifts |
 | A lookup to a vendor or a public service | The analyst, who names who signs it off | The named Lead investigator, in a separate action with a fresh sign-in |
+| A key lookup in a Web Key Directory | A holder of `comms.key.lookup` (a Lead investigator or a Collection manager) | A different holder of `comms.key.lookup.approve` (a Lead investigator or a Reviewer), who approves and sends it |
 | Retrieve a preserved, rejected sample | A Lead investigator | A Security officer authorises that one person for that one sample |
 | A collection authority | A Collection manager records it | A Security officer confirms it, and each source under it |
 | Lower a lookup provider's exposure, or move it | An administrator | A different administrator holding `integration.manage`, within 72 hours |
@@ -536,7 +542,7 @@ The case as a network, and the working surface. Entities are nodes, relationship
 | **drag** the background | pan |
 | **scroll** | zoom |
 | **click** a node or line | inspect it: the inspector shows *why it is believed* |
-| **double-click**, or <kbd>Enter</kbd> | the ego network: this entity and its immediate ties |
+| **double-click**, or <kbd>Enter</kbd> | the ego network: this entity and its immediate ties. An entity whose ties pass what one view reads shows the oldest recorded neighbours at the distance where the view was cut, and a **Neighbourhood cut** banner says so; a narrower projection shows others |
 | **shift-click** one entity, then shift-click another (or press <kbd>P</kbd> on each) | the shortest path between them, treated as undirected; the first one only sets the anchor |
 | **drag a node** | move and pin it |
 | <kbd>U</kbd> | pin or unpin the selected node |
@@ -582,13 +588,13 @@ Every entity, **unprojected**. The Graph shows a view; this pane shows what is i
 
 ![The entity list and the inspector.](../docs/images/02-entities.png)
 
-The header counts what is in the case: for example "20 of 20 entities, 28 relationships in the case (23 social ties and 5 other links)". Filter by **Type filter**, find by **Label**, and sort by any column (Type, Label, Classification, First seen). Selecting a row selects the entity everywhere, and the inspector opens on it.
+The header counts what is in the case: for example "20 of 20 entities · 28 relationships in the case (23 social ties and 5 other links)". Filter by **Type filter**, find by **Label**, and sort by any column (Type, Label, Classification, First seen). Selecting a row selects the entity everywhere, and the inspector opens on it.
 
 #### The inspector
 
 Select anything and the inspector, on the right of every pane, answers **why is it believed**. For an entity:
 
-- **Assertions**: every claim behind it, with its basis, Admiralty grade, confidence and exhibit, live ones first. Beside each: **Retract**, **Date this claim** where it has no observation date, and the history of what superseded what. **Include retracted** lists the withdrawn ones. On a relationship, **Add a claim about this tie...** adds another source for it, or the same tie at another grade, as its own assertion; on an entity, **Correct...** records a graded correction.
+- **Assertions**: every claim behind it, with its basis, Admiralty grade, confidence and exhibit, live ones first. Beside each: **Retract**, **Date this claim** where it has no observation date, and the history of what superseded what. **Include retracted** lists the withdrawn ones. Dating a claim replaces it: the old claim is kept as history, is not offered **Retract**, and cannot be retracted through the API either; if the date was wrong, retract the claim that replaced it. An exhibit the old claim carried backs the entity or relationship only through the claim that replaced it, so withdrawing the replacement leaves the exhibit backing nothing there. On a relationship, **Add a claim about this tie...** adds another source for it, or the same tie at another grade, as its own assertion; on an entity, **Correct...** records a graded correction.
 - **Evidence**: the exhibits behind the claims, each with the digest and whether it is verified.
 - **Relationships**: every tie in the case, social or not, each one opening its own inspector. **Link from this...** and **Link to this...** open the Add link form with this end filled in.
 - **Metrics**: **local** measures for this entity (degree, weighted degree, k-core, clustering), each describing the entity's own neighbourhood. Brokerage (betweenness, constraint, key-player) is global, so it lives in the Analysis pane; the line under the metrics says whether this entity is in a run and where to see it.
@@ -623,7 +629,7 @@ When a lookup provider is enabled for a selector's type, the inspector shows **L
 
 A lookup to a VENDOR or PUBLIC provider is **not sent when you press the button**. You name a colleague who may sign it off (a Lead investigator on the case) and say why; nothing leaves until they sign it off under Records, Lookups, within 24 hours. The answer is kept as case material, never labelled below the question, and what it found arrives as suggestions in Triage: a lookup never writes the graph.
 
-**Show answer**, on each lookup under Records, Lookups and on a Triage card raised from one, reads the stored answer when you press it. If you may upload exhibits on the case, **File as exhibit** keeps the answer exactly as it came back, locked like any exhibit. An answer labelled above your clearance says so and shows nothing of itself, not even whether it could be read.
+**Show answer**, on each lookup under Records, Lookups and on a Triage card raised from one, reads the stored answer when you press it. If you may upload exhibits on the case, **File as exhibit** keeps the answer exactly as it came back, locked like any exhibit, and carries every compartment it took to read the answer. An answer labelled above your clearance says so and shows nothing of itself, not even whether it could be read.
 
 **Look up all**, below an entity's selectors, plans a lookup of every one of them on your own instance (NONE): a batch never goes to a vendor or the public. The plan says how many would go, how many are already answered, which are refused and why, and when the sends start and end; nothing is queued until you say why and press **Queue them**. Whoever asked for a batch, and a Lead investigator, can cancel what is still queued; what was sent stays sent.
 
@@ -645,7 +651,7 @@ Exhibits are accepted up to the deployment's declared size, shown above the list
 
 The server computes **SHA-256 and BLAKE3** on receipt. Two hashes, because if one is ever weakened, or a column is doctored, the two must still agree. The digest is what a later verification is checked against.
 
-Every *read* is a custody row, not just every change: "who looked at this exhibit, and when" is answerable. The **Custody** button shows the ledger for one exhibit: acquired, verified, exported, held, lifted, read. Rows are to the second, and a re-acquisition reads as one row. A **verification** that fails writes a row that says **HASH MISMATCH**, keeps it permanently, and raises an integrity alarm in the audit log and in the Inbox as an urgent notice. After a backup is restored into a new object store, an exhibit's ledger carries one **RESTORED** row for each time it was re-lodged. The card says the exhibit was re-lodged from a backup after its bytes matched the recorded digests, and until when the new copy is locked in storage. The exhibit keeps the version it was first lodged as, every digest is unchanged, and Verify (logged) and Export read the copy the RESTORED row names, still checking SHA-256 and BLAKE3. The row names the person who answered for the restore.
+Every *read* is a custody row, not just every change: "who looked at this exhibit, and when" is answerable. The **Custody** button shows the ledger for one exhibit: acquired, verified, exported, held, lifted, read. Rows are to the second, and a re-acquisition reads as one row. A **verification** that fails writes a row that says **HASH MISMATCH**, keeps it permanently, and raises an integrity alarm in the audit log and in the Inbox as an urgent notice. After a backup is restored into a new object store, an exhibit's ledger carries one **RESTORED** row for each time it was re-lodged. The card says the exhibit was re-lodged from a backup after its bytes matched the recorded digests, and until when the new copy is locked in storage. The exhibit keeps the version it was first lodged as, every digest is unchanged, and Verify (logged) and Export read the copy the RESTORED row names, still checking SHA-256 and BLAKE3. The row names the person who answered for the restore. The custody trail of a purged exhibit does not show the source address the exhibit was lodged with: the purge emptied it from the exhibit, and the trail does not give it back.
 
 #### Verify
 
@@ -655,7 +661,7 @@ Every *read* is a custody row, not just every change: "who looked at this exhibi
 
 **Export for disclosure...** saves the verified bytes to your computer. An exhibit of attacker markup shows **Produce through the sample origin...** instead, which delivers it in a password-protected archive (the password is `infected`) served by the separate sample origin. Export needs `evidence.export` (a Lead investigator holds it), a sign-in from the last 15 minutes, and writes an **EXPORTED** entry to the custody record in your name. The stored bytes are checked against the digest first: a mismatch releases nothing and raises the alarm. Material at `AMBER_STRICT` or `RED`, and compartmented material, is refused, and the refusal is recorded.
 
-An exhibit that is **attacker-authored markup** (an email, a captured page, a HAR) shows a chip saying so. Its metadata, digest and custody are shown on the card; its bytes are never served from the console's origin and its export goes through the sample origin, in an archive with the password `infected`, which is public and is there to stop a double-click and a mail gateway, not to protect anything.
+An exhibit that is **attacker-authored markup** (an email, a captured page, a HAR) shows a chip saying so. Its metadata, digest and custody are shown on the card; its bytes are never served from the console's origin and its export goes through the sample origin, in an archive with the password `infected`, which is public and is there to stop a double-click and a mail gateway, not to protect anything. Whether an exhibit counts as attacker markup is decided when it is lodged, from its declared type, its first bytes and its title or file name, not from the type alone: a page uploaded as a plain binary file, or with a title ending in `.html`, `.svg`, `.xml` or `.eml`, is marked and is produced through the sample origin, and so is a text file that opens with a tag. An exhibit lodged before that rule keeps the mark it was given.
 
 #### Legal hold on an exhibit
 
@@ -667,7 +673,7 @@ Each exhibit shows **WORM until** a date: its storage lock. If that date is earl
 
 #### Finding an exhibit
 
-**Find an exhibit** searches title and description. **Only exhibits nothing rests on** lists the ones no live claim cites and no entity or relationship links to. The line under it counts them, and says how many exhibits the case has and how many back nothing on the live graph. An exhibit is **evidenced** the way the canvas marks an element as evidenced: a live claim carries it, or it is linked to the element directly, on an entity or relationship you can see. An exhibit whose claims were all retracted, or purged, says so: nothing on the live graph rests on it now, and where it was attached the inspector still lists it, marked.
+**Find an exhibit** searches title and description. **Only exhibits nothing rests on** lists the ones no live claim cites and no entity or relationship links to. The line under it counts them, and says how many exhibits the case has and how many back nothing on the live graph. An exhibit is **evidenced** the way the canvas marks an element as evidenced: a live claim (one neither retracted nor replaced by a dated copy) carries it, or it is linked to the element directly, on an entity or relationship you can see. An exhibit whose claims were all retracted or replaced, or that was purged, says so: nothing on the live graph rests on it now, and where it was attached the inspector still lists it, marked.
 
 ### 14. Triage: suggestions waiting
 
@@ -691,6 +697,7 @@ Choose the **Queue**: awaiting review, deferred, accepted, rejected. Each card s
 - **Why this was proposed** opens the full reasoning: how the selector was found, and how it was scored. A domain found in prose, for example, scores low because it is common; a Tox key published in a contact block alongside other identifiers scores higher, because the actor themselves asserted the identifiers belong to one operator. That is still **a claim**: only a CONFIRMED binding carries weight in automatic identity resolution, and confirmation needs a signature over the identifier, not a parse of it.
 - **Open source** shows the captured text around the match, where it was found, and the hash of the document.
 - A card for something the server would refuse to attach says so where **Accept** would be (for example, a claim whose label is higher than the entity it would attach to), and you reject or defer it.
+- A card about an entity you may not see names it **an entity not visible to you**; neither its label nor its id is shown.
 
 
 ![A suggestion's reasoning, opened under Why this was proposed.](../docs/images/manual/triage-why.png)
@@ -700,7 +707,7 @@ Choose the **Queue**: awaiting review, deferred, accepted, rejected. Each card s
 
 #### What Accept does
 
-Accepting promotes a suggestion to a real assertion with your name on it: the element is created **inferred**, **graded low**, and recorded as a machine's suggestion that you accepted (basis `AUTOMATED_INFERENCE`). You then raise the grade yourself, by adding your own claim, if your assessment supports it. A suggestion at a label above the case is written at its own label, never below the case's, and the **at ...** picker on the card lets you write it higher. Accepting a claim about an entity you cannot see is refused with "the entity this proposal makes a claim about is not in this case", the same words as for an entity that does not exist.
+Accepting promotes a suggestion to a real assertion with your name on it: the element is created **inferred**, **graded low**, and recorded as a machine's suggestion that you accepted (basis `AUTOMATED_INFERENCE`). You then raise the grade yourself, by adding your own claim, if your assessment supports it. A suggestion at a label above the case is written at its own label, never below the case's, and the **at ...** picker on the card lets you write it higher. Accepting a claim about an entity you cannot see is refused with "the entity this proposal makes a claim about is not in this case; nothing was written", the same words as for an entity that does not exist. Accepting a proposed tie is refused with "an entity this proposal would tie is not in this case; nothing was written" when either entity it names is one you cannot see, is in another case or does not exist: reject or defer it, or ask a colleague cleared for both entities to accept it.
 
 **Undo** retires what the accept wrote. The suggestion stays in the Accepted queue, and the retirement is recorded with it. A role that cannot retire does not see Undo.
 
@@ -763,7 +770,7 @@ Two cautions the pane repeats, which are worth taking seriously:
 - **Every figure is over the view**, and the view excludes what your clearance does not reach. A centrality computed over a redacted graph is a **lower bound**, not a measurement of the case.
 - **Betweenness on a sparse investigative graph is unstable.** Adding one edge can reorder the top five. Treat the ranking as a prompt, not a finding.
 
-The caveat flags above the results are warnings, not decoration. They say when the graph changed since the run; when the run was **approximate** (betweenness computed from sampled pivots, so small movements between two approximate runs may be sampling noise); when eigenvector centrality is **not meaningful** on this graph; when the projection includes **non-actor vertices** (INFRA, WALLET, ...) that carry ties, so brokerage means "central in the actor-artefact graph", not "central among actors", or that have no ties, so density and every percentile are computed over a larger population than the actors; and what the ties rest on: **"All 23 ties behind these numbers have been reviewed, and 11 of 23 rest on an exhibit."** A run that includes ties nobody has accepted warns.
+The caveat flags above the results are warnings, not decoration. They say when the graph changed since the run; when the run was **approximate** (betweenness computed from sampled pivots, so small movements between two approximate runs may be sampling noise); when eigenvector centrality is **not meaningful** on this graph; when the projection includes **non-actor vertices** (INFRA, WALLET, ...) that carry ties, so brokerage means "central in the actor-artefact graph", not "central among actors", or that have no ties, so density and every percentile are computed over a larger population than the actors; and what the ties rest on: **"All 23 ties behind these numbers have been reviewed, and 11 of 23 rest on an exhibit."** A run that includes ties nobody has accepted warns. With trust decay on, a note that begins "Trust decay:" also counts the connected pairs whose ties have decayed to nothing: such a pair is left out of betweenness, closeness and the broker ranking, while the components, bridges, communities and the removal set still count it as a tie.
 
 #### Options
 
@@ -804,7 +811,7 @@ A rising betweenness is a claim about a **person**, so the chart is exact about 
 
 Removing a set of entities and seeing how much of the network can no longer reach itself. The pane shows the set, the share of pairs that become unable to reach each other (for example "87% of pairs, against 45% now"), what is left (the pieces), and **Fragmentation (F)**, the same share as a fraction: 0 means everyone can reach everyone, 1 means nobody can reach anybody. **Show the network without them** and **Show them on graph** put the set on the canvas; nothing is removed from the case.
 
-It compares the set with the **top n by betweenness**: the optimal set is usually *not* the top n most central, because two brokers often span the same gap and removing both is redundant. "The 3 most central by betweenness would cut off only 71% of pairs" is the surprise made legible instead of asked for on trust. The set comes from a fast search (a greedy start, then swaps) that is usually, but not always, the best there is. A set that cuts nobody off is not a finding, and the pane says so rather than naming people for nothing.
+It compares the set with the **top n by betweenness**: the optimal set is usually *not* the top n most central, because two brokers often span the same gap and removing both is redundant. "The 3 most central by betweenness would cut off only 71% of pairs" is the surprise made legible instead of asked for on trust. The set comes from a fast search (a greedy start, then swaps) that is usually, but not always, the best there is. A set that cuts nobody off is not a finding, and the pane says so rather than naming people for nothing. With trust decay on, a pair whose ties have decayed to nothing is left out of that betweenness ranking, as it is out of the table's betweenness, while the removal set still counts it as a tie; the card says how many pairs.
 
 **Cut vertices** are entities whose removal alone disconnects the network; **bridges** are ties whose removal does. Both are single points of failure in the structure, and the cheap, exact companion to the key-player search.
 
@@ -857,13 +864,13 @@ Choose the **platform**, type the **identifier as observed**, and the pane shows
 - **Telegram** is indexed on the numeric id, never the `@username`, because usernames are recycled and a match on one can attribute a new person's traffic to an old case. A Bot-API channel id is decoded to its MTProto form and indexed in the channel namespace, so it cannot collide with a user id of the same number; a bare positive number is refused for that reason, and you record it as `u:<id>` or `c:<id>` when you know which it is.
 - **Jabber** loses its resourcepart, which is per-connection.
 
-**Verification** chooses where the binding starts: **CLAIMED** (advertised in a profile or signature, the default) and upward as evidence accumulates. **Published together with** records the thread or profile URL a block came from, a co-declaration reference, which is stronger evidence than co-occurrence in a thread because the actor themselves asserted the identifiers belong to one operator. It is still a claim.
+**Verification** chooses where the binding starts: **CLAIMED** (advertised in a profile or signature, the default) or **OBSERVED** (seen in actual use); only a valid signature check, below, confirms one. **Published together with** records the thread or profile URL a block came from, a co-declaration reference, which is stronger evidence than co-occurrence in a thread because the actor themselves asserted the identifiers belong to one operator. It is still a claim.
 
 **Correlate** takes an identifier and says which bindings in this case hold it, so you can see whether two entities advertise the same one.
 
 #### Parse a contact block
 
-Paste a block of text where somebody publishes their identifiers (a vendor's signature, a forum profile). Each line is classified and bound. **Third-party identifiers** (the forum's escrow, a guarantor, a partner shop) are **flagged, not attributed to the publisher**: if the block says "Escrow: nm_escrow@jabber.example (forum escrow only)", that is the forum's escrow, and the pane does not tell you it is the vendor's. Lines whose type is ambiguous are kept **unresolved with a reason** rather than guessed. Later lines in a block are more often somebody else's, which the score reflects (it falls with position).
+Paste a block of text where somebody publishes their identifiers (a vendor's signature, a forum profile). Each line is classified and bound. **Third-party identifiers** (the forum's escrow, a guarantor, a partner shop) are **flagged, not attributed to the publisher**: if the block says "Escrow: nm_escrow@jabber.example (forum escrow only)", that is the forum's escrow, and the pane does not tell you it is the vendor's. Lines whose type is ambiguous are kept **unresolved with a reason** rather than guessed. Later lines in a block are more often somebody else's, which the score reflects (it falls with position). If the text was already parsed in this case, the pane shows the earlier reading under **Already parsed: showing the existing reading**. If that reading is filed at labels you do not hold, the pane shows only **Already parsed** and the sentence "This block has already been parsed in this case, so it was not parsed again." A block can cite an exhibit or a publisher entity above its own labels; if you may not see one, it reads as not cited.
 
 Four defences keep a forum's escrow from being read as the vendor's, in order of strength: the **label** on the line (`Escrow:`, `Guarantor:`, `Admin:`), an **in-line marker** such as "NOT mine", the **stoplist**, and **shared-service detection**.
 
@@ -879,7 +886,7 @@ The **stoplist** is a list of known escrow, guarantor and admin identifiers. It 
 
 - **Upload the signed file** if you have it. A pasted copy can lose Windows line endings, and a signature over the file's exact bytes then fails.
 - A key you record under **Vendor keys** says where it was obtained and who compared its fingerprint with the one the actor published. **Nothing is confirmed when a key is added.**
-- **Key lookups** ask a Web Key Directory for a vendor's key. Nothing is sent until a second person approves, because the request leaves the deployment; the pane says when lookups are switched off on this deployment (`NOCTORNAL_WKD_CEILING` is not declared).
+- **Key lookups** ask a Web Key Directory for a vendor's key. Nothing is sent until a second person approves, because the request leaves the deployment; the pane says when lookups are switched off on this deployment (`NOCTORNAL_WKD_CEILING` is not declared). The approval checks the case, and the contact block and channel binding the lookup cites, again, and refuses a lookup whose citation has been raised or given a compartment since it was asked ("The labels of what the lookup cites changed since it was asked for, so it is not sent."); the request then stays waiting until it is declined or lapses.
 - **Bindings still at CLAIMED** lists the ones nobody has checked.
 
 #### Co-participation
@@ -930,11 +937,11 @@ Collection schedules and health. **Nothing polls on its own**: a collector that 
 
 **Add a source** is for a Collection manager. A **forum** source is a public XenForo or MyBB thread or board, read without signing in: the forum sees `NocTORnal-collector` in its access logs, from the egress profile and never from this server. Each poll reads the new pages and rechecks the last few for edits and deletions. A MyBB board prints times in its own zone with no offset, so you give the zone and the two formats its settings show, or no posting time is stored. A forum or Telegram source is **not read** until its classification is within the declared ceiling and a Security officer has confirmed the authority that covers it.
 
-**Telegram chats.** Each chat is read by one persona, through that persona's egress profile, under an authority a second person confirmed. Nothing is sent, nothing is marked read, and no watch term leaves this server: matching happens here, after the messages arrive. **Look up a chat** asks Telegram, as the persona, which chat a name belongs to, and Telegram records that this account looked it up; an invite link is **never followed**: join a private chat from the persona's own device, then add it by its id. **Mark as a member chat** makes the chat read as a member, which needs a member authority, is checked at once, and never goes back to public. **Joining is an overt act**: the chat's administrators can see this persona in the member list and in the recent actions log, and some groups announce every new member; leaving is visible too.
+**Telegram chats.** Each chat is read by one persona, through that persona's egress profile, under an authority a second person confirmed. Nothing is sent, nothing is marked read, and no watch term leaves this server: matching happens here, after the messages arrive. **Look it up and add**, in **Add a chat**, asks Telegram, as the persona, which chat a name belongs to, and Telegram records that this account looked it up; an invite link is **never followed**: join a private chat from the persona's own device, then add it by its id. **Mark as a member chat** makes the chat read as a member, which needs a member authority, is checked at once, and never goes back to public. **Joining is an overt act**: the chat's administrators can see this persona in the member list and in the recent actions log, and some groups announce every new member; leaving is visible too.
 
 **Personas** are the collection accounts. A **persona** has a platform, a handle, an egress profile, active hours, and a status that ends in **BURNED**, which is permanent: re-using one a forum admin has already flagged is how you burn the next one too. A credential is enrolled on the server and **never through this console**: do not enter the phone number or password here. **Locked by its platform** means the platform refused its credential, and it comes back only with a new one enrolled after the lock. **Telegram device** is what Telegram is told this persona's device is: choose something ordinary and keep it for the life of the persona.
 
-**Persona acts** are what the console asked the collector to do for a persona (look a chat up, join, check, rebind, sign out, poll now). Each is queued, runs in the **collector** service, and reads pending, running, done, refused or failed. An act the collector has not started in time (fifteen minutes, unless the operator set another limit) is not run.
+**Persona acts** are what the console asked the collector to do for a persona (look a chat up, join, check, mark as a member chat, rebind, sign out, poll now). Each is queued, runs in the **collector** service, and reads PENDING, RUNNING, DONE, REFUSED, FAILED, EXPIRED or CANCELLED, and a pending act has **Cancel**. An act the collector has not started in time (fifteen minutes, unless the operator set another limit) reads EXPIRED and is never run late.
 
 **Collection authorities** are the written authority a collection runs under. The authority itself is a **document outside this system**. **Record an authority** takes its reference exactly as an auditor would look it up, the persona it covers and the sources under it; a Collection manager records it and a **Security officer confirms it, and each source under it**, before any of them is read. Reading as a member needs its own reference, because it is a different act from reading what is public. An authority for a persona with no sources allows the persona's own acts and no read. A change that makes a source reach further (a new exit, a rebinding) stops the authority recorded for the old binding at once: the new binding needs its own confirmed authority before the next poll. Adapter collection **carries no compartments**: work that needs a compartment, or a label above the declared ceiling, is collected by hand into its case.
 
@@ -1000,6 +1007,7 @@ They are not decoration.
 
 - **Score an assertion**: select an entity or tie on the graph, load its live assertions here, and score one against a hypothesis. Every further cell in that row is then one click in the matrix.
 - **A cell keeps its note.** The chooser opens with it and says who wrote it and when, a save keeps it unless you change it, and a replaced note stays listed as an earlier note and in the audit trail. The report prints each note beside the stance it explains.
+- **A stance on a claim you later dated is kept and shown as replaced.** Dating a claim replaces it with a dated copy. The row is dimmed, its name is struck through and it carries a **replaced** chip, the word *replaced* stands where the diagnosticity would be, and its cells are plain text you cannot click. It counts in no score, fills no blank and is never the next test, and a warning above the matrix says how many rows are in that state. A new stance on the old claim is refused: open **Score an assertion**, choose the claim that replaced it and score that one, and the evidence counts again. A claim you retract leaves the matrix altogether. The report applies the same rule, prints the same warning, and marks a note on such a stance as claim replaced, not scored.
 - **Clear** puts a cell back to not assessed, which *neutral* is not.
 - **Status...** accepts, disputes, rejects or supersedes a hypothesis, or puts it back in play. Rejecting needs the reason, and so does taking a rejection back. **Rejected** and **superseded** hypotheses leave the ranking; tick **Include ruled out** to list them after it. A rejected one stays in the report with its status and the reason given for it. A superseded one leaves the report. A status can be changed again later; the note is kept with it and printed in the report.
 - **Reword...** corrects a hypothesis while nothing has been scored against it. After that, write the new wording as a new hypothesis and mark the old one superseded.
@@ -1028,6 +1036,7 @@ The preview shows what the document is built from ("the case as it stands now, a
 - If the case changed after the preview was prepared, the document just cleared is not the one shown above: prepare again, read it, and check again before saving anything.
 - Saving or sending a report needs the **Lead investigator** role on the case.
 - Checking egress needs a sign-in from the last 15 minutes; press **Check egress** again to be asked for one.
+- Characters that change how a line reads without being visible (right-to-left overrides and isolates, zero-width marks, control characters) appear in the saved file as their code points, for example `U+202E` between single angle quotes, exactly as the preview shows them.
 
 ### 22. Records: retention, destruction, break-glass, audit and lookups
 
@@ -1043,7 +1052,7 @@ The governance pane. The rules behind it are in Chapter 9; this chapter is the p
 
 ![The case's clocks and what is due for destruction.](../docs/images/manual/retention-due.png)
 
-**Run a purge for this case** and **Confirm destruction**: a **dry run** reports what would be destroyed and destroys nothing, and it is the default every time the pane opens. A real run needs a dry run first, under the same authority, and asks you to type the case code.
+**Run a purge for this case** and **Confirm destruction**: a **dry run** reports what would be destroyed and destroys nothing, and it is the default every time the pane opens. A real run needs a dry run first, under the same authority, and asks you to type the case code. The dry run's preview is a keyed value only the server can make, over everything due on the case, including what you may not see, and the real run presents it again. If the server holds no key for it (`NOCTORNAL_AUDIT_PEPPER` is not set), the dry run says so and issues none, so a real run cannot follow until an administrator sets it. Rotating the pepper voids a dry run that was not yet confirmed: run it again.
 
 #### Destroyed
 
@@ -1055,8 +1064,8 @@ The tombstone ledger: what was destroyed, by whom and under whose authority, wit
 
 ![The break-glass form and the grants awaiting review.](../docs/images/manual/break-glass.png)
 
-- **Scope**: this case only, or every case you are assigned to. **Raise my clearance to**: choose the level the emergency needs; levels you already hold are listed but cannot be picked, because a grant to them would raise nothing. **For**: the number of hours. **Justification** is the text somebody defends later: at least 40 characters.
-- **Why** is the text somebody defends later: at least **40 characters**, and the counter says how many you have. The review is the control that makes emergency access acceptable at all. A grant nobody looked at is a role.
+- **Scope**: this case only, or every case you are assigned to. **Raise my clearance to**: choose the level the emergency needs; levels you already hold are listed but cannot be picked, because a grant to them would raise nothing. **For**: the number of hours.
+- **Justification** is the text somebody defends later: at least **40 characters**, and the counter says how many you have. The review is the control that makes emergency access acceptable at all. A grant nobody looked at is a role.
 - Invoking **alerts every Security officer at once, even in quiet hours**, and one of them must review it. It **refuses outright if nobody other than you holds `SECURITY_OFFICER`**, because the mandatory review is the control and a grant nobody will review is just access with a better story.
 - What it opens, on a **case** grant: the graph, the entity and exhibit lists, the inspector, search, comms, analytics, tags and captures include material up to the level, on that case only. What you create, and any report you build, stay within your own clearance. On a **deployment** grant the same holds on every case you are assigned to, what you may create there and the reports you build are raised too, and so are the Lab, collection and ingest views.
 - **What is counted:** each exhibit, capture or message you open above your own clearance, and each change you make to an entity above it. Nothing else a grant widens is counted (the graph, the inspector, lists and search), except on a case classified above your own clearance, where every request on that case is. The count is therefore **not** a statement that nothing above your clearance was seen.
@@ -1155,7 +1164,7 @@ A screenshot on its own proves somebody had a screenshot. **The evidence is the 
 
 - The **certificate public-key hash** is the durable identifier for pivoting: phishing infrastructure rotates domains constantly and keys rarely, so it outlives the domain.
 - The **favicon's MMH3 hash** is the usual way phishing kits are clustered, but **weak on its own**: a stock framework icon is shared by thousands of unrelated sites.
-- **Record a capture** files what somebody else captured; an active fetch is the collection tooling's. Ticking that an analyst **entered input into the page**, canary credentials included, asks for the **written authority** it was done under (legal item L5), and the schema refuses to record the submission without one. A capture that names an egress profile the platform does not know is refused with a sentence.
+- **Record a capture** files what somebody else captured; an active fetch is the collection tooling's. Ticking that an analyst **entered input into the page**, canary credentials included, asks for the **written authority** it was done under (legal item L5), and the schema refuses to record the submission without one. A capture that names an egress profile the platform does not know is refused with a sentence. A capture whose screenshot, DOM or HAR exhibit is above your labels is shown as if that exhibit were not held: with no screenshot the pane reads **No screenshot on this capture.**, and there is no note about the DOM.
 
 #### Email / BEC
 
@@ -1182,7 +1191,7 @@ The caller ID is the attack, so a row keeps two blocks apart. **What the victim 
 | **C** | The call came in through a gateway, and the carrier vouches for nothing about the caller. |
 | **none** | No attestation arrived: the network vouched for nothing about the caller. |
 
-An attestation whose signature nobody checked is only a claim. **Record a call** keeps the two blocks apart in the form too, and a recording attached to a call asks for the **lawful basis** it was obtained under (legal item L4), or you leave the recording out. A call record can link up to two exhibits, the call detail record and the recording, and each must be an exhibit of this case that you can read. An exhibit from another case, one above your clearance and one that does not exist are refused with the same "no such exhibit" answer, and the refusal is audited.
+An attestation whose signature nobody checked is only a claim. **Record a call** keeps the two blocks apart in the form too, and a recording attached to a call asks for the **lawful basis** it was obtained under (legal item L4), or you leave the recording out. A call record can link up to two exhibits, the call detail record and the recording, and each must be an exhibit of this case that you can read. An exhibit from another case, one above your clearance and one that does not exist are refused with the same "no such exhibit" answer, and the refusal is audited. A call whose call detail record or recording exhibit is above your labels shows no **recording held** chip.
 
 #### Across the three
 
@@ -1237,7 +1246,7 @@ A tie between two ends that already have one is a **second tie**: each is a sepa
 
 #### Share
 
-**Share...** opens **Who is on** the case: **who is on this case** and **whether their access works**. An assignment row is only half of access, because the account, its clearance and its compartments have to reach the case too. **Add a colleague** takes a **Work email**, a **Case role** (the list offers `ANALYST`, `REVIEWER`, `CONTRIBUTOR`, `READ_ONLY` and `LIAISON`, that is Analyst, Reviewer, Contributor, Read only and External liaison; the Lead investigator is not offered here) and an optional **Access ends** date and time, in UTC; **Add to case** saves it. The grant is checked: a colleague whose clearance or compartments do not reach the case is refused, not written and then silently filtered out of every read. If you can see who is on a case but cannot change it, your role does not include adding or removing people (`case.grant`; the Lead investigator holds it, with a step-up).
+**Share...** opens **Who is on** the case: **who is on this case** and **whether their access works**. An assignment row is only half of access, because the account, its clearance and its compartments have to reach the case too. **Add a colleague** takes a **Work email**, a **Case role** (the list offers `ANALYST`, `REVIEWER`, `CONTRIBUTOR`, `READ_ONLY` and `LIAISON`, that is Analyst, Reviewer, Contributor, Read only and External liaison; the Lead investigator is not offered here) and an optional **Access ends** date and time, in UTC; **Add to case** saves it. The grant is checked: a colleague whose clearance or compartments do not reach the case is refused, not written and then silently filtered out of every read. The refusal says only that the colleague's clearance or compartments do not reach the case, or that the role cannot be given on this case. It names no level, no compartment and no other case, whether the colleague was named by address or by id, and every refused grant is recorded. If you can see who is on a case but cannot change it, your role does not include adding or removing people (`case.grant`; the Lead investigator holds it, with a step-up).
 
 ![Who is on a case, and whether their access works.](../docs/images/manual/share.png)
 
@@ -1281,6 +1290,7 @@ Click your name at the top right to open **Account**. It shows your **Name**, **
 
 - **Recovery codes**: **Generate recovery codes** replaces any earlier set (it needs a sign-in from the last 15 minutes, and asks first). A chip beside your name says **no recovery codes** until you have a set.
 - **Password**: **Change your password** takes the current one, the new one twice, and your authenticator code or a recovery code. At least 12 characters; length is the only rule. Your other sessions are signed out; this one stays.
+- **Using a recovery code**: a recovery code is typed into the same code field as an authenticator code, at sign-in and here. Checking one takes about half a second longer than checking an authenticator code, and takes exactly as long whether the password is right or wrong, so that the wait tells nobody anything. Nothing about the card changes, and the longer wait is not a sign that anything is wrong.
 
 **Log out** ends the session on the server. If the server still holds the session after you press it (the browser kept only part of your sign-in), nothing was signed out: reload the page, and the sign-in form returns if the server has ended it since.
 
@@ -1325,7 +1335,7 @@ An account's card shows its roles and clearance, the compartments it is read int
 - **Change read-ins** opens the set, and **Save read-ins** writes the **whole set** of compartments the person is read into, not a change to it. Who is read into each compartment is shown only after a sign-in from the last 15 minutes.
 - **Reset password** issues a one-time password and signs the person out everywhere. It opens no session: at their next sign-in they choose their own, and their authenticator is unchanged. **Re-enrol TOTP** issues a new secret: the old authenticator stops at once, every session is signed out, and the new secret is shown once.
 - **Unlock** after repeated failed sign-ins; **Deactivate**, which signs the person out everywhere and keeps the account and its history; **Reactivate**.
-- **Add to a case** puts the account on a case you are on. You are on no case yourself? There is none to offer here: a case owner can add them from the case's Share panel, by work email.
+- **Add to a case** puts the account on a case you are on. You are on no case yourself? There is none to offer here: a case owner can add them from the case's Share panel, by work email. The grant is checked as Share checks it: a refusal says only that the account's clearance or compartments do not reach the case, or that the role cannot be given on this case, and it names no level, no compartment and no other case.
 
 The pane will not leave the deployment unable to repair itself: **the only active System administrator or Security officer cannot lose the role or be deactivated**, and you cannot deactivate yourself. **Make YOURSELF a Security Officer?** warns that nobody reviews their own break-glass, so while you are the only officer, break-glass is refused to you; the readiness register is satisfied by one officer, but the control needs a second person, so grant it to someone else as well. Revoking an administrator or officer role, resetting a password and any change to your own account ask first, by name.
 
@@ -1345,11 +1355,12 @@ Which acts take two different people, who can be each of them, and what is waiti
 
 ![Operations, the pairs of permissions no one role holds, the changes waiting and the history.](../docs/images/manual/two-person.png)
 
-- **Operations** lists each act with its **mode** (every time, or where the case asks for it), whether it is deployment-wide or per case, the roles that ask and the roles that sign second, and how long a signature lasts. An act the build does not enforce yet says so, and why: marking a case PURGED takes one signature today and destroying a case is not built; nothing changes a role definition yet, because roles change only with a release; and an act is **deliberately not reachable over HTTP** when it would reveal a persona credential, which never leaves the vault, and revealing a Telegram session would hand over the whole account.
+- **Operations** lists each act with its **mode** (every time, or where the case asks for it), whether it is deployment-wide or per case, the roles that ask and the roles that sign second, and how long a signature lasts. An act the build does not enforce yet says so, and why: marking a case PURGED takes one signature today and destroying a case is not built; nothing changes a role definition yet, because roles change only with a release; and an act is **deliberately not reachable over HTTP** when it would reveal a persona credential, which never leaves the vault, and revealing a Telegram session would hand over the whole account. Lifting a legal hold is listed three times, for an exhibit's, a case's and a collected document's (a document belongs to no case, so its lift is deployment-wide): a holder of `retention.manage` asks, a different holder cleared for the same material signs second, and a signature lasts 72 hours.
 - **Two people by role** lists the **pairs of permissions no one role may hold together**, so whoever holds one half needs someone else for the other: `break_glass.review` and `break_glass.invoke`; `collection.authority.confirm` and `collection.authority.record`; `collection.authority.confirm` and `collection.run`; `dual_control.countersign` and `dual_control.manage`; `sample.preserved.authorise` and `sample.preserved.retrieve`; `sample.yara.manage` and `sample.yara.activate`; `victim_pii.authorise` and `victim_pii.reveal`. A pair is **Fixed** (installed with the software or by the database owner, so the screen cannot remove it) or **Added** (by a two-person change). A release that later grants both halves to one role stops at upgrade until the pair is removed here.
+- **Other acts that take two people** names the controls that are held where the act happens: a collection authority (a Collection manager records it, a Security officer confirms it and each source under it), a lookup to a vendor or public provider (the analyst who asks, and the Lead investigator who signs it off), lowering a lookup provider's exposure (an administrator asks, a different administrator holding `integration.manage` approves within 72 hours) and sending a sample to a sandbox whose exposure is not NONE or whose network route or analysis machine is live (the requester, and a Lead investigator on the sample's case who is cleared for it).
 - **Changes waiting** and **History**: changing any of this takes **two people** as well. An **administrator proposes**, a **Security officer who is not an administrator countersigns**, and the administrator applies it. A proposal needs a **justification**, which the countersigner reads with no access to any case: **keep case details out of it**. Nobody sees a button the server would refuse them; a countersigner whom the **seven-day rule** blocks (someone else took over their account, or they changed the proposer's account, in the seven days before they signed) sees why, and can still refuse. If the policy changed after a change was proposed, it can no longer be applied: propose it again if it is still wanted.
 
-The section asks for a sign-in from the last 15 minutes. An officer who administers nothing reads the same section under Oversight, as **Two-person changes**, and its badge counts the changes waiting for your countersignature. **Oversight** also holds the **break-glass review queue**, the **preserved-sample authorisations**, the **collection authorities** that wait for a second person, the two-person changes waiting, and the **prohibited-content screening record**. They cover the whole deployment, so no case is needed.
+The section asks for a sign-in from the last 15 minutes. An officer who administers nothing reads the same section under Oversight, as **Two-person changes**, and its badge counts the changes waiting for your countersignature. **Oversight** also holds the **break-glass review queue**, the **preserved-sample authorisations**, the **collection authorities** that wait for a second person, the two-person changes waiting, the **prohibited-content screening record** and the **YARA rule sets to activate**. They cover the whole deployment, so no case is needed.
 
 A Security officer, who holds `comms.minimise.oversee`, also sees **Minimisation gaps**: the cases whose conversations nobody assigned can minimise, with the case code, its status, when it closed and how many days ago, how many conversations, the highest TLP they need, how many Lead investigators are assigned and how many cleared ones there are elsewhere. It never shows a conversation, a platform, a compartment or a name, and it changes nothing. Raise each case with its Lead investigator. A case leaves the list on the next **Refresh** once a cleared Lead investigator is assigned to it. When such a case is closed the officer also gets a notice that names no case, with an **Open Oversight** button to this list.
 
@@ -1372,7 +1383,7 @@ For an account holding `embedding.manage`, with a sign-in from the last 15 minut
 - **Similar wording** runs **on this host and sends nothing anywhere**. It compares character patterns, so it finds reposts, light edits and the same passage in another alphabet or spelling.
 - **Similar meaning** asks an **operator's model server**, and only what its ceiling and its declarations allow ever leaves; **each batch is audited before it is sent**. The card names the endpoint, where it is, its ceiling and the authority declared for it. With no endpoint configured, no case text is sent anywhere to be embedded.
 
-A card shows each **index** (its slot, whether it is active, being built or retired, the model, and since when), a field, **Reason, for the audit trail**, of at least five characters, and the acts: **Rebuild...**, **Activate the new index...**, **Recheck...**, **Retire...** and **Run a pass now**. Each asks a plain question first. A **rebuild of similar wording** embeds every item again on this host, in a new index, and queries keep using the current one until the new one is complete; nothing leaves this host. A **rebuild of similar meaning** says that it will send the text of every eligible item at or below the ceiling to the model endpoint again. **Recheck** judges failed or withheld items again on the next pass and sends the model endpoint the public canary to see whether its model changed. The new index becomes active by itself once every item is in it.
+A card shows each **index** (its slot, whether it is active, being built or retired, the model, and since when), a field, **Reason, for the audit trail**, of at least five characters, and the acts: **Rebuild...**, **Activate the new index...** (while a new one is being built), **Recheck the active index...**, **Retire the active index...** (these two are offered for an index being built as well) and **Run a pass now**. Each but **Run a pass now** asks a plain question first. A **rebuild of similar wording** embeds every item again on this host, in a new index, and queries keep using the current one until the new one is complete; nothing leaves this host. A **rebuild of similar meaning** says that it will send the text of every eligible item at or below the ceiling to the model endpoint again. **Recheck** has failed items tried again on the next pass; on similar meaning it also judges withheld items again and sends the model endpoint the public canary to see whether its model changed. The new index becomes active by itself once every item is in it.
 
 **Not in the index** lists the documents you can read that an index does not hold, with why: failed, withheld, excluded, or nothing to compare. A document still waiting for the embedding pass is not listed, and the list needs access to collected documents as well as `embedding.manage`. Similar text is **not the same author**: one advert is reposted by many personas, and one author writes in many ways.
 
@@ -1384,9 +1395,9 @@ Administration, Integrations is for an account holding `integration.manage`; one
 
 ![Integrations: channels, the outbox and the delivery ledger.](../docs/images/manual/integrations.png)
 
-A channel whose route or setting is missing is **held**: its deliveries wait, spend no attempt, and go once it is fixed. Only an attempted send can fail. Mail and webhooks each leave by an egress route (`smtp`, `webhook`), created under Administration, Egress; without one they are held. **Retry the failed deliveries of one channel** puts every failed delivery since a time back in the outbox, up to 30 days back and 1,000 rows; the drain applies the recipient's access, the egress gate and Jira's routing again, so a retry never sends more than the first attempt could have.
+A channel whose route or setting is missing is **held**: its deliveries wait, spend no attempt, and go once it is fixed. Only an attempted send can fail. Mail and webhooks each leave by an egress route (`smtp`, `webhook`), created under Administration, Egress; without one they are held. **Retry every failed delivery since**, with a channel and a date (UTC), puts every failed delivery of that channel since then back in the outbox after a sign-in from the last 15 minutes, up to 30 days back and 1,000 rows; the drain applies the recipient's access, the egress gate and Jira's routing again, so a retry never sends more than the first attempt could have.
 
-**Jira** takes work items only, and only from analysts who turned it on for themselves. Declare the one destination (base URL, project, issue type, a credential that is sealed and never shown again), run **Test**, then **Activate**. The ceiling is **GREEN** unless you raise it, **never above AMBER**; the **What an issue carries** setting decides whether the case code travels. Give the Jira service account Browse, Create, Add Comments and Edit on that one project, and put the `labels` field on the issue type's create and edit screens. A case owner can keep a case out of Jira from the case's record. **Issues outlive NocTORnal's retention**: a purge warns with their count, and you close them in Jira. To find the issues raised about one case (a purge, a disclosure), give its id: the list never names a case, and an unconfirmed create shows its ref label, which finds the issue in Jira by JQL. Removing a destination destroys its credential, closes its issues here (not in Jira) and withdraws queued deliveries; a new destination starts as a draft.
+**Jira** takes work items only, and only from analysts who turned it on for themselves. Declare the one destination (base URL, project, issue type, a credential that is sealed and never shown again), run **Test**, then **Activate**. The ceiling is **GREEN** unless you raise it, **never above AMBER**; the **What an issue carries** setting decides whether the case code travels. Give the Jira service account Browse, Create, Add Comments and Edit on that one project, and put the `labels` field on the issue type's create and edit screens. A case owner can keep a case out of Jira from the case's record. **Issues outlive NocTORnal's retention**: a purge warns with their count, and you close them in Jira. To find the issues raised about one case (a purge, a disclosure), give its id: the list never names a case, and an unconfirmed create shows its ref label, which finds the issue in Jira by JQL. **Retire** on the destination destroys its credential, closes its issues here (not in Jira) and withdraws queued deliveries; a new destination starts as a draft.
 
 The ledger shows **kinds, channels, destinations and why each did or did not go**, never subjects or summaries (it spans every case and every recipient), and a webhook address with its path withheld, because a path commonly carries the hook's secret.
 
@@ -1403,11 +1414,11 @@ A provider that refuses its key is **locked** until somebody replaces the key or
 
 This manual does not repeat the installer. [START-HERE.md](START-HERE.md) installs on one computer; [INSTALL.md](INSTALL.md) covers configuration, a production deployment, troubleshooting and verification. Five things belong to operators of any size:
 
-- **Keep `.env.local` (or the production `secrets.env`).** It holds the keys. Without it stored data cannot be opened. An upgrade is: unzip the new release in a new folder, copy the file in, and run the installer again.
-- **Back up the database and the object stores together.** Evidence is locked in the object store under COMPLIANCE mode and the database says what each object is; one without the other is not a case. A restore into a new store is finished by `scripts/restore_object_versions.py` (Appendix J, each month).
-- **Run the production role split**: the application connects as `noctornal_app`, never as the schema owner, so that the append-only ledgers are enforced by the server and not by convention. The Readiness checks `app_db_role_not_owner` and `row_level_security_enforced` tell you whether you do.
-- **Know what an upgrade needs before `up`.** The release notes say which step. The production secrets step (`sudo bash release/install.sh --production-secrets`) writes the secrets a new image needs, among them the key of the audit log's hashes, and a production service refuses to start without one it requires, naming the variable. A deployment from before the internal certificates needs `sudo python3 scripts/internal_tls.py migrate`, then `check`, before the new stack starts: keep the CA's key, `tls/ca/ca.key`, off the host, and know that nothing renews a certificate by itself and `check` fails when a certificate is within 30 days of its end (`infra/production/README.md`). An image built before YARA joined the default build has no yara-x and keeps its tag, so run `up -d --build` once.
-- **Declare what the legal register needs** before anyone uploads a sample, ingests a leak or runs a persona: the prohibited-content policy and designated person, the retention periods, and a Security officer who is not the administrator.
+- **Keep `.env.local` (or the production `secrets.env`).** It holds the keys. Without it stored data cannot be opened. An upgrade is: unzip the new release in a new folder, copy the file in, and run the installer again. In production the other env files beside `secrets.env` (`caddy.env`, `postgres-init.env`, `migrate.env`, `redis.env` and `minio.env`) each hold what one service reads and no other; the installer step writes `redis.env` and `minio.env` from `secrets.env`, so run it again after any change to a Redis or MinIO value, or the service keeps the old one.
+- **Back up the database and the object stores together.** Evidence is locked in the object store under COMPLIANCE mode and the database says what each object is; one without the other is not a case. A restore into a new store is finished by `scripts/restore_object_versions.py`, a dry run first, and never by setting `storage_version_id` to NULL (Appendix J, each month). The bundled MinIO is the default store. Any other store (`NOCTORNAL_OBJECT_STORE=s3`) qualifies only by passing the conformance run and the readiness register (`docs/22-object-store-requirements.md`). One that somebody else operates also holds no AMBER_STRICT or RED exhibit or sample until counsel has declared it, and the check `object_store_custody_declared` fails while its operator, jurisdiction and legal-process contact are undeclared.
+- **Run the production role split**: the application connects as `noctornal_app`, never as the schema owner, so that the append-only ledgers are enforced by the server and not by convention. The Readiness checks `app_db_role_not_owner` and `row_level_security_enforced` tell you whether you do. That role updates no column of a case, and it reads the collector's heartbeat, the embedding queue, the YARA compile queue and the ingest batches without writing them: the system role writes those after the route's own checks, and the audit trail still names the person who made the change.
+- **Know what an upgrade needs before `up`.** The release notes say which step. The production secrets step (`sudo bash release/install.sh --production-secrets`) writes the secrets a new image needs, among them the key of the audit log's hashes, and a production service refuses to start without one it requires, naming the variable. A deployment from before the internal certificates needs `sudo python3 scripts/internal_tls.py migrate`, then `check`, before the new stack starts: keep the CA's key, `tls/ca/ca.key`, off the host, and know that nothing renews a certificate by itself and `check` fails when a certificate is within 30 days of its end (`infra/production/README.md`). `internal_tls.py add-ca` appends a second CA (for an agency database) only when its name constraints leave out `minio`, `postgres` and `redis`, and `check` fails a bundle that already holds one that does not. An upgrade across the internal certificates takes `down` and then `up -d --build`, not a plain `up -d --build`, because the upgrade changes the stack's networks; under ACME add `-f infra/production/compose.acme.yml` to both commands. The production image carries yara-x unless `NOCTORNAL_EXTRAS` is set to an empty value, and an image built before YARA joined the default build has no yara-x and keeps its tag, so run `up -d --build` once. `NOCTORNAL_AUDIT_PEPPER` also keys the preview a purge's dry run returns, so changing it voids a dry run that has not been confirmed: run the dry run again. Uploaded mail records no SPF, DKIM or DMARC verdict until your own mail server adds the stamp, with `NOCTORNAL_MAIL_STAMP_KEY` and `NOCTORNAL_TRUSTED_MTA_HOSTS` set on the API (the key is optional and no installer step writes it; `infra/production/mail-stamp/README.md`). A database DSN may carry a `statement_timeout` only as a stricter bound, from 5 to 3600 seconds, and one that names a connection service and no host must ask for `sslmode=verify-full` itself.
+- **Declare what the legal register needs** before anyone uploads a sample, ingests a leak or runs a persona: the prohibited-content policy and designated person, the retention periods, the separate sample origin (`NOCTORNAL_SAMPLE_ORIGIN`), and a Security officer who is not the administrator.
 
 **On a cluster.** No manifest ships. The application is laid out for one (decision 239), and `infra/production/README.md`, 'On a cluster', maps what compose guaranteed to what an operator must set. Two probe paths exist: `GET /healthz` (liveness) and `GET /readyz` (readiness: the database answers and the schema is at head, nothing else); `scripts/wait_for_schema.py --wait 120` holds a pod that serves no HTTP until the migration has run. The settings are all unset by default and none is needed by a compose deployment: `NOCTORNAL_ANALYSIS_ADDR` (callers: HOST:PORT of a worker reached over TCP), `NOCTORNAL_ANALYSIS_LISTEN` (the worker: its one ADDRESS:PORT, never a wildcard), `NOCTORNAL_ANALYSIS_TLS_CERT`, `NOCTORNAL_ANALYSIS_TLS_KEY` and `NOCTORNAL_ANALYSIS_TLS_CA` (absolute paths on both sides; the CA must be one kept for this channel alone), `NOCTORNAL_ANALYSIS_PIDS_LIMIT` (the worker, in a pod only), `NOCTORNAL_EGRESS_BOUNDARY` (`network_policy`, in a pod only) and `NOCTORNAL_EGRESS_CANARY` (HOST:PORT). Under Kubernetes `NOCTORNAL_EGRESS_INTERNAL_CIDRS` must list the cluster's pod, service and node networks; a pod with it blank, or without the service address in it, refuses to start. The worker's pod sets `enableServiceLinks: false` and needs an ingress NetworkPolicy that admits only the API's pods; nothing in the register proves that policy.
 
@@ -1426,9 +1437,9 @@ Terms are listed alphabetically. A term in **bold** inside a definition has its 
 
 | Term | Meaning |
 |---|---|
+| **ACH** | Analysis of Competing Hypotheses: rank hypotheses by the evidence **against** them. Chapter 20. |
 | **Acknowledge** | The act that stops a notification nagging and, for an urgent one, stops it escalating. Reading it does not. |
 | **Admiralty grading** | Source reliability (A to F) and information credibility (1 to 6), graded separately. Chapter 5. |
-| **ACH** | Analysis of Competing Hypotheses: rank hypotheses by the evidence **against** them. Chapter 20. |
 | **As-of** | A moment in world time the whole console can be moved to. Chapter 8. |
 | **Assertion** | A claim, with its basis, grading, confidence, source and time. Every element of the graph rests on at least one. Also called a **claim**. |
 | **Assessed person** | The console's name for a `PERSON` entity: a human you concluded stands behind one or more personas. |
@@ -1449,13 +1460,13 @@ Terms are listed alphabetically. A term in **bold** inside a definition has its 
 | **Confidence** | Your confidence in a claim, in ICD 203 words: low, moderate, high. |
 | **Constraint** | Burt's constraint: how far an entity's ties are to people who are tied to each other. **Low is good**: it means the entity spans holes. |
 | **Contested pair** | Two entities with both a positive and a negative tie. |
-| **Cut vertex** | An entity whose removal alone disconnects the network. A **bridge** is the same for a tie. |
 | **Custody** | The append-only record of everything done to an exhibit: acquired, read, verified, exported, held, destroyed. |
+| **Cut vertex** | An entity whose removal alone disconnects the network. A **bridge** is the same for a tie. |
 | **Dead letter** | A record that could not be parsed, kept with the reason. Nothing is silently dropped. |
 | **Defang** | Writing a URL so it cannot be clicked or fetched by mistake: `hxxps://portal[.]example`. |
 | **Diagnosticity** | How far a row of evidence separates the live hypotheses. 0 means it says the same about all of them. |
 | **Dry run** | A purge that reports what would be destroyed and destroys nothing. The default, every time. |
-| **Dual control** | An act that takes two different people. Chapters 6 and 31. |
+| **Dual control** | An act that takes two different people. Chapters 10 and 31. |
 | **Egress** | Anything leaving the deployment. Every path calls one check. Chapter 7. |
 | **Ego network** | An entity and its immediate ties. |
 | **Entity** | A person, persona, group, victim, wallet, host or other node of the graph. |
@@ -1478,6 +1489,7 @@ Terms are listed alphabetically. A term in **bold** inside a definition has its 
 | **Persona** | The console's name for an `IDENTITY` entity: a handle you observed. Also a collection account a collector operates. |
 | **Pin** | Holding a node where you put it on the canvas. |
 | **Placeholder** | A retention period the build shipped with that nobody has confirmed. |
+| **Preview** | The value a purge dry run returns and a real run presents again. Only the server can make it, and it covers everything due on the case, including items you cannot see. |
 | **Projection** | The view: preset, confidence floor, inferred in or out, decay, and as-of. Chapter 8. |
 | **Proposal** | A machine's suggestion waiting in Triage. The console calls it a **suggestion**. |
 | **Provenance** | The chain from an element to the claim, the exhibit and the custody record behind it. |
@@ -1495,8 +1507,8 @@ Terms are listed alphabetically. A term in **bold** inside a definition has its 
 | **Step-up** | A requirement for a sign-in from the last 15 minutes. |
 | **Structural hole** | A gap between two parts of a network that an entity spans. |
 | **Suggestion** | See **proposal**. |
-| **Tombstone** | The permanent record that something was destroyed: what, by whom, under what authority, and what the store did. |
 | **TLP** | Traffic Light Protocol, the classification scale. `AMBER_STRICT` and `RED` never leave the platform. |
+| **Tombstone** | The permanent record that something was destroyed: what, by whom, under what authority, and what the store did. |
 | **Trust decay** | Down-weighting a claim as its valid interval recedes, by a half-life. |
 | **View** | See **projection**. |
 | **WORM** | Write once, read many: the object-store lock that makes an exhibit's bytes undeletable until its retention date. |
@@ -1623,7 +1635,7 @@ The permission table below uses the codes in the Code column. **LI** is the Lead
 | **click** | Inspect an element |
 | **double-click**, <kbd>Enter</kbd> | Ego network of the selection |
 | **shift-click** one entity, then another; <kbd>P</kbd> on each | Shortest path between them (the first one only marks the anchor) |
-| **hold** <kbd>space</kbd> | Hide inferred edges while held. Works anywhere on the graph tab, the timeline and the inspector included, except where Space already does something: typing in a field, or pressing a control you tabbed to |
+| **hold** <kbd>space</kbd> | Hide inferred edges while held. Works anywhere on the graph tab, the timeline and the inspector included, except where Space already does something: typing in a field, or pressing a control you tabbed to or an inspector button you just used |
 | <kbd>&larr;</kbd> <kbd>&rarr;</kbd> | Previous or next entity; one off the canvas is brought into view |
 | <kbd>[</kbd> <kbd>]</kbd> | Previous or next tie of the selected entity, including every tie on a pair that has more than one |
 | <kbd>Shift</kbd> and arrows | Pan the view |
@@ -1723,7 +1735,7 @@ A blank cell is **not assessed**, which neutral is not. The weights each row cou
 | `LOCATION` | Location | context |
 | `TRANSACTION` | Transaction | context |
 
-The **category** decides how a type behaves in analysis: an **actor** is a person, persona or group that can act; an **artefact** is a thing actors use or leave behind (a wallet, a host, a sample); a **context** is a place or venue (a forum, a channel). Only actors count as people in brokerage, and a projection that includes non-actor vertices says so.
+The **category** decides how a type behaves in analysis: an **actor** is a person, persona or group that can act; an **artefact** is a thing actors use or leave behind (a wallet, a host, a sample); a **context** is an occasion or a place (an event, a campaign, a location). Only actors count as people in brokerage, and a projection that includes non-actor vertices says so.
 
 #### Relationship types
 
@@ -1848,7 +1860,7 @@ The 51 checks of Administration, Readiness, in register order. **Blocking** chec
 
 | # | Check | What it confirms | Settled by | Blocking, and what it refuses |
 |---|---|---|---|---|
-| 1 | `prohibited_content_policy` | A prohibited-content policy and a designated person are declared, and the rejected-sample disposition is a known one (legal item L1). | config: `NOCTORNAL_PROHIBITED_CONTENT_POLICY`, `NOCTORNAL_DESIGNATED_PERSON` | **Blocking.** Sample ingest is refused. |
+| 1 | `prohibited_content_policy` | A prohibited-content policy and a designated person are declared (legal item L1). The evidence also says whether a rejected sample is preserved or destroyed, and a value that is neither fails the preservation bucket row. | config: `NOCTORNAL_PROHIBITED_CONTENT_POLICY`, `NOCTORNAL_DESIGNATED_PERSON` | **Blocking.** Sample ingest is refused. |
 | 2 | `sample_origin_configured` | A separate sample origin exists, so downloads can be served from somewhere that is not the console's origin. | config: `NOCTORNAL_SAMPLE_ORIGIN` (its own host, cookie scope and CSP, never a path on the app's host), `NOCTORNAL_PUBLIC_ORIGIN` on the process that serves it, `NOCTORNAL_BASE_URL` on both | **Blocking.** Every sample download is refused. |
 | 3 | `retention_rules_confirmed` | Every retention rule has been confirmed by a named person with a rationale (legal item L2). | console: Records, Retention, **Confirm rule** | **Blocking.** |
 | 4 | `retention_sweep_current` | Nothing in collected documents, dead letters or unattached ingest records is past its retention clock. | config: run `scripts/retention_sweep.py` (a dry run unless `--apply`) | |
@@ -1865,13 +1877,13 @@ The 51 checks of Administration, Readiness, in register order. **Blocking** chec
 | 15 | `redis_limiter_isolated` | The limiter has its own Redis, with nothing else writing to it. | config | |
 | 16 | `internal_hops_encrypted` | The database and the limiter's Redis are reached over TLS 1.3 that checks the server: this register's own database session, the `sslmode` each DSN asks for, and the protocol, cipher and certificate end date of the limiter's Redis connection. In production a hop that is not TLS 1.3, a DSN without `sslmode=verify-full` or a `REDIS_URL` that is not `rediss://` fails it; outside production it passes and says what it read. | config: `scripts/internal_tls.py`, then `sudo bash release/install.sh --production-secrets` | |
 | 17 | `evidence_bucket_object_lock` | The evidence bucket enforces write-once: a canary delete is refused and the version is still there. | config: `OBJECT_STORE_*` (or the older `MINIO_*`); the bucket must be created with object lock | |
-| 18 | `preservation_bucket_object_lock` | The preservation bucket proves both COMPLIANCE retention and a legal hold, because the hold is what a preserved sample carries. | config: `PRESERVE_*` | |
+| 18 | `preservation_bucket_object_lock` | The preservation bucket proves both COMPLIANCE retention and a legal hold, because the hold is what a preserved sample carries. The hold proof also reads the held canary's retention back and passes only when it carries none, because a retention of any mode refuses a delete exactly as a hold does, and the evidence names the credential that read it. It fails, and its evidence says why, when the bucket applies a default retention to the canary, or when no credential this process holds may read a retention (`s3:GetObjectRetention`). | config: `PRESERVE_*` | |
 | 19 | `object_store_custody_declared` | Whoever operates the object store is declared when it is not this deployment. A store inside it (a single-label host name, `localhost`, or a loopback, private or link-local address) passes. One outside it fails until `NOCTORNAL_OBJECT_STORE_CUSTODY` names the operator, the jurisdiction and the legal-process contact. The evidence also says whether counsel's declaration (`NOCTORNAL_OBJECT_STORE_COUNSEL_DECLARATION`) lets it hold `AMBER_STRICT` and `RED`, which an upload refuses on such a store until it does. | config: `NOCTORNAL_OBJECT_STORE_CUSTODY`, after the custody questions in docs/22 are answered | |
 | 20 | `evidence_size_cap_declared` | The exhibit size cap is a decision and not a default, and the value this process enforces is the one the environment says. | config: `NOCTORNAL_MAX_EVIDENCE_BYTES` | |
 | 21 | `migrations_at_head` | The database is at the head of the migrations on disk. | config: `alembic upgrade head` | |
 | 22 | `app_db_role_not_owner` | The application connects as a role that cannot switch off the append-only triggers (`noctornal_app`), never the schema owner. Expected to fail on a development or CI database. | config: `DATABASE_URL` | |
 | 23 | `row_level_security_enforced` | Row-level security is actually the second line: the connected role is subject to it. | config | |
-| 24 | `smtp_configured` | An SMTP relay that speaks TLS is set, and the plaintext exception is not in force. | config: `SMTP_HOST` | |
+| 24 | `smtp_configured` | An SMTP relay that speaks TLS is set, the plaintext exception is not in force, and the `smtp` egress route allows the relay (without it every email is held). | config: `SMTP_HOST`; console: Administration, Egress, for the route | |
 | 25 | `compartment_bindings_intact` | Every compartment-bound column this release knows has a readable, enabled binding, and the database binds nothing this release does not know. | config: `alembic upgrade head` | |
 | 26 | `captured_documents_compartmented` | Captured documents that a compartmented case cites carry a compartment. | console: re-capture under the compartment | |
 | 27 | `triage_claims_within_labels` | No accepted triage claim is readable below the label of what it was found in. | listed, never moved | |
@@ -1879,13 +1891,13 @@ The 51 checks of Administration, Readiness, in register order. **Blocking** chec
 | 29 | `egress_boundary` | Outbound connections leave through the egress proxy. In development they do not, and the row says so. On a cluster a pod always has a default route, so a deployment that sets `NOCTORNAL_EGRESS_BOUNDARY=network_policy` and a canary is judged another way, after the proxy half has passed: the register makes one connection to the canary, a host and port the NetworkPolicy must not let the pod reach. Unanswered passes with a caveat that the boundary is the policy. Answered fails as 'NetworkPolicy is not enforced for this pod', and the action is a network plugin that enforces it. A refused connection, an unreachable address, a name that does not resolve and an address outside `NOCTORNAL_EGRESS_INTERNAL_CIDRS` each fail as 'cannot tell'. Confirm once, from a pod the policy allows, that the canary answers: an unanswered connection is also what a canary that is not running looks like. The caveat also says the cluster's DNS forwards names outside the cluster to its upstream. | console: Administration, Egress; on a cluster `NOCTORNAL_EGRESS_BOUNDARY`, `NOCTORNAL_EGRESS_CANARY` and `NOCTORNAL_EGRESS_INTERNAL_CIDRS` | |
 | 30 | `role_analysis_thread_capped` | The numerical library's thread count is capped for the role analyses. Slow, not unsafe, when it is not. | config | |
 | 31 | `dual_control_policy_changeable` | Two different people could change which operations need two people: one who may propose and one who may countersign without also being able to propose. | console: Accounts | |
-| 32 | `sample_static_analysis` | Static triage and forum parsing can run here, where, under which limits, and something is draining the triage queue. It names the YARA engine. It is red when yara-x is installed but the analysis worker could not compile a one-rule test and scan with it under its limits, and the evidence names the error's class. Without yara-x it passes with a caveat: a production image built before 2026-11-15, or with `NOCTORNAL_EXTRAS` set empty, has none, and `up -d --build` rebuilds it. When the register says analysis runs in the isolated worker at host:port (not at a socket), the worker is a pod of its own, reached over mutual TLS 1.3, and the row no longer requires 'no network interface but loopback', which a pod cannot have: it allows one interface besides loopback and fails on two, and it proves isolation by a test the register runs itself. The analysis child inside the worker tries to open a connection to the database host and to the egress canary (`NOCTORNAL_EGRESS_CANARY`, when set); if either is answered the row fails, 'the worker is not isolated', and the action is a NetworkPolicy on the worker's pod that allows it no egress at all, on a network plugin that enforces it. A name the register cannot resolve counts as not tried, and a row with nothing tried fails. A worker that reports its pids limit as declared passes with a caveat: the limit was told to the worker (`NOCTORNAL_ANALYSIS_PIDS_LIMIT`) and not read, because a container in a pod cannot read the pod's limit; set `podPidsLimit` on the nodes that run the worker to the number declared. | config: the analysis worker service, `NOCTORNAL_ANALYSIS_SOCKET` and `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY`; on a cluster `NOCTORNAL_ANALYSIS_ADDR`, `NOCTORNAL_ANALYSIS_LISTEN`, the three `NOCTORNAL_ANALYSIS_TLS_*` paths and `NOCTORNAL_ANALYSIS_PIDS_LIMIT` | |
+| 32 | `sample_static_analysis` | Static triage and forum parsing can run here, where, under which limits, and something is draining the triage queue. It names the YARA engine. It is red when yara-x is installed but the analysis worker could not compile a one-rule test and scan with it under its limits, and the evidence names the error's class. Without yara-x it passes with a caveat: a production image built before 2026-11-15, or with `NOCTORNAL_EXTRAS` set empty, has none, and `up -d --build` rebuilds it. When the register says analysis runs in the isolated worker at host:port (not at a socket), the worker is a pod of its own, reached over mutual TLS 1.3, and the row does not require 'no network interface but loopback', which a pod cannot have: it allows one interface besides loopback and fails on two, and it proves isolation by a test the register runs itself. The analysis child inside the worker tries to open a connection to the database host and to the egress canary (`NOCTORNAL_EGRESS_CANARY`, when set); if either is answered the row fails, 'the worker is not isolated', and the action is a NetworkPolicy on the worker's pod that allows it no egress at all, on a network plugin that enforces it. A name the register cannot resolve counts as not tried, and a row with nothing tried fails. A worker that reports its pids limit as declared passes with a caveat: the limit was told to the worker (`NOCTORNAL_ANALYSIS_PIDS_LIMIT`) and not read, because a container in a pod cannot read the pod's limit; set `podPidsLimit` on the nodes that run the worker to the number declared. | config: the analysis worker service, `NOCTORNAL_ANALYSIS_SOCKET` and `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY`; on a cluster `NOCTORNAL_ANALYSIS_ADDR`, `NOCTORNAL_ANALYSIS_LISTEN`, the three `NOCTORNAL_ANALYSIS_TLS_*` paths and `NOCTORNAL_ANALYSIS_PIDS_LIMIT` | |
 | 33 | `yara_rules_active` | Every active YARA rule set has a build this host can load. | console: Lab, Rules. Without the engine it carries the same rebuild caveat | |
 | 34 | `collection_sources_configured` | Every active forum and Telegram source could be read: a declared ceiling it sits within, an exit or persona that fits, and a parser that does not refuse it. | console: Feeds, Sources | |
 | 35 | `collection_authority_current` | Every active forum and Telegram source is covered by a confirmed authority, and none ends soon. | console: Feeds, Sources | |
 | 36 | `egress_routes_cover_sources` | Every outbound use has a route to leave through. | console: Egress | |
 | 37 | `egress_exits_open` | The egress proxy holds the key every sealed exit is sealed under and can open each one. | console: Egress | |
-| 38 | `pgp_verifier` | A signature check made now could produce a verdict: GnuPG 2.4.9 or later is present. Without it every check records "no verifier" and no binding can be confirmed. | config: install GnuPG, or `NOCTORNAL_GPG` | |
+| 38 | `pgp_verifier` | A signature check made now could produce a verdict: GnuPG 2.4.9 or later (2.5.14 in the 2.5 series, 2.2.51 in the 2.2 series) is present, or the operator attests that a distribution build carries those fixes. Without it every check records "no verifier" and no binding can be confirmed. The production image's gnupg is Debian's 2.4.7-21+deb13u1, which the check reads as below the floor until it is attested. | config: install GnuPG, or `NOCTORNAL_GPG`; for a distribution build whose changelog you have checked, `NOCTORNAL_GPG_PATCHED_AS` (`2.4.9` for the production image) | |
 | 39 | `pgp_key_directory` | Web Key Directory lookups are off (a pass), on with the exposure said out loud, or half configured (a fail naming the fix). | config: `NOCTORNAL_WKD_CEILING` and the route `wkd` | |
 | 40 | `conversations_minimisable` | Every closed case's conversations can be minimised by somebody assigned to it. It fails while a closed, archived or purged case holds a conversation nobody assigned is cleared to minimise, and a case not yet closed with one is a caveat. It never names a case or says how many. | Oversight, Minimisation gaps names each case (no Go to); its Lead investigator adds a cleared colleague through Share | |
 | 41 | `embedding_wording_current` | Similar wording is built and still reproduces itself: its canary equals a fresh local embedding, and no item has been failing for over an hour. | console: Embeddings | |
@@ -1914,7 +1926,7 @@ Every kind a notification can have, with its default priority. A channel's **min
 | `APPROVAL_DECIDED` | normal | Your approval request was decided |
 | `APPROVAL_REQUESTED` | normal | Someone is asking for your second signature |
 | `COLLECTION_AUTHORITY_PENDING` | normal | A collection authority waits for your confirmation |
-| `COMMS_MINIMISATION_GAP` | normal | A case was closed with conversations nobody on its team can minimise. It names no case; Oversight, Minimisation gaps does. Never sent to Jira |
+| `COMMS_MINIMISATION_GAP` | normal | A case was closed with conversations nobody on its team can minimise. The Security officer's notice names no case; Oversight, Minimisation gaps does. A Lead investigator assigned to the case, other than the one who closed it, is told in the words the case's withheld-disclosure setting allows, and nothing under NONE. Never sent to Jira |
 | `DETONATION_NAMED` | normal | A recorded detonation names you as the person who agreed to it |
 | `DETONATION_SIGNOFF_DECIDED` | normal | Your detonation request was signed off or declined |
 | `DETONATION_SIGNOFF_REQUESTED` | normal | A detonation needs your sign-off |
@@ -1942,9 +1954,9 @@ The numbers the console enforces or quotes. A deployment may declare different o
 | Session | Idle timeout | 30 minutes | No |
 | Session | Absolute lifetime | 12 hours | No |
 | Session | Step-up freshness | a sign-in from the last 15 minutes | No |
-| Evidence | Largest exhibit | 256 MiB by default; the pane shows the figure in force | Yes: `NOCTORNAL_MAX_EVIDENCE_BYTES` |
+| Evidence | Largest exhibit | 256 MiB by default in development; a production deployment must declare it; the pane shows the figure in force | Yes: `NOCTORNAL_MAX_EVIDENCE_BYTES` |
 | Evidence | Storage lock | to the case's retention date, as far ahead as the deployment sets in one step, and for at least a fixed period from lodging | Yes |
-| Samples | Largest sample | 256 MiB by default in development; a production deployment must declare it; the Submit tab shows the figure in force | Yes |
+| Samples | Largest sample | 256 MiB unless the deployment declares another; the Submit tab shows the figure in force | Yes: `NOCTORNAL_MAX_SAMPLE_BYTES` |
 | Samples | Static analysis | up to 256 MiB analysed by default (the sample cap), fuzzy hashing up to 32 MiB, 300 seconds per step | `NOCTORNAL_SAMPLE_ANALYSIS_MAX_BYTES` |
 | Samples | Archive expansion | 200 members, 256 MiB, a 100 to 1 ratio and two levels per archive; 1,000 members in a whole tree | Yes: `NOCTORNAL_ARCHIVE_MAX_*` |
 | Samples | Preserved-sample authorisation | at most 30 days, one named person, one sample | No |
@@ -1969,8 +1981,10 @@ The numbers the console enforces or quotes. A deployment may declare different o
 | Two-person changes | The second person on a case's merge switch | must have held `case.update` on the case for seven days | Yes: `NOCTORNAL_RELAX_SEASONING_DAYS`, 0 turns it off, at most 365 |
 | Collector | Persona act not started | not run after 15 minutes | Yes |
 | Database | Request connections | a pool of up to 10 for each process in production; a request waits 10 seconds for one, then is answered 503 | Yes: `NOCTORNAL_DB_POOL`, `NOCTORNAL_DB_POOL_MAX` (1 to 50), `NOCTORNAL_DB_POOL_TIMEOUT` (1 to 60) |
+| Database | A request's statement | cancelled after 120 seconds; the setting takes 5 to 3600 | Yes: `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` |
 | Integrations | Retry of failed deliveries | up to 30 days back and 1,000 rows | No |
 | Egress | A retired route | an open connection to it closes within 30 seconds | No |
+| Internal TLS | Certificates | a server's lasts 1095 days and the deployment CA's ten years; nothing renews either, and `scripts/internal_tls.py check` fails within 30 days of an end | No |
 | Jira | Destination ceiling | `GREEN` unless raised, never above `AMBER` | No |
 | Notifications | Digest | hourly | No |
 
@@ -1991,10 +2005,11 @@ The numbers the console enforces or quotes. A deployment may declare different o
 3. Set a separate sample origin.
 4. Confirm every retention rule with its rationale, and name a person for each.
 5. Move to the production role split: `noctornal_app` for the application, the schema owner for migrations only. `app_db_role_not_owner` and `row_level_security_enforced` should pass.
-6. Put the egress proxy in front, give each persona its own profile, and create the integration routes. `egress_boundary` should pass.
-7. Replace every development credential. `credentials_not_published` should pass.
-8. Register the compartments the work needs and read people in.
-9. Run a **break-glass drill** with the Security officer: invoke on a synthetic case, review it. A control you have never exercised is a control you do not know works.
+6. Issue the internal certificates (`sudo python3 scripts/internal_tls.py init` on a new host, `migrate` on an existing one) and run `check`. Keep `tls/ca/ca.key` off the host. `internal_hops_encrypted` should pass.
+7. Put the egress proxy in front, give each persona its own profile, and create the integration routes. `egress_boundary` should pass.
+8. Replace every development credential, and run `sudo bash release/install.sh --production-secrets`, which writes the secrets that are missing (`NOCTORNAL_AUDIT_PEPPER` among them) and never replaces a valid one. `credentials_not_published` should pass.
+9. Register the compartments the work needs and read people in.
+10. Run a **break-glass drill** with the Security officer: invoke on a synthetic case, review it. A control you have never exercised is a control you do not know works.
 
 #### Each month
 
@@ -2004,7 +2019,9 @@ The numbers the console enforces or quotes. A deployment may declare different o
 4. Accounts: who holds `SYS_ADMIN` and `SECURITY_OFFICER`, who has not signed in, who should be deactivated.
 5. Ingest keys unused for thirty days: revoke any nobody can name.
 6. Awaiting break-glass reviews, preserved-sample authorisations and collection authorities: none waiting longer than they should.
-7. Backups: restore one to a scratch machine and open a case. After restoring the database and creating the new buckets, run `scripts/restore_object_versions.py`: first a dry run, then with `--apply`, `--actor` (an active account that holds `retention.manage`, `SYS_ADMIN` or `CASE_OWNER`) and `--authority` (a restore ticket or incident number). Use an account of its own on the store with the policy in `infra/production/README.md`, which can neither delete nor lift a hold. Read each refusal (mirror file missing, digest differs, bucket differs, hold missing) before running again; the run adopts anything it already put, and a purged exhibit is never restored. Afterwards run `scripts/audit_verify.py`: both chains must be INTACT. The old step of setting `storage_version_id` to NULL as the schema owner is no longer the recovery; do not use it.
+7. Internal certificates: `sudo python3 scripts/internal_tls.py check` fails within 30 days of an end. Renew a server's with `renew <server>` and restart that service; nothing renews by itself.
+8. Oversight, Minimisation gaps (the Security officer): each case listed has conversations nobody assigned can minimise. Ask its Lead investigator to add one who is cleared, through **Share...**.
+9. Backups: restore one to a scratch machine and open a case. After restoring the database and creating the new buckets, run `scripts/restore_object_versions.py`: first a dry run, then with `--apply`, `--actor` (an active account that holds `retention.manage` through a global role) and `--authority` (a restore ticket or incident number). Use an account of its own on the store with the policy in `infra/production/README.md`, which can neither delete nor lift a hold. Read each refusal (mirror file missing, digest differs, bucket differs, hold missing) before running again; the run adopts anything it already put, and a purged exhibit is never restored. Afterwards run `scripts/audit_verify.py`: both chains must be INTACT. Do not set `storage_version_id` to NULL as the schema owner: it undoes the version pin on every exhibit and is not a recovery.
 
 ### K. Refusals you will meet, and why
 
@@ -2014,7 +2031,7 @@ None of these is a bug. A refusal you do not understand looks like one, which is
 |---|---|
 | **404 on something you know exists** | You are not assigned to that case, or not read into its compartment, or the material is above your clearance. The status is deliberately the same as "does not exist", otherwise it would be an existence oracle for a compartmented operation. An id that names nothing is gated the same way and leaves the same record, one denial row (`AUTHZ_DENIED`) in the audit log, so a stale link or a mistyped id shows there as a denial. |
 | **"Refused: this needs the (role) role."** followed by who to ask | The server named the roles that hold the permission you lacked. **Ask an administrator** for a deployment-wide one, or **ask this case's Lead investigator** for a case role. |
-| **"Re-authentication required: your step-up has expired"** | A step-up permission with a stale session. Merges, exports, purges, holds, break-glass and sample downloads all require a sign-in from the last 15 minutes, not merely a valid session. Sign in again: the console tells you to sign out and back in to refresh it, and for a report, an export or break-glass it asks for the sign-in on the spot. |
+| **"Re-authentication required: your step-up has expired"** | A step-up permission with a stale session. Merges, exports, purges, holds, break-glass and sample downloads all require a sign-in from the last 15 minutes, not merely a valid session. Sign in again. For a report, an export, a legal hold, a sample's card, an ingest key and most of Administration the console asks for the sign-in over the pane and carries on; for the others, break-glass among them, it tells you to sign out and back in to refresh it. |
 | **"Analysis is briefly throttled"** | The graph view and the Analysis pane share one request budget, and moving the timeline spends from it. Wait for the number of seconds it says. The earlier results stay on screen. |
 | **451 on a sample upload**, or "Submissions are refused" | No prohibited-content policy has been declared. This is legal item L1, and the refusal is the feature. Contact the person the banner names. |
 | **"Downloads are off"** or **"sample downloads are refused"** | One of four: `NOCTORNAL_SAMPLE_ORIGIN` is not configured, so the origin split is off and every download refuses; it is not an origin (a path is a location on an origin, not an origin); it equals the application origin (two names for one origin is not a split); or this process is the application origin, in which case fetch from the sample origin, which runs as a second process of this code with `NOCTORNAL_PUBLIC_ORIGIN` set to it. The message names which, and so does the Lab's Handling tab. |
@@ -2030,17 +2047,22 @@ None of these is a bug. A refusal you do not understand looks like one, which is
 | **"Name a colleague who may sign this off"** | A lookup to a vendor or the public needs a named colleague's sign-off and a reason before anything is sent. |
 | **"You cannot decide your own request"** | Dual control: somebody else has to approve or countersign. Reviewing your own break-glass is refused for the same reason. |
 | **"lowering this user to ... would strand them below ..."** (the Set clearance button's hint says lowering below a case they lead or deputise is refused) | Set clearance: transfer or close those cases first. |
-| **"refusing to revoke the last active SYS_ADMIN"** (for Security officer, break-glass would have nobody to review it) | The deployment would be unable to repair itself. Grant the role to a second person first. |
+| **"refusing to deactivate the last active SYS_ADMIN"** or **"refusing to revoke SYS_ADMIN from the last active SYS_ADMIN"** (the same for `SECURITY_OFFICER`, where break-glass would have nobody to review it) | The deployment would be unable to repair itself. Grant the role to a second person first. |
 | **"An inference must state its reasoning"** | A claim whose basis is an inference needs its rationale. |
+| **"the entity this proposal makes a claim about is not in this case; nothing was written"**, **"an entity this proposal would tie is not in this case; nothing was written"** | Accepting a proposal is refused when the entity it names does not exist, is in another case or is above your clearance, and the three read alike on purpose. Reject or defer the proposal, or ask a colleague cleared for the entity to accept it. |
+| **"that claim has been replaced by a dated one, so it takes no new stance"** | Dating a claim replaces it, and the replaced claim is history. Score the claim that replaced it. A replaced claim is not retracted either: retract the one that replaced it. |
+| **"no such persona, or it is above your clearance"** | A persona that does not exist and one you may not see are answered alike. A conversation can name a persona only on its own platform. |
+| **"no password change is pending for this account, so nothing was changed"** | A new password came with a sign-in that was not asked to change one. Sign in without the new password, then change it from Account. The refusal is recorded as `AUTH_PASSWORD_CHANGE_NOT_PENDING`. |
+| **"no preview was issued: this server holds no key to bind a confirmation to what this dry run counted"** | A purge dry run needs `NOCTORNAL_AUDIT_PEPPER`, so a real run cannot follow it until an administrator sets it. A new pepper voids a preview not yet confirmed: run the dry run again. |
 | **"a bare positive Telegram id is ambiguous"** | A Telegram id without its namespace. Record it as `u:<id>` for a user or `c:<id>` for a channel when you know which. |
-| **"Only a closed case can be reopened, by its lead investigator"** | A case in any other state, or by anyone else, is refused. An archived case cannot be reopened. |
+| **"An archived case is a record and cannot be reopened."** | A closed case moves back to Active or on to Archived, and an archived one only to Purged; any other move is refused. Only the Lead investigator, who holds `case.close`, moves a case. |
 | **"Retention can only be extended"**, **"Classification can only be raised"** | One-way on purpose: an exhibit's storage lock cannot be shortened, and lowering a label would let material through it was written to stop. |
 | **"the batch was refused: this key is no longer live"** | An ingest key was revoked or expired between the moment it was recognised and the moment its batch was created. The partner needs a live key. |
 | **"This case is CLOSED"** | Content writes are refused on a closed, archived or purged case. Reopen it if the work is genuinely resuming. |
 | **"This watch was changed by someone else while you were editing it."** (a 409) | A collection manager saved a change to the same watch between your opening it and your saving. Nothing of yours was written, and the other change stands, even if you touched different fields. Reload the watch and make your change again. |
 | **"Poll now needs the collector role, which your account does not hold."** | Polling a source belongs to the Collection manager role. |
 | **"Reviewing a tie needs proposal.review"** | A Lead investigator and a Reviewer hold it on a case. Nothing was changed. |
-| **"Exporting an exhibit needs evidence.export"** | The Lead investigator holds it on the case. |
+| **"Exporting an exhibit needs the evidence.export permission on this case"** | The Lead investigator holds it on the case. |
 
 ### L. Troubleshooting
 
@@ -2050,7 +2072,7 @@ None of these is a bug. A refusal you do not understand looks like one, which is
 |---|---|
 | "invalid credentials", and you are sure | Five failed attempts lock the account for 15 minutes, and a locked account gives the same answer even for the right password. Wait, or ask an administrator to **Unlock** it. |
 | The code is refused every time | Check the phone's clock is set automatically. A code works once: wait for the next. An operator can run `python scripts/bootstrap.py totp-diagnose --email you@example.org --code 123456`, which says whether the clock or the secret is wrong. |
-| You lost the phone | Use a recovery code in the code field. With none, ask an administrator for **Re-enrol TOTP**. |
+| You lost the phone | Use a recovery code in the code field. Signing in with one takes about half a second longer than with an authenticator code, and takes as long whether the password is right or wrong; that is not a fault. With none, ask an administrator for **Re-enrol TOTP**. |
 | "Your password and code were accepted, but this browser refused to keep the sign-in" | The console is on plain HTTP at an address that is not `localhost`, so the Secure session cookies were refused. Use the HTTPS address, or `localhost`. |
 | You are asked to choose a new password | An administrator issued yours. Choose your own; the issued one is not used again. |
 | The sign-in form says you are signed out after a few minutes | The session idles out at 30 minutes and ends at 12 hours. Anything unsaved stays on screen; save after signing in again. |
@@ -2075,6 +2097,8 @@ None of these is a bug. A refusal you do not understand looks like one, which is
 | Analysis says "The graph has changed since" | The numbers describe the graph as it was. Run the analysis again. |
 | A metric differs from yesterday | The view moved: preset, confidence floor, inferred in or out, decay, or the as-of date. Read the view (the **i** beside the count at the foot of the canvas, or the View line in Analysis) before quoting a number. |
 | A role or centrality ranking reorders on a small change | Betweenness on a sparse investigative graph is unstable. Treat the ranking as a prompt, not a finding. |
+| The View line says connected pairs "decayed to nothing" | Trust decay has faded those ties to no weight. Betweenness, closeness and the broker ranking leave the pairs out, and the components, bridges and the removal set still count them as ties. |
+| A banner reads **Neighbourhood cut** | One step from that entity reads more ties than a view holds, so the neighbours shown at that distance are the oldest recorded and the newer ones are left out. A narrower projection shows others. |
 | "Not computed for this view yet" | The removal set, the positions and the regular roles are each their own run, stored per size or option. Press the button beside it. |
 | The Connection log's rows carry no sequence number | The log holds rows you are not cleared to see, and numbers drawn from the same sequence would let a gap count them. Cite a row by its connection id and time. |
 | The Entities count is higher than the Graph's | The Graph draws a view. The difference is identity and other links the **All social ties** preset leaves out. |
@@ -2097,7 +2121,7 @@ None of these is a bug. A refusal you do not understand looks like one, which is
 | "The server lists this as a blocking failure but sent no check row for it" | Read the readiness report directly: `GET /api/v1/admin/readiness`. |
 | `alembic downgrade` refuses | Later migrations refuse to undo while append-only history exists. Run the round-trip suites on a fresh database. |
 | `refusing to downgrade 0147` (or 0141, 0134, 0133) | The database holds rows the older, narrower key cannot hold: two rows that differ only by labels, or for 0141 also a destroyed exhibit and a live one of the same bytes in one case. The number says how many keys collide. That revision's downgrade changed nothing, but the revisions above it are already undone: the database sits at the named revision and `migrations_at_head` fails. Run `alembic upgrade head` to return, or restore a backup taken before it was applied. Never delete or merge rows to make it pass. `db/README.md` shows how to find the rows by id. |
-| A request answers 503, "the service is at its limit of concurrent database connections" | The pool of request connections is full and the wait for one ran out. Retry after a second. If it persists, find the slow request, or raise `NOCTORNAL_DB_POOL_MAX` within Postgres's connection limit, counting every worker of every process that pools. |
+| A request answers 503, "The service is at its limit of concurrent database connections" | The pool of request connections is full and the wait for one ran out, too many requests were already waiting, or the process is shutting down. Retry after a second. If it persists, find the slow request, or raise `NOCTORNAL_DB_POOL_MAX` within Postgres's connection limit, counting every worker of every process that pools. |
 | A service refuses to start and names `NOCTORNAL_AUDIT_PEPPER` | It is unset, the placeholder, shorter than 16 characters or the same as another secret. Run `sudo bash release/install.sh --production-secrets`: it writes one and never replaces a valid one. |
 | Postgres, Redis or the API refuse after an upgrade and name a certificate, `sslmode` or `rediss://` | The internal certificates are missing or the DSNs do not ask for them. Run `sudo python3 scripts/internal_tls.py migrate` (or `init` on a new host), then `check`, then the production secrets step, and bring the stack down and up (Chapter 35). |
 
@@ -2117,5 +2141,7 @@ More installation troubleshooting is in INSTALL.md, which has the failures the i
 | `docs/05-security-rbac.md` | Access, step-up and the two-person controls. |
 | `docs/08-governance.md` | Retention, holds and purge. |
 | `docs/20-outbound-connections.md` | How anything leaves the deployment: the address policy, the one client, routes and the egress proxy. |
+| `docs/22-object-store-requirements.md` | What a store must do to hold evidence, and how to run on one other than the bundled MinIO. |
+| `infra/production/README.md` | The production stack: the secrets files, the internal certificates, restoring a backup, the health endpoints and the notes for a cluster. |
 | `docs/06-interface.md` | The design brief, including the rule that keeps the console quiet. |
 | `release/CHANGELOG.md` | What changed in each release. |
