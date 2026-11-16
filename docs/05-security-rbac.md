@@ -512,7 +512,9 @@ watch changed under it is a 409 and nothing is written.
   envelope scheme as persona credentials
 - Replay protection: store the last accepted TOTP counter per user and
   reject reuse. Frequently omitted, trivially exploitable.
-- Recovery codes: 10, single-use, Argon2id-hashed, regenerated as a set
+- Recovery codes: 10, single-use, Argon2id-hashed, regenerated as a set. A second factor shaped like a
+  recovery code costs one password verify and ten recovery verifies on every sign-in, whatever the account
+  holds or whether it exists (the dummy hash pads the count), so the wait never says the password was right
 - Passwords: Argon2id (t=3, m=64 MiB, p=4), no rotation policy, no
   composition rules. A chosen password is at least 12 characters, is not
   the one it replaces and is not the account's own email address; length is
@@ -529,7 +531,10 @@ watch changed under it is a 409 and nothing is written.
   `urn:noctornal:problem:password-change-required`, and the same sign-in
   carrying `new_password` and a fresh code stores the chosen password and
   signs in. A recovery code sent with a refused sign-in is checked and not
-  spent: it is spent only by the sign-in that opens a session. An account
+  spent: it is spent only by the sign-in that opens a session. A new password sent
+  for an account with none pending is refused with a 409 and audited as
+  `AUTH_PASSWORD_CHANGE_NOT_PENDING` (outcome DENIED), which names the factor
+  checked and whether it was spent. An account
   an administrator creates from Admin (`POST /admin/users`) gets the same
   flag, because its issued password is shown with the TOTP secret beside
   it. First run, which makes the operator's own account, does not set it,

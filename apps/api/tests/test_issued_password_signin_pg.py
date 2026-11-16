@@ -403,3 +403,79 @@ def test_a_refused_sign_in_still_resets_the_failure_count(conn, client):
     assert r.status_code == 403, r.text
     assert conn.execute("SELECT failed_logins FROM iam.app_user WHERE id = %s",
                         (uid,)).fetchone()[0] == 0
+
+
+# --- the refusal that names no pending change is audited -----------------------------------
+
+def _since(conn, uid, seq: int) -> list[tuple]:
+    """(action, outcome, detail) of every row this account is the actor of, written after `seq`."""
+    return [tuple(r) for r in conn.execute(
+        """SELECT action, outcome, detail FROM audit.event
+            WHERE seq > %s AND actor_id = %s ORDER BY seq""", (seq, uid)).fetchall()]
+
+
+def _last_seq(conn) -> int:
+    return conn.execute("SELECT coalesce(max(seq), 0) FROM audit.event").fetchone()[0]
+
+
+def test_the_no_change_pending_refusal_is_audited_with_the_factor_it_checked(conn, client):
+    """SIGNIN-02. A sign-in that proved both factors and sent a new password for an account with none pending
+    got a 409 and no audit row, though the factor check had already run (a TOTP code's step is spent by it).
+    Every other outcome of this route is audited, and the row says which factor was checked and whether it was
+    spent, with nothing the person typed."""
+    uid, email, secret = _make_user(conn)
+    before = _last_seq(conn)
+    r = client.post("/api/v1/auth/login", json={
+        "email": email, "password": PASSWORD,
+        "totp_code": _code(conn, uid, secret), "new_password": "something else entirely"})
+    assert r.status_code == 409, r.text
+    assert not _cookie(r) and _live_sessions(conn, uid) == 0
+    assert _since(conn, uid, before) == [
+        ("AUTH_PASSWORD_CHANGE_NOT_PENDING", "DENIED", {"second_factor": "totp", "spent": True})], (
+        "the refusal that names no pending change left no audit row")
+    assert conn.execute("SELECT totp_last_counter IS NOT NULL FROM iam.app_user WHERE id = %s",
+                        (uid,)).fetchone()[0], "the row says the step was spent and it was not"
+
+
+def test_the_no_change_pending_refusal_says_a_recovery_code_was_checked_and_not_spent(conn, client):
+    from noctornal_api.stores import PgUserStore
+    uid, email, _ = _make_user(conn)
+    codes = PgUserStore(conn).issue_recovery_codes(uid, 1)
+    before = _last_seq(conn)
+    r = client.post("/api/v1/auth/login", json={
+        "email": email, "password": PASSWORD, "totp_code": codes[0],
+        "new_password": "something else entirely"})
+    assert r.status_code == 409, r.text
+    assert _since(conn, uid, before) == [
+        ("AUTH_PASSWORD_CHANGE_NOT_PENDING", "DENIED",
+         {"second_factor": "recovery_code", "spent": False})]
+    assert _row(conn, uid) == (False, None, 1), "the code the row calls unspent was spent"
+
+
+def test_the_no_change_pending_refusal_keeps_the_failure_count_reset_of_the_issued_password_refusal(
+        conn, client):
+    """Both factors were right, so the typos before this sign-in no longer count toward a lockout: the
+    same reasoning, and the same effect, as `test_a_refused_sign_in_still_resets_the_failure_count` for the
+    403. The 409 is audited now; what it clears is unchanged."""
+    uid, email, secret = _make_user(conn)
+    conn.execute("UPDATE iam.app_user SET failed_logins = 3 WHERE id = %s", (uid,))
+    r = client.post("/api/v1/auth/login", json={
+        "email": email, "password": PASSWORD,
+        "totp_code": _code(conn, uid, secret), "new_password": "something else entirely"})
+    assert r.status_code == 409, r.text
+    assert conn.execute("SELECT failed_logins FROM iam.app_user WHERE id = %s",
+                        (uid,)).fetchone()[0] == 0
+
+
+def test_a_wrong_factor_with_a_new_password_is_the_ordinary_failed_sign_in(conn, client):
+    """The 409 is reached only after both factors verified: a wrong code is the ordinary 401 with the
+    ordinary AUTH_FAILED row, never the new refusal's."""
+    uid, email, _ = _make_user(conn)
+    before = _last_seq(conn)
+    r = client.post("/api/v1/auth/login", json={
+        "email": email, "password": PASSWORD, "totp_code": "000000",
+        "new_password": "something else entirely"})
+    assert r.status_code == 401, r.text
+    actions = [a for (a,) in conn.execute(
+        "SELECT action FROM audit.event WHERE seq > %s ORDER BY seq", (before,)).fetchall()]
+    assert actions == ["AUTH_FAILED"], actions

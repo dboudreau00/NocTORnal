@@ -36,7 +36,7 @@ from noctornal_api.http.limits import (
 )
 from noctornal_api.iam_admin import change_password, new_password_problem
 from noctornal_api.security import audit_hash
-from noctornal_api.security.auth import AuthService
+from noctornal_api.security.auth import AuthResult, AuthService
 from noctornal_api.security.sessions import (
     IDLE_TIMEOUT,
     STEP_UP_FRESHNESS,
@@ -146,7 +146,7 @@ def _login(body: LoginBody, request: Request,
                {"reason": result.audit_reason, **_audit_email(body.email)},
                request, outcome="DENIED")
         raise Problem(401, "Unauthenticated", "invalid credentials")
-    must_change = _password_change_due(conn, result.user_id, body, request)
+    must_change = _password_change_due(conn, result, body, request)
     if not service.spend(result):
         # A concurrent sign-in spent the recovery code verified above first. The same answer and
         # trace as a spent code gets inside `authenticate`; nothing has changed yet, the new
@@ -179,7 +179,7 @@ def _login(body: LoginBody, request: Request,
     return response
 
 
-def _password_change_due(conn, user_id, body: LoginBody,
+def _password_change_due(conn, result: AuthResult, body: LoginBody,
                          request: Request) -> bool:
     """The must-change rule, at the one door a session comes through.
 
@@ -189,10 +189,13 @@ def _password_change_due(conn, user_id, body: LoginBody,
     - flag set, no new password: 403 `PASSWORD_CHANGE_REQUIRED_TYPE` and no session; the TOTP code
       is spent, a recovery code is not;
     - flag set and a new password: True; `login` stores it and clears the flag in one statement;
-    - no flag but a new password: 409, rather than leave the person believing it changed.
+    - no flag but a new password: 409, rather than leave the person believing it changed. Audited
+      like the 403: the factor check has run (a TOTP step is spent by it, and the failure count is
+      cleared, as for the 403) and a refusal that leaves no row is one nobody can account for.
 
     The only check of the flag in the API, which is enough: `reset_password` revokes every session.
     """
+    user_id = result.user_id
     row = conn.execute(
         "SELECT must_change_password FROM iam.app_user WHERE id = %s",
         (user_id,)).fetchone()
@@ -205,6 +208,11 @@ def _password_change_due(conn, user_id, body: LoginBody,
     if body.new_password is None:
         return False
     if not must:
+        recovery_code = result.recovery_hash is not None
+        _audit(conn, "AUTH_PASSWORD_CHANGE_NOT_PENDING", user_id,
+               {"second_factor": "recovery_code" if recovery_code else "totp",
+                "spent": not recovery_code},
+               request, outcome="DENIED")
         raise Problem(409, "Conflict",
                       "no password change is pending for this account, so "
                       "nothing was changed. Sign in without a new password, "
