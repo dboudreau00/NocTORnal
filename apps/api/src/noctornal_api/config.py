@@ -773,6 +773,11 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             f"NOCTORNAL_OUTBOUND_LOOKUPS is on and {egress.PROXY_URL_ENV} is not set, "
             f"so case selectors would leave from this host's own address instead of "
             f"through the egress proxy ({egress_policy.DECISION_REF}).")
+    from noctornal_api import maasspec
+    if env.get(maasspec.SWITCH_ENV, "").strip().lower() not in ("", "off", "on"):
+        problems.append(
+            f"{maasspec.SWITCH_ENV} is neither on nor off, so MaaSSpec spectra would be "
+            f"stored as ordinary objects while the operator believes they are checked.")
 
     # The hash-set authority is a legal declaration like the two above, and secrets.env.example
     # ships a placeholder in it; the list cap is a size, read by the one size reader. Named, never
