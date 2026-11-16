@@ -143,7 +143,8 @@ access-control bugs get shipped (`docs/05`), so there is one function, one
 resolver, and a fail-closed `AccessResolutionError` for anything
 unresolvable.
 
-**MinIO with object lock** for evidence. S3-compatible, self-hostable, and
+**An S3 store with object lock** for evidence, MinIO bundled (any store that passes the conformance
+suite and the register, docs/22). S3-compatible, self-hostable, and
 object lock gives real WORM semantics for chain of custody, COMPLIANCE
 mode, not GOVERNANCE, so not even the API's own credentials can delete
 before retention expires (decision 26). Three buckets: evidence (locked),

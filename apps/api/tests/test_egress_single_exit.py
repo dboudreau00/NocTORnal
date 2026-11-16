@@ -46,7 +46,8 @@ ALLOWED = {
                       "subclass HTTPConnection",
     "egress_proxy.py": "the egress proxy's listener and its upstream clients",
     "readiness.py": "the object store probe, to MinIO on the internal network",
-    "samples.py": "the sample store's client, to MinIO on the internal network",
+    "pools.py": "the object store clients' bounded pools, to the store on the "
+                "internal network (docs/17 F41)",
     "lab_static.py": "the analysis child's self-test, which only reports whether "
                      "it could reach the database host (an exposure), sending nothing",
     "rawstore.py": "the raw-markup store's client, to MinIO on the internal network",

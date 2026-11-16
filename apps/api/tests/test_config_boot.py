@@ -284,6 +284,38 @@ def test_unset_object_store_tls_is_refused(variable):
     _only(verify_environment(env), variable)
 
 
+def test_the_neutral_secure_name_is_read_first():
+    """OBJECT_STORE_SECURE is the evidence client's setting under its neutral name, read before its alias
+    MINIO_SECURE (`objectstore.settings`), so the boot check reads it in the same order."""
+    env = _production()
+    del env["MINIO_SECURE"]
+    env["OBJECT_STORE_SECURE"] = "true"
+    assert verify_environment(env) == []
+    env["OBJECT_STORE_SECURE"] = "false"
+    _only(verify_environment(env), "OBJECT_STORE_SECURE")
+
+
+def test_a_disagreeing_pair_of_store_names_is_refused():
+    """A neutral name and its MINIO_* alias set to different values name two stores while one is used."""
+    env = _production()
+    env["OBJECT_STORE_ENDPOINT"] = "s3.store.example:443"
+    problem = _only(verify_environment(env), "OBJECT_STORE_ENDPOINT")
+    assert "MINIO_ENDPOINT" in problem and "s3.store.example" not in problem
+    env["OBJECT_STORE_ENDPOINT"] = env["MINIO_ENDPOINT"]
+    assert verify_environment(env) == []
+
+
+@pytest.mark.parametrize("value", ["minIO-ish", "ceph", "gcs"])
+def test_an_unknown_object_store_profile_is_refused(value):
+    env = _production()
+    env["NOCTORNAL_OBJECT_STORE"] = value
+    problem = _only(verify_environment(env), "NOCTORNAL_OBJECT_STORE")
+    assert value not in problem
+    for good in ("minio", "s3", " S3 "):
+        env["NOCTORNAL_OBJECT_STORE"] = good
+        assert verify_environment(env) == []
+
+
 def test_missing_base_url_is_refused():
     env = _production()
     del env["NOCTORNAL_BASE_URL"]

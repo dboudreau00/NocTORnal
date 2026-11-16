@@ -609,7 +609,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Fifty checks, each with the evidence behind it and, when it fails, the
+Fifty-one checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -643,7 +643,7 @@ register is the one that answers for the deployment.
 
 ### What stays red, and what a red check refuses
 
-Four of the fifty are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the fifty-one are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -852,6 +852,42 @@ sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --bu
 ```
 
 An `up` without the flag starts it again, idle, and nothing else changes.
+
+---
+
+## Your own object store
+
+The bundled MinIO is optional. To keep evidence on an S3 store of your own,
+read [`docs/22`](../../docs/22-object-store-requirements.md) first: what the
+store must do, the two profiles (`NOCTORNAL_OBJECT_STORE`), the three
+accounts' policies, and the custody questions a store somebody else operates
+raises. Then make the buckets with an administrator's credential and start the
+stack with the override, which leaves MinIO and `minio-init` out and waits on a
+check of the buckets instead. The administrator's pair goes in
+`infra/production/object-store-admin.env` (`OBJECT_STORE_ADMIN_ACCESS_KEY`,
+`OBJECT_STORE_ADMIN_SECRET_KEY`, mode 0600, read by that one service and
+ignored by git and the image build), never in `secrets.env`:
+
+```sh
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
+  -f infra/production/compose.external-store.yml run --rm object-store-init \
+  /bin/sh -c 'cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt &&
+    SSL_CERT_FILE=/tmp/ca-bundle.crt exec python scripts/object_store_provision.py --apply'
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
+  -f infra/production/compose.external-store.yml up -d
+```
+
+Name both files on every command. `MINIO_ENDPOINT` and the other `MINIO_*`
+names stay accepted as the endpoint and credentials of whatever store you
+use, but `secrets.env.example` sets them, and `SAMPLE_ENDPOINT` and
+`SAMPLE_SECURE`, for the bundled MinIO: remove those lines or change them to
+the new store, or production refuses to start (`MINIO_ENDPOINT` against
+`OBJECT_STORE_ENDPOINT`) and the samples bucket points at a service that is
+not there. Two limits: the store must be attached to the stack's internal network,
+because a store on another host has no route (docs/17 F41), and the `mc
+mirror` backups under Day-to-day are MinIO's, so use your store's replication.
+`evidence_bucket_object_lock` and `preservation_bucket_object_lock` must both
+say "write-once PROVEN" before an exhibit is written there.
 
 ---
 
@@ -2025,6 +2061,9 @@ both names resolve to the same digest, which is how that is checked.
 
 * **No high availability.** One host. When it is down, the product is down,
   and there is no failover to anything.
+* **No store other than MinIO shipped.** The bundled MinIO is optional
+  (Your own object store), but no other store is shipped, tested in CI or
+  supported beyond what docs/22 records as measured.
 * **No backups.** The volumes are on one disk on this machine. The commands
   above are a manual procedure nothing runs for you, and nothing verifies a
   restore.

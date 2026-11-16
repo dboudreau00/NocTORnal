@@ -34,11 +34,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import urllib3
-from minio.commonconfig import COMPLIANCE, GOVERNANCE
-from minio.error import InvalidResponseError, S3Error, ServerError
-from minio.retention import Retention
 
 from noctornal_api import readiness
+from noctornal_api.objectstore.errors import (
+    StoreBadAnswer,
+    StoreRefusal,
+    StoreUnreachable,
+    refusal,
+)
+from noctornal_api.objectstore.types import COMPLIANCE, GOVERNANCE
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 KEY = readiness.WORM_CANARY_KEY
@@ -50,9 +54,21 @@ WORM = ("InvalidRequest", "Object is WORM protected and cannot be overwritten")
 DENIED = ("AccessDenied", "Access Denied.")
 
 
-def _err(code: str, message: str | None = None) -> S3Error:
-    return S3Error(code=code, message=message or code, resource="r",
-                   request_id="1", host_id="1", response=None)
+def _err(code: str, message: str | None = None) -> StoreRefusal:
+    """A store's refusal as the object store seam hands one over."""
+    return refusal(code, message or code)
+
+
+class Retention:
+    """A retention as the fake store records it: the mode and the instant, with `until` as the seam's
+    `RetentionInfo` names it."""
+
+    def __init__(self, mode, retain_until_date):
+        self.mode, self.retain_until_date = mode, retain_until_date
+
+    @property
+    def until(self):
+        return self.retain_until_date
 
 
 class _Stat:
@@ -69,7 +85,7 @@ class _Written:
 class _Listed:
     def __init__(self, version_id, last_modified, is_delete_marker=False,
                  key=KEY):
-        self.object_name = key
+        self.key = key
         self.version_id = version_id
         self.last_modified = last_modified
         self.is_delete_marker = is_delete_marker
@@ -92,13 +108,13 @@ class _Backing:
 #: answers its call with AccessDenied, as a least-privilege policy would.
 _PERMISSIONS = ("retention_denied", "retention_put_denied", "hold_put_denied",
                 "hold_read_denied", "stat_denied", "list_denied",
-                "delete_denied")
+                "delete_denied", "object_delete_denied")
 #: `applies` default: the store records the retention the PUT asked for.
 _AS_ASKED = object()
 
 
 class FakeStore:
-    """An object store with just enough surface for the probe.
+    """An object store (`objectstore.store.ObjectStore`) with just enough surface for the probe.
 
     `enforces` decides what a DELETE of a locked version does: True
     refuses it the way MinIO does, False deletes it the way seaweedfs
@@ -124,7 +140,8 @@ class FakeStore:
                  hold_refusal=None, versioned=True, accepts_lock=True,
                  refusal=WORM, vanish_after_refusal=False, bucket_exists=True,
                  retention_error=None, list_raises=None, now=NOW,
-                 on_call=None, **permissions):
+                 on_call=None, profile="minio", makes_markers=True,
+                 **permissions):
         self.enforces = enforces
         self.enforces_hold = enforces_hold
         self.records_hold = records_hold
@@ -143,6 +160,11 @@ class FakeStore:
         self._set_permissions(permissions)
         self._b = _Backing()
         self.calls: list[tuple] = []
+        self.profile = profile
+        self.host = "store.example:9000"
+        #: False: a DELETE naming no version adds no marker for an absent key (the s3 profile's control
+        #: then cannot run).
+        self.makes_markers = makes_markers
 
     def _set_permissions(self, permissions: dict) -> None:
         unknown = set(permissions) - set(_PERMISSIONS)
@@ -198,7 +220,7 @@ class FakeStore:
         r = self._b.versions.get(vid)
         return r is not None and r.retain_until_date > self.now
 
-    def stat_object(self, bucket, key, version_id=None):
+    def head(self, bucket, key, *, version_id=None):
         self._call("stat", key, version_id)
         if self.stat_denied:
             raise _err(*DENIED)
@@ -208,7 +230,7 @@ class FakeStore:
             raise _err("NoSuchKey", "Object does not exist")
         return _Stat(vid if self.versioned else None, b.written[vid])
 
-    def get_object_retention(self, bucket, key, version_id=None):
+    def get_retention(self, bucket, key, version_id=None):
         self._call("retention", key, version_id)
         if self.retention_denied:
             raise _err(*DENIED)
@@ -216,14 +238,17 @@ class FakeStore:
             raise _err(*self.retention_error)
         return self._b.versions.get(version_id)
 
-    def is_object_legal_hold_enabled(self, bucket, key, version_id=None):
+    def legal_hold_is_on(self, bucket, key, version_id=None):
         self._call("hold?", key, version_id)
         if self.hold_read_denied:
             raise _err(*DENIED)
         return version_id in self._b.holds
 
-    def put_object(self, bucket, key, data, length, content_type=None,
-                   retention=None, legal_hold=False):
+    def put(self, bucket, key, data, *, media_type=None, retain_until=None,
+            legal_hold=False):
+        # The seam writes COMPLIANCE and nothing else, so that is what the PUT asks for.
+        retention = (Retention(COMPLIANCE, retain_until)
+                     if retain_until is not None else None)
         self._call("put", key, retention, legal_hold)
         if retention is not None and self.retention_put_denied:
             raise _err(*DENIED)
@@ -237,7 +262,7 @@ class FakeStore:
                         hold=legal_hold and self.records_hold)
         return _Written(vid if self.versioned else None)
 
-    def remove_object(self, bucket, key, version_id=None):
+    def delete_version(self, bucket, key, version_id=None):
         self._call("remove", key, version_id)
         assert version_id is not None, (
             "the probe deleted by KEY: on a versioned bucket that adds a "
@@ -260,11 +285,10 @@ class FakeStore:
         if b.latest.get(owner) == version_id:
             b.latest[owner] = None
 
-    def list_objects(self, bucket, prefix=None, include_version=False):
-        self._call("list", prefix, include_version)
+    def list_versions(self, bucket, prefix):
+        self._call("list", prefix, True)
         if self.list_denied:
             raise _err(*DENIED)
-        assert include_version, "a keyless listing hides the versions"
         b = self._b
         listed = [_Listed(v, b.written[v], key=b.keys[v]) for v in b.versions
                   if b.keys[v].startswith(prefix or "")]
@@ -273,12 +297,27 @@ class FakeStore:
         failure = self.list_raises
 
         def pages():
-            # minio's listing is lazy: a transport error arrives on the
+            # The seam's listing is lazy: a transport error arrives on the
             # first next(), inside the caller's loop, not at the call.
             if failure is not None:
                 raise failure
             yield from listed
         return pages()
+
+    def delete_key(self, bucket, key):
+        """A DELETE naming no version: on this versioned store it adds a delete marker and removes
+        nothing, as S3 does, and says so in its answer."""
+        from noctornal_api.objectstore.types import KeylessDelete
+        self._call("delete_key", key)
+        if self.object_delete_denied:
+            raise _err(*DENIED)
+        if not self.makes_markers:
+            return KeylessDelete(delete_marker=False, version_id=None)
+        b = self._b
+        b.n += 1
+        marker = f"m{b.n}"
+        b.markers.append(marker)
+        return KeylessDelete(delete_marker=True, version_id=marker)
 
     def removes(self):
         return [c for c in self.calls if c[0] == "remove"]
@@ -598,8 +637,9 @@ def test_a_version_still_locked_is_kept_and_a_tidy_failure_keeps_the_proof():
         "Connection aborted.", ConnectionResetError(10054, "reset by peer")),
     urllib3.exceptions.ReadTimeoutError(
         None, "/b?versions", "Read timed out. (read timeout=5.0)"),
-    InvalidResponseError(502, "text/html", "<html>Bad Gateway</html>"),
-    ServerError("server failed with HTTP status code 503", 503),
+    StoreBadAnswer("InvalidResponseError: 502 text/html <html>Bad Gateway</html>",
+                   status=502),
+    StoreUnreachable("ProtocolError: Connection aborted.", never_reached=False),
 ], ids=lambda exc: type(exc).__name__)
 def test_a_transport_error_while_tidying_keeps_the_proof(failure):
     """The tidy runs after the proof passed and is best effort, and the probe's client retries nothing. A
@@ -641,16 +681,20 @@ def fake_store(monkeypatch):
     stores: list[tuple[FakeStore, tuple]] = []
     template: dict = {"store": FakeStore(), "by_access": {}}
 
-    def factory(endpoint, access, secret, secure):
-        store = template["by_access"].get(access, template["store"])
-        stores.append((store, (endpoint, access, secret, secure)))
+    def factory(settings):
+        store = template["by_access"].get(settings.access_key, template["store"])
+        store.profile = settings.profile
+        stores.append((store, (settings.endpoint, settings.access_key,
+                               settings.secret_key, settings.secure)))
         return store
 
-    monkeypatch.setattr(readiness, "_object_store_client", factory)
+    monkeypatch.setattr(readiness, "_probe_store", factory)
     for var in ("PRESERVE_ENDPOINT", "PRESERVE_ACCESS_KEY", "PRESERVE_SECRET_KEY",
                 "PRESERVE_SECURE", "SAMPLE_ENDPOINT", "SAMPLE_ACCESS_KEY",
                 "SAMPLE_SECRET_KEY", "SAMPLE_SECURE", "PRESERVE_BUCKET",
-                "MINIO_SECURE", readiness.DISPOSITION_ENV):
+                "MINIO_SECURE", "OBJECT_STORE_ENDPOINT", "OBJECT_STORE_ACCESS_KEY",
+                "OBJECT_STORE_SECRET_KEY", "OBJECT_STORE_SECURE",
+                "NOCTORNAL_OBJECT_STORE", readiness.DISPOSITION_ENV):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("MINIO_ENDPOINT", "store.example:9000")
     monkeypatch.setenv("MINIO_ACCESS_KEY", "evidence-key")
@@ -992,7 +1036,8 @@ _STORE_VARS = ("PRESERVE_ENDPOINT", "PRESERVE_ACCESS_KEY", "PRESERVE_SECRET_KEY"
                "PRESERVE_SECURE", "PRESERVE_BUCKET", "SAMPLE_ENDPOINT",
                "SAMPLE_ACCESS_KEY", "SAMPLE_SECRET_KEY", "SAMPLE_SECURE",
                "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY",
-               "MINIO_SECURE")
+               "MINIO_SECURE", "OBJECT_STORE_ENDPOINT", "OBJECT_STORE_ACCESS_KEY",
+               "OBJECT_STORE_SECRET_KEY", "OBJECT_STORE_SECURE")
 
 
 @pytest.mark.parametrize("env, expect", [
@@ -1033,7 +1078,7 @@ def test_the_preservation_store_is_addressed_as_the_store_addresses_it(
     store_cls = getattr(samples, "PreservationStorage", None)
     if store_cls is not None:
         store = store_cls()
-        client = store._client
+        client = store.store._client
         assert store.bucket == s.bucket
         assert client._base_url.host == s.endpoint[1]
         assert client._base_url.is_https is s.secure
@@ -1124,10 +1169,106 @@ def test_the_dev_minio_proves_write_once_on_both_buckets(monkeypatch):
 @needs_minio
 def test_the_dev_minio_names_a_bucket_that_does_not_exist():
     """A HEAD on a bucket that is not there, against the real store, so nothing is created."""
-    client = readiness._object_store_client(
-        os.environ["MINIO_ENDPOINT"], os.environ.get("MINIO_ACCESS_KEY", ""),
-        os.environ.get("MINIO_SECRET_KEY", ""),
-        os.environ.get("MINIO_SECURE", "false").lower() == "true")
+    from noctornal_api.objectstore.settings import resolve
+    client = readiness._probe_store(resolve("evidence"))
     ok, evidence = readiness.prove_write_once(client, "noctornal-g05-no-such-bucket")
     assert ok is False
     assert evidence.startswith("the bucket does not exist (NoSuchBucket)"), evidence
+
+
+# ---------------------------------------------------------------------------
+# The s3 profile: a refusal is read by state, after the permission control
+# ---------------------------------------------------------------------------
+
+#: What AWS answers for a DELETE of a COMPLIANCE-locked version: the same code and words as a policy denial.
+AWS_LOCKED = ("AccessDenied", "Access Denied")
+
+
+def test_the_s3_profile_runs_the_permission_control_before_crediting_a_refusal():
+    store = FakeStore(profile="s3", refusal=AWS_LOCKED)
+    ok, evidence = readiness.prove_write_once(store, "b", now=NOW)
+    assert ok is True, evidence
+    names = [c[0] for c in store.calls]
+    control = names.index("delete_key")
+    assert control < names.index("remove"), store.calls
+    # The marker the control added was removed by its version id, and nothing else is left behind.
+    assert store.markers == []
+    assert ("delete_key", readiness_control_key()) in store.calls
+
+
+def readiness_control_key():
+    from noctornal_api.objectstore.classify import DELETE_CONTROL_KEY
+    return DELETE_CONTROL_KEY
+
+
+def test_a_credential_that_cannot_remove_a_marker_is_denied_not_proven():
+    """The preservation account's shape: it may not delete a version, so its refusal of the canary says
+    nothing, and the proof is marked denied so the register moves to the second credential."""
+    store = FakeStore(profile="s3", refusal=AWS_LOCKED, delete_denied=True)
+    proof = readiness._prove(store, "b", now=NOW, deadline=1e18,
+                             clock=lambda: 0.0)
+    assert proof.ok is False and proof.denied is True, proof
+    assert "permission control" in proof.evidence
+    assert not [c for c in store.removes() if c[2] and c[2].startswith("v")], (
+        "the canary's DELETE must not be credited or even made before the control passes")
+
+
+def test_a_store_that_creates_no_marker_fails_closed():
+    store = FakeStore(profile="s3", refusal=AWS_LOCKED, makes_markers=False)
+    ok, evidence = readiness.prove_write_once(store, "b", now=NOW)
+    assert ok is False
+    assert "left no delete marker" in evidence and "fails closed" in evidence
+
+
+def test_an_aws_style_refusal_passes_on_the_s3_profile_and_fails_on_the_minio_profile_without_state():
+    """On the minio profile the words decide, and AWS's words are a policy denial's: not proven. On the s3
+    profile the version's retention is read back and an unexpired COMPLIANCE lock is the reason."""
+    ok, evidence = readiness.prove_write_once(
+        FakeStore(profile="minio", refusal=AWS_LOCKED), "b", now=NOW)
+    assert ok is False and "says nothing about write-once" in evidence, evidence
+    ok, evidence = readiness.prove_write_once(
+        FakeStore(profile="s3", refusal=AWS_LOCKED), "b", now=NOW)
+    assert ok is True and "refused (AccessDenied)" in evidence, evidence
+    # A store that answers AccessDenied with no lock on the version: a denial, never a lock.
+    store = FakeStore(profile="s3", refusal=AWS_LOCKED, locks_unrecorded=True,
+                      applies=None)
+    ok, evidence = readiness.prove_write_once(store, "b", now=NOW)
+    assert ok is False, evidence
+
+
+def test_the_s3_profile_proves_a_hold_by_state():
+    store = FakeStore(profile="s3", refusal=AWS_LOCKED, hold_refusal=AWS_LOCKED)
+    proof = readiness._prove_hold(store, "b", writer="PRESERVE_ACCESS_KEY",
+                                  deleters=[("PRESERVE_ACCESS_KEY", lambda: store)],
+                                  deadline=1e18, clock=lambda: 0.0)
+    assert proof.ok is True, proof.evidence
+    # The preservation account, which may not delete: passed over, then the second credential proves it.
+    own = store.account(delete_denied=True)
+    proof = readiness._prove_hold(own, "b", writer="PRESERVE_ACCESS_KEY",
+                                  deleters=[("PRESERVE_ACCESS_KEY", lambda: own),
+                                            ("MINIO_ACCESS_KEY", lambda: store)],
+                                  deadline=1e18, clock=lambda: 0.0)
+    assert proof.ok is True, proof.evidence
+    assert "PRESERVE_ACCESS_KEY may not delete a version" in proof.evidence
+
+
+def test_the_evidence_names_the_profile_and_the_host_not_the_keys(fake_store, monkeypatch):
+    monkeypatch.setenv("NOCTORNAL_OBJECT_STORE", "s3")
+    template, _ = fake_store
+    template["store"] = FakeStore(refusal=AWS_LOCKED)
+    check = readiness._evidence_bucket_object_lock(None)
+    assert check.ok is True, check
+    assert check.evidence.endswith("; store: s3 at store.example:9000"), check.evidence
+    assert "evidence-key" not in check.evidence and "evidence-secret" not in check.evidence
+
+
+def test_the_action_text_names_the_unconditional_lock_requirement_without_mc_for_the_s3_profile(
+        fake_store, monkeypatch):
+    template, _ = fake_store
+    template["store"] = FakeStore(enforces=False)
+    assert "mc mb --with-lock" in readiness._evidence_bucket_object_lock(None).action
+    monkeypatch.setenv("NOCTORNAL_OBJECT_STORE", "s3")
+    template["store"] = FakeStore(enforces=False)
+    action = readiness._evidence_bucket_object_lock(None).action
+    assert "mc " not in action, action
+    assert "object lock enabled at creation and versioning on, docs/22" in action

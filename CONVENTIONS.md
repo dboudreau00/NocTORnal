@@ -144,7 +144,8 @@ firehose into a half-built model produces a landfill.
 - A Canvas 2D sociogram with a hand-written ForceAtlas2 + Barnes-Hut
   layout in a Web Worker (decision 37)
 - Redis for the rate-limit meter (GCRA in one Lua script) and cache
-- MinIO (S3 + object lock) for evidence, raw captures and samples
+- An S3 store with object lock (MinIO bundled) for evidence, raw captures and samples,
+  reached through one seam (`objectstore/`, docs/22)
 - Mailpit as the development SMTP sink
 - Authorisation is the five-part gate in `security/access.py`, answered
   from `iam.*` in Postgres, no external authorisation engine. Row-level

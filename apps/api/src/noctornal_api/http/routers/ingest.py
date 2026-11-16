@@ -64,9 +64,9 @@ def _with_raw(conn: psycopg.Connection, **kw) -> IngestService:
     """An `IngestService` that can actually persist and re-read raw bytes.
 
     Built per request like every other service here. `RawBatchStorage`
-    raises when MinIO is not configured rather than degrading to a no-op:
-    an accept path that acknowledges bytes and drops them is worse than one
-    that refuses, because the partner is told it worked.
+    raises when no object store is configured rather than degrading to a
+    no-op: an accept path that acknowledges bytes and drops them is worse
+    than one that refuses, because the partner is told it worked.
     """
     try:
         storage = RawBatchStorage()
@@ -74,8 +74,9 @@ def _with_raw(conn: psycopg.Connection, **kw) -> IngestService:
         raise Problem(
             503, "Storage unavailable",
             "raw ingest storage is not configured, and the raw payload "
-            "must be persisted before parsing. Set MINIO_ENDPOINT / "
-            "MINIO_ACCESS_KEY / MINIO_SECRET_KEY and INGEST_BUCKET.") from exc
+            "must be persisted before parsing. Set OBJECT_STORE_ENDPOINT / "
+            "OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY (or their "
+            "MINIO_* names) and INGEST_BUCKET.") from exc
     return IngestService(conn, storage, **kw)
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])

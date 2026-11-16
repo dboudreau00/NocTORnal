@@ -730,8 +730,9 @@ def _purger(conn: psycopg.Connection) -> RetentionService:
             "the evidence object store is not configured, so a purge "
             "cannot destroy the exhibit bytes. Refusing rather than "
             "marking the rows purged and recording a destruction that did "
-            "not happen. Set MINIO_ENDPOINT / MINIO_ACCESS_KEY / "
-            "MINIO_SECRET_KEY / EVIDENCE_BUCKET.") from exc
+            "not happen. Set OBJECT_STORE_ENDPOINT / OBJECT_STORE_ACCESS_KEY / "
+            "OBJECT_STORE_SECRET_KEY (or their MINIO_* names) and "
+            "EVIDENCE_BUCKET.") from exc
     return RetentionService(conn, storage, sample_stores=_sample_stores)
 
 

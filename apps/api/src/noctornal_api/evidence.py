@@ -7,8 +7,8 @@ Prosecution-grade (decision 13, US + Canada). The load-bearing properties:
   cannot be rewritten by any role once lodged (0140), the exhibit names the object VERSION it was lodged as
   (0139) and is read at exactly that version, and verification also compares the hash-chained ACQUIRED custody
   row, so substituting an object and rewriting the row to match is detected.
-- Bytes land in a MinIO bucket with object-lock retention (WORM), so the exhibit cannot be altered or deleted
-  before its retention expires, the API process included.
+- Bytes land in an object store bucket with object-lock retention (WORM; the bundled store is MinIO), so the
+  exhibit cannot be altered or deleted before its retention expires, the API process included.
 - Every touch (ACQUIRED, VIEWED, EXPORTED, HASH_VERIFIED) is written to the append-only custody ledger AND to
   the hash-chained audit log, so "who looked at this exhibit, and when" is answerable and tamper-evident
   (docs/05: reads matter as much as writes).
@@ -21,13 +21,16 @@ Destruction goes through `EvidenceStorage.delete_all_versions()`, which `retenti
 keyless `delete()` is NOT a destruction path on this bucket: the bucket is versioned (forced by `--with-lock`),
 so a keyless delete inserts a delete marker and returns success with every byte still retrievable by version id.
 It is kept only so `tests/test_evidence_lock_live_pg.py` can keep demonstrating that. `is_retention_refusal()` is
-the ONE classifier both this module and `retention` use to tell a lock refusal from a plain failure.
+the ONE classifier both this module and `retention` use to tell a lock refusal from a plain failure; it lives
+with the object store seam (`objectstore/classify.py`) and is importable from here under its old name.
+
+The bucket is reached through the object store seam (`noctornal_api.objectstore`), so this module never
+imports the client library and reads a store's answer in the seam's own words.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
-import io
 import logging
 import os
 from dataclasses import dataclass
@@ -36,18 +39,27 @@ from uuid import UUID, uuid4
 
 import blake3 as _blake3
 import psycopg
-from minio import Minio
-from minio.commonconfig import COMPLIANCE
-from minio.error import S3Error
-from minio.retention import Retention
 
 from noctornal_api.egress import NEVER_EGRESS
+from noctornal_api.objectstore import errors as _store_errors
+from noctornal_api.objectstore.custody import restricted_refusal
+# The one classifier, and the versioned delete's result, kept importable from here.
+from noctornal_api.objectstore.classify import (
+    is_retention_refusal as is_retention_refusal,
+)
+from noctornal_api.objectstore.pools import bounded_http
+from noctornal_api.objectstore.settings import StoreConfigError, resolve
+from noctornal_api.objectstore.store import open_store
+from noctornal_api.objectstore.types import COMPLIANCE
+from noctornal_api.objectstore.versions import (
+    VersionedDeleteResult as VersionedDeleteResult,
+)
+from noctornal_api.objectstore.versions import delete_every_version
 # The Lab's ticket, reused for an exhibit (0068): its lifetime, and its
 # sampled counter for strings that match no ticket. Private to samples.py
 # and imported rather than copied, so the two tickets cannot drift apart.
 from noctornal_api.samples import (
     DOWNLOAD_TICKET_TTL_SECONDS,
-    _bounded_http,
     _SampledWarning,
 )
 
@@ -161,11 +173,8 @@ def store_did_not_answer(exc: BaseException) -> bool:
     """Whether a put failed because the store did not answer (a refused or
     timed-out connection, a reset, a name that did not resolve) and not
     because it answered with a refusal. The store's own refusals are
-    `S3Error`s and keep their codes."""
-    import urllib3
-
-    return (not isinstance(exc, S3Error)
-            and isinstance(exc, (urllib3.exceptions.HTTPError, OSError)))
+    `StoreRefusal`s and keep their codes (`objectstore.errors`)."""
+    return _store_errors.did_not_answer(exc)
 
 
 def store_never_reached(exc: BaseException) -> bool:
@@ -174,130 +183,31 @@ def store_never_reached(exc: BaseException) -> bool:
     Nothing was sent, so nothing was stored, and no object is waiting under a
     lock for a row to name it. A read that timed out, or a connection that
     was reset, is not this: the bytes may have landed."""
-    import socket
-
-    import urllib3
-
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if isinstance(cur, (urllib3.exceptions.NewConnectionError,
-                            urllib3.exceptions.ConnectTimeoutError,
-                            ConnectionRefusedError, socket.gaierror)):
-            return True
-        # MaxRetryError keeps what it gave up on in `reason`.
-        cur = getattr(cur, "reason", None) or cur.__cause__ or cur.__context__
-    return False
-
-
-@dataclass(frozen=True)
-class VersionedDeleteResult:
-    """What a versioned delete actually did, per key.
-
-    Three counts rather than a boolean, because "the bytes are gone" and "the store refused" are different facts
-    that a caller has to record differently, and merging them into one success is how a keyless `delete()`
-    reports destructions it has not performed.
-
-    `versions_seen` includes delete markers; `versions_removed` never does. Removing a marker is tidying up after
-    a keyless delete, not destruction, and counting it as one would report a destruction that did not happen.
-    """
-    key: str
-    versions_seen: int
-    versions_removed: int
-    versions_locked: int
-
-    @property
-    def fully_destroyed(self) -> bool:
-        """Every real version is gone. FALSE while anything is locked —
-        this is the value a tombstone may be written from."""
-        return self.versions_locked == 0
-
-    @property
-    def outcome(self) -> str:
-        """A one-word summary for logs and tests. NOT the tombstone vocabulary.
-
-        The tombstone words (the CHECK on `core.purge_tombstone.storage_outcome`, migration 0032) are DELETED /
-        LOCKED_UNTIL_RETENTION / FAILED / NOT_APPLICABLE, and two of the three values here, DESTROYED and
-        NOTHING_TO_DELETE, would be refused by that CHECK. Only LOCKED_UNTIL_RETENTION coincides. So
-        `retention._purge_evidence` maps the three COUNTS above onto its own vocabulary and never writes this
-        string anywhere; `tests/test_evidence_versioned_delete.py` reads both sides and the migration to keep it
-        that way.
-        """
-        if self.versions_locked:
-            return "LOCKED_UNTIL_RETENTION"
-        return "DESTROYED" if self.versions_removed else "NOTHING_TO_DELETE"
-
-
-#: Codes that mean "the object is under retention" and nothing else. The
-#: S3 vendors do not agree on one, so there are two.
-_RETENTION_REFUSAL_CODES = frozenset({"RetentionPeriodNotMet", "MethodNotAllowed"})
-#: Codes that mean "there is NO lock configuration", whatever the message
-#: says — and MinIO's message for the first one contains "Object Lock".
-_NOT_A_LOCK_CODES = frozenset({
-    "ObjectLockConfigurationNotFoundError", "NoSuchObjectLockConfiguration",
-})
-#: What a store says when a retention lock is the reason. MinIO:
-#: "Object is WORM protected and cannot be overwritten".
-_LOCK_WORDS = ("worm", "retention", "object lock")
-
-
-def is_retention_refusal(exc: Exception) -> bool:
-    """True only when the store said the object is under a retention lock.
-
-    LOCKED_UNTIL_RETENTION is a specific claim ("the bytes will become deletable when a retention expires") and
-    it is written into an append-only tombstone. So this errs towards FAILED: a failure an operator investigates
-    is recoverable; a permissions refusal recorded as a lawful lock is a false record nobody revisits.
-
-    A bare `AccessDenied` or `InvalidRequest` is not enough, since a read-only key or a bucket policy denying
-    `s3:DeleteObject` would be recorded as a retention lock, and `ObjectLockConfigurationNotFoundError` means the
-    bucket has NO lock configuration. `delete_all_versions` and retention share this one function so they cannot
-    drift: `delete_all_versions` uses it to decide locked-versus-raise, and retention uses it to classify what a
-    store without version enumeration raises.
-
-    `AccessDenied` and `InvalidRequest` therefore need the MESSAGE to say worm / retention / object lock. The
-    message is read, not `str(exc)`: minio's `S3Error.__str__` quotes the resource and object name, and an
-    exhibit whose key contains the word "retention" must not turn a policy denial into a lock. Message-only
-    refusals from clients that carry no code (the governance test stubs raise RuntimeError("object is under a
-    retention lock")) still count.
-
-    MinIO refuses a COMPLIANCE-locked version with code `InvalidRequest` and message "Object is WORM protected
-    and cannot be overwritten", not `AccessDenied`. `tests/test_evidence_lock_live_pg.py` re-measures that on
-    every run so a vocabulary drift shows up here rather than in a tombstone.
-    """
-    code = getattr(exc, "code", None)
-    if code in _NOT_A_LOCK_CODES:
-        return False
-    if code in _RETENTION_REFUSAL_CODES:
-        return True
-    message = getattr(exc, "message", None)
-    text = str(message if message else exc).lower()
-    return any(word in text for word in _LOCK_WORDS)
+    return _store_errors.never_reached(exc)
 
 
 class EvidenceStorage:
-    """Thin MinIO wrapper. Config from the environment: MINIO_ENDPOINT
-    (host:port), MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_SECURE
-    ('true'/'false'), EVIDENCE_BUCKET (default 'noctornal-evidence')."""
+    """The evidence bucket, through the object store seam. Settings from the environment through the one
+    reader (`objectstore.settings`, role `evidence`): OBJECT_STORE_ENDPOINT (host:port),
+    OBJECT_STORE_ACCESS_KEY, OBJECT_STORE_SECRET_KEY and OBJECT_STORE_SECURE ('true'/'false'), or their
+    MINIO_* aliases, and EVIDENCE_BUCKET (default 'noctornal-evidence'). `store` is the `ObjectStore`."""
 
     def __init__(self) -> None:
-        endpoint = os.environ.get("MINIO_ENDPOINT")
-        access = os.environ.get("MINIO_ACCESS_KEY")
-        secret = os.environ.get("MINIO_SECRET_KEY")
-        if not (endpoint and access and secret):
+        try:
+            settings = resolve("evidence")
+        except StoreConfigError as exc:
+            raise EvidenceError(str(exc)) from exc
+        if not settings.configured:
             raise EvidenceError(
-                "MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY must be set"
-            )
-        secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
-        self._bucket = os.environ.get("EVIDENCE_BUCKET", "noctornal-evidence")
+                "OBJECT_STORE_ENDPOINT / OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY "
+                "(or MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY) must be set")
+        self._bucket = settings.bucket
         # A pool that gives up in seconds. minio-py's own waits five minutes on a connect and retries five times,
         # so a store that was down would hold an upload for about 18 seconds and a store that swallowed packets
         # for far longer. Writes are never resent after a server answer or a read timeout: an exhibit's object is
         # locked and versioned, and a resent put whose answer was lost writes a second version nothing can delete
-        # (`samples._bounded_http`).
-        self._client = Minio(endpoint, access_key=access, secret_key=secret,
-                             secure=secure,
-                             http_client=_bounded_http(resend_writes=False))
+        # (`objectstore.pools.bounded_http`).
+        self.store = open_store(settings, http=bounded_http(resend_writes=False))
 
     @property
     def bucket(self) -> str:
@@ -305,18 +215,16 @@ class EvidenceStorage:
 
     def put(self, key: str, data: bytes, *, media_type: str,
             retain_until: datetime) -> str | None:
-        # COMPLIANCE (not GOVERNANCE) object lock: not even a root MinIO
+        # COMPLIANCE (not GOVERNANCE) object lock: not even a root
         # principal can delete or overwrite the exhibit before retain_until,
         # so the WORM guarantee holds against the API's own credentials.
         # (GOVERNANCE is bypassable by anyone with BypassGovernanceRetention.)
-        result = self._client.put_object(
-            self._bucket, key, io.BytesIO(data), length=len(data),
-            content_type=media_type,
-            retention=Retention(COMPLIANCE, retain_until),
-        )
+        # The store only ever writes COMPLIANCE (`objectstore.store`).
+        result = self.store.put(self._bucket, key, data, media_type=media_type,
+                                retain_until=retain_until)
         # The version the store kept, so reads ask for exactly it: a locked key still accepts a newer version, and
         # the latest is whatever was written last.
-        return getattr(result, "version_id", None)
+        return result.version_id
 
     def delete(self, key: str) -> None:
         """Keyless delete. On this bucket it destroys NOTHING: it is not a destruction path and production code
@@ -336,71 +244,35 @@ class EvidenceStorage:
         happens, so a change in MinIO's semantics shows up as a test failure rather than a silent change in what
         a tombstone means.
         """
-        self._client.remove_object(self._bucket, key)
+        self.store.delete_key(self._bucket, key)
 
     # The destruction path: `retention._purge_evidence` calls this, and nothing else does.
-    def delete_all_versions(self, key: str) -> "VersionedDeleteResult":
-        """Remove every version of `key`, reporting refusals as refusals.
+    def delete_all_versions(self, key: str) -> VersionedDeleteResult:
+        """Remove every version of `key`, reporting refusals as refusals (`objectstore.versions`).
 
-        Enumerate every version under the key, delete each by `version_id`, and separate the two outcomes that
-        `delete()` merges into silence: bytes actually gone, versus the store refusing because a retention has
-        not expired. A refusal is RETURNED as a count, not raised, because the caller
-        (`retention._purge_evidence`) has to record it against the tombstone rather than abort a batch; anything
-        that is neither a deletion nor a recognised lock refusal raises, because an unrecognised storage failure
-        is not an outcome to write down as a lock. `is_retention_refusal` is the one classifier for that, shared
-        with retention.
+        Every version under the key is deleted by its `version_id`, separating the two outcomes that `delete()`
+        merges into silence: bytes actually gone, versus the store refusing because a retention has not expired.
+        A refusal is RETURNED as a count, not raised, because the caller (`retention._purge_evidence`) has to
+        record it against the tombstone rather than abort a batch; anything that is neither a deletion nor a
+        recognised lock refusal raises, because an unrecognised storage failure is not an outcome to write down
+        as a lock. `is_retention_refusal` is the one classifier for that, shared with retention.
 
         A purge under an unexpired COMPLIANCE lock records `LOCKED_UNTIL_RETENTION`, leaves the row unpurged and
         due, and warns that the store refused; the sweep after expiry finishes the job. On the shipped
         configuration (`infra/docker-compose.yml` sets a bucket DEFAULT of `GOVERNANCE 365d` and `put()` applies
         COMPLIANCE for `DEFAULT_RETENTION` per object) a purge therefore refuses for the object's whole
-        retention. This method deliberately does NOT send the GOVERNANCE-bypass header: acquiring that power
-        silently is not a decision to make in a helper, and COMPLIANCE ignores it anyway.
+        retention. No GOVERNANCE-bypass header is ever sent: acquiring that power silently is not a decision to
+        make in a helper, and COMPLIANCE ignores it anyway.
 
         `tests/test_evidence_lock_live_pg.py` measures both branches against a live MinIO (a COMPLIANCE-locked
         object reports a locked version with its bytes intact; a versioned object with no lock is removed, every
         version) and FAILS, not skips, unless the bucket's object lock and versioning are on, because against a
         bucket where locking is off every assertion about a refusal passes for the wrong reason.
         """
-        removed, locked = 0, 0
-        # `include_version=True` is the whole fix. Without it the listing
-        # hides exactly the versions that survive a keyless delete.
-        versions = [
-            v for v in self._client.list_objects(
-                self._bucket, prefix=key, include_version=True)
-            if v.object_name == key
-        ]
-        for v in versions:
-            if v.is_delete_marker:
-                # A marker left by an earlier keyless delete. Removing it
-                # is not destruction and must not be counted as any.
-                self._client.remove_object(
-                    self._bucket, key, version_id=v.version_id)
-                continue
-            try:
-                self._client.remove_object(
-                    self._bucket, key, version_id=v.version_id)
-                removed += 1
-            except S3Error as exc:
-                # MinIO answers a locked version with InvalidRequest and "Object is WORM protected and cannot be
-                # overwritten". The shared classifier decides; anything it does not recognise as a refusal
-                # raises, because treating an unknown failure as either a lock or a successful delete is the
-                # failure this method exists to end.
-                if is_retention_refusal(exc):
-                    locked += 1
-                else:
-                    raise
-        return VersionedDeleteResult(
-            key=key, versions_seen=len(versions),
-            versions_removed=removed, versions_locked=locked)
+        return delete_every_version(self.store, self._bucket, key)
 
     def get(self, key: str, version_id: str | None = None) -> bytes:
-        resp = self._client.get_object(self._bucket, key, version_id=version_id)
-        try:
-            return resp.read()
-        finally:
-            resp.close()
-            resp.release_conn()
+        return self.store.get(self._bucket, key, version_id=version_id)
 
     def extend_lock(self, key: str, until: datetime) -> "LockExtension":
         """Lengthen the COMPLIANCE lock on every stored version of `key` so
@@ -427,30 +299,25 @@ class EvidenceStorage:
         if until.microsecond:
             until = until.replace(microsecond=0) + timedelta(seconds=1)
         versions = [
-            v for v in self._client.list_objects(
-                self._bucket, prefix=key, include_version=True)
-            if v.object_name == key and not v.is_delete_marker
+            v for v in self.store.list_versions(self._bucket, key)
+            if v.key == key and not v.is_delete_marker
         ]
         if not versions:
             raise EvidenceError(f"no stored version of {key} to lock")
         ends: list[datetime | None] = []
         extended = 0
         for v in versions:
-            held = self._client.get_object_retention(
-                self._bucket, key, version_id=v.version_id)
-            held_until = held.retain_until_date if held is not None else None
+            held = self.store.get_retention(self._bucket, key, v.version_id)
+            held_until = held.until if held is not None else None
             ends.append(held_until)
             if (held is not None and held.mode == COMPLIANCE
-                    and held_until >= until):
+                    and held_until is not None and held_until >= until):
                 continue
             target = until if held_until is None else max(until, held_until)
-            self._client.set_object_retention(
-                self._bucket, key, Retention(COMPLIANCE, target),
-                version_id=v.version_id)
-            now_held = self._client.get_object_retention(
-                self._bucket, key, version_id=v.version_id)
+            self.store.set_compliance_retention(self._bucket, key, v.version_id, target)
+            now_held = self.store.get_retention(self._bucket, key, v.version_id)
             if (now_held is None or now_held.mode != COMPLIANCE
-                    or now_held.retain_until_date < until):
+                    or now_held.until is None or now_held.until < until):
                 raise EvidenceError(
                     f"the store accepted a lock on {key} until "
                     f"{until.isoformat()} and does not hold it")
@@ -653,6 +520,11 @@ class EvidenceService:
                            acquisition_method=acquisition_method,
                            media_type=media_type)
         self._refuse_below_case_floor(case_id, classification)
+        # AMBER_STRICT and RED never leave the boundary (invariant 8): a store operated outside the deployment
+        # takes neither until counsel's written decision is recorded (`objectstore.custody`, docs/22).
+        refused = restricted_refusal("evidence", classification)
+        if refused:
+            raise EvidenceError(refused)
         # One spelling per set, so the per-labels unique key (0141) treats a
         # set as a set.
         compartments = sorted(set(compartments or []))
@@ -774,6 +646,13 @@ class EvidenceService:
                               "lock_ends_at": retain.isoformat(), **provenance}
                     if version:
                         detail["storage_version_id"] = version
+                    # Which store family and which store took the bytes (docs/22): a disclosure can say what
+                    # held an exhibit and under which rule its refusals were read. On new rows only; a row
+                    # already written is never touched, and no key is named.
+                    store = getattr(self._s, "store", None)
+                    if store is not None:
+                        detail["store_profile"] = store.profile
+                        detail["store_host"] = store.host
                     self._custody(evidence_id, "ACQUIRED", acquired_by,
                                   detail=detail, hash_verified=True)
                     self._audit("EVIDENCE_ACQUIRED", acquired_by, evidence_id, case_id,

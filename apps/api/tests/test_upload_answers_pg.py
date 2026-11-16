@@ -211,9 +211,8 @@ def test_a_refusal_from_the_store_is_not_a_store_that_did_not_answer(
         conn, store, client):
     """The store answered. Its refusal keeps its code and is the server's own
     fault to report as it was: a 503 asking for a retry would be wrong."""
-    from minio.error import S3Error
-    refusal = S3Error.__new__(S3Error)
-    Exception.__init__(refusal, "AccessDenied")
+    from noctornal_api.objectstore.errors import refusal as store_refusal
+    refusal = store_refusal("AccessDenied", "Access Denied.")
     _boss, case_id, headers = _world(conn)
     store.on_put = _down(refusal)
     r = _upload(client, headers, case_id, _body())
@@ -234,8 +233,18 @@ def test_the_two_classifiers_agree_on_every_shape_of_failure():
     import urllib3
 
     from noctornal_api.evidence import store_did_not_answer, store_never_reached
+    from noctornal_api.objectstore.errors import (
+        StoreBadAnswer,
+        StoreUnreachable,
+        refusal,
+    )
     refused = urllib3.exceptions.NewConnectionError(None, "refused")
     shapes = [
+        # What the store seam hands over, the shapes the real storage class raises.
+        (StoreUnreachable("refused", never_reached=True), True, True),
+        (StoreUnreachable("read timed out", never_reached=False), True, False),
+        (refusal("AccessDenied", "Access Denied."), False, False),
+        (StoreBadAnswer("502 from a proxy", status=502), False, False),
         # exc, did not answer, never reached the store
         (refused, True, True),
         (urllib3.exceptions.MaxRetryError(None, "/k", reason=refused), True, True),
@@ -268,13 +277,16 @@ def test_a_chain_that_loops_does_not_hang_the_classifier():
 
 def test_the_evidence_store_is_given_a_pool_that_gives_up_in_seconds(monkeypatch):
     from noctornal_api.evidence import EvidenceStorage
-    from noctornal_api.samples import STORE_CONNECT_TIMEOUT_S, STORE_READ_TIMEOUT_S
+    from noctornal_api.objectstore.pools import (
+        STORE_CONNECT_TIMEOUT_S,
+        STORE_READ_TIMEOUT_S,
+    )
 
     monkeypatch.setenv("MINIO_ENDPOINT", "127.0.0.1:9")
     monkeypatch.setenv("MINIO_ACCESS_KEY", "g79-access-not-real")
     monkeypatch.setenv("MINIO_SECRET_KEY", "g79-secret-not-real")
     monkeypatch.setenv("MINIO_SECURE", "false")
-    pool = EvidenceStorage()._client._http
+    pool = EvidenceStorage().store._client._http
 
     kw = pool.connection_pool_kw
     assert kw["timeout"].connect_timeout == STORE_CONNECT_TIMEOUT_S == 10.0
@@ -294,7 +306,7 @@ def test_an_upload_to_a_store_that_never_answers_is_a_503_in_seconds(
     bucket; the read timeout is shortened so the test is quick."""
     import time
 
-    from noctornal_api import samples
+    from noctornal_api.objectstore import pools
 
     server = socket.socket()
     server.bind(("127.0.0.1", 0))
@@ -316,7 +328,7 @@ def test_an_upload_to_a_store_that_never_answers_is_a_503_in_seconds(
         monkeypatch.setenv("MINIO_ACCESS_KEY", "g79-access-not-real")
         monkeypatch.setenv("MINIO_SECRET_KEY", "g79-secret-not-real")
         monkeypatch.setenv("MINIO_SECURE", "false")
-        monkeypatch.setattr(samples, "STORE_READ_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(pools, "STORE_READ_TIMEOUT_S", 0.5)
         _boss, case_id, headers = _world(conn)
 
         started = time.monotonic()

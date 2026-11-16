@@ -18,7 +18,7 @@ The last tests assert that `retention._purge_evidence` is the one production cal
 `delete_all_versions`, and a second test reads both modules and migration 0032 together: the purge maps the
 three COUNTS and never `outcome`, whose words the tombstone's CHECK would refuse.
 
-These tests use a STUB client. They must never create a real COMPLIANCE-locked object: that retention
+These tests use a STUB store. They must never create a real COMPLIANCE-locked object: that retention
 cannot be shortened, lifted or overridden by any credential, so a test that locks something for a year has
 added a year of storage to the bucket, permanently. The live measurement is
 `tests/test_evidence_lock_live_pg.py`, with locks of seconds; the refusal shape the stub here raises is what
@@ -33,17 +33,18 @@ import re
 from pathlib import Path
 
 import pytest
-from minio.error import S3Error
+
+from noctornal_api.objectstore.errors import StoreRefusal, refusal
+from noctornal_api.objectstore.types import VersionInfo
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
 MIGRATIONS = Path(__file__).resolve().parents[3] / "db" / "migrations" / "versions"
 
 
-class _Version:
-    def __init__(self, name, version_id, is_delete_marker=False):
-        self.object_name = name
-        self.version_id = version_id
-        self.is_delete_marker = is_delete_marker
+def _Version(name, version_id, is_delete_marker=False):
+    return VersionInfo(key=name, version_id=version_id,
+                       is_delete_marker=is_delete_marker, is_latest=False,
+                       last_modified=None)
 
 
 #: What MinIO says for a COMPLIANCE-locked version, measured against the live stack
@@ -52,18 +53,19 @@ class _Version:
 WORM = ("InvalidRequest", "Object is WORM protected and cannot be overwritten")
 
 
-def _s3_error(code: str, message: str | None = None) -> S3Error:
-    return S3Error(code=code, message=message or code, resource="r",
-                   request_id="1", host_id="1", response=None)
+def _s3_error(code: str, message: str | None = None) -> StoreRefusal:
+    return refusal(code, message or code)
 
 
 class _StubClient:
-    """Refuses whichever version ids are named as locked.
+    """An `ObjectStore` that refuses whichever version ids are named as locked.
 
     `refusal` is either a bare code (the message is then the code, which
     is what a client with nothing to say looks like) or a (code, message)
     pair for the shapes whose message is what makes them a lock.
     """
+
+    profile = "minio"
 
     def __init__(self, versions, locked_ids=(), refusal=WORM):
         self._versions = versions
@@ -71,14 +73,10 @@ class _StubClient:
         self._refusal = refusal if isinstance(refusal, tuple) else (refusal, None)
         self.removed: list[str] = []
 
-    def list_objects(self, bucket, prefix=None, include_version=False,
-                     recursive=False):
-        assert include_version, (
-            "the listing did not ask for versions, which hides exactly the "
-            "versions that survive a keyless delete")
-        return list(self._versions)
+    def list_versions(self, bucket, prefix):
+        return iter(list(self._versions))
 
-    def remove_object(self, bucket, key, version_id=None):
+    def delete_version(self, bucket, key, version_id):
         assert version_id is not None, (
             "deleted by key rather than by version -- that inserts a delete "
             "marker and destroys nothing")
@@ -91,7 +89,7 @@ def _storage(stub):
     from noctornal_api.evidence import EvidenceStorage
 
     st = EvidenceStorage.__new__(EvidenceStorage)   # no network in __init__
-    st._client = stub
+    st.store = stub
     st._bucket = "b"
     return st
 
@@ -147,7 +145,7 @@ def test_an_unrecognised_storage_failure_raises_rather_than_being_recorded():
     silence standing in for "the bytes are gone"."""
     stub = _StubClient([_Version("k", "v1")], locked_ids=["v1"],
                        refusal="InternalError")
-    with pytest.raises(S3Error):
+    with pytest.raises(StoreRefusal):
         _storage(stub).delete_all_versions("k")
 
 
@@ -168,7 +166,7 @@ def test_a_bare_access_denied_is_not_a_lock_and_raises():
     FAILED, named per key."""
     stub = _StubClient([_Version("k", "v1")], locked_ids=["v1"],
                        refusal=("AccessDenied", "Access Denied."))
-    with pytest.raises(S3Error) as info:
+    with pytest.raises(StoreRefusal) as info:
         _storage(stub).delete_all_versions("k")
     assert info.value.code == "AccessDenied"
     assert stub.removed == []
@@ -209,6 +207,33 @@ def test_delete_all_versions_is_called_by_retention_and_nothing_else():
         f"delete_all_versions is called from {callers or 'nowhere'}; the "
         f"purge in retention.py must be its one caller")
     assert len(callers["retention.py"]) == 1, callers
+
+
+#: The stores whose own delete is built on the shared versioned deletes, and the reason each may call one.
+VERSIONED_DELETE_CALLERS = {
+    ("evidence.py", "delete_every_version"):
+        "EvidenceStorage.delete_all_versions, the purge's destruction path",
+    ("rawstore.py", "delete_working_object"):
+        "DocumentRawStorage.delete, the purge of a collected page's markup",
+    ("samples.py", "delete_working_object"):
+        "SampleStorage.delete, a sample's working copy",
+}
+
+
+def test_delete_every_version_is_called_by_the_stores_and_nothing_else():
+    """The shared functions behind `delete_all_versions` and the working-bucket deletes destroy bytes too, so
+    their callers are named here: a new one is a destruction path nobody reviewed."""
+    callers = set()
+    for path in SRC.rglob("*.py"):
+        if path.parent.name == "objectstore":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            name = (getattr(node.func, "id", getattr(node.func, "attr", None))
+                    if isinstance(node, ast.Call) else None)
+            if name in ("delete_every_version", "delete_working_object"):
+                callers.add((path.name, name))
+    assert callers == set(VERSIONED_DELETE_CALLERS), callers
 
 
 def test_retention_maps_the_counts_and_never_the_outcome_string():

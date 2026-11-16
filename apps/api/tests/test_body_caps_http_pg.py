@@ -307,8 +307,8 @@ def _multipart_of_total(total: int, *, head: bytes = b"",
 def _evidence_objects(case_id: str) -> list[str]:
     from noctornal_api.evidence import EvidenceStorage
     storage = EvidenceStorage()
-    return [o.object_name for o in storage._client.list_objects(
-        storage.bucket, prefix=f"{case_id}/")]
+    return [v.key for v in storage.store.list_versions(storage.bucket, f"{case_id}/")
+            if v.is_latest and not v.is_delete_marker]
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +499,7 @@ def test_an_ingest_body_at_the_keys_cap_is_accepted(conn, app):
     finally:
         digest = hashlib.sha256(body).hexdigest()
         # The raw bucket has no lock; leave nothing behind.
-        storage._client.remove_object(storage.bucket, f"ingest/{digest[:2]}/{digest}")
+        storage.store.delete_key(storage.bucket, f"ingest/{digest[:2]}/{digest}")
 
 
 def test_the_ingest_docstring_and_the_schema_agree_on_the_default_cap(conn):

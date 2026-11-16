@@ -543,19 +543,23 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             "credentials and its case notifications in clear text (docs/07: "
             "never plaintext); it exists for a development Mailpit.")
 
-    # The exact expression the clients write inline: default "false", no strip, equality against
-    # "true". `evidence.py`, `rawstore.py` and `readiness.py` write it for MINIO_SECURE;
-    # `samples.py` writes the same for SAMPLE_SECURE, so the two are asked separately. Strict on
-    # purpose: `MINIO_SECURE=" true"` builds a PLAINTEXT client in every one of those readers, so a
-    # more forgiving test here would pass exactly the deployments that talk to the object store in
-    # the clear.
+    # The exact expression the one store settings reader (`objectstore.settings`) applies: default
+    # "false", no strip, equality against "true". The evidence, raw and readiness clients read it from
+    # OBJECT_STORE_SECURE, then its alias MINIO_SECURE; the sample client from SAMPLE_SECURE alone, so
+    # the two are asked separately. Strict on purpose: `MINIO_SECURE=" true"` builds a PLAINTEXT
+    # client in every one of those readers, so a more forgiving test here would pass exactly the
+    # deployments that talk to the object store in the clear.
     #
     # Neither message says the credentials cross the wire: under SigV4 the secret never does. What
     # an interceptor gets is the bytes, the access key id and a signature it can replay while the
     # request is in date, which is enough to refuse on and is true.
-    if env.get("MINIO_SECURE", "false").lower() != "true":
+    from noctornal_api.objectstore import settings as store_settings
+
+    secure_name, secure_raw = store_settings.first_set(env, store_settings.secure_chain("evidence"))
+    if (secure_raw or "false").lower() != "true":
+        named = secure_name if secure_raw else "OBJECT_STORE_SECURE (or MINIO_SECURE)"
         problems.append(
-            'MINIO_SECURE is not "true", so the evidence client speaks plain '
+            f'{named} is not "true", so the evidence client speaks plain '
             "HTTP: every exhibit's bytes cross the network in clear text, and "
             "each request carries a signature anything on the path can lift and "
             "replay against the evidence bucket until it expires.")
@@ -622,8 +626,8 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
     # `SAMPLE_ENDPOINT` falls back the same way and is deliberately NOT refused: one object store
     # serving two buckets is legitimate, and docs/11 asks for separate credentials, not a separate
     # host.
-    for name, evidence_twin in (("SAMPLE_ACCESS_KEY", "MINIO_ACCESS_KEY"),
-                                ("SAMPLE_SECRET_KEY", "MINIO_SECRET_KEY")):
+    for name, evidence_twin in (("SAMPLE_ACCESS_KEY", "OBJECT_STORE_ACCESS_KEY or MINIO_ACCESS_KEY"),
+                                ("SAMPLE_SECRET_KEY", "OBJECT_STORE_SECRET_KEY or MINIO_SECRET_KEY")):
         if not env.get(name, "").strip():
             problems.append(
                 f"{name} is not set, so SampleStorage silently falls back to "
@@ -631,6 +635,11 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
                 f"evidence bucket's credentials (docs/11 requires the sample "
                 f"bucket to have its own), and nothing at runtime reports the "
                 f"fallback.")
+
+    # The object store's profile and the neutral names (docs/22): a profile that is neither minio nor s3
+    # chooses no rule for a refused delete, and a neutral name and its MINIO_* alias set to different values
+    # name two stores while only one is used. Both are refused here, naming variables and never a value.
+    problems.extend(store_settings.problems(env))
 
     # docs/08, "Exhibit size policy". Every accepted evidence byte is written once under a
     # COMPLIANCE lock no credential can shorten, so the cap is a decision about a permanent

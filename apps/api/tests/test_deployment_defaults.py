@@ -94,12 +94,16 @@ def test_a_secrets_file_that_names_no_bucket_gets_the_buckets_the_code_looks_for
 
 def test_the_defaults_are_the_names_the_code_falls_back_to():
     """One reader per fact: the three strings the script defaults to are the
-    ones the three stores default to."""
-    root = ROOT / "apps" / "api" / "src" / "noctornal_api"
-    for env, default, module in (("EVIDENCE_BUCKET", "noctornal-evidence", "evidence.py"),
-                                 ("INGEST_BUCKET", "noctornal-raw", "rawstore.py"),
-                                 ("SAMPLE_BUCKET", "noctornal-samples", "samples.py")):
-        assert f'os.environ.get("{env}", "{default}")' in _text(root / module), env
+    ones the three stores default to, which the store settings reader holds
+    (`objectstore.settings`)."""
+    from noctornal_api.objectstore import settings
+
+    for env, default, role in (("EVIDENCE_BUCKET", "noctornal-evidence", "evidence"),
+                               ("INGEST_BUCKET", "noctornal-raw", "ingest"),
+                               ("SAMPLE_BUCKET", "noctornal-samples", "sample")):
+        assert settings.BUCKET_ENV[role] == env, role
+        assert settings.BUCKET_DEFAULT[role] == default, role
+        assert settings.bucket_for(role, {}) == default, role
         assert f"${{{env}:-{default}}}" in _script("minio-init", "entrypoint").replace("$$", "$"), env
 
 

@@ -160,6 +160,7 @@ _GLOBAL_UNICAST_V6 = ipaddress.ip_network("2000::/3")
 RESERVED_SERVICE_NAMES = frozenset({
     "postgres", "redis", "minio", "minio-init", "migrate", "api",
     "sample-origin", "cron", "caddy", "egress-proxy", "mailpit", "localhost",
+    "object-store-init",
 })
 
 #: The production compose networks `noctornal`, `edge`, `frontend` (Caddy, api and

@@ -37,6 +37,9 @@ from pathlib import Path
 import psycopg
 
 from noctornal_api.config import EVIDENCE_CAP_ENV
+from noctornal_api.objectstore.settings import StoreConfigError, StoreSettings
+from noctornal_api.objectstore.settings import bucket_for as store_bucket_for
+from noctornal_api.objectstore.settings import resolve as resolve_store
 from noctornal_api.wording import agree, count_of
 
 log = logging.getLogger("noctornal.readiness")
@@ -135,7 +138,7 @@ def _disposition_evidence() -> str:
     """The sentence the L1 evidence carries about what a rejection does, so a green L1 cannot hide a build that
     destroys rejected samples."""
     disposition, raw = rejected_sample_disposition()
-    bucket = preservation_store_settings().bucket
+    bucket = store_bucket_for("preserve")
     if disposition == "preserve":
         how = "the default" if not raw.strip() else f"{DISPOSITION_ENV}={raw.strip()}"
         return (f"A rejected sample is PRESERVED into {bucket} under a legal "
@@ -1364,6 +1367,52 @@ def _denied(what: str, exc, tail: str = "") -> _Proof:
         denied=True, step=f"may not {what} ({exc.code})")
 
 
+def _lock_words(client, exc) -> bool:
+    """Whether a refused PUT reads as a lock problem rather than a policy denial. The minio profile's rule;
+    the s3 profile never reads a store's words, so there an `AccessDenied` is the policy's."""
+    from noctornal_api.objectstore.classify import is_retention_refusal
+    from noctornal_api.objectstore.settings import S3
+
+    return getattr(client, "profile", None) != S3 and is_retention_refusal(exc)
+
+
+def _permission_control(client, bucket: str, what: str) -> _Proof | None:
+    """On the s3 profile, the control that must pass before a refused DELETE is credited to a lock
+    (`objectstore.classify.delete_control`); None when it passed, or on the minio profile, which reads the
+    refusal's own code and words as it always has. A denied control is a denied proof, so the preservation
+    check moves to its second credential exactly as for a denied DELETE."""
+    from noctornal_api.objectstore.classify import (
+        CONTROL_ALLOWED,
+        CONTROL_DENIED,
+        CONTROL_NO_MARKER,
+        DELETE_CONTROL_KEY,
+        delete_control,
+    )
+    from noctornal_api.objectstore.settings import S3
+
+    if getattr(client, "profile", None) != S3:
+        return None
+    control = delete_control(client, bucket)
+    if control.outcome == CONTROL_ALLOWED:
+        return None
+    if control.outcome == CONTROL_DENIED:
+        return _denied(control.step, control.refusal,
+                       f" (the permission control, {DELETE_CONTROL_KEY}), so a "
+                       f"refused DELETE of {what} could not be told from a policy "
+                       f"denial")
+    if control.outcome == CONTROL_NO_MARKER:
+        return _Proof(False, (
+            f"a DELETE naming no version of {DELETE_CONTROL_KEY}, a key nothing "
+            f"holds, left no delete marker, so the permission control the s3 "
+            f"profile needs cannot run and a refused DELETE of {what} cannot be "
+            f"told from a policy denial; this fails closed (docs/22)"))
+    exc = control.refusal
+    return _Proof(False, (
+        f"the permission control ({DELETE_CONTROL_KEY}) could not {control.step} "
+        f"({exc.code}: {exc.message}), so a refused DELETE of {what} cannot be "
+        f"told from a policy denial (docs/22)"))
+
+
 def _not_compliance(exc: _NotCompliance) -> _Proof:
     until = f" until {_stamp(exc.until)}" if exc.until else ""
     return _Proof(False, (
@@ -1385,13 +1434,16 @@ def _out_of_time(exc: _OutOfTime) -> _Proof:
 
 
 class _Budgeted:
-    """A store client whose every call first checks one shared deadline."""
+    """A store whose every call first checks one shared deadline. A plain attribute (the store's
+    `profile`, its `host`) is passed through as it is."""
 
     def __init__(self, client, deadline: float, clock: Callable[[], float]):
         self._client, self._deadline, self._clock = client, deadline, clock
 
     def __getattr__(self, name: str):
         method = getattr(self._client, name)
+        if not callable(method):
+            return method
 
         def call(*args, **kwargs):
             if self._clock() >= self._deadline:
@@ -1400,21 +1452,19 @@ class _Budgeted:
         return call
 
 
-def _object_store_client(endpoint: str, access: str, secret: str,
-                         secure: bool):
-    """A client that gives up quickly. Module level so a test can swap
-    in a fake store without a network. The client's default pool waits
-    five minutes and retries five times; a readiness probe against a hung
-    store would hold the report for longer than the operator waits."""
+def _probe_store(settings: StoreSettings):
+    """The `ObjectStore` the settings name, on a pool that gives up quickly. Module level so a test can swap
+    in a fake store without a network. The client's default pool waits five minutes and retries five times;
+    a readiness probe against a hung store would hold the report for longer than the operator waits."""
     import urllib3
-    from minio import Minio
+
+    from noctornal_api.objectstore.store import open_store
 
     http = urllib3.PoolManager(
         timeout=urllib3.Timeout(connect=_PROBE_CONNECT_S, read=_PROBE_READ_S),
         retries=urllib3.Retry(total=0),
     )
-    return Minio(endpoint, access_key=access, secret_key=secret,
-                 secure=secure, http_client=http)
+    return open_store(settings, http=http)
 
 
 def _utc(moment: datetime) -> datetime:
@@ -1432,21 +1482,21 @@ def _live_canary(client, bucket: str, now: datetime):
     `CANARY_RETENTION`. The inference picks WHICH version to test, never the verdict: if the store did not lock
     it, the delete below succeeds and the check fails.
     """
-    from minio.commonconfig import COMPLIANCE
-    from minio.error import S3Error
+    from noctornal_api.objectstore.types import COMPLIANCE
+    from noctornal_api.objectstore.errors import StoreRefusal
 
     try:
-        stat = client.stat_object(bucket, WORM_CANARY_KEY)
-    except S3Error as exc:
+        stat = client.head(bucket, WORM_CANARY_KEY)
+    except StoreRefusal as exc:
         if exc.code in _ABSENT:
             return None
         raise
     if not stat.version_id:
         return None
     try:
-        retention = client.get_object_retention(
+        retention = client.get_retention(
             bucket, WORM_CANARY_KEY, version_id=stat.version_id)
-    except S3Error as exc:
+    except StoreRefusal as exc:
         written = getattr(stat, "last_modified", None)
         if exc.code != _DENIED or written is None:
             # The PUT below meets the same store and reports what it says
@@ -1461,8 +1511,8 @@ def _live_canary(client, bucket: str, now: datetime):
             # This probe is the key's only writer and always asks for COMPLIANCE, so another mode is the store's
             # answer, not a reason to write another canary.
             raise _NotCompliance(stat.version_id, retention.mode,
-                                 _utc(retention.retain_until_date))
-        until, how = _utc(retention.retain_until_date), "read"
+                                 _utc(retention.until))
+        until, how = _utc(retention.until), "read"
     if until <= now + CANARY_MARGIN:
         return None
     return stat.version_id, until, how
@@ -1478,20 +1528,18 @@ def _tidy_canaries(client, bucket: str, *, keep: str,
     Best effort: a failure here is reported beside a proof that stands.
 
     Any failure means any: the probe's client retries nothing and reads for five seconds at most, so a reset
-    connection, a read timeout or a proxy's HTML answer (urllib3 errors, minio's InvalidResponseError and
-    ServerError, none an S3Error) is ordinary here.
+    connection, a read timeout or a proxy's HTML answer (the seam's StoreUnreachable and StoreBadAnswer,
+    neither a StoreRefusal) is ordinary here.
     """
-    from minio.error import S3Error
-
-    from noctornal_api.evidence import is_retention_refusal
+    from noctornal_api.objectstore.classify import version_delete_is_locked
+    from noctornal_api.objectstore.errors import StoreRefusal
 
     removed = attempts = 0
     try:
-        for v in client.list_objects(bucket, prefix=WORM_CANARY_KEY,
-                                     include_version=True):
+        for v in client.list_versions(bucket, WORM_CANARY_KEY):
             if attempts >= _TIDY_LIMIT:
                 break
-            if v.object_name != WORM_CANARY_KEY or v.version_id == keep:
+            if v.key != WORM_CANARY_KEY or v.version_id == keep:
                 continue
             written = getattr(v, "last_modified", None)
             if not v.is_delete_marker and (
@@ -1499,15 +1547,16 @@ def _tidy_canaries(client, bucket: str, *, keep: str,
                 continue
             attempts += 1
             try:
-                client.remove_object(bucket, WORM_CANARY_KEY,
+                client.delete_version(bucket, WORM_CANARY_KEY,
                                      version_id=v.version_id)
-            except S3Error as exc:
-                if is_retention_refusal(exc):
+            except StoreRefusal as exc:
+                if version_delete_is_locked(client, bucket, WORM_CANARY_KEY,
+                                            v.version_id, exc):
                     continue
                 return removed, exc.code
             if not v.is_delete_marker:
                 removed += 1
-    except S3Error as exc:
+    except StoreRefusal as exc:
         return removed, exc.code
     except _OutOfTime:
         return removed, "the probe's time ran out"
@@ -1526,19 +1575,18 @@ def _prove(client, bucket: str, *, now: datetime, deadline: float,
 
 
 def _prove_steps(client, bucket: str, now: datetime) -> _Proof:
-    import io
-
-    from minio.commonconfig import COMPLIANCE
-    from minio.error import S3Error
-    from minio.retention import Retention
-
-    from noctornal_api.evidence import is_retention_refusal
+    from noctornal_api.objectstore.classify import (
+        LOCKED,
+        classify_version_delete_refusal,
+    )
+    from noctornal_api.objectstore.errors import StoreRefusal
+    from noctornal_api.objectstore.types import COMPLIANCE
 
     try:
         live = _live_canary(client, bucket, now)
     except _NotCompliance as exc:
         return _not_compliance(exc)
-    except S3Error as exc:
+    except StoreRefusal as exc:
         if exc.code == "NoSuchBucket":
             return _MISSING
         if exc.code == _DENIED:
@@ -1552,14 +1600,13 @@ def _prove_steps(client, bucket: str, now: datetime) -> _Proof:
     if live is None:
         requested = now + CANARY_RETENTION
         try:
-            result = client.put_object(
-                bucket, WORM_CANARY_KEY, io.BytesIO(_CANARY_BODY),
-                len(_CANARY_BODY), content_type="text/plain",
-                retention=Retention(COMPLIANCE, requested))
-        except S3Error as exc:
+            result = client.put(
+                bucket, WORM_CANARY_KEY, _CANARY_BODY, media_type="text/plain",
+                retain_until=requested)
+        except StoreRefusal as exc:
             if exc.code == "NoSuchBucket":
                 return _MISSING
-            if exc.code == _DENIED and not is_retention_refusal(exc):
+            if exc.code == _DENIED and not _lock_words(client, exc):
                 return _denied("write an object under a retention "
                                "(s3:PutObjectRetention)", exc)
             return _Proof(False, (
@@ -1579,9 +1626,9 @@ def _prove_steps(client, bucket: str, now: datetime) -> _Proof:
         # saying the mode is requested and not confirmed. Any other answer is the store declining to name the
         # lock, which fails.
         try:
-            applied = client.get_object_retention(
+            applied = client.get_retention(
                 bucket, WORM_CANARY_KEY, version_id=version)
-        except S3Error as exc:
+        except StoreRefusal as exc:
             if exc.code != _DENIED:
                 return _Proof(False, (
                     f"the store took canary {WORM_CANARY_KEY} version "
@@ -1596,13 +1643,13 @@ def _prove_steps(client, bucket: str, now: datetime) -> _Proof:
         else:
             if applied is not None and applied.mode != COMPLIANCE:
                 return _not_compliance(_NotCompliance(
-                    version, applied.mode, _utc(applied.retain_until_date)))
+                    version, applied.mode, _utc(applied.until)))
             if applied is None:
                 unrecorded = True
                 lock = f"COMPLIANCE requested until {_stamp(requested)}"
                 how = "written by this probe; the store reports no retention on it"
             else:
-                lock = f"COMPLIANCE until {_stamp(_utc(applied.retain_until_date))}"
+                lock = f"COMPLIANCE until {_stamp(_utc(applied.until))}"
                 how = "written by this probe and read back"
     else:
         version, until, how = live
@@ -1615,10 +1662,14 @@ def _prove_steps(client, bucket: str, now: datetime) -> _Proof:
                    "the store recorded is not confirmed")
 
     what = f"canary {WORM_CANARY_KEY} version {version} ({lock}, {how})"
+    control = _permission_control(client, bucket, what)
+    if control is not None:
+        return control
     try:
-        client.remove_object(bucket, WORM_CANARY_KEY, version_id=version)
-    except S3Error as exc:
-        if not is_retention_refusal(exc):
+        client.delete_version(bucket, WORM_CANARY_KEY, version_id=version)
+    except StoreRefusal as exc:
+        if classify_version_delete_refusal(client, bucket, WORM_CANARY_KEY,
+                                           version, exc, now) != LOCKED:
             if exc.code == _DENIED:
                 return _denied("delete a version", exc,
                                f", so a DELETE of {what} proved nothing")
@@ -1633,8 +1684,8 @@ def _prove_steps(client, bucket: str, now: datetime) -> _Proof:
             f"retention and does not enforce it, so no object in this bucket "
             f"is write-once"))
     try:
-        client.stat_object(bucket, WORM_CANARY_KEY, version_id=version)
-    except S3Error as exc:
+        client.head(bucket, WORM_CANARY_KEY, version_id=version)
+    except StoreRefusal as exc:
         if exc.code in _ABSENT:
             return _Proof(False, (
                 f"a DELETE of {what} was answered with a retention refusal "
@@ -1667,12 +1718,13 @@ def prove_write_once(client, bucket: str, *, now: datetime | None = None,
                      ) -> tuple[bool, str]:
     """Try to delete the canary's locked version; `(ok, evidence)`.
 
-    `ok` is True only when the store REFUSED a DELETE naming the version id, the refusal is a retention refusal
-    by `evidence.is_retention_refusal` (the classifier the purge uses, so a policy denial counts here as little
-    as on a tombstone), the version is still readable afterwards, and the store has not reported a mode other
-    than COMPLIANCE on it. Every other answer, a missing bucket included, is False with a sentence saying
+    `ok` is True only when the store REFUSED a DELETE naming the version id, the refusal is a lock by the
+    profile's rule (`objectstore.classify`, the rule the purge uses, so a policy denial counts here as little
+    as on a tombstone: on the minio profile the refusal's code and words, on the s3 profile the version's state
+    read back after the permission control passed), the version is still readable afterwards, and the store has
+    not reported a mode other than COMPLIANCE on it. Every other answer, a missing bucket included, is False with a sentence saying
     which. A store that cannot be reached raises, and the register reports it through `_guarded`. `client` is
-    anything shaped like a minio client.
+    an `ObjectStore` (`objectstore.store`).
     """
     proof = _prove(client, bucket, now=now or datetime.now(timezone.utc),
                    deadline=clock() + _PROBE_BUDGET_S, clock=clock)
@@ -1705,13 +1757,13 @@ def _prove_hold(client, bucket: str, *, writer: str,
 def _prove_hold_steps(client, bucket: str, writer: str,
                       deleters: list[tuple[str, Callable[[], object]]]
                       ) -> _Proof:
-    import io
+    from noctornal_api.objectstore.classify import (
+        LOCKED,
+        classify_version_delete_refusal,
+    )
+    from noctornal_api.objectstore.errors import StoreRefusal
 
-    from minio.error import S3Error
-
-    from noctornal_api.evidence import is_retention_refusal
-
-    def refused(what: str, exc: S3Error) -> _Proof:
+    def refused(what: str, exc: StoreRefusal) -> _Proof:
         # The account rejected samples are written with may not do what
         # `preserve()` does, so every rejection is refused rather than
         # preserved. Proving the hold with another credential would hide
@@ -1724,9 +1776,9 @@ def _prove_hold_steps(client, bucket: str, writer: str,
 
     def held(version: str) -> bool | _Proof:
         try:
-            return client.is_object_legal_hold_enabled(
+            return client.legal_hold_is_on(
                 bucket, HOLD_CANARY_KEY, version_id=version)
-        except S3Error as exc:
+        except StoreRefusal as exc:
             if exc.code == _DENIED:
                 return refused("read a legal hold (s3:GetObjectLegalHold)", exc)
             return _Proof(False, (
@@ -1736,8 +1788,8 @@ def _prove_hold_steps(client, bucket: str, writer: str,
 
     version = None
     try:
-        stat = client.stat_object(bucket, HOLD_CANARY_KEY)
-    except S3Error as exc:
+        stat = client.head(bucket, HOLD_CANARY_KEY)
+    except StoreRefusal as exc:
         if exc.code == "NoSuchBucket":
             return _MISSING
         if exc.code == _DENIED:
@@ -1756,14 +1808,13 @@ def _prove_hold_steps(client, bucket: str, writer: str,
     if version is None:
         # Absent, or its hold no longer reads ON: a fresh held version, and the old one stays where it is.
         try:
-            result = client.put_object(
-                bucket, HOLD_CANARY_KEY, io.BytesIO(_HOLD_CANARY_BODY),
-                len(_HOLD_CANARY_BODY), content_type="text/plain",
+            result = client.put(
+                bucket, HOLD_CANARY_KEY, _HOLD_CANARY_BODY, media_type="text/plain",
                 legal_hold=True)
-        except S3Error as exc:
+        except StoreRefusal as exc:
             if exc.code == "NoSuchBucket":
                 return _MISSING
-            if exc.code == _DENIED and not is_retention_refusal(exc):
+            if exc.code == _DENIED and not _lock_words(client, exc):
                 return refused("write an object under a legal hold "
                                "(s3:PutObjectLegalHold)", exc)
             return _Proof(False, (
@@ -1792,10 +1843,18 @@ def _prove_hold_steps(client, bucket: str, writer: str,
             f"and no retention, {how})")
     passed_over: list[str] = []
     for label, make in deleters:
+        deleter = make()
+        control = _permission_control(deleter, bucket, what)
+        if control is not None:
+            if control.denied:
+                passed_over.append(f"{label} {control.step}")
+                continue
+            return control
         try:
-            make().remove_object(bucket, HOLD_CANARY_KEY, version_id=version)
-        except S3Error as exc:
-            if is_retention_refusal(exc):
+            deleter.delete_version(bucket, HOLD_CANARY_KEY, version_id=version)
+        except StoreRefusal as exc:
+            if classify_version_delete_refusal(deleter, bucket, HOLD_CANARY_KEY,
+                                               version, exc) == LOCKED:
                 refusal, by = exc.code, label
                 break
             if exc.code == _DENIED:
@@ -1818,8 +1877,8 @@ def _prove_hold_steps(client, bucket: str, writer: str,
             f"this process holds addresses that store, so the hold cannot be "
             f"proven from here"), denied=True, step="may not delete a version")
     try:
-        client.stat_object(bucket, HOLD_CANARY_KEY, version_id=version)
-    except S3Error as exc:
+        client.head(bucket, HOLD_CANARY_KEY, version_id=version)
+    except StoreRefusal as exc:
         if exc.code in _ABSENT:
             return _Proof(False, (
                 f"a DELETE of {what} was answered with a lock refusal "
@@ -1835,26 +1894,12 @@ def _prove_hold_steps(client, bucket: str, writer: str,
         f"({refusal}) and the version is still there{around}"))
 
 
-def _first_env(*names: str) -> tuple[str, str]:
-    """`(name, value)` of the first variable that is set and not empty, or
-    `("", "")`. The rule `samples.PreservationStorage` applies to its
-    fallbacks, kept identical so the probe reaches the store rejections are
-    written to. The name travels into the evidence so a fallback says so."""
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return name, value
-    return "", ""
-
-
 @dataclass(frozen=True)
 class PreservationSettings:
-    """Where rejected samples are preserved, resolved exactly as `samples.PreservationStorage.__init__`
-    resolves it.
-
-    The rule is copied here because that class builds its client in its constructor with the library's
-    five-minute timeouts, so this module cannot ask it; `test_readiness_worm_probe` holds the copy to the class.
-    Each field is `(variable, value)` so the evidence can name a fallback.
+    """Where rejected samples are preserved, resolved as `samples.PreservationStorage.__init__` resolves it:
+    both read the one store settings reader (`objectstore.settings`, role `preserve`), and
+    `test_readiness_worm_probe` still holds the two to each other. Each field is `(variable, value)` so the
+    evidence can name a fallback.
     """
     endpoint: tuple[str, str]
     access: tuple[str, str]
@@ -1864,16 +1909,10 @@ class PreservationSettings:
 
 
 def preservation_store_settings() -> PreservationSettings:
-    secure = _first_env("PRESERVE_SECURE", "SAMPLE_SECURE")[1] or "false"
+    s = resolve_store("preserve")
     return PreservationSettings(
-        endpoint=_first_env("PRESERVE_ENDPOINT", "SAMPLE_ENDPOINT",
-                            "MINIO_ENDPOINT"),
-        access=_first_env("PRESERVE_ACCESS_KEY", "SAMPLE_ACCESS_KEY",
-                          "MINIO_ACCESS_KEY"),
-        secret=_first_env("PRESERVE_SECRET_KEY", "SAMPLE_SECRET_KEY",
-                          "MINIO_SECRET_KEY"),
-        secure=secure.lower() == "true",
-        bucket=os.environ.get(PRESERVE_BUCKET_ENV) or PRESERVE_BUCKET_DEFAULT)
+        endpoint=s.named("endpoint"), access=s.named("access_key"),
+        secret=s.named("secret_key"), secure=s.secure, bucket=s.bucket)
 
 
 def _config_gap(name: str, bucket: str, endpoint: tuple[str, str],
@@ -1895,30 +1934,58 @@ def _config_gap(name: str, bucket: str, endpoint: tuple[str, str],
     return None
 
 
+def _with_lock(profile: str) -> str:
+    """How an operator creates a bucket with object lock, in the words of the store's profile: the MinIO
+    command on the bundled store, the S3 requirement and the operator's page on any other."""
+    if profile == "minio":
+        return "(`mc mb --with-lock`)"
+    return "(object lock enabled at creation and versioning on, docs/22)"
+
+
+def _store_named(check: Check, role: str) -> Check:
+    """`check` with the store's profile and host after its evidence ("store: s3 at host:port"), so a reader
+    knows which rule read the refusal and which store answered. Never a key."""
+    try:
+        s = resolve_store(role)
+    except StoreConfigError:
+        return check
+    if not s.configured:
+        return check
+    return replace(check, evidence=f"{check.evidence}; store: {s.profile} at {s.host}")
+
+
 def _evidence_bucket_object_lock(conn: psycopg.Connection) -> Check:
+    """`_evidence_lock_check`, naming the store's profile and host."""
+    return _store_named(_evidence_lock_check(conn), "evidence")
+
+
+def _evidence_lock_check(conn: psycopg.Connection) -> Check:
     """The WORM guarantee `EvidenceStorage.put` relies on, proven by the
     store refusing to destroy a locked version (see the block above), read
     through the same variables `EvidenceStorage` constructs from."""
     name = "evidence_bucket_object_lock"
-    bucket = os.environ.get("EVIDENCE_BUCKET", "noctornal-evidence")
-    endpoint = _first_env("MINIO_ENDPOINT")
-    access, secret = _first_env("MINIO_ACCESS_KEY"), _first_env("MINIO_SECRET_KEY")
+    try:
+        s = resolve_store("evidence")
+    except StoreConfigError as exc:
+        return Check(name, False, str(exc), "set it to one of the values it takes and restart")
+    bucket = s.bucket
+    endpoint, access, secret = s.named("endpoint"), s.named("access_key"), s.named("secret_key")
     action = (
-        "set MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY, and create "
-        "the evidence bucket WITH object lock (`mc mb --with-lock`) on a store "
+        "set OBJECT_STORE_ENDPOINT / OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY "
+        "(or their MINIO_* names), and create the evidence bucket WITH object lock "
+        f"{_with_lock(s.profile)} on a store "
         "that enforces it; lock cannot be switched on for a bucket that "
         "already exists, so an unlocked bucket has to be replaced, and a store "
         "that accepts a lock and deletes anyway has to be replaced (docs/16 "
-        "C2, docs/17 F24)")
+        "C2, docs/17 F24, docs/22)")
     gap = _config_gap(name, bucket, endpoint, access, secret,
-                      ("MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"),
+                      tuple(f"OBJECT_STORE_{w} (or MINIO_{w})"
+                            for w in ("ENDPOINT", "ACCESS_KEY", "SECRET_KEY")),
                       action)
     if gap:
         return gap
     where = f"bucket {bucket} at {endpoint[1].strip()}"
-    client = _object_store_client(
-        endpoint[1].strip(), access[1], secret[1],
-        os.environ.get("MINIO_SECURE", "false").lower() == "true")
+    client = _probe_store(s)
     proof = _prove(client, bucket, now=datetime.now(timezone.utc),
                    deadline=time.monotonic() + _PROBE_BUDGET_S,
                    clock=time.monotonic)
@@ -1931,6 +1998,11 @@ def _evidence_bucket_object_lock(conn: psycopg.Connection) -> Check:
 
 
 def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
+    """`_preservation_lock_check`, naming the store's profile and host."""
+    return _store_named(_preservation_lock_check(conn), "preserve")
+
+
+def _preservation_lock_check(conn: psycopg.Connection) -> Check:
     """docs/17 F2: rejected samples are preserved under a legal hold in their own bucket, and a hold on a store
     that does not enforce it preserves nothing. Two proofs, and both must pass: the evidence bucket's COMPLIANCE
     proof, and a LEGAL HOLD proof (`_prove_hold`), because the hold is what a preserved sample carries.
@@ -1979,13 +2051,18 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
             f"destroyed and nothing is preserved. That is the deployment's "
             f"declared choice (docs/16 L1), which this register records and "
             f"cannot verify")
-    s = preservation_store_settings()
+    try:
+        own = resolve_store("preserve")
+        ev = resolve_store("evidence")
+    except StoreConfigError as exc:
+        return Check(name, False, str(exc), "set it to one of the values it takes and restart")
+    s = PreservationSettings(
+        endpoint=own.named("endpoint"), access=own.named("access_key"),
+        secret=own.named("secret_key"), secure=own.secure, bucket=own.bucket)
     gap = _config_gap(
         name, s.bucket, s.endpoint, s.access, s.secret,
-        tuple(f"{p} (or {q}, {m})" for p, q, m in (
-            ("PRESERVE_ENDPOINT", "SAMPLE_ENDPOINT", "MINIO_ENDPOINT"),
-            ("PRESERVE_ACCESS_KEY", "SAMPLE_ACCESS_KEY", "MINIO_ACCESS_KEY"),
-            ("PRESERVE_SECRET_KEY", "SAMPLE_SECRET_KEY", "MINIO_SECRET_KEY"))),
+        tuple(f"PRESERVE_{w} (or SAMPLE_{w}, OBJECT_STORE_{w}, MINIO_{w})"
+              for w in ("ENDPOINT", "ACCESS_KEY", "SECRET_KEY")),
         action)
     if gap:
         return gap
@@ -2003,27 +2080,21 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
         "set and read a hold, as infra/production/compose.yml mints it "
         "(docs/17 F2)")
     elsewhere = (
-        "run the preservation bucket on the MINIO_ENDPOINT store, whose "
+        f"run the preservation bucket on the {ev.sources['endpoint']} store, whose "
         "credentials the proof can use, or prove its object lock out of "
         "band and record how (docs/16 C2)")
-    own_client = _object_store_client(s.endpoint[1], s.access[1], s.secret[1],
-                                      s.secure)
-    m_endpoint = os.environ.get("MINIO_ENDPOINT", "").strip()
-    m_access = os.environ.get("MINIO_ACCESS_KEY", "")
-    m_secret = os.environ.get("MINIO_SECRET_KEY", "")
-    #: The one other credential that may make a DELETE here: MINIO_* on the
-    #: SAME endpoint, and only when it is a different account. Built once,
-    #: and only if a proof needs it.
-    other = bool(m_endpoint and m_access and m_secret
-                 and m_endpoint == s.endpoint[1].strip()
-                 and m_access != s.access[1])
+    own_client = _probe_store(own)
+    m_label = ev.sources["access_key"]
+    #: The one other credential that may make a DELETE here: the evidence store's (OBJECT_STORE_* or MINIO_*)
+    #: on the SAME endpoint, and only when it is a different account. Built once, and only if a proof needs it.
+    other = bool(ev.configured
+                 and ev.endpoint.strip() == s.endpoint[1].strip()
+                 and ev.access_key != s.access[1])
     built: list = []
 
     def minio_client():
         if not built:
-            built.append(_object_store_client(
-                m_endpoint, m_access, m_secret,
-                os.environ.get("MINIO_SECURE", "false").lower() == "true"))
+            built.append(_probe_store(ev))
         return built[0]
 
     proof = _prove(own_client, s.bucket, now=now, deadline=deadline,
@@ -2046,7 +2117,7 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
         second = _prove(minio_client(), s.bucket, now=now, deadline=deadline,
                         clock=time.monotonic)
         retention = (f"{own}, as its policy intends, so the proof was made "
-                     f"with MINIO_ACCESS_KEY on the same store: "
+                     f"with {m_label} on the same store: "
                      f"{second.evidence}")
         if not second.ok:
             return Check(name, False, f"{where}: {retention}{note}", action)
@@ -2055,7 +2126,7 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
 
     deleters = [(s.access[0], lambda: own_client)]
     if other:
-        deleters.append(("MINIO_ACCESS_KEY", minio_client))
+        deleters.append((m_label, minio_client))
     hold = _prove_hold(own_client, s.bucket, writer=s.access[0],
                        deleters=deleters, deadline=deadline,
                        clock=time.monotonic)
@@ -2066,6 +2137,50 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
         f"{where}: {hold.evidence}. The COMPLIANCE retention proof on this "
         f"bucket passed, and a retention says nothing about a hold{note}",
         reach if hold.cannot_preserve else elsewhere if hold.denied else action)
+
+
+def _object_store_custody_declared(conn: psycopg.Connection) -> Check:
+    """Whether a store somebody else operates holds this deployment's bytes, and if so, whether it is declared.
+
+    Exhibits and samples are plaintext to whoever runs the store, so a store outside the deployment is a
+    custody decision before it is a setting (docs/16 C2, docs/22). An endpoint is read for what it names and
+    never resolved (`objectstore.custody`): a single-label name, `localhost`, or a loopback, private or
+    link-local address is inside; anything else is off-host and fails here until NOCTORNAL_OBJECT_STORE_CUSTODY
+    names who operates it, the jurisdiction and the legal-process contact. The evidence also says whether
+    counsel's declaration lets it hold AMBER_STRICT and RED, which the upload refuses on such a store until it
+    does (invariant 8). Not blocking: the refusal that matters is at the upload, and a declaration is text this
+    register records and cannot verify.
+    """
+    from noctornal_api.objectstore.custody import COUNSEL_ENV, CUSTODY_ENV, custody_of
+    from noctornal_api.objectstore.settings import configured
+
+    name = "object_store_custody_declared"
+    roles = [r for r in ("evidence", "sample", "preserve") if configured(r)]
+    if not roles:
+        return Check(name, True, "no object store is configured, so no store holds anything")
+    held = [custody_of(r) for r in roles]
+    outside = [h for h in held if not h.inside]
+    hosts = ", ".join(dict.fromkeys(h.host for h in held))
+    if not outside:
+        return Check(name, True, f"every object store is inside the deployment ({hosts}), read "
+                                 f"from the configured names")
+    where = ", ".join(dict.fromkeys(h.host for h in outside))
+    restricted = (f"counsel's declaration is recorded ({COUNSEL_ENV}), so it may hold AMBER_STRICT "
+                  f"and RED" if outside[0].counsel else
+                  "AMBER_STRICT and RED uploads are refused on it until counsel's declaration "
+                  f"is recorded in {COUNSEL_ENV}")
+    custody = outside[0].custody
+    if not custody:
+        return Check(
+            name, False,
+            f"a store operated outside the deployment holds this deployment's bytes ({where}), and "
+            f"{CUSTODY_ENV} does not say who operates it, under which jurisdiction, or who answers "
+            f"legal process for it; {restricted}",
+            f"set {CUSTODY_ENV} to the operator, the jurisdiction and the legal-process contact, "
+            f"after the custody questions in docs/22 are answered, and restart")
+    return Check(name, True,
+                 f"a store operated outside the deployment holds this deployment's bytes ({where}), "
+                 f"declared as: {custody[:200]}; {restricted}")
 
 
 def _evidence_size_cap_declared(conn: psycopg.Connection) -> Check:
@@ -2867,7 +2982,7 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
         kind = lab_static.limits_kind()
     leaked = [k for k in out.get("environment_keys") or []
               if k.startswith(("NOCTORNAL_", "DATABASE", "MINIO_", "SAMPLE_",
-                               "PRESERVE_", "REDIS", "SMTP_"))]
+                               "PRESERVE_", "OBJECT_STORE_", "REDIS", "SMTP_"))]
     if leaked:
         return Check(name, False,
                      f"the analysis child was started with "
@@ -3850,12 +3965,17 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "internal certificates with scripts/internal_tls.py (infra/production/README.md, "
      "step 3)"),
     ("evidence_bucket_object_lock", _evidence_bucket_object_lock,
-     "fix MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY or start the "
-     "object store; the evidence bucket must be created with object lock"),
+     "fix OBJECT_STORE_ENDPOINT / OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY "
+     "(or their MINIO_* names) or start the object store; the evidence bucket "
+     "must be created with object lock"),
     ("preservation_bucket_object_lock", _preservation_bucket_object_lock,
      "fix PRESERVE_ENDPOINT / PRESERVE_ACCESS_KEY / PRESERVE_SECRET_KEY (or "
-     "their SAMPLE_* / MINIO_* fallbacks) or start the object store; the "
+     "their SAMPLE_* / OBJECT_STORE_* / MINIO_* fallbacks) or start the object store; the "
      "preservation bucket must be created with object lock"),
+    # Not blocking: the upload refuses AMBER_STRICT and RED on an undeclared off-host store (docs/22).
+    ("object_store_custody_declared", _object_store_custody_declared,
+     "declare who operates the object store in NOCTORNAL_OBJECT_STORE_CUSTODY (docs/22, "
+     "docs/16 C2) and restart"),
     ("evidence_size_cap_declared", _evidence_size_cap_declared,
      f"declare {EVIDENCE_CAP_ENV} (bytes, or 512MiB) and restart the API; "
      "every accepted exhibit byte is locked under COMPLIANCE for the "

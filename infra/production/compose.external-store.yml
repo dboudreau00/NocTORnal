@@ -1,0 +1,102 @@
+# The production stack on an S3 store other than the bundled MinIO (docs/22). An override, read after the
+# base file:
+#
+#   sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
+#     -f infra/production/compose.external-store.yml up -d
+#
+# Every command for this deployment names both files, `ps`, `logs` and `down` included, or compose
+# reads the base file alone and starts the bundled MinIO again.
+#
+# What it changes, and nothing else:
+#
+#   * `minio` and `minio-init` move to the profile `bundled-store`, which nothing activates, so they are
+#     neither created nor started. Their volume stays where it is.
+#   * `object-store-init` takes minio-init's place: a one-shot of the application image that runs
+#     `scripts/object_store_provision.py` (a check, read only) and exits 1 on a missing bucket or a lock
+#     that is absent where it is required or present where it is not. `api` and `sample-origin` wait for
+#     it to succeed, exactly as they waited for minio-init, so a store that is not ready keeps the API
+#     down rather than lodging an exhibit in an unlocked bucket. It makes nothing: make the five buckets
+#     with `object_store_provision.py --apply` and an administrator's credential first (docs/22).
+#   * `api` and `sample-origin` lose their dependency on minio-init (`!reset`, Compose 2.24 or later, the
+#     stated minimum) and keep every other one; a test holds the override to that.
+#
+# Point secrets.env at the store with NOCTORNAL_OBJECT_STORE and the OBJECT_STORE_* names (or the MINIO_*
+# ones, which stay accepted), and give the samples and preservation buckets their own accounts with the
+# SAMPLE_* and PRESERVE_* variables and the policies in docs/22. The CA your store's certificate chains to
+# goes into ./tls/public.crt, which every application process adds to its trusted roots at start.
+#
+# The route: the `noctornal` network is internal, so from inside the stack a store is reachable only when
+# it is attached to that network (a Ceph RGW container in this project, say). A store on another host has
+# no route here, and adding one is the later step docs/17 F41 records, not a setting.
+#
+# The bundled MinIO's backups (`mc mirror`, infra/production/README.md) do not apply: back up with the
+# store's own replication. A mirror keeps bytes and not version ids on any store (docs/17).
+
+services:
+  minio:
+    profiles: [bundled-store]
+
+  minio-init:
+    profiles: [bundled-store]
+
+  object-store-init:
+    image: noctornal-api:0.9.5
+    pull_policy: never
+    # The administrator's credential, when the check should read with one (OBJECT_STORE_ADMIN_ACCESS_KEY,
+    # OBJECT_STORE_ADMIN_SECRET_KEY). Optional, git- and docker-ignored like every *.env file.
+    env_file:
+      - secrets.env
+      - path: object-store-admin.env
+        required: false
+    networks: [noctornal]
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # The public half of ./tls only matters here; the bundle is built in /tmp as every application
+    # process builds it.
+    volumes:
+      - ./tls:/certs:ro
+    healthcheck:
+      disable: true
+    environment:
+      # No database credential: the check speaks to the store and nothing else.
+      POSTGRES_PASSWORD: ""
+      NOCTORNAL_MIGRATION_DATABASE_URL: ""
+      DATABASE_URL: ""
+      NOCTORNAL_WORKER_DATABASE_URL: ""
+      NOCTORNAL_APP_DB_PASSWORD: ""
+      # Nor a key, a pepper or a mail or cache secret: env_file cannot filter secrets.env, so each is
+      # emptied here, and the check keeps only the store's own settings.
+      NOCTORNAL_TOTP_KEK: ""
+      NOCTORNAL_INGEST_PEPPER: ""
+      REDIS_PASSWORD: ""
+      REDIS_URL: ""
+      SMTP_PASSWORD: ""
+      MINIO_ROOT_USER: ""
+      MINIO_ROOT_PASSWORD: ""
+      NOCTORNAL_ENV: production
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        exec python scripts/object_store_provision.py
+
+  api:
+    depends_on:
+      minio-init: !reset null
+      object-store-init:
+        condition: service_completed_successfully
+
+  sample-origin:
+    depends_on:
+      minio-init: !reset null
+      object-store-init:
+        condition: service_completed_successfully

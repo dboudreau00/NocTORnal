@@ -61,6 +61,8 @@ EXPECTED_CHECKS = (
     "evidence_bucket_object_lock",
     # docs/17: the store rejected samples are preserved in.
     "preservation_bucket_object_lock",
+    # docs/22: a store somebody else operates is declared before it holds anything restricted.
+    "object_store_custody_declared",
     "evidence_size_cap_declared",
     "migrations_at_head",
     "app_db_role_not_owner",

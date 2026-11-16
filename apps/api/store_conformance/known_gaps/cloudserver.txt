@@ -1,0 +1,2 @@
+# Zenko CloudServer 8.8.32 (S3BACKEND=mem, profile s3), measured 2026-11-15: no known gap. A line here names a
+# check in checks.py, then a hash and the reason with its upstream link, and runs as a strict xfail.

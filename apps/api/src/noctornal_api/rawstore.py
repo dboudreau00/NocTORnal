@@ -25,14 +25,32 @@ a second index.
 from __future__ import annotations
 
 import hashlib
-import io
 import os
 
-from minio import Minio
+from noctornal_api.objectstore import errors as store_errors
+from noctornal_api.objectstore.settings import StoreConfigError, configured, resolve
+from noctornal_api.objectstore.store import ObjectStore, open_store
+from noctornal_api.objectstore.versions import BytesKept, delete_working_object
+
+#: The variables a working bucket's store is named by, for the sentences that say what to set.
+STORE_VARIABLES = ("OBJECT_STORE_ENDPOINT / OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY "
+                   "(or MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY)")
 
 
 class RawStoreError(Exception):
     pass
+
+
+def _working_store(role: str, purpose: str, *, http=None) -> ObjectStore:
+    """The store for a working bucket (`ingest` or `collect_raw`), or `RawStoreError` naming what to set
+    when none is configured."""
+    try:
+        settings = resolve(role)
+    except StoreConfigError as exc:
+        raise RawStoreError(str(exc)) from exc
+    if not settings.configured:
+        raise RawStoreError(f"{STORE_VARIABLES} must be set {purpose}")
+    return open_store(settings, http=http)
 
 
 class MissingObject(RawStoreError):
@@ -71,22 +89,16 @@ def raw_key(data: bytes) -> str:
 
 
 class RawBatchStorage:
-    """MinIO wrapper for raw ingest payloads. No object lock, own bucket."""
+    """Raw ingest payloads through the object store seam (role `ingest`). No object lock, own bucket.
+    `store` is the `ObjectStore`."""
 
     def __init__(self) -> None:
-        endpoint = os.environ.get("MINIO_ENDPOINT")
-        access = os.environ.get("MINIO_ACCESS_KEY")
-        secret = os.environ.get("MINIO_SECRET_KEY")
-        if not (endpoint and access and secret):
-            raise RawStoreError(
-                "MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY must be "
-                "set to store raw ingest batches. Without them `accept()` "
-                "would take the bytes and drop them, which is the failure "
-                "raw-before-parse exists to prevent.")
-        secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
-        self._bucket = os.environ.get("INGEST_BUCKET", "noctornal-raw")
-        self._client = Minio(endpoint, access_key=access, secret_key=secret,
-                             secure=secure)
+        self.store = _working_store(
+            "ingest",
+            "to store raw ingest batches. Without them `accept()` would take the "
+            "bytes and drop them, which is the failure raw-before-parse exists to "
+            "prevent.")
+        self._bucket = resolve("ingest").bucket
 
     @property
     def bucket(self) -> str:
@@ -99,25 +111,20 @@ class RawBatchStorage:
         misconfigured bucket name by silently making a second one, and the
         symptom is a feed that appears to work and cannot be re-parsed.
         """
-        if not self._client.bucket_exists(self._bucket):
-            self._client.make_bucket(self._bucket)
+        if not self.store.bucket_exists(self._bucket):
+            self.store.make_bucket(self._bucket, object_lock=False)
 
     def put(self, key: str, data: bytes) -> None:
-        self._client.put_object(
-            self._bucket, key, io.BytesIO(data), length=len(data),
-            content_type="application/octet-stream")
+        self.store.put(self._bucket, key, data)
 
     def get(self, key: str) -> bytes:
-        from minio.error import S3Error
+        """The batch's bytes. Only a key the store says is not there is `MissingObject`, whose sentence
+        tells a partner to resend: a denied read, a missing bucket or a store that does not answer
+        propagates, because the bytes may well be there and a resend would be the wrong repair."""
         try:
-            resp = self._client.get_object(self._bucket, key)
-        except S3Error as exc:
+            return self.store.get(self._bucket, key)
+        except store_errors.ObjectMissing as exc:
             raise MissingObject.for_key(key) from exc
-        try:
-            return resp.read()
-        finally:
-            resp.close()
-            resp.release_conn()
 
 
 class InMemoryRawStorage:
@@ -177,69 +184,52 @@ def document_raw_key(source_id, fragment: bytes) -> str:
 
 
 class DocumentRawStorage:
-    """MinIO wrapper for collected raw markup. No object lock, own bucket,
-    and a delete, because the purge must be able to remove it."""
+    """Collected raw markup through the object store seam (role `collect_raw`). No object lock, own
+    bucket, and a delete, because the purge must be able to remove it. `store` is the `ObjectStore`."""
 
     def __init__(self) -> None:
-        endpoint = os.environ.get("MINIO_ENDPOINT")
-        access = os.environ.get("MINIO_ACCESS_KEY")
-        secret = os.environ.get("MINIO_SECRET_KEY")
-        if not (endpoint and access and secret):
-            raise RawStoreError(
-                "MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY must be "
-                "set to keep collected raw markup.")
-        secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
+        self.store = _working_store("collect_raw", "to keep collected raw markup.")
         self._bucket = collect_raw_bucket()
-        self._client = Minio(endpoint, access_key=access, secret_key=secret,
-                             secure=secure)
 
     @property
     def bucket(self) -> str:
         return self._bucket
 
-    @property
-    def client(self) -> Minio:
-        return self._client
-
     def ensure_bucket(self) -> None:
         """Create the bucket if it is absent, WITHOUT object lock. Not called
         from `put`, for the reason RawBatchStorage.ensure_bucket gives: a
         create-on-write masks a misconfigured bucket name."""
-        if not self._client.bucket_exists(self._bucket):
-            self._client.make_bucket(self._bucket)
+        if not self.store.bucket_exists(self._bucket):
+            self.store.make_bucket(self._bucket, object_lock=False)
 
     def put(self, key: str, data: bytes) -> None:
-        self._client.put_object(
-            self._bucket, key, io.BytesIO(data), length=len(data),
-            content_type="application/octet-stream")
+        self.store.put(self._bucket, key, data)
 
     def get(self, key: str) -> bytes:
-        from minio.error import S3Error
         try:
-            resp = self._client.get_object(self._bucket, key)
-        except S3Error as exc:
+            return self.store.get(self._bucket, key)
+        except store_errors.ObjectMissing as exc:
             raise MissingObject(f"no collected markup under {key}") from exc
-        try:
-            return resp.read()
-        finally:
-            resp.close()
-            resp.release_conn()
 
     def exists(self, key: str) -> bool:
-        from minio.error import S3Error
+        """Whether an object is at `key`. False only when the store says nothing is there; a denial or an
+        outage raises, so `delete` never tells a purge 'nothing there' about bytes it could not see."""
         try:
-            self._client.stat_object(self._bucket, key)
-        except S3Error:
+            self.store.head(self._bucket, key)
+        except store_errors.ObjectMissing:
             return False
         return True
 
     def delete(self, key: str) -> bool:
-        """Remove the object; True when one was there. Raises when the store
-        refuses, so the purge keeps the document rather than recording a
-        destruction that did not happen."""
+        """Remove the object, every version of it on a versioned bucket; True when one was there. Raises
+        when the store refuses or keeps a version, so the purge keeps the document rather than recording
+        a destruction that did not happen (`objectstore.versions.delete_working_object`)."""
         if not self.exists(key):
             return False
-        self._client.remove_object(self._bucket, key)
+        try:
+            delete_working_object(self.store, self._bucket, key)
+        except BytesKept as exc:
+            raise RawStoreError(str(exc)) from exc
         return True
 
 
@@ -275,27 +265,21 @@ def document_raw_bucket_exists(timeout: float = 2.0) -> bool | None:
     """Whether COLLECT_RAW_BUCKET exists, asked with a short timeout and no
     retries (the readiness row must not hang on a store that does not
     answer). None when no store is configured."""
-    endpoint = os.environ.get("MINIO_ENDPOINT")
-    access = os.environ.get("MINIO_ACCESS_KEY")
-    secret = os.environ.get("MINIO_SECRET_KEY")
-    if not (endpoint and access and secret):
+    settings = resolve("collect_raw")
+    if not settings.configured:
         return None
     import urllib3
 
     http = urllib3.PoolManager(
         timeout=urllib3.Timeout(connect=timeout, read=timeout),
         retries=urllib3.Retry(total=0, connect=0, read=0, redirect=0))
-    client = Minio(endpoint, access_key=access, secret_key=secret,
-                   secure=os.environ.get("MINIO_SECURE", "false").lower() == "true",
-                   http_client=http)
-    return bool(client.bucket_exists(collect_raw_bucket()))
+    return open_store(settings, http=http).bucket_exists(collect_raw_bucket())
 
 
 def default_document_raw_store():
-    """DocumentRawStorage when the MinIO variables are set, else None: no
-    store is a recorded gap on every run that keeps markup (RAW_NOT_KEPT),
-    never the in-memory store, which would lose it on restart."""
-    if not (os.environ.get("MINIO_ENDPOINT") and os.environ.get("MINIO_ACCESS_KEY")
-            and os.environ.get("MINIO_SECRET_KEY")):
+    """DocumentRawStorage when the store variables are set (`objectstore.settings`, role `collect_raw`),
+    else None: no store is a recorded gap on every run that keeps markup (RAW_NOT_KEPT), never the
+    in-memory store, which would lose it on restart."""
+    if not configured("collect_raw"):
         return None
     return DocumentRawStorage()

@@ -42,7 +42,8 @@ from datetime import date, timedelta
 from uuid import uuid4
 
 import pytest
-from minio.error import S3Error
+
+from noctornal_api.objectstore.errors import refusal
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -149,9 +150,19 @@ def _evidence(conn, case_id, owner):
          f"{case_id}/{uuid4().hex}", owner)).fetchone()[0]
 
 
-def _s3_error(code: str, message: str, *, object_name: str | None = None):
-    return S3Error(code=code, message=message, resource="r", request_id="1",
-                   host_id="1", response=None, object_name=object_name)
+def _s3_error(code: str, message: str):
+    """A refusal as the store seam hands one over (`objectstore.errors`)."""
+    return refusal(code, message)
+
+
+class _QuotingError(Exception):
+    """A client error whose text quotes the object's key, as minio's own error class did: the code and the
+    message are attributes, and `str()` carries the key."""
+
+    def __init__(self, code: str, message: str, key: str):
+        super().__init__(f"S3 operation failed; code: {code}, message: {message}, "
+                         f"object_name: {key}")
+        self.code, self.message = code, message
 
 
 class _VersionedStore:
@@ -441,9 +452,9 @@ def test_a_worm_refusal_is_a_retention_lock(conn):
      STORAGE_FAILED),
     # A storage key that happens to contain the word "retention" must not
     # turn a plain refusal into a lock: the classifier reads the MESSAGE,
-    # not the whole `str(exc)`, which quotes the object name.
-    (_s3_error("AccessDenied", "Access Denied.",
-               object_name="case/retention-notes.pdf"), STORAGE_FAILED),
+    # not the whole `str(exc)`, which can quote the object name.
+    (_QuotingError("AccessDenied", "Access Denied.", "case/retention-notes.pdf"),
+     STORAGE_FAILED),
     # The message-only shapes the existing governance stubs raise.
     (RuntimeError("object is under a retention lock"), STORAGE_LOCKED),
     (RuntimeError("connection reset by peer"), STORAGE_FAILED),

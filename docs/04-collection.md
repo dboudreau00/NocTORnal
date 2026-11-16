@@ -300,7 +300,7 @@ Defences:
 The aggregation text bucket is `collect.document` plus the object store.
 
 **Three representations of every capture:**
-1. **Raw bytes**, MinIO, WORM, object-locked, `sha256`. Never modified.
+1. **Raw bytes**, the object store (MinIO bundled, docs/22), WORM, object-locked, `sha256`. Never modified.
 2. **Normalised text**, `document.body_text`. Quotes stripped, signatures
    removed, entities decoded, whitespace collapsed. What extractors read.
 3. **Index**, Postgres FTS (`search_tsv`) + pgvector similarity vectors

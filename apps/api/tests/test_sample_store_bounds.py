@@ -16,7 +16,8 @@ import pytest
 _VARS = ("SAMPLE_ENDPOINT", "SAMPLE_ACCESS_KEY", "SAMPLE_SECRET_KEY",
          "SAMPLE_SECURE", "PRESERVE_ENDPOINT", "PRESERVE_ACCESS_KEY",
          "PRESERVE_SECRET_KEY", "PRESERVE_SECURE", "MINIO_ENDPOINT",
-         "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY")
+         "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "OBJECT_STORE_ENDPOINT",
+         "OBJECT_STORE_ACCESS_KEY", "OBJECT_STORE_SECRET_KEY", "OBJECT_STORE_SECURE")
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +33,7 @@ def configured(monkeypatch):
 def test_each_store_waits_seconds_not_minutes(which):
     from noctornal_api import samples
     store = getattr(samples, which)()
-    pool = store._client._http.connection_pool_kw
+    pool = store.store._client._http.connection_pool_kw
     timeout, retries = pool["timeout"], pool["retries"]
     assert timeout.connect_timeout <= 10, timeout
     assert timeout.read_timeout <= 60, timeout
@@ -46,7 +47,7 @@ def test_a_request_that_went_out_is_never_sent_again(which):
     nothing can delete, so reads are not retried."""
     from noctornal_api import samples
     store = getattr(samples, which)()
-    assert store._client._http.connection_pool_kw["retries"].read == 0
+    assert store.store._client._http.connection_pool_kw["retries"].read == 0
 
 
 def test_the_preservation_store_never_resends_a_write_on_a_5xx():
@@ -54,7 +55,7 @@ def test_the_preservation_store_never_resends_a_write_on_a_5xx():
     nothing was written, and a resent held write is a second held version nothing can delete. Only reads
     are resent."""
     from noctornal_api import samples
-    retries = samples.PreservationStorage()._client._http.connection_pool_kw[
+    retries = samples.PreservationStorage().store._client._http.connection_pool_kw[
         "retries"]
     for method, status in (("PUT", 502), ("PUT", 504), ("POST", 503)):
         assert not retries.is_retry(method, status), (method, status)
@@ -65,7 +66,7 @@ def test_the_samples_store_still_resends_on_a_5xx():
     """There a resend is harmless: a PUT overwrites the same unversioned
     object and a DELETE is idempotent, so a transient 5xx is ridden out."""
     from noctornal_api import samples
-    retries = samples.SampleStorage()._client._http.connection_pool_kw[
+    retries = samples.SampleStorage().store._client._http.connection_pool_kw[
         "retries"]
     for method in ("PUT", "DELETE", "GET"):
         assert retries.is_retry(method, 503), method
@@ -75,6 +76,6 @@ def test_certificates_are_still_verified(monkeypatch):
     """Handing minio-py a pool replaces its own, certificate settings included, so they are restated."""
     from noctornal_api import samples
     monkeypatch.setenv("SAMPLE_SECURE", "true")
-    pool = samples.SampleStorage()._client._http.connection_pool_kw
+    pool = samples.SampleStorage().store._client._http.connection_pool_kw
     assert pool["cert_reqs"] == "CERT_REQUIRED"
     assert pool["ca_certs"]

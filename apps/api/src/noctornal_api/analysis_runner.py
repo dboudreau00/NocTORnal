@@ -192,8 +192,8 @@ def child_env() -> dict[str, str]:
     """The child's whole environment: a PATH, what Windows needs to start
     an interpreter, a locale, two flags that stop it writing, and where
     THIS process's code is, so parent and child run the same module. No
-    NOCTORNAL_*, DATABASE_URL, MINIO_*, SAMPLE_*, PRESERVE_*, REDIS_URL or
-    SMTP_*: the data key and the KEK never reach a child. (In the isolated
+    NOCTORNAL_*, DATABASE_URL, OBJECT_STORE_*, MINIO_*, SAMPLE_*, PRESERVE_*,
+    REDIS_URL or SMTP_*: the data key and the KEK never reach a child. (In the isolated
     worker there is nothing of the kind to leave out in the first place.)"""
     env = {"PATH": os.environ.get("PATH", os.defpath),
            "LANG": "C.UTF-8",

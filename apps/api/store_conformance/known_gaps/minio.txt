@@ -1,0 +1,2 @@
+# The bundled MinIO (the pinned build, profile minio): no known gap. A line here names a check in
+# checks.py, then a hash and the reason with its upstream link, and runs as a strict xfail.

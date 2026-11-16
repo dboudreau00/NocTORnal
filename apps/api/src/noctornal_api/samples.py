@@ -97,7 +97,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import io
 import logging
 import math
 import os
@@ -121,6 +120,14 @@ from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 # The one existing spelling of "does this ACTIVE account hold this global
 # permission", used at redemption. See `_still_authorised`.
 from noctornal_api.iam_admin import IamAdminService
+from noctornal_api.objectstore.custody import restricted_refusal
+from noctornal_api.objectstore.errors import ObjectMissing, StoreError, StoreRefusal
+# The pool both sample stores are handed (`objectstore/pools.py` keeps its two bounds).
+from noctornal_api.objectstore.pools import bounded_http as _bounded_http
+from noctornal_api.objectstore.settings import StoreConfigError
+from noctornal_api.objectstore.settings import resolve as _resolve_store
+from noctornal_api.objectstore.store import open_store
+from noctornal_api.objectstore.versions import BytesKept, delete_working_object
 from noctornal_api.security import envelope
 from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 # The one spelling of "hash an opaque token" in this codebase. A download
@@ -975,46 +982,6 @@ def archive(data: bytes, sha256_hex: str,
 # Records
 # ---------------------------------------------------------------------------
 
-#: Seconds to wait for a TCP connection to the sample or preservation store.
-STORE_CONNECT_TIMEOUT_S = 10.0
-#: Seconds to wait on any one read from the socket. Per read, not per
-#: transfer: a 256 MiB sample streams in many reads, each well inside this.
-STORE_READ_TIMEOUT_S = 60.0
-
-
-def _bounded_http(*, resend_writes: bool = True):
-    """The HTTP pool both sample stores use, which gives up in seconds.
-
-    minio-py's own pool waits five minutes on a connect or a read and retries five times, so one stalled
-    call could hold a request for about half an hour. The preserving rejection calls these stores inside a
-    transaction that holds the sample's row lock, so the bound matters. It matches
-    `readiness._object_store_client`, loosened for real transfers.
-
-    Retries: a connection that never opened is retried (nothing was sent). A read that timed out is not:
-    the request went out, and retrying a held PUT whose answer was lost writes a second held version that
-    nothing can delete. A 5xx answer is retried only where a resend is harmless. For the samples store it
-    is (a resent PUT overwrites the same unversioned object, a resent DELETE deletes nothing twice). For
-    the preservation store (`resend_writes=False`) only reads are resent: a 502 or 504 can come from a
-    proxy after the store took the held PUT, so `preserve()` reports the refusal instead. Certificate
-    handling is minio-py's own default, restated because passing a pool replaces it.
-    """
-    import certifi
-    import urllib3
-
-    retry = {"total": 2, "connect": 2, "read": 0, "status": 2,
-             "backoff_factor": 0.2, "status_forcelist": [500, 502, 503, 504]}
-    if not resend_writes:
-        retry["allowed_methods"] = frozenset({"GET", "HEAD"})
-    return urllib3.PoolManager(
-        timeout=urllib3.Timeout(connect=STORE_CONNECT_TIMEOUT_S,
-                                read=STORE_READ_TIMEOUT_S),
-        maxsize=10,
-        cert_reqs="CERT_REQUIRED",
-        ca_certs=os.environ.get("SSL_CERT_FILE") or certifi.where(),
-        retries=urllib3.Retry(**retry),
-    )
-
-
 def _missing(exc: BaseException) -> bool:
     """Whether a failed working-store read means the object is not there,
     as opposed to the store not answering. KeyError is the test doubles'
@@ -1024,51 +991,51 @@ def _missing(exc: BaseException) -> bool:
     return getattr(exc, "code", None) in ("NoSuchKey", "NoSuchObject")
 
 
+def _store_settings(role: str):
+    """`role`'s store settings through the one reader, a setting it will not guess at as a SampleError."""
+    try:
+        return _resolve_store(role)
+    except StoreConfigError as exc:
+        raise SampleError(str(exc)) from exc
+
+
 class SampleStorage:
     """The sample bucket. docs/11: "Bucket separate from evidence, WORM, no public access, no CDN, own
     credentials."
 
     Its own credentials, so a compromise of the evidence path does not reach the malware store or vice
-    versa. `SAMPLE_ACCESS_KEY` falls back to the MinIO ones only for a single-node development stack.
+    versa. `SAMPLE_ACCESS_KEY` falls back to the evidence store's (`OBJECT_STORE_*`, then `MINIO_*`) only
+    for a single-node development stack. Reached through the object store seam (role `sample`); `store`
+    is the `ObjectStore`.
     """
 
     def __init__(self) -> None:
-        from minio import Minio
-
-        endpoint = os.environ.get("SAMPLE_ENDPOINT") or os.environ.get(
-            "MINIO_ENDPOINT")
-        access = os.environ.get("SAMPLE_ACCESS_KEY") or os.environ.get(
-            "MINIO_ACCESS_KEY")
-        secret = os.environ.get("SAMPLE_SECRET_KEY") or os.environ.get(
-            "MINIO_SECRET_KEY")
-        if not (endpoint and access and secret):
+        settings = _store_settings("sample")
+        if not settings.configured:
             raise SampleError(
                 "sample storage is not configured: set SAMPLE_ENDPOINT / "
                 "SAMPLE_ACCESS_KEY / SAMPLE_SECRET_KEY (a deployment should "
                 "give the sample bucket its own credentials, not the evidence "
                 "bucket's)")
-        secure = os.environ.get("SAMPLE_SECURE", "false").lower() == "true"
-        self._bucket = os.environ.get("SAMPLE_BUCKET", "noctornal-samples")
-        self._client = Minio(endpoint, access_key=access, secret_key=secret,
-                             secure=secure, http_client=_bounded_http())
+        self._bucket = settings.bucket
+        self.store = open_store(settings, http=_bounded_http())
 
     def put(self, key: str, data: bytes) -> None:
-        self._client.put_object(
-            self._bucket, key, io.BytesIO(data), length=len(data),
-            # Never the real type. Nothing about a sample is ever parsed by
-            # anything, and a Content-Type is a hint to parse.
-            content_type="application/octet-stream")
+        # Never the real type. Nothing about a sample is ever parsed by
+        # anything, and a Content-Type is a hint to parse.
+        self.store.put(self._bucket, key, data,
+                       media_type="application/octet-stream")
 
     def get(self, key: str) -> bytes:
-        response = self._client.get_object(self._bucket, key)
-        try:
-            return response.read()
-        finally:
-            response.close()
-            response.release_conn()
+        return self.store.get(self._bucket, key)
 
     def delete(self, key: str) -> None:
-        self._client.remove_object(self._bucket, key)
+        """Remove the sample's ciphertext, every version of it on a versioned bucket, or raise
+        (`objectstore.versions.delete_working_object`)."""
+        try:
+            delete_working_object(self.store, self._bucket, key)
+        except BytesKept as exc:
+            raise SampleError(str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -1087,8 +1054,10 @@ class PreservationStorage:
     Separate from `SampleStorage` for the same reason that store is separate from evidence: its own bucket
     (`PRESERVE_BUCKET`, default `noctornal-preserved`) and credentials (`PRESERVE_ENDPOINT` /
     `PRESERVE_ACCESS_KEY` / `PRESERVE_SECRET_KEY`). Those fall back to the `SAMPLE_*` variables and then
-    `MINIO_*` only so a single-node development stack works; a deployment gives this bucket its own
-    account, and infra/production/compose.yml mints one when the variables are set.
+    the evidence store's (`OBJECT_STORE_*`, then `MINIO_*`) only so a single-node development stack works;
+    a deployment gives this bucket its own account, and infra/production/compose.yml mints one when the
+    variables are set. Reached through the object store seam (role `preserve`); `store` is the
+    `ObjectStore`.
 
     The bucket is created with object lock and no default retention. The protection is a per-object legal
     hold on the one version this process wrote, which has no expiry for a clock to run out.
@@ -1099,33 +1068,34 @@ class PreservationStorage:
     """
 
     def __init__(self) -> None:
-        from minio import Minio
-
-        def pick(*names: str) -> str | None:
-            for name in names:
-                value = os.environ.get(name)
-                if value:
-                    return value
-            return None
-
-        endpoint = pick("PRESERVE_ENDPOINT", "SAMPLE_ENDPOINT", "MINIO_ENDPOINT")
-        access = pick("PRESERVE_ACCESS_KEY", "SAMPLE_ACCESS_KEY",
-                      "MINIO_ACCESS_KEY")
-        secret = pick("PRESERVE_SECRET_KEY", "SAMPLE_SECRET_KEY",
-                      "MINIO_SECRET_KEY")
-        if not (endpoint and access and secret):
+        settings = _store_settings("preserve")
+        if not settings.configured:
             raise SampleError(
                 "the preservation store is not configured: set "
                 "PRESERVE_ENDPOINT / PRESERVE_ACCESS_KEY / PRESERVE_SECRET_KEY "
                 "(a deployment should give the preservation bucket its own "
                 "credentials), or set NOCTORNAL_REJECTED_SAMPLE_DISPOSITION "
                 "deliberately")
-        secure = (pick("PRESERVE_SECURE", "SAMPLE_SECURE") or "false"
-                  ).lower() == "true"
-        self.bucket = os.environ.get("PRESERVE_BUCKET") or "noctornal-preserved"
-        self._client = Minio(endpoint, access_key=access, secret_key=secret,
-                             secure=secure,
-                             http_client=_bounded_http(resend_writes=False))
+        self.bucket = settings.bucket
+        self.store = open_store(settings, http=_bounded_http(resend_writes=False))
+
+    def _lock_hint(self, exc: StoreRefusal) -> bool:
+        """Whether a refused held PUT means the bucket has no object lock. The bucket's own account of
+        itself decides where it gives one (advisory, and only ever used to word a failure); where it will
+        not say, the codes a store gives an unlocked bucket do. A message is never read: a store's words
+        are not a portable signal (docs/22)."""
+        try:
+            lock = self.store.bucket_capabilities(self.bucket).object_lock
+        except StoreError:
+            lock = None
+        if lock is not None:
+            return lock is False
+        return exc.code in ("InvalidRequest", "ObjectLockConfigurationNotFoundError")
+
+    def _create_with_lock(self) -> str:
+        if self.store.profile == "minio":
+            return "It must be created with object lock (mc mb --with-lock)"
+        return "It must be created with object lock enabled and versioning on"
 
     def preserve(self, key: str, data: bytes) -> PreservedObject:
         """Write, hold, and prove both, or raise saying what now exists.
@@ -1142,19 +1112,16 @@ class PreservationStorage:
         the two words the console reads as "record the rejection only", because once a held copy exists
         that is the one way out that strands it.
         """
-        from minio.error import S3Error
-
         try:
-            written = self._client.put_object(
-                self.bucket, key, io.BytesIO(data), length=len(data),
-                content_type="application/octet-stream", legal_hold=True)
-        except S3Error as exc:
-            if "lock" in (exc.message or "").lower() or exc.code in (
-                    "InvalidRequest", "ObjectLockConfigurationNotFoundError"):
+            written = self.store.put(self.bucket, key, data,
+                                     media_type="application/octet-stream",
+                                     legal_hold=True)
+        except StoreRefusal as exc:
+            if self._lock_hint(exc):
                 raise SampleError(
                     f"the preservation bucket {self.bucket!r} would not take a "
-                    f"legal hold ({exc.code}: {exc.message}). It must be "
-                    f"created with object lock (mc mb --with-lock); object "
+                    f"legal hold ({exc.code}: {exc.message}). "
+                    f"{self._create_with_lock()}; object "
                     f"lock cannot be switched on afterwards, so an unlocked "
                     f"bucket has to be replaced.") from exc
             raise SampleError(
@@ -1169,14 +1136,12 @@ class PreservationStorage:
         version = written.version_id
         made = PreservedObject(self.bucket, key, version, len(data))
         try:
-            stat = self._client.stat_object(self.bucket, key,
-                                            version_id=version)
+            stat = self.store.head(self.bucket, key, version_id=version)
             if stat.size != len(data):
                 raise SampleError(
                     f"the preservation store reports {stat.size} bytes at "
                     f"{self.bucket}/{key} after {len(data)} were written")
-            if not self._client.is_object_legal_hold_enabled(
-                    self.bucket, key, version_id=version):
+            if not self.store.legal_hold_is_on(self.bucket, key, version):
                 raise SampleError(
                     f"the preservation store accepted {self.bucket}/{key} but "
                     f"does not report the hold as on")
@@ -1197,16 +1162,11 @@ class PreservationStorage:
         rejection that would leave it named by no row. A plain HEAD and a hold read, which the
         preservation account's policy allows; it may not list versions. The caller still proves the bytes
         are this sample's before recording anything."""
-        from minio.error import S3Error
-
         try:
-            stat = self._client.stat_object(self.bucket, key)
-        except S3Error as exc:
-            if exc.code in ("NoSuchKey", "NoSuchVersion", "NoSuchObject"):
-                return None
-            raise
-        if not self._client.is_object_legal_hold_enabled(
-                self.bucket, key, version_id=stat.version_id):
+            stat = self.store.head(self.bucket, key)
+        except ObjectMissing:
+            return None
+        if not self.store.legal_hold_is_on(self.bucket, key, stat.version_id):
             return None
         return PreservedObject(self.bucket, key, stat.version_id, stat.size)
 
@@ -1215,18 +1175,11 @@ class PreservationStorage:
         """The held ciphertext, read in place. `bucket` is the one the
         sample's row names, which outlives a later change of
         `PRESERVE_BUCKET`."""
-        response = self._client.get_object(bucket or self.bucket, key,
-                                           version_id=version_id)
-        try:
-            return response.read()
-        finally:
-            response.close()
-            response.release_conn()
+        return self.store.get(bucket or self.bucket, key, version_id=version_id)
 
     def is_held(self, key: str, *, version_id: str | None = None,
                 bucket: str | None = None) -> bool:
-        return self._client.is_object_legal_hold_enabled(
-            bucket or self.bucket, key, version_id=version_id)
+        return self.store.legal_hold_is_on(bucket or self.bucket, key, version_id)
 
 
 @dataclass(frozen=True)
@@ -1394,6 +1347,13 @@ class SampleService:
             classification = max(tlp_from_name(classification),
                                  tlp_from_name(case[0])).name
             compartments = frozenset(compartments) | frozenset(case[1] or [])
+        # AMBER_STRICT and RED never leave the boundary (invariant 8): neither the sample store nor the store
+        # a rejected sample is preserved in may be one operated outside the deployment, unless counsel's
+        # written decision is recorded (`objectstore.custody`, docs/22). Asked before anything is written.
+        for role in ("sample", "preserve"):
+            refused = restricted_refusal(role, classification)
+            if refused:
+                raise SampleError(refused)
 
         result = triage(data)
         digest_hex = result.sha256.hex()

@@ -41,7 +41,8 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from minio.error import S3Error
+
+from noctornal_api.objectstore.errors import StoreError, StoreRefusal
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 MINIO = os.environ.get("MINIO_ENDPOINT", "")
@@ -63,9 +64,8 @@ LOCK_OFF = "lock is off; a pass here would be for the wrong reason"
 
 
 def _versions(storage, key):
-    return [v for v in storage._client.list_objects(
-                storage.bucket, prefix=key, include_version=True)
-            if v.object_name == key]
+    return [v for v in storage.store.list_versions(storage.bucket, key)
+            if v.key == key]
 
 
 def _sweep(storage) -> None:
@@ -75,12 +75,11 @@ def _sweep(storage) -> None:
     working -- and the run after next gets them. Anything else the store
     says is swallowed: a sweep is hygiene, not an assertion.
     """
-    keys = {v.object_name for v in storage._client.list_objects(
-        storage.bucket, prefix=PREFIX, include_version=True)}
+    keys = {v.key for v in storage.store.list_versions(storage.bucket, PREFIX)}
     for key in keys:
         try:
             storage.delete_all_versions(key)
-        except S3Error:
+        except StoreError:
             pass
 
 
@@ -95,17 +94,16 @@ def storage():
 
 @pytest.fixture(scope="module")
 def locked_bucket(storage):
-    """FAIL, never skip, when the bucket cannot refuse a delete."""
-    try:
-        config = storage._client.get_object_lock_config(storage.bucket)
-    except S3Error as exc:
-        pytest.fail(f"{LOCK_OFF}: get_object_lock_config({storage.bucket!r}) "
-                    f"-> {exc.code}")
-    versioning = storage._client.get_bucket_versioning(storage.bucket)
-    if versioning.status != "Enabled":
-        pytest.fail(f"{LOCK_OFF}: bucket versioning is {versioning.status!r}, "
+    """FAIL, never skip, when the bucket cannot refuse a delete. The bucket's own account of itself
+    (`bucket_capabilities`) is enough for a precondition; the product never passes on it."""
+    caps = storage.store.bucket_capabilities(storage.bucket)
+    if caps.object_lock is not True:
+        pytest.fail(f"{LOCK_OFF}: bucket_capabilities({storage.bucket!r}) reports "
+                    f"object lock {caps.object_lock!r}")
+    if caps.versioning != "Enabled":
+        pytest.fail(f"{LOCK_OFF}: bucket versioning is {caps.versioning!r}, "
                     f"so a keyless delete would destroy rather than mark")
-    return config
+    return caps
 
 
 def _locked_object(storage, data: bytes):
@@ -121,13 +119,7 @@ def _locked_object(storage, data: bytes):
 
 
 def _get_version(storage, key: str, version_id: str) -> bytes:
-    resp = storage._client.get_object(storage.bucket, key,
-                                      version_id=version_id)
-    try:
-        return resp.read()
-    finally:
-        resp.close()
-        resp.release_conn()
+    return storage.store.get(storage.bucket, key, version_id=version_id)
 
 
 @pytest.fixture
@@ -160,7 +152,8 @@ def test_the_bucket_is_lock_enabled_and_versioned(locked_bucket):
     """Documents what the rest of the file rests on. The bucket DEFAULT is
     whatever compose set (GOVERNANCE 365d at the time of writing); the
     per-object lock `put()` applies is asserted separately below."""
-    assert locked_bucket.mode in ("GOVERNANCE", "COMPLIANCE"), locked_bucket.mode
+    default = locked_bucket.default_retention
+    assert default is not None and default.mode in ("GOVERNANCE", "COMPLIANCE"), default
 
 
 def test_put_applies_a_compliance_retention_to_the_object(storage, locked_bucket):
@@ -169,11 +162,10 @@ def test_put_applies_a_compliance_retention_to_the_object(storage, locked_bucket
     s3:BypassGovernanceRetention; COMPLIANCE by nobody. The distinction is
     the whole WORM guarantee, so it is measured rather than trusted."""
     key, version_id, retain_until = _locked_object(storage, b"compliance")
-    retention = storage._client.get_object_retention(
-        storage.bucket, key, version_id=version_id)
+    retention = storage.store.get_retention(storage.bucket, key, version_id)
     assert retention.mode == "COMPLIANCE", retention.mode
     # MinIO stores millisecond precision; allow that much slack.
-    assert retention.retain_until_date >= retain_until - timedelta(seconds=1)
+    assert retention.until >= retain_until - timedelta(seconds=1)
 
 
 # ---------------------------------------------------------------------------
@@ -206,9 +198,8 @@ def test_the_live_refusal_is_recognised_as_a_lock_by_the_classifier(
     from noctornal_api.evidence import is_retention_refusal
 
     key, version_id, _ = _locked_object(storage, b"refusal")
-    with pytest.raises(S3Error) as info:
-        storage._client.remove_object(storage.bucket, key,
-                                      version_id=version_id)
+    with pytest.raises(StoreRefusal) as info:
+        storage.store.delete_version(storage.bucket, key, version_id)
     exc = info.value
     assert is_retention_refusal(exc), (exc.code, exc.message)
     assert retention._is_retention_refusal(exc), (exc.code, exc.message)
@@ -265,7 +256,7 @@ def test_the_old_keyless_delete_returns_success_while_holding_the_bytes(
     assert any(v.version_id == version_id and not v.is_delete_marker
                for v in versions), "the real version is gone"
     assert _get_version(storage, key, version_id) == data
-    with pytest.raises(S3Error) as info:
+    with pytest.raises(StoreRefusal) as info:
         storage.get(key)
     assert info.value.code == "NoSuchKey", info.value.code
 

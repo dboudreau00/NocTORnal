@@ -118,6 +118,48 @@ def test_a_fresh_acquisition_records_its_read_back_as_a_verified_hash(conn, case
     assert again == [True, None]
 
 
+def test_a_lodging_row_names_the_store_profile_and_host(conn, case, svc):
+    """The ACQUIRED row of bytes actually stored says which store family and which store took them, and
+    never a key; a re-acquisition stores nothing, so it names no store."""
+    case_id, uid = case
+    data = b"which-store-" + uuid4().hex.encode()
+    res = _ingest(svc, case_id, uid, data)
+    _ingest(svc, case_id, uid, data)
+    rows = conn.execute(
+        "SELECT detail FROM core.evidence_custody WHERE evidence_id = %s AND action = 'ACQUIRED' "
+        "ORDER BY occurred_at, id", (res.evidence_id,)).fetchall()
+    first, again = rows[0][0], rows[1][0]
+    assert first["store_profile"] == svc._s.store.profile == "minio"
+    assert first["store_host"] == os.environ["MINIO_ENDPOINT"]
+    assert "store_profile" not in again and "store_host" not in again
+    text = str(first)
+    assert os.environ["MINIO_SECRET_KEY"] not in text and os.environ["MINIO_ACCESS_KEY"] not in text
+
+
+def test_a_red_exhibit_is_refused_on_an_undeclared_vendor_store(conn, case, svc, monkeypatch):
+    """Invariant 8 at the upload: a store operated outside the deployment takes no AMBER_STRICT or RED exhibit
+    until counsel's declaration is recorded, and the refusal stores nothing (`objectstore.custody`)."""
+    from noctornal_api.evidence import EvidenceError
+    from noctornal_api.objectstore.custody import COUNSEL_ENV
+    case_id, uid = case
+    monkeypatch.setenv("OBJECT_STORE_ENDPOINT", "objects.vendor.example:443")
+    monkeypatch.delenv(COUNSEL_ENV, raising=False)
+    data = b"restricted-" + uuid4().hex.encode()
+    for label in ("RED", "AMBER_STRICT"):
+        with pytest.raises(EvidenceError, match="never leaves the boundary"):
+            svc.ingest(case_id=case_id, title="r.png", media_type="image/png", data=data,
+                       acquired_by=uid, acquisition_method="MANUAL_UPLOAD",
+                       classification=label)
+    assert conn.execute("SELECT count(*) FROM core.evidence WHERE case_id = %s",
+                        (case_id,)).fetchone()[0] == 0
+    # AMBER may leave the boundary, so the same store takes it; and counsel's declaration lets RED in.
+    svc.ingest(case_id=case_id, title="a.png", media_type="image/png", data=data + b"a",
+               acquired_by=uid, acquisition_method="MANUAL_UPLOAD", classification="AMBER")
+    monkeypatch.setenv(COUNSEL_ENV, "counsel's memo of 2026-11-15")
+    svc.ingest(case_id=case_id, title="r.png", media_type="image/png", data=data,
+               acquired_by=uid, acquisition_method="MANUAL_UPLOAD", classification="RED")
+
+
 def test_view_returns_original_bytes_and_logs_access(conn, case, svc):
     case_id, uid = case
     data = b"view-me-" + uuid4().hex.encode()
@@ -169,7 +211,6 @@ def test_read_path_detects_object_tampering(conn, case, svc):
     it was lodged as, so a version written on the key afterwards is never served at all; the legacy path, a
     row with no recorded version, still recomputes and fails closed."""
     case_id, uid = case
-    import io
     data = b"pristine-" + uuid4().hex.encode()
     res = _ingest(svc, case_id, uid, data)
     key, version = conn.execute(
@@ -179,8 +220,7 @@ def test_read_path_detects_object_tampering(conn, case, svc):
     # Swap the object's latest version with different bytes (object lock
     # protects old versions from deletion, not the key from new versions).
     tampered = b"TAMPERED-" + uuid4().hex.encode()
-    svc._s._client.put_object(svc._s.bucket, key, io.BytesIO(tampered),
-                              length=len(tampered))
+    svc._s.store.put(svc._s.bucket, key, tampered)
     assert svc._s.get(key) == tampered, "the latest version is the swap"
     assert svc.view(res.evidence_id, uid) == data, "the swap is never served"
     assert svc.verify_integrity(res.evidence_id, uid) is True

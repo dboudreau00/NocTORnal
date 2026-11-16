@@ -337,7 +337,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **8922 tests** (`def test_`
+With the containers up, expect **no failures** across **9040 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -679,7 +679,7 @@ test named after it.
 | **System of record** | Postgres 16 + pgvector | The graph, the assertion ledger and the audit log live in **one transactional store**, so an inference and its justification commit or fail together. A separate graph database makes that a distributed-transaction problem, which is how provenance gets lost. |
 | **API** | Python 3.12+ / FastAPI | Async, typed, OpenAPI for free. |
 | **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** (pure Python, and it falls over around 50k edges on betweenness). **Leiden, not Louvain**: Louvain can produce internally disconnected communities. |
-| **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
+| **Object store** | MinIO bundled, or any S3 store with object lock that passes [`docs/22`](docs/22-object-store-requirements.md) | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
 | **Migrations** | Alembic | 197 revisions (Alembic head 0197), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
@@ -701,7 +701,7 @@ enforces it.
 
 ### Testing
 
-**8922 tests** (`def test_` functions across two pytest roots, maintained by
+**9040 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -748,6 +748,7 @@ noctornal/
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
 | [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) | **the register**: every place the build stops because the next step is a legal question, and why holding this material is dangerous |
 | [`docs/21-law-enforcement-readiness.md`](docs/21-law-enforcement-readiness.md) | **for an agency in the US or Canada**: what FRE 902(13), (14) and Canada Evidence Act ss. 31.1-31.8 ask, what the build supplies, and the steps before real casework |
+| [`docs/22-object-store-requirements.md`](docs/22-object-store-requirements.md) | **for an agency on its own S3 store**: what a store must do, the two profiles, the conformance suite, and the custody questions a store somebody else runs raises |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | what may need to change: data not to be trusted, the Beta 1 review, known residuals, judgement calls |
 | [`docs/00-decisions.md`](docs/00-decisions.md) | the numbered decisions and why the architecture is the way it is |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | the map of what was built |

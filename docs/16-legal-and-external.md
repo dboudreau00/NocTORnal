@@ -552,6 +552,15 @@ infrastructure, which is a custody question for this register (who can reach
 the bytes, in which jurisdiction, under whose legal process) before it is a
 technical one.
 
+**The proof is store-neutral now** (decision 235, [docs/22](22-object-store-requirements.md)). A deployment
+names its store with `NOCTORNAL_OBJECT_STORE` (`minio`, the default, or `s3`) and the `OBJECT_STORE_*`
+variables. On the `s3` profile a refused DELETE is read by the version's lock state, after a permission control
+shows the credential may delete, because AWS-shaped stores refuse a locked version and a policy alike with
+`AccessDenied`. A store the endpoint names as outside the deployment holds no AMBER_STRICT or RED exhibit or
+sample until counsel's written decision is recorded in `NOCTORNAL_OBJECT_STORE_COUNSEL_DECLARATION`, and the
+readiness row `object_store_custody_declared` is red until `NOCTORNAL_OBJECT_STORE_CUSTODY` names the
+operator, the jurisdiction and the legal-process contact. docs/22 lists the custody questions to answer first.
+
 **Still to confirm externally,** whichever store is used: that a COMPLIANCE
 lock on it is the property your courts need, and that the probe passing on
 it is evidence enough of that for your disclosure regime. The probe shows

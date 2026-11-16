@@ -121,29 +121,28 @@ def conn(written):
 def _sweep(written: _Written) -> None:
     """Lift this file's holds and remove its objects. Hygiene, not an
     assertion: whatever the store says is swallowed."""
-    from minio.error import S3Error
-
+    from noctornal_api.objectstore.errors import StoreError
     from noctornal_api.samples import PreservationStorage, SampleStorage
     pres = PreservationStorage()
     for bucket, key, _version in set(written.preserved):
         try:
-            versions = [v for v in pres._client.list_objects(
-                bucket, prefix=key, include_version=True)
-                if v.object_name == key]
-        except S3Error:
+            versions = [v for v in pres.store.list_versions(bucket, key)
+                        if v.key == key]
+        except StoreError:
             continue
         for v in versions:
             try:
-                pres._client.disable_object_legal_hold(bucket, key,
-                                                       version_id=v.version_id)
-                pres._client.remove_object(bucket, key, version_id=v.version_id)
-            except S3Error:
+                # Lifting a hold is the conformance suite's and this sweep's alone
+                # (`test_objectstore_boundary.py`).
+                pres.store.set_legal_hold(bucket, key, v.version_id, False)
+                pres.store.delete_version(bucket, key, v.version_id)
+            except StoreError:
                 pass
     work = SampleStorage()
     for key in set(written.working):
         try:
             work.delete(key)
-        except S3Error:
+        except StoreError:
             pass
 
 
@@ -287,8 +286,7 @@ def _preserve(conn, who, written, **kw):
 def test_reject_preserves_by_default(conn, written):
     """The default promise, measured against the real store: the bytes moved, the hold is on, the key is
     kept, and the row says where."""
-    from minio.error import S3Error
-
+    from noctornal_api.objectstore.errors import ObjectMissing, StoreRefusal
     from noctornal_api.samples import (
         REJECTED,
         PreservationStorage,
@@ -319,16 +317,16 @@ def test_reject_preserves_by_default(conn, written):
     assert bytes(after[0]) == bytes(before[0]) and len(bytes(after[0])) > 0
     assert after[1] == before[1]
 
-    with pytest.raises(S3Error):
-        working._client.stat_object(working._bucket, storage_key)
+    with pytest.raises(ObjectMissing):
+        working.store.head(working._bucket, storage_key)
 
     pres = PreservationStorage()
     assert pres.get(after[4], version_id=after[5]) == ciphertext, (
         "what was preserved must be exactly what was stored, still encrypted")
     assert pres.is_held(after[4], version_id=after[5])
-    with pytest.raises(S3Error):
+    with pytest.raises(StoreRefusal):
         # WORM: a held version cannot be removed, by this credential or any.
-        pres._client.remove_object(pres.bucket, after[4], version_id=after[5])
+        pres.store.delete_version(pres.bucket, after[4], after[5])
 
     [(actor, detail, _fmt)] = _custody(conn, sample.id, "REJECTED")
     assert actor == who
@@ -556,9 +554,12 @@ def test_the_working_copy_delete_does_not_hold_the_audit_chain(conn):
 
 
 class _FakeLockedStore:
-    """A stand-in for the preservation store's S3 client, for the failures a live MinIO will not produce
-    on demand: a PUT whose answer is lost, and a read-back that fails or disagrees after the held PUT
-    returned."""
+    """A stand-in for the preservation store (an `ObjectStore`), for the failures a live MinIO will not
+    produce on demand: a PUT whose answer is lost, and a read-back that fails or disagrees after the held
+    PUT returned."""
+
+    profile = "minio"
+    host = "fake:9000"
 
     def __init__(self, *, put_error=None, stat_error=None, size_delta=0,
                  held=True):
@@ -568,21 +569,21 @@ class _FakeLockedStore:
         self.held = held
         self.puts: list[int] = []
 
-    def put_object(self, bucket, key, data, length, **_kw):
-        from types import SimpleNamespace
+    def put(self, bucket, key, data, **_kw):
+        from noctornal_api.objectstore.types import PutResult
         if self.put_error is not None:
             raise self.put_error
-        self.puts.append(length)
-        return SimpleNamespace(version_id=f"held-{len(self.puts)}")
+        self.puts.append(len(data))
+        return PutResult(version_id=f"held-{len(self.puts)}")
 
-    def stat_object(self, bucket, key, version_id=None):
-        from types import SimpleNamespace
+    def head(self, bucket, key, *, version_id=None):
+        from noctornal_api.objectstore.types import ObjectInfo
         if self.stat_error is not None:
             raise self.stat_error
-        return SimpleNamespace(size=self.puts[-1] + self.size_delta,
-                               version_id=version_id)
+        return ObjectInfo(size=self.puts[-1] + self.size_delta,
+                          version_id=version_id, last_modified=None)
 
-    def is_object_legal_hold_enabled(self, bucket, key, version_id=None):
+    def legal_hold_is_on(self, bucket, key, version_id=None):
         return self.held
 
 
@@ -604,7 +605,7 @@ def test_a_read_back_failure_after_the_held_put_names_the_copy(conn, fault):
             "size_disagrees": _FakeLockedStore(size_delta=-1),
             "hold_not_reported": _FakeLockedStore(held=False)}[fault]
     pres = PreservationStorage()
-    pres._client = fake
+    pres.store = fake
     who, _ = _user(conn)
     store = MemoryStore()
     svc = SampleService(conn, store, pres)
@@ -640,7 +641,7 @@ def test_a_held_put_that_was_never_answered_says_a_copy_may_exist(conn):
         SampleService,
     )
     pres = PreservationStorage()
-    pres._client = _FakeLockedStore(
+    pres.store = _FakeLockedStore(
         put_error=TimeoutError("simulated: the answer was lost"))
     who, _ = _user(conn)
     store = MemoryStore()
@@ -813,8 +814,7 @@ def test_the_retry_adopts_the_held_version_in_the_real_store(conn, written):
     version the failed attempt wrote (a HEAD and a hold read, which the
     preservation account's policy allows), and the retry must record THAT
     version, not write another."""
-    from minio.error import S3Error
-
+    from noctornal_api.objectstore.errors import ObjectMissing
     from noctornal_api.samples import (
         PreservationStorage,
         SampleError,
@@ -838,8 +838,8 @@ def test_the_retry_adopts_the_held_version_in_the_real_store(conn, written):
     assert PreservationStorage().latest_held(key).version_id == first.version_id
     working = SampleStorage()
     storage_key = f"samples/{sample.sha256[:2]}/{sample.sha256}"
-    with pytest.raises(S3Error):
-        working._client.stat_object(working._bucket, storage_key)
+    with pytest.raises(ObjectMissing):
+        working.store.head(working._bucket, storage_key)
 
 
 def test_a_retry_never_adopts_a_held_copy_that_is_not_this_sample(conn):

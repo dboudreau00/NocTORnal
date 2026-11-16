@@ -171,6 +171,26 @@ def test_the_policy_reference_is_not_a_boolean(monkeypatch):
 
 # --- quarantine ---------------------------------------------------------
 
+@pytest.mark.parametrize("variable", ["SAMPLE_ENDPOINT", "PRESERVE_ENDPOINT"])
+def test_a_red_sample_is_refused_on_an_undeclared_vendor_store(conn, svc, monkeypatch, variable):
+    """Invariant 8 at submission: neither the sample store nor the store a rejection is preserved in may be
+    operated outside the deployment for AMBER_STRICT or RED, until counsel's declaration is recorded."""
+    import hashlib
+
+    from noctornal_api.objectstore.custody import COUNSEL_ENV
+    from noctornal_api.samples import SampleError
+    monkeypatch.setenv(variable, "objects.vendor.example:443")
+    monkeypatch.delenv(COUNSEL_ENV, raising=False)
+    alice = _user(conn)
+    data = _unique(f"vendor-{uuid4().hex}")
+    with pytest.raises(SampleError, match="never leaves the boundary"):
+        svc.submit(data, submitted_by=alice, classification="RED")
+    assert conn.execute("SELECT count(*) FROM lab.sample WHERE sha256 = %s",
+                        (hashlib.sha256(data).digest(),)).fetchone()[0] == 0
+    monkeypatch.setenv(COUNSEL_ENV, "counsel's memo of 2026-11-15")
+    assert svc.submit(data, submitted_by=alice, classification="RED").sha256
+
+
 def test_a_sample_lands_in_quarantine_never_in_the_queue(conn, svc):
     """docs/11: nothing is visible to the RE queue until automated triage
     has run."""

@@ -601,29 +601,25 @@ class _FakeClient:
     def __init__(self, held):
         self.held = held
 
-    def list_objects(self, bucket, prefix, include_version):
-        class V:
-            object_name = prefix
-            is_delete_marker = False
-            version_id = "v1"
-        return [V()]
+    def list_versions(self, bucket, prefix):
+        from noctornal_api.objectstore.types import VersionInfo
+        return iter([VersionInfo(key=prefix, version_id="v1", is_delete_marker=False,
+                                 is_latest=True, last_modified=None)])
 
-    def get_object_retention(self, bucket, key, version_id=None):
+    def get_retention(self, bucket, key, version_id):
         return self.held
 
-    def set_object_retention(self, bucket, key, config, version_id=None):
+    def set_compliance_retention(self, bucket, key, version_id, until):
         return None
 
 
 def test_a_store_that_does_not_hold_the_new_date_is_not_believed():
-    from minio.commonconfig import COMPLIANCE
-    from minio.retention import Retention
-
     from noctornal_api.evidence import EvidenceError, EvidenceStorage
+    from noctornal_api.objectstore.types import COMPLIANCE, RetentionInfo
     storage = EvidenceStorage.__new__(EvidenceStorage)
     storage._bucket = "b"
-    storage._client = _FakeClient(Retention(COMPLIANCE, datetime(2027, 1, 1,
-                                                                 tzinfo=timezone.utc)))
+    storage.store = _FakeClient(RetentionInfo(COMPLIANCE, datetime(2027, 1, 1,
+                                                                   tzinfo=timezone.utc)))
     with pytest.raises(EvidenceError, match="does not hold it"):
         storage.extend_lock("k", datetime(2029, 1, 1, tzinfo=timezone.utc))
     done = storage.extend_lock("k", datetime(2026, 1, 1, tzinfo=timezone.utc))
@@ -636,9 +632,8 @@ def test_the_live_store_holds_the_lengthened_lock():
     read back, refused a delete, and left alone when asked for less. Under
     `_itest-lock/` so the live lock test's sweep removes it once it lapses;
     every lock here ends within two minutes."""
-    from minio.commonconfig import COMPLIANCE
-
     from noctornal_api.evidence import EvidenceStorage
+    from noctornal_api.objectstore.types import COMPLIANCE
     storage = EvidenceStorage()
     key = f"_itest-lock/extend-{uuid4().hex}"
     now = datetime.now(timezone.utc)
@@ -648,8 +643,8 @@ def test_the_live_store_holds_the_lengthened_lock():
     done = storage.extend_lock(key, until)
     assert done.versions == 1 and done.extended == 1
     assert done.previous is not None and done.previous < until
-    held = storage._client.get_object_retention(storage.bucket, key)
-    assert held.mode == COMPLIANCE and held.retain_until_date >= until.replace(microsecond=0)
+    held = storage.store.get_retention(storage.bucket, key, None)
+    assert held.mode == COMPLIANCE and held.until >= until.replace(microsecond=0)
     assert storage.extend_lock(key, now + timedelta(seconds=30)).extended == 0
     result = storage.delete_all_versions(key)
     assert result.versions_locked == 1, "the lengthened lock refuses a delete"
