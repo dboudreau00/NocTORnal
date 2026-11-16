@@ -66,6 +66,7 @@ from noctornal_api.config import published_credentials  # noqa: E402
 from noctornal_api.egress_admin import EgressAdminError, EgressAdminService  # noqa: E402
 from noctornal_api.security import egress_seal  # noqa: E402
 from noctornal_api.security.access import TLP_NAMES  # noqa: E402
+from noctornal_api.security.audit_hash import typed_identifier  # noqa: E402
 
 VIA = "scripts/egress_setup.py"
 PROD_DIR = Path(__file__).resolve().parent.parent / "infra" / "production"
@@ -106,7 +107,7 @@ def _auth_failed(conn, user_id, reason: str, email: str) -> None:
                (actor_id, actor_kind, action, object_type, outcome, detail)
            VALUES (%s, %s, 'AUTH_FAILED', 'auth', 'DENIED', %s)""",
         (user_id, "USER" if user_id else "SYSTEM",
-         Json({"reason": reason, "email": email, **_via()})))
+         Json({"reason": reason, **typed_identifier(email), **_via()})))
 
 
 def sign_in(conn, *, need: str, ask=input, secret=getpass.getpass) -> tuple[UUID, dict]:

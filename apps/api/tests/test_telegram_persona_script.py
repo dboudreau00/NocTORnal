@@ -142,6 +142,8 @@ def _row(conn, pid):
 # --- the sign-in ---------------------------------------------------------------
 
 def test_the_script_refuses_an_operator_who_does_not_sign_in(conn, monkeypatch, capsys):
+    from noctornal_api.security.audit_hash import identifier_hash
+
     op = Operator(conn)
     pid = _fresh(conn)
     done, out, err = _run(monkeypatch, capsys, op, ["enrol", "--persona", str(pid)],
@@ -149,7 +151,8 @@ def test_the_script_refuses_an_operator_who_does_not_sign_in(conn, monkeypatch, 
     assert done == 1 and err.strip() == "The sign-in did not verify." and out == ""
     detail, outcome = conn.execute(
         """SELECT detail, outcome FROM audit.event WHERE action = 'AUTH_FAILED'
-              AND detail->>'email' = %s""", (op.email,)).fetchone()
+              AND detail->>'email_hmac' = %s""", (identifier_hash(op.email),)).fetchone()
+    assert "email" not in detail and detail["email_length"] == len(op.email)
     assert detail["via"] == "scripts/telegram_persona.py"
     # A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
     assert outcome == "DENIED"
@@ -182,6 +185,7 @@ def test_a_recovery_code_does_not_sign_in_the_script_and_stays_usable(
     recovery code and leaves it unspent; the script refuses it after the
     fact, twice, and the code still signs in once at the console."""
     from noctornal_api.security.auth import AuthService
+    from noctornal_api.security.audit_hash import identifier_hash
     from noctornal_api.stores import PgUserStore
 
     op = Operator(conn)
@@ -194,7 +198,7 @@ def test_a_recovery_code_does_not_sign_in_the_script_and_stays_usable(
     assert conn.execute(
         """SELECT count(*) FROM audit.event WHERE action = 'AUTH_FAILED'
               AND detail->>'reason' = 'recovery_code_refused'
-              AND detail->>'email' = %s""", (op.email,)).fetchone()[0] == 2
+              AND detail->>'email_hmac' = %s""", (identifier_hash(op.email),)).fetchone()[0] == 2
     assert AuthService(PgUserStore(conn)).authenticate(op.email, PASSWORD, code).ok
 
 

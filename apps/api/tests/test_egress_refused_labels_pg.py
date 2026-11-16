@@ -69,15 +69,17 @@ def proxy():
 
 def _refused(conn, run_or_persona):
     return conn.execute(
-        """SELECT seq, reason, dest_host, source_id, collection_run_id, egress_profile_id,
-                  classification::text
+        """SELECT connection_id::text, reason, dest_host, source_id, collection_run_id,
+                  egress_profile_id, classification::text
              FROM collect.egress_connection
             WHERE event = 'REFUSED' AND context_id = %s ORDER BY seq DESC LIMIT 1""",
         (run_or_persona,)).fetchone()
 
 
-def _seqs(listing):
-    return {r["seq"] for r in listing["rows"]}
+def _ids(listing):
+    """The connection ids listed: a row's `seq` is None for a reader the log withholds anything from, and
+    the shared test database holds rows above every clearance these tests read at."""
+    return {r["connection_id"] for r in listing["rows"]}
 
 
 @pytest.fixture
@@ -112,17 +114,17 @@ def test_a_passive_feed_refused_on_its_port_names_its_run_and_follows_its_source
     run = es.run(conn, sid)
     _expect(proxy, f"persona.passive~run.{run}", "feed.rebind.test:8080",
             "port_not_allowed")
-    seq, reason, host, source, row_run, profile, label = _refused(conn, run)
+    cid, reason, host, source, row_run, profile, label = _refused(conn, run)
     assert (reason, host, source, row_run, profile, label) == (
         "port_not_allowed", "feed.rebind.test", sid, run, passive, "AMBER")
-    assert seq in _seqs(egress_ledger.listing(conn, clearance="AMBER", limit=500))
+    assert cid in _ids(egress_ledger.listing(conn, clearance="AMBER", limit=500))
     # Raised after the fact: an AMBER reader no longer sees the host.
     conn.execute("UPDATE collect.source SET classification = 'RED' WHERE id = %s", (sid,))
     after = egress_ledger.listing(conn, clearance="AMBER", limit=500)
-    assert seq not in _seqs(after) and after["withheld"] >= 1
-    red = {r["seq"]: r for r in egress_ledger.listing(conn, clearance="RED",
-                                                       limit=500)["rows"]}
-    assert red[seq]["classification"] == "RED"
+    assert cid not in _ids(after) and after["some_withheld"] is True
+    red = {r["connection_id"]: r for r in egress_ledger.listing(conn, clearance="RED",
+                                                                 limit=500)["rows"]}
+    assert red[cid]["classification"] == "RED"
 
 
 def test_a_run_above_its_ceiling_is_hidden_without_its_sources_compartments(
@@ -133,13 +135,13 @@ def test_a_run_above_its_ceiling_is_hidden_without_its_sources_compartments(
     run = es.run(conn, sid, profile=pid, persona=persona, authority=aid)
     _expect(proxy, _persona_user(pid, f"run.{run}"), "secretforum.rebind.test:443",
             "above_route_ceiling")
-    seq, _reason, host, source, row_run, profile, _label = _refused(conn, run)
+    cid, _reason, host, source, row_run, profile, _label = _refused(conn, run)
     assert (host, source, row_run, profile) == ("secretforum.rebind.test", sid, run, pid)
     conn.execute("UPDATE collect.source SET compartments = '{HUMINT-EGRESS}' WHERE id = %s",
                  (sid,))
-    assert seq not in _seqs(egress_ledger.listing(conn, clearance="RED", limit=500))
-    assert seq in _seqs(egress_ledger.listing(conn, clearance="RED",
-                                              compartments={"HUMINT-EGRESS"}, limit=500))
+    assert cid not in _ids(egress_ledger.listing(conn, clearance="RED", limit=500))
+    assert cid in _ids(egress_ledger.listing(conn, clearance="RED",
+                                             compartments={"HUMINT-EGRESS"}, limit=500))
 
 
 def test_an_act_refused_after_its_source_tie_names_the_source_and_persona(
@@ -176,23 +178,26 @@ def test_the_reader_labels_a_run_row_without_a_source_by_its_run(conn):
     pid = es.profile(conn, PREFIX, kind="RESIDENTIAL", exit_kind=None)
     sid = es.source(conn, PREFIX, classification="GREEN")
     run = es.run(conn, sid)
-    seq = egress_ledger.write(conn, Row(
+    cid = uuid4()
+    egress_ledger.write(conn, Row(
         event="REFUSED", route_id=f"persona:{pid}", reason="port_not_allowed",
-        connection_id=uuid4(), protocol="HTTP_CONNECT", route_kind="persona",
+        connection_id=cid, protocol="HTTP_CONNECT", route_kind="persona",
         egress_profile_id=pid, collection_run_id=run, context_kind="run", context_id=run,
         dest_host="older.rebind.test", dest_port=8080, classification="GREEN"))
-    assert seq in _seqs(egress_ledger.listing(conn, clearance="GREEN", limit=500))
+    assert str(cid) in _ids(egress_ledger.listing(conn, clearance="GREEN", limit=500))
     conn.execute("UPDATE collect.source SET classification = 'RED' WHERE id = %s", (sid,))
-    assert seq not in _seqs(egress_ledger.listing(conn, clearance="AMBER", limit=500))
+    assert str(cid) not in _ids(egress_ledger.listing(conn, clearance="AMBER", limit=500))
 
 
 def test_a_persona_row_with_nothing_to_label_it_by_shows_no_host(conn):
     pid = es.profile(conn, PREFIX, kind="RESIDENTIAL", exit_kind=None)
-    seq = egress_ledger.write(conn, Row(
+    cid = uuid4()
+    egress_ledger.write(conn, Row(
         event="REFUSED", route_id=f"persona:{pid}", reason="port_not_allowed",
-        connection_id=uuid4(), protocol="SOCKS5", route_kind="persona",
+        connection_id=cid, protocol="SOCKS5", route_kind="persona",
         egress_profile_id=pid, context_kind="run", context_id=uuid4(),
         dest_host="orphan.rebind.test", dest_port=8080, classification="GREEN"))
-    rows = {r["seq"]: r for r in egress_ledger.listing(conn, clearance="RED",
-                                                        limit=500)["rows"]}
-    assert rows[seq]["dest_host"] is None and rows[seq]["destination_withheld"] is True
+    rows = {r["connection_id"]: r for r in egress_ledger.listing(conn, clearance="RED",
+                                                                  limit=500)["rows"]}
+    row = rows[str(cid)]
+    assert row["dest_host"] is None and row["destination_withheld"] is True

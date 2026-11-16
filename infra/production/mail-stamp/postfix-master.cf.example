@@ -1,0 +1,34 @@
+# Postfix master.cf lines for the mail stamp (README.md beside this file).
+#
+# The shape is Postfix's own simple content filter (FILTER_README, "Simple
+# content filter example"). Merge these into /etc/postfix/master.cf; do not
+# replace the file with this one.
+#
+# 1. The filter service. pipe(8) runs stamp-filter.sh as the unprivileged
+#    user noctornal-stamp, up to 10 at a time. null_sender= passes the empty
+#    sender as empty, not as MAILER-DAEMON. Rq: a Return-Path header, and the
+#    pipe quotes an address that needs it.
+#
+# ==========================================================================
+# service type  private unpriv  chroot  wakeup  maxproc command + args
+# ==========================================================================
+noctornal-stamp unix  -   n       n       -       10      pipe
+  flags=Rq user=noctornal-stamp null_sender=
+  argv=/usr/local/libexec/noctornal-stamp/stamp-filter.sh -f ${sender} -- ${recipient}
+
+# 2. Turn the filter on for mail arriving over SMTP ONLY, on the smtpd
+#    service that faces the internet. Keep "...other stuff here..." as your
+#    file has it and add the -o line under it.
+#
+#    Do NOT set content_filter in main.cf. The filter hands each message back
+#    through sendmail, which goes through pickup; a main.cf content_filter
+#    would send it through the filter again, for ever. Set on smtpd only, the
+#    re-injected copy is delivered.
+#
+# smtp      inet  n       -       y       -       -       smtpd
+#   -o content_filter=noctornal-stamp:dummy
+#
+# 3. The stamp attests the Authentication-Results header your milters write,
+#    so the milters (smtpd_milters in main.cf) must run on the same smtpd.
+#    They do: Postfix runs smtpd milters before the queue, and the content
+#    filter after it.

@@ -109,8 +109,9 @@ REALM = 'Basic realm="noctornal-egress"'
 #: credential, which no runtime process may hold.
 FORBIDDEN_ENV = ("NOCTORNAL_TOTP_KEK", "NOCTORNAL_TOTP_KEK_RETIRED", "DATABASE_URL",
                  "NOCTORNAL_MIGRATION_DATABASE_URL", "POSTGRES_PASSWORD",
-                 "NOCTORNAL_INGEST_PEPPER", "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY",
-                 "NOCTORNAL_PERSONA_KEK", "NOCTORNAL_PERSONA_KEK_RETIRED")
+                 "NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_AUDIT_PEPPER", "MINIO_SECRET_KEY",
+                 "SAMPLE_SECRET_KEY", "NOCTORNAL_PERSONA_KEK", "NOCTORNAL_PERSONA_KEK_RETIRED",
+                 "NOCTORNAL_MAIL_STAMP_KEY", "NOCTORNAL_MAIL_STAMP_KEY_RETIRED")
 
 #: Refusals before the credentials held: counted per peer, never chained
 #: row by row (egress_ledger, PREAUTH).

@@ -376,10 +376,9 @@ def test_the_login_audit_names_the_address_the_session_is_bound_to(
     """Behind a declared proxy `client_ip` is the address the session is bound to (0058) and the
     limiter meters. The login audit hashes the same address, so AUTH_SUCCEEDED does not name the proxy
     for every analyst behind it: one address, both places."""
-    import hashlib
     import time
 
-    from noctornal_api.security import totp
+    from noctornal_api.security import audit_hash, totp
 
     monkeypatch.setenv("NOCTORNAL_TRUSTED_PROXY_HOPS", "1")
     uid, email, secret = _make_user(conn)
@@ -397,6 +396,6 @@ def test_the_login_audit_names_the_address_the_session_is_bound_to(
     bound = conn.execute(
         "SELECT host(ip) FROM iam.session WHERE user_id = %s", (uid,)).fetchone()[0]
     assert bound == "203.0.113.77"
-    assert audited == hashlib.sha256(bound.encode()).digest()
-    assert audited != hashlib.sha256(b"testclient").digest(), (
+    assert audited == audit_hash.ip_hash(bound)
+    assert audited != audit_hash.ip_hash("testclient"), (
         "the audit named the test client's peer address, i.e. the proxy")

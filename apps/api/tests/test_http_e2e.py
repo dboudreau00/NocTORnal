@@ -553,13 +553,15 @@ def test_login_events_are_audited(conn, client):
     handler that authenticated somebody. (`bootstrap.py session` writes
     its own, marked `mfa: bypassed`, for the same reason.)
     """
+    from noctornal_api.security.audit_hash import identifier_hash
+
     uid, email, secret = _make_user(conn)
     client.post("/api/v1/auth/login",
                 json={"email": email, "password": "wrong", "totp_code": "000000"})
     _login(client, email, secret)
     actions = [r[0] for r in conn.execute(
-        "SELECT action FROM audit.event WHERE detail->>'email' = %s "
-        "OR actor_id = %s ORDER BY seq", (email, uid),
+        "SELECT action FROM audit.event WHERE detail->>'email_hmac' = %s "
+        "OR actor_id = %s ORDER BY seq", (identifier_hash(email), uid),
     ).fetchall()]
     assert "AUTH_FAILED" in actions and "AUTH_SUCCEEDED" in actions
 

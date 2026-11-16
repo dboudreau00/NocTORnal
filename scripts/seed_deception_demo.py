@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,8 +40,8 @@ load_env_local()
 
 #: The Reply-To sits on a real free-mail domain, because the free-mail signal reads
 #: deception.FREEMAIL_DOMAINS, but its local part holds an underscore, which Gmail does not allow,
-#: so it cannot be anybody's real address. The receiving server's Authentication-Results sits above
-#: every Received header, as a prepending MTA writes it: one below them is not believed.
+#: so it cannot be anybody's real address. The receiving server's Authentication-Results is believed
+#: only under its mail stamp, which `main` adds with a key it makes and then forgets (docs/19 section 2.1).
 BEC_EML = b"""\
 Authentication-Results: mail.latticework-holdings.example; spf=fail smtp.mailfrom=vps-4471.hostmarket.example; dkim=fail header.d=latticework-holdings.example; dmarc=fail
 Received: from mx-edge.latticework-holdings.example (mx-edge.latticework-holdings.example [10.4.0.9]) by mail.latticework-holdings.example with ESMTPS id 7f2a; Fri, 17 Jul 2026 08:14:31 +0000
@@ -77,6 +79,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from noctornal_api.db import SystemPurpose, connect_system
+    from noctornal_api import mail_stamp
     from noctornal_api.deception import DeceptionService, parse_eml
     from noctornal_api.evidence import EvidenceService, EvidenceStorage
 
@@ -143,13 +146,19 @@ def main() -> int:
     )
 
     # -- 2. the BEC message ----------------------------------------------
+    # The demo's receiving server is played by a key made here and never kept: the stamp verifies at
+    # this parse, so the row records the server's verdict, and any later parse of the exhibit reads
+    # the header as the sender's claim. No key is committed anywhere.
+    demo_keys = {"mail:demo": secrets.token_bytes(32)}
+    message = mail_stamp.sign(BEC_EML, demo_keys["mail:demo"], "mail:demo",
+                              now=int(time.time()))
     # The exhibit lands FIRST and the parse is derived from it.
     try:
         exhibit = EvidenceService(conn, EvidenceStorage()).ingest(
             case_id=case_id,
             title="remittance-change.eml",
             media_type="message/rfc822",
-            data=BEC_EML,
+            data=message,
             acquired_by=owner,
             acquisition_method="MANUAL_UPLOAD",
             classification=floor,
@@ -164,7 +173,8 @@ def main() -> int:
         evidence_id = None
 
     if evidence_id is not None:
-        parsed = parse_eml(BEC_EML, trusted=("latticework-holdings.example",))
+        parsed = parse_eml(message, trusted=("latticework-holdings.example",),
+                           stamp_keys=demo_keys)
         svc.record_email(
             case_id=case_id, evidence_id=evidence_id, parsed=parsed,
             recorded_by=owner, classification="CLEAR",

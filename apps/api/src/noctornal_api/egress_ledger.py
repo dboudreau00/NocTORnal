@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
@@ -327,16 +327,14 @@ def source_has_compartments(conn: psycopg.Connection) -> bool:
               AND column_name = 'compartments')""").fetchone()[0]
 
 
-def listing(conn: psycopg.Connection, *, clearance: str,
-            compartments: Iterable[str] = (), route_id: str | None = None,
-            event: str | None = None, since: datetime | None = None,
-            limit: int = 200) -> dict:
-    """The rows the caller may see, newest first, each OPEN paired with its CLOSE, with how many rows of the
-    WHOLE log were withheld (never narrowed by the route, event or window asked about). `clearance` is a TLP
-    name (deps.user_ceiling, no case)."""
-    if event is not None and event not in ("OPEN", "REFUSED", "PREAUTH", "REWRAP"):
-        raise ValueError("event is OPEN, REFUSED, PREAUTH or REWRAP")
-    held = sorted(set(compartments))
+#: Whether a row of the `filtered` CTE is within the caller's clearance and compartments.
+_VISIBLE = "(f.effective <= %(clearance)s::core.tlp AND f.compartments_ok)"
+
+
+def _labelled(conn: psycopg.Connection) -> Callable[[list[str]], str]:
+    """The CTE `filtered` as a function of its WHERE clauses: every ledger row they select, with the label it
+    is read under (`effective`) and whether the compartments in `%(held)s` cover it (`compartments_ok`). Which
+    collection columns exist is read per call."""
     has_comp = source_has_compartments(conn)
     # Which sources a persona is bound to is the collection framework's
     # column; before it exists no ACT or STOP row can have been written.
@@ -344,17 +342,6 @@ def listing(conn: psycopg.Connection, *, clearance: str,
         """SELECT EXISTS (SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'collect' AND table_name = 'source'
               AND column_name = 'collection_account_id')""").fetchone()[0]
-    where = ["c.event <> 'CLOSE'"]
-    named: dict = {"held": held, "clearance": clearance}
-    if route_id:
-        where.append("c.route_id = %(route_id)s")
-        named["route_id"] = route_id
-    if event:
-        where.append("c.event = %(event)s")
-        named["event"] = event
-    if since is not None:
-        where.append("c.occurred_at >= %(since)s")
-        named["since"] = since
     # The effective label: the greater of the stored label and, for a persona row, its source's current label, or
     # for an ACT or STOP row that matched no source, the persona's bound sources' labels now. A row's source is
     # the one it names, else its run's: a RUN row the proxy refused before it matched a source still belongs to
@@ -395,16 +382,56 @@ def listing(conn: psycopg.Connection, *, clearance: str,
           LEFT JOIN collect.source s ON s.id = {subject}
          WHERE {' AND '.join(clauses)})
     """
-    base = cte(where)
-    visible = "(f.effective <= %(clearance)s::core.tlp AND f.compartments_ok)"
-    # The count of rows the caller's clearance hides is taken over the WHOLE log, never under the route, event or
-    # window the caller asked about: under those filters it would read one hidden profile's activity exactly (a
-    # profile's id is in the overview even when its details are not), so a reader below its label could map the
-    # timing and volume of RED collection by moving `since`. A route hidden from the caller answers as one that
-    # does not exist: no rows, the same count.
-    withheld = conn.execute(
+    return cte
+
+
+def _withholds_any(conn: psycopg.Connection, cte: Callable[[list[str]], str], named: dict) -> bool:
+    # Whether the caller's clearance hides anything is asked of the WHOLE log, never under the route, event or
+    # window the caller asked about: under those filters it would read one hidden profile's activity (a profile's
+    # id is in the overview even when its details are not) by moving `since`. And it is a flag, not a count: a
+    # count of the whole log, polled and subtracted, still told a reader below a label when hidden rows arrived
+    # and roughly how many. A route hidden from the caller answers as one that does not exist: no rows, the same
+    # flag.
+    return bool(conn.execute(
         cte(["c.event <> 'CLOSE'"])
-        + f"SELECT count(*) FROM filtered f WHERE NOT {visible}", named).fetchone()[0]
+        + f"SELECT EXISTS (SELECT 1 FROM filtered f WHERE NOT {_VISIBLE})", named).fetchone()[0])
+
+
+def withholds_any(conn: psycopg.Connection, *, clearance: str,
+                  compartments: Iterable[str] = ()) -> bool:
+    """Whether the caller's clearance and compartments hide any row of the WHOLE log: the listing's
+    `some_withheld`, and what decides whether a reader is given the sequence numbers and the chain's length.
+    `clearance` is a TLP name (deps.user_ceiling, no case)."""
+    return _withholds_any(conn, _labelled(conn),
+                          {"held": sorted(set(compartments)), "clearance": clearance})
+
+
+def listing(conn: psycopg.Connection, *, clearance: str,
+            compartments: Iterable[str] = (), route_id: str | None = None,
+            event: str | None = None, since: datetime | None = None,
+            limit: int = 200) -> dict:
+    """The rows the caller may see, newest first, each OPEN paired with its CLOSE, and `some_withheld`: whether
+    any row of the WHOLE log was withheld, never narrowed by the route, event or window asked about, and never
+    how many. `seq` is given only to a reader the log hides nothing from: hidden rows draw from the same
+    sequence, so for any other reader the gaps between the numbers shown would count what was withheld. A row
+    is cited by its `connection_id` and `occurred_at` instead. `clearance` is a TLP name (deps.user_ceiling,
+    no case)."""
+    if event is not None and event not in ("OPEN", "REFUSED", "PREAUTH", "REWRAP"):
+        raise ValueError("event is OPEN, REFUSED, PREAUTH or REWRAP")
+    held = sorted(set(compartments))
+    where = ["c.event <> 'CLOSE'"]
+    named: dict = {"held": held, "clearance": clearance}
+    if route_id:
+        where.append("c.route_id = %(route_id)s")
+        named["route_id"] = route_id
+    if event:
+        where.append("c.event = %(event)s")
+        named["event"] = event
+    if since is not None:
+        where.append("c.occurred_at >= %(since)s")
+        named["since"] = since
+    cte = _labelled(conn)
+    base = cte(where)
     named["limit"] = max(1, min(int(limit), 500))
     rows = conn.execute(
         base + f"""
@@ -423,13 +450,16 @@ def listing(conn: psycopg.Connection, *, clearance: str,
              WHERE f.event = 'OPEN' AND x.event = 'CLOSE'
                AND x.connection_id = f.connection_id
              ORDER BY x.seq LIMIT 1) cl ON true
-         WHERE {visible}
+         WHERE {_VISIBLE}
          ORDER BY f.seq DESC
          LIMIT %(limit)s""", named).fetchall()
+    # Asked AFTER the rows, as verify() counts before it asks: a hidden row written between the two
+    # statements can only turn the flag on, which withholds `seq`, never show a gap with the flag off.
+    some_withheld = _withholds_any(conn, cte, {"held": held, "clearance": clearance})
     out = []
     for r in rows:
         item = {
-            "seq": r[0], "occurred_at": r[1].isoformat(), "event": r[2],
+            "seq": None if some_withheld else r[0], "occurred_at": r[1].isoformat(), "event": r[2],
             "connection_id": _s(r[3]), "protocol": r[4], "route_kind": r[5],
             "route_id": r[6], "egress_profile_id": _s(r[7]),
             "integration_route_id": _s(r[8]), "collection_run_id": _s(r[9]),
@@ -455,7 +485,7 @@ def listing(conn: psycopg.Connection, *, clearance: str,
                                   "duration_ms": r[25]}
                 item["close_text"] = close_sentence(r[22])
         out.append(item)
-    return {"rows": out, "withheld": withheld}
+    return {"rows": out, "some_withheld": some_withheld}
 
 
 def _s(value) -> str | None:

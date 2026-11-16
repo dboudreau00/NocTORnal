@@ -1125,22 +1125,33 @@ def co_participation(
             since=since, until=until))
     except CoParticipationError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
-    _disclose_hidden_participants(result, disclosure_mode(conn, case_id))
+    _disclose_hidden_participants(result, disclosure_mode(conn, case_id),
+                                  include_unresolved=include_unresolved)
     return _cap_projection(result, limit)
 
 
-def _disclose_hidden_participants(out: dict, mode: str) -> None:
+def _disclose_hidden_participants(out: dict, mode: str, *,
+                                  include_unresolved: bool) -> None:
     """How many participants resolve to an identity the reader cannot see, said only as the case
     allows under `coverage.withheld`: nothing under NONE, whether under PRESENCE, how many under
     COUNT, which alone keeps `participants_excluded_not_visible`. The filters can narrow this to
-    one room, so a bare count would localise hidden identities. An oversized room's
-    `projectable_participants` is left out except under COUNT: it is the room's size less, among
-    others, its hidden members."""
+    one room, so a bare count would localise hidden identities.
+
+    The service draws such a participant as an unresolved handle, and leaves it out as one when
+    `include_unresolved` is off; so under NONE and PRESENCE it is counted as one too, in
+    `participants_excluded_unresolved`. Otherwise that count, set against the handles the reader
+    can list (`contact-graph`), would say how many of them resolve above the reader (decision
+    232). An
+    oversized room's `projectable_participants` is left out except under COUNT: it is the room's
+    size less, among others, its hidden members."""
     cov = out.get("coverage") or {}
     hidden = cov.pop("participants_excluded_not_visible", 0)
     if mode == DISCLOSURE_COUNT:
         cov["participants_excluded_not_visible"] = hidden
     else:
+        if not include_unresolved:
+            cov["participants_excluded_unresolved"] = (
+                cov.get("participants_excluded_unresolved", 0) + hidden)
         for room in cov.get("oversized") or []:
             room.pop("projectable_participants", None)
     notice = withheld_notice(mode, hidden, noun="participants")

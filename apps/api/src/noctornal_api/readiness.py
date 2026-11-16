@@ -375,6 +375,28 @@ def _ingest_pepper_set(conn: psycopg.Connection) -> Check:
         f"not a compromise of the other")
 
 
+def _audit_pepper_set(conn: psycopg.Connection) -> Check:
+    """Calls `audit_hash.pepper_state`, the verdict the boot refusal takes too, so the check cannot
+    disagree with the product (see `_totp_kek_set`).
+
+    Not blocking: an unset pepper costs the audit log its address and sign-in identifier hashes and stops
+    nothing else. The value is never quoted, only its length.
+    """
+    from noctornal_api.security.audit_hash import MIN_PEPPER_CHARS, PEPPER_ENV, pepper_state
+
+    state = pepper_state()
+    action = (
+        f"set {PEPPER_ENV} in the API's environment to a random string of at least "
+        f"{MIN_PEPPER_CHARS} characters that no other secret shares, and restart. Rotating it "
+        f"is allowed: new rows stop matching older ones for the same address, and nothing "
+        f"stored breaks")
+    if not state.ok:
+        return Check("audit_pepper_set", False, state.why, action)
+    return Check(
+        "audit_pepper_set", True,
+        f"{PEPPER_ENV} is set and is {state.length} characters, a secret of its own")
+
+
 def _credentials_not_published(conn: psycopg.Connection) -> Check:
     """Does any credential this process holds carry a value somebody has already published?
 
@@ -3298,6 +3320,38 @@ def _collector_split(conn: psycopg.Connection) -> Check:
     return Check("collector_split", ok, evidence, "" if ok else action)
 
 
+_MAIL_STAMP_ACTION = (
+    "set NOCTORNAL_MAIL_STAMP_KEY (and its _ID and _RETIRED) to what "
+    "infra/production/secrets.env.example describes, and restart the API")
+
+
+def _mail_stamp_key(conn: psycopg.Connection) -> Check:
+    """The mail stamp key ring (docs/19 section 2.1), read by the reader `parse_eml` calls. Not blocking: with
+    no key, no Authentication-Results header is believed, which fails closed, so it passes with a caveat. A
+    ring that is set and unreadable fails, with the reader's sentence, which names a variable and a position
+    and never a key."""
+    from noctornal_api import mail_stamp
+    from noctornal_api.deception import trusted_mta_suffixes
+
+    name = "mail_stamp_key"
+    try:
+        keys = mail_stamp.ring(os.environ)
+    except mail_stamp.StampKeyError as exc:
+        return Check(name, False, f"the key ring cannot be read: {exc}", _MAIL_STAMP_ACTION)
+    if not keys:
+        return Check(name, True, "no mail stamp key is set", caveat=(
+            "No mail stamp key is set, so the SPF, DKIM and DMARC results on uploaded mail "
+            "are read as the sender's claim and no domain is proposed from them."))
+    active = next(iter(keys))
+    evidence = (f"active key id {active}, "
+                f"{count_of(len(keys) - 1, 'retired key', 'retired keys')}")
+    if not trusted_mta_suffixes():
+        return Check(name, True, evidence, caveat=(
+            "No trusted MTA host is declared (NOCTORNAL_TRUSTED_MTA_HOSTS), so no verdict "
+            "can be attributed to this deployment's own mail server."))
+    return Check(name, True, evidence)
+
+
 # ---------------------------------------------------------------------------
 # Prohibited-content screening. Not blocking: holding hash lists may itself be unlawful, so no list loaded
 # must pass.
@@ -3649,6 +3703,9 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "hold must be in the ring (NOCTORNAL_TOTP_KEK / _RETIRED)"),
     ("ingest_pepper_set", _ingest_pepper_set,
      f"set {_PEPPER_ENV} to a long random string, once, and keep it"),
+    # Not blocking, no console target: the pepper is settled in secrets.env.
+    ("audit_pepper_set", _audit_pepper_set,
+     "set NOCTORNAL_AUDIT_PEPPER to a random string of at least 16 characters of its own"),
     ("credentials_not_published", _credentials_not_published,
      "replace every credential that carries a published value with one "
      "generated for this deployment, and restart"),
@@ -3748,6 +3805,7 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "the collection tables could not be read; run alembic upgrade head"),
     ("collector_split", _collector_split,
      "the persona act queue could not be read; run alembic upgrade head"),
+    ("mail_stamp_key", _mail_stamp_key, _MAIL_STAMP_ACTION),
 )
 
 #: The names, in the order the report lists them. Public so the router

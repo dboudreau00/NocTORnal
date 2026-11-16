@@ -80,6 +80,7 @@ def test_collection_poll_refuses_a_persona_key_boundary_with_exit_two(monkeypatc
 @pytest.mark.parametrize("args", [[], ["--apply", "--actor", "a@b.example"]])
 @pytest.mark.parametrize("variable, value", [
     ("NOCTORNAL_INGEST_PEPPER", "replace-me-ingest-pepper"),
+    ("NOCTORNAL_AUDIT_PEPPER", "replace-me-audit-pepper"),
     ("NOCTORNAL_MIGRATION_DATABASE_URL", "postgresql://noctornal:Xk9pQ7@db/noctornal"),
     ("NOCTORNAL_PERSONA_KEK", "A" * 44),
 ])

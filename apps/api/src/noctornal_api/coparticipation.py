@@ -11,7 +11,16 @@ not been observed communicating, and a stored edge would be indistinguishable fr
 dashed and feed to metrics ONLY by opting in. Nothing here writes `core.edge`.
 
 Newman weighting divides each co-participation by (room size - 1), so a 500-member room contributes
-1/499 per pair. It does not fix the combinatorial cost (a 5,000-member channel still yields 12.5
+1/499 per pair. The room's size is its roster, every participant row, and it is one figure for every
+reader (docs/00 decision 232). A participant row carries no labels and its row policy is its
+conversation's (Alembic 0122), so whoever may read a conversation may list all of its participants
+(`CommsService.contact_graph`): the weight divides by a number the reader can already count, and says
+nothing about who resolves above them. Dividing by the members this caller can resolve would: set
+against the handles the caller can list, it says how many resolve above the caller. Nothing stores or
+caches this result. A change that does must key it by what the reader sees, as `analytics.graph_hash`
+is taken after `project()` has dropped what is above the caller.
+
+Newman weighting does not fix the combinatorial cost (a 5,000-member channel still yields 12.5
 million near-zero pairs), so rooms above `max_room_size` are excluded outright and the exclusion is
 reported in the result: a cap that silently drops data looks complete. Two restrictive defaults,
 both reversible: unresolved handles are excluded (`comms.participant` deliberately does not resolve
@@ -19,6 +28,14 @@ most group members, and promoting them to vertices would manufacture actors) and
 participants are excluded (docs/08, docs/16 L4: a third party in a group channel is not a subject).
 Both counts are reported either way, so an analyst can tell a sparse network from a filtered one, as
 with `projections.withheld` (docs/14 U2).
+
+What the roster does not say is the identity a handle resolves to. A participant resolved to an
+identity this caller may not see is, to this caller, an unresolved handle: drawn as one when
+`include_unresolved` is on and left out as one when it is off. Were it simply dropped, a caller
+holding the handle list could find the handle that is neither an identity vertex nor a handle
+vertex, under NONE. It is counted apart (`participants_excluded_not_visible`), and the router says
+that count only as the case's `withheld_disclosure` allows, folding it into the unresolved count
+otherwise (`http/routers/comms.py`).
 """
 from __future__ import annotations
 
@@ -165,22 +182,25 @@ class CoParticipationService:
                 if member["incidental"] and not p.include_incidental:
                     excluded_incidental += 1
                     continue
-                if member["identity"] is None:
+                # Resolved to a node this caller may not see: to this caller it is a handle, drawn
+                # and left out as an unresolved one is, so no answer tells the two apart (decision
+                # 232). Counted apart all the same; the router says the count only as the case allows.
+                hidden = member["identity"] is not None and member["label"] is None
+                if hidden:
+                    excluded_invisible += 1
+                if member["identity"] is None or hidden:
                     if not p.include_unresolved:
-                        excluded_unresolved += 1
+                        if not hidden:
+                            excluded_unresolved += 1
                         continue
                     key = f"handle:{member['handle']}"
                     vertices.setdefault(key, {
                         "key": key, "kind": "HANDLE",
                         "label": member["handle"], "node_id": None,
-                        "note": ("not resolved to an identity: this vertex is "
-                                 "a handle, and two handles may be one person "
-                                 "or one handle may be several")})
+                        "note": ("not resolved to an identity you may see: this "
+                                 "vertex is a handle, and two handles may be one "
+                                 "person or one handle may be several")})
                 else:
-                    if member["label"] is None:
-                        # Resolved to a node this caller may not see.
-                        excluded_invisible += 1
-                        continue
                     key = f"node:{member['identity']}"
                     vertices.setdefault(key, {
                         "key": key, "kind": "IDENTITY",
@@ -200,7 +220,9 @@ class CoParticipationService:
             # channel would score exactly as high as a two-party DM (a 499x overstatement), and the
             # room would also escape the oversize cap and never appear in `oversized`. Newman
             # divides by the size of the GROUP: how many members we resolved is a fact about our
-            # coverage, and coverage must not inflate a tie.
+            # coverage, and coverage must not inflate a tie. Nor is it a fact about the reader: the
+            # roster is what every reader of the conversation can list, hidden identities' handles
+            # included, so this is the same number for each of them (decision 232).
             room_size = room["raw_size"]
             if size < 2:
                 singleton_rooms += 1

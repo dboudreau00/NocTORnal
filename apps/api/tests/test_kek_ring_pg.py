@@ -164,6 +164,8 @@ def test_login_refuses_as_invalid_credentials_when_the_secret_cannot_be_opened(
     """The answer a wrong password gets, and one lockout attempt spent: an
     answer of its own would confirm the password. The cause is in the audit
     row and the server log, where the operator reads it."""
+    from noctornal_api.security.audit_hash import identifier_hash
+
     uid, email, secret = _enrolled(conn)
     assert _login(client, conn, uid, email, secret).status_code == 204
 
@@ -176,8 +178,8 @@ def test_login_refuses_as_invalid_credentials_when_the_secret_cannot_be_opened(
                         (uid,)).fetchone()[0] == 1
     audited = conn.execute(
         """SELECT detail->>'reason' FROM audit.event
-            WHERE action = 'AUTH_FAILED' AND detail->>'email' = %s
-            ORDER BY seq DESC LIMIT 1""", (email,)).fetchone()
+            WHERE action = 'AUTH_FAILED' AND detail->>'email_hmac' = %s
+            ORDER BY seq DESC LIMIT 1""", (identifier_hash(email),)).fetchone()
     assert audited and audited[0] == "totp_secret_unopenable"
 
 

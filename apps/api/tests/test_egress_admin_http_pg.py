@@ -9,10 +9,13 @@ import json
 import logging
 import os
 import socket
+from uuid import uuid4
 
 import pytest
 
 import egress_support as es
+from noctornal_api import egress_ledger
+from noctornal_api.egress_ledger import Row
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
@@ -121,6 +124,78 @@ def test_a_naive_since_is_refused_in_utc_words(conn, client, people):
     r = client.get(f"{API}/connections?since=2026-09-24T10:00:00",
                    headers=es.session(conn, people["officer"]))
     assert r.status_code == 422 and "Times are UTC" in r.json()["detail"]
+
+
+def _ledger_row(conn, label, source=None) -> int:
+    """One OPEN row: a persona row on `source` at `label`, or a GREEN integration row."""
+    if source is None:
+        return egress_ledger.write(conn, Row(
+            event="OPEN", route_id="integration:webhook", reason="allowed",
+            connection_id=uuid4(), protocol="HTTP_CONNECT", route_kind="integration",
+            dest_host="hooks.example", dest_port=443, exit_kind="DIRECT"))
+    return egress_ledger.write(conn, Row(
+        event="OPEN", route_id="persona:" + str(uuid4()), reason="allowed",
+        connection_id=uuid4(), protocol="SOCKS5", route_kind="persona",
+        dest_host="forum.example", dest_port=443, exit_kind="SOCKS5",
+        source_id=source, classification=label, context_kind="run", context_id=uuid4()))
+
+
+def _red_source(conn):
+    return es.source(conn, PREFIX, kind="XENFORO", parser="xenforo",
+                     base_url="http://forum.example/", classification="RED")
+
+
+def _caller(uid):
+    from noctornal_api.http.deps import CurrentUser
+    return CurrentUser(user_id=uid, session_id=uuid4(), session_mfa_at=None)
+
+
+def test_the_verify_answer_gives_no_chain_length_to_a_reader_with_withheld_rows(
+        conn, client, people):
+    # Committed, because the client reads on a connection of its own: the ledger keeps both rows, and the
+    # RED one stays above the GREEN officer on its stored label after the module's teardown.
+    _ledger_row(conn, "RED", _red_source(conn))
+    _ledger_row(conn, "GREEN")
+    officer = es.session(conn, people["officer"])
+    log = client.get(f"{API}/connections", headers=officer).json()
+    assert log["some_withheld"] is True and "withheld" not in log
+    assert log["rows"] and all(r["seq"] is None for r in log["rows"])
+    got = client.get(f"{API}/connections/verify", headers=officer).json()
+    assert got["rows"] is None and got["first_break_seq"] is None
+    assert got["checked_at"]
+
+
+def test_the_verify_route_gives_the_chain_length_to_a_reader_the_log_hides_nothing_from(
+        conn, people):
+    """The route's own function on this test's connection, in a transaction it rolls back: the shared
+    database holds rows hidden from every reader, which only an emptied ledger in such a transaction is
+    without, and the HTTP client could not see it. The gate in front of the route is the one
+    test_the_officer_reads_the_overview_and_the_log_and_an_analyst_does_not holds."""
+    from noctornal_api.http.routers import egress as router
+    with conn.transaction(force_rollback=True):
+        es.empty_ledger(conn)
+        _ledger_row(conn, "GREEN")
+        _ledger_row(conn, "RED", _red_source(conn))
+        admin = router.verify(user=_caller(people["admin"]), conn=conn)
+        officer = router.verify(user=_caller(people["officer"]), conn=conn)
+    assert admin["rows"] == 2 and admin["first_break_seq"] is None
+    assert officer["rows"] is None and officer["first_break_seq"] is None
+
+
+def test_a_broken_chain_is_still_reported_with_its_sequence_number_to_everyone(conn, people):
+    from noctornal_api.http.routers import egress as router
+    with conn.transaction(force_rollback=True):
+        es.empty_ledger(conn)
+        broken = _ledger_row(conn, "GREEN")
+        _ledger_row(conn, "RED", _red_source(conn))
+        conn.execute("ALTER TABLE collect.egress_connection DISABLE TRIGGER USER")
+        conn.execute("UPDATE collect.egress_connection SET dest_host = 'forged.example' "
+                     "WHERE seq = %s", (broken,))
+        conn.execute("ALTER TABLE collect.egress_connection ENABLE TRIGGER USER")
+        admin = router.verify(user=_caller(people["admin"]), conn=conn)
+        officer = router.verify(user=_caller(people["officer"]), conn=conn)
+    assert officer["first_break_seq"] == broken and officer["rows"] is None
+    assert admin["first_break_seq"] == broken and admin["rows"] == 2
 
 
 def test_each_write_leaves_one_audit_row(conn, client, people):

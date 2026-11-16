@@ -15,7 +15,6 @@ other, and `MALWARE_ANALYST` holds no case access.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 from datetime import timedelta
 from uuid import UUID
@@ -64,6 +63,7 @@ from noctornal_api import fuzzyhash, lab_archive, lab_similarity, lab_triage
 from noctornal_api.config import SAMPLE_CAP_ENV, cap_is_declared
 from noctornal_api.iam_admin import IamAdminService
 from noctornal_api.ratelimit import ip_subject
+from noctornal_api.security import audit_hash
 from noctornal_api.security.access import tlp_from_name
 from noctornal_api.samples import (
     AUTHORISE_PERMISSION,
@@ -137,10 +137,10 @@ def _ip_hash(request: Request) -> bytes | None:
     `client_ip` rather than `request.client.host`, for the reason
     `routers/auth.py` records against the same three lines: behind a
     proxy the latter is the load balancer, so every event was attributed
-    to the address of the thing in front of the application.
+    to the address of the thing in front of the application. Keyed, by
+    `audit_hash.ip_hash`.
     """
-    ip = client_ip(request)
-    return hashlib.sha256(ip.encode()).digest() if ip else None
+    return audit_hash.ip_hash(client_ip(request))
 
 
 def _download_url(sample_origin: str, sample_id: UUID) -> str:

@@ -88,6 +88,7 @@ def sign_in(conn):
     after the fact and never spends it; must_change_password is read only
     after both factors verified, so an unauthenticated shell user learns
     nothing about an account's reset state."""
+    from noctornal_api.security.audit_hash import typed_identifier
     from noctornal_api.security.auth import AuthService
     from noctornal_api.stores import PgUserStore
 
@@ -100,12 +101,12 @@ def sign_in(conn):
     # sign-in stores its own (docs/17, "refusals are recorded as SUCCESS").
     if not result.ok:
         _audit(conn, None, "AUTH_FAILED",
-               "auth", None, {"reason": result.audit_reason, "email": email,
+               "auth", None, {"reason": result.audit_reason, **typed_identifier(email),
                               "via": VIA}, outcome="DENIED")
         raise Refused(NOT_VERIFIED)
     if result.audit_reason == "ok_recovery_code":
         _audit(conn, None, "AUTH_FAILED", "auth", None,
-               {"reason": "recovery_code_refused", "email": email, "via": VIA},
+               {"reason": "recovery_code_refused", **typed_identifier(email), "via": VIA},
                outcome="DENIED")
         raise Refused(RECOVERY_REFUSED)
     must_change = conn.execute(
@@ -113,7 +114,7 @@ def sign_in(conn):
         (result.user_id,)).fetchone()
     if must_change is not None and must_change[0]:
         _audit(conn, None, "AUTH_FAILED", "auth", None,
-               {"reason": "password_change_required", "email": email, "via": VIA},
+               {"reason": "password_change_required", **typed_identifier(email), "via": VIA},
                outcome="DENIED")
         raise Refused(CHANGE_FIRST)
     holds = conn.execute(

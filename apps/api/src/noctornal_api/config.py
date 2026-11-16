@@ -479,6 +479,20 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
                     f"nobody, and the process would otherwise start and find that "
                     f"out at the first login.")
 
+    # The mail stamp ring, through its own reader. Unset is not a problem: no Authentication-Results
+    # header is believed, which is the feature off and failing closed (docs/19 section 2.1). A ring
+    # set and unreadable would do the same in silence, so it is refused here, by variable and
+    # position, never by value.
+    from noctornal_api import mail_stamp
+
+    try:
+        mail_stamp.ring(env)
+    except mail_stamp.StampKeyError as exc:
+        problems.append(
+            f"the mail stamp key ring is not usable ({exc}), so no stamp verifies "
+            f"and every Authentication-Results header on uploaded mail is read as "
+            f"the sender's claim.")
+
     # `.strip()` because `ingest._pepper` strips: a pepper of one space is
     # unset as far as key issuance is concerned, and must be unset here.
     if not env.get("NOCTORNAL_INGEST_PEPPER", "").strip():
@@ -486,6 +500,18 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             "NOCTORNAL_INGEST_PEPPER is not set, so ingest keys have no pepper "
             "to be HMAC'd with (docs/12) and every key this deployment issues "
             "would be an unusable credential its holder cannot authenticate with.")
+
+    # The verdict is `audit_hash.pepper_state`'s, the reader every audit hash and the readiness row
+    # `audit_pepper_set` go through. A published value was refused above, by the name.
+    from noctornal_api.security.audit_hash import MIN_PEPPER_CHARS, PEPPER_ENV, pepper_state
+
+    audit_pepper = pepper_state(env)
+    if not audit_pepper.ok and PEPPER_ENV not in already:
+        problems.append(
+            f"{audit_pepper.why}, so the hashes the audit log keeps of a client's address and "
+            f"of what a failed sign-in typed would not be keyed by a strong secret of their own: "
+            f"it must be a random string of at least {MIN_PEPPER_CHARS} characters that no "
+            f"other secret shares, and {SECRETS_STEP} writes one into secrets.env.")
 
     if not env.get("REDIS_URL", "").strip():
         problems.append(

@@ -559,6 +559,18 @@ The Python in the virtual environment produced nothing.'
     } >> "$ENV_LOCAL"
     good 'added the persona key to .env.local'
   fi
+  # And a file written before the audit pepper existed gains that, appended the same way.
+  if ! grep -q '^NOCTORNAL_AUDIT_PEPPER=' "$ENV_LOCAL"; then
+    AUDIT_PEPPER="$("$VENV_PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    [[ -n "$AUDIT_PEPPER" ]] || stop_with 'Could not generate the audit pepper.' \
+'Run this installer again. Nothing was written, so that is safe.
+The Python in the virtual environment produced nothing.'
+    {
+      printf '%s\n' '# NOCTORNAL_AUDIT_PEPPER keys the audit log'\''s hashes of an address and of a failed sign-in. Changed, new rows no longer correlate with older ones.'
+      printf 'NOCTORNAL_AUDIT_PEPPER=%s\n' "$AUDIT_PEPPER"
+    } >> "$ENV_LOCAL"
+    good 'added the audit pepper to .env.local'
+  fi
 else
   # Checked before anything is written. `set -e` stops on an interpreter that exits non-zero,
   # but not on one that exits 0 and prints nothing, or prints a warning ahead of the value, and
@@ -594,6 +606,12 @@ The Python in the virtual environment did not produce a usable key."
 "Run this installer again. Nothing was written, so that is safe.
 The Python in the virtual environment produced nothing."
   fi
+  AUDIT_PEPPER="$("$VENV_PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  if [[ -z "$AUDIT_PEPPER" ]]; then
+    stop_with 'Could not generate the audit pepper.' \
+"Run this installer again. Nothing was written, so that is safe.
+The Python in the virtual environment produced nothing."
+  fi
   # The service configuration is written too, not just the secrets: every script reads this
   # file (scripts/_env.py), so the documented second-terminal commands work in a fresh shell.
   # The SMTP values point the Mailpit demo at port 1025 (transports.py defaults to 587). Every
@@ -622,6 +640,10 @@ The Python in the virtual environment produced nothing."
 # stored fingerprints no longer match new ones for the same value.
 NOCTORNAL_TOTP_KEK=$KEK
 NOCTORNAL_INGEST_PEPPER=$PEPPER
+# NOCTORNAL_AUDIT_PEPPER keys the hashes the audit log keeps of a client's
+# address and of what a failed sign-in typed as its email. Changed, new rows
+# no longer correlate with older ones, and nothing stored breaks.
+NOCTORNAL_AUDIT_PEPPER=$AUDIT_PEPPER
 # NOCTORNAL_PERSONA_KEK seals every collection persona credential. Lost,
 # every persona is enrolled again. This install has no collector process,
 # so persona acts run inside the API (NOCTORNAL_COLLECTOR_INLINE); a

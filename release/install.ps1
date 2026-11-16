@@ -630,6 +630,18 @@ if (Test-Path $EnvLocal) {
         Add-Content -LiteralPath $EnvLocal -Value $added
         Write-Good 'added the persona key to .env.local'
     }
+    # And a file written before the audit pepper existed gains that, appended the same way.
+    if ($envText -notmatch '(?m)^NOCTORNAL_AUDIT_PEPPER=') {
+        $auditPepper = & $VenvPython -c "import secrets; print(secrets.token_urlsafe(32))"
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($auditPepper)) {
+            Stop-With 'Could not generate the audit pepper.' `
+                'Run this installer again. Nothing was written, so that is safe. The Python in the virtual environment produced nothing.'
+        }
+        Add-Content -LiteralPath $EnvLocal -Value @(
+            '# NOCTORNAL_AUDIT_PEPPER keys the audit log''s hashes of an address and of a failed sign-in. Changed, new rows no longer correlate with older ones.',
+            "NOCTORNAL_AUDIT_PEPPER=$auditPepper")
+        Write-Good 'added the audit pepper to .env.local'
+    }
 } else {
     # The output of these is checked before anything is written. A failed subprocess leaves its
     # variable empty, and a file written with an empty key would stay, since every later run
@@ -663,6 +675,11 @@ if (Test-Path $EnvLocal) {
         Stop-With 'Could not generate the ingest pepper.' `
             'Run this installer again. Nothing was written, so that is safe. The Python in the virtual environment produced nothing.'
     }
+    $auditPepper = & $VenvPython -c "import secrets; print(secrets.token_urlsafe(32))"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($auditPepper)) {
+        Stop-With 'Could not generate the audit pepper.' `
+            'Run this installer again. Nothing was written, so that is safe. The Python in the virtual environment produced nothing.'
+    }
     # The service configuration is written too, not just the secrets: every script reads this
     # file (scripts/_env.py), so the documented second-terminal commands work in a fresh shell.
     # The SMTP values point the Mailpit demo at port 1025 (transports.py defaults to 587) and
@@ -691,6 +708,10 @@ if (Test-Path $EnvLocal) {
         '# stored fingerprints no longer match new ones for the same value.',
         "NOCTORNAL_TOTP_KEK=$kek",
         "NOCTORNAL_INGEST_PEPPER=$pepper",
+        '# NOCTORNAL_AUDIT_PEPPER keys the hashes the audit log keeps of a client''s',
+        '# address and of what a failed sign-in typed as its email. Changed, new rows',
+        '# no longer correlate with older ones, and nothing stored breaks.',
+        "NOCTORNAL_AUDIT_PEPPER=$auditPepper",
         '# NOCTORNAL_PERSONA_KEK seals every collection persona credential. Lost,',
         '# every persona is enrolled again. This install has no collector process,',
         '# so persona acts run inside the API (NOCTORNAL_COLLECTOR_INLINE); a',

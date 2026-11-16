@@ -130,7 +130,9 @@ def test_the_register_names_are_unique_and_in_register_order():
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
     # conversations_minimisable (decision 231), not blocking.
-    assert len(readiness.CHECK_NAMES) == 47, readiness.CHECK_NAMES
+    # mail_stamp_key (docs/19 section 2.1), not blocking: with no key nothing is believed.
+    # audit_pepper_set (decision 237), not blocking: an unset pepper costs only the audit hashes.
+    assert len(readiness.CHECK_NAMES) == 49, readiness.CHECK_NAMES
     # Also not blocking: proxy_hops_declared (docs/17 "a missing hop count"), retention_sweep_current,
     # collector_split, the row-level security, Telegram, forum, screening and sandbox, outbound
     # integration and similarity index rows, the comms rows, egress_routes_cover_sources,
@@ -633,6 +635,36 @@ def test_the_two_new_checks_answer_with_evidence(conn):
     if not role.ok:
         assert "noctornal_app" in role.action
         assert "infra/production/compose.yml" in role.action
+
+
+def test_audit_pepper_set_is_registered_after_the_ingest_pepper_and_is_not_blocking():
+    """An unset audit pepper costs the audit log two hashes and stops nothing, so a collection poll is
+    never refused over it, and it sits beside the other pepper in the register."""
+    names = list(readiness.CHECK_NAMES)
+    assert names.index("audit_pepper_set") == names.index("ingest_pepper_set") + 1
+    assert "audit_pepper_set" not in readiness.BLOCKING_CHECKS
+    assert "audit_pepper_set" not in readiness.CONSEQUENCES
+
+
+def test_the_audit_pepper_row_reports_only_a_length(monkeypatch):
+    """The row asks the reader the boot refusal asks, and says how long the value is, never what it is."""
+    pepper = "Qz4-a-pepper-for-this-test-only"
+    monkeypatch.setenv("NOCTORNAL_AUDIT_PEPPER", pepper)
+    monkeypatch.setenv("NOCTORNAL_INGEST_PEPPER", "a-different-pepper-entirely")
+    good = readiness._audit_pepper_set(None)
+    assert good.ok, good
+    assert f"is {len(pepper)} characters" in good.evidence
+    assert pepper not in good.evidence and pepper not in (good.action or "")
+
+    monkeypatch.setenv("NOCTORNAL_INGEST_PEPPER", pepper)
+    reused = readiness._audit_pepper_set(None)
+    assert not reused.ok
+    assert reused.evidence == "NOCTORNAL_AUDIT_PEPPER is the same value as NOCTORNAL_INGEST_PEPPER"
+    assert "NOCTORNAL_AUDIT_PEPPER" in reused.action
+
+    monkeypatch.delenv("NOCTORNAL_AUDIT_PEPPER")
+    unset = readiness._audit_pepper_set(None)
+    assert not unset.ok and unset.evidence == "NOCTORNAL_AUDIT_PEPPER is not set"
 
 
 @needs_db

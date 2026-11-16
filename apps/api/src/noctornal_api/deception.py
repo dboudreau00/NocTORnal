@@ -9,7 +9,7 @@ column), and three rules this module enforces rather than documents:
    `core.evidence` is whatever the uploading client said.
 2. The displayed identifier is the spoofed one (invariant 9 generalised). `presented_number` never
    becomes a selector, `header_from` never becomes an identity, and a DKIM domain is an identity
-   only if DKIM *passed*.
+   only if DKIM *passed*, as the deployment's own mail server said under a valid mail stamp.
 3. The Received chain is trustworthy inwards only. Everything above the receiving organisation's own
    MTA is attacker-writable, so `seq` is stored recipient-first and the boundary is marked.
 
@@ -24,6 +24,7 @@ import hashlib
 import ipaddress
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -34,6 +35,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api import mail_stamp
 from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 
 
@@ -417,6 +419,9 @@ MAX_EML_BYTES = 64 * 1024 * 1024
 _MAX_HEADERS = 2000
 _MAX_PARTS = 500
 
+#: `ParsedEmail.auth_basis` for a verdict read from the header a valid mail stamp attests.
+AUTH_BASIS_STAMP = "MAIL_STAMP"
+
 
 @dataclass
 class ParsedEmail:
@@ -446,6 +451,9 @@ class ParsedEmail:
     dmarc_result: str | None = None
     dmarc_domain: str | None = None
     auth_results_raw: str | None = None
+    #: What made the SPF, DKIM and DMARC verdicts believable: `AUTH_BASIS_STAMP` when a valid mail stamp
+    #: attested the header they were read from, None when none was read.
+    auth_basis: str | None = None
     body_text: str | None = None
     has_html_body: bool = False
     extracted_urls: list[str] = field(default_factory=list)
@@ -504,7 +512,8 @@ def _header_str(msg: EmailMessage, name: str) -> str | None:
         return None
 
 
-def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedEmail:
+def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None,
+              stamp_keys: Mapping[str, bytes] | None = None) -> ParsedEmail:
     """Parse an RFC 5322 message into forensic fields.
 
     Never renders, never fetches, never executes. The HTML body is recorded as *present* and its
@@ -514,6 +523,10 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
     Malformed input degrades into `gaps` rather than raising, because a BEC exhibit is by definition
     attacker-authored and "the parser crashed" is not an acceptable answer to "what does this mail
     say".
+
+    `trusted` defaults to `NOCTORNAL_TRUSTED_MTA_HOSTS` and `stamp_keys` to the mail stamp key ring
+    in the environment (`mail_stamp.ring`); a ring that cannot be read is an empty one, which
+    believes no Authentication-Results header (docs/19 section 2.1).
     """
     if len(data) > MAX_EML_BYTES:
         raise DeceptionError(
@@ -562,27 +575,35 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
         # fact about the mail.
         auth_headers, auth_unreadable = [], f"{type(exc).__name__}: {exc}"
     if auth_headers:
-        # ONLY THE FIRST HEADER IS EVIDENCE. The rest are recorded and not believed.
+        # AT MOST ONE HEADER IS EVIDENCE: the one a valid mail stamp attests. The rest are recorded
+        # and not believed.
         #
-        # An MTA PREPENDS, so index 0 is the receiving organisation's own verdict and anything the
-        # sender put in the message they wrote is LAST (the same rule this module applies to
-        # `Received`). A last-wins dict over the joined string would let an attacker appending their
-        # own `Authentication-Results: dkim=pass header.d=microsoft.com` override the real
-        # `dkim=fail`, and `microsoft.com` would come out as a durable, cryptographically
-        # authenticated DOMAIN selector. That defeats rule 2 and invariant 9 using bytes the
-        # attacker typed, and the `email_dkim_domain_needs_pass` CHECK cannot catch it: a constraint
-        # defends against the application forgetting to check, never against it checking a forged
-        # input (docs/17, the forged PGP verdict).
+        # Every byte of an uploaded message is somebody's claim, a forged `Received: ... by
+        # mx.<trusted host>` line and a forged `Authentication-Results: dkim=pass
+        # header.d=microsoft.com` above it included, so no rule about where a header sits can say
+        # who wrote it (docs/17, http_ui-007). Believed, that header would make `microsoft.com` a
+        # durable, cryptographically authenticated DOMAIN selector out of bytes the attacker typed,
+        # and the `email_dkim_domain_needs_pass` CHECK cannot catch it: a constraint defends
+        # against the application forgetting to check, never against it checking a forged input.
+        # The stamp is a MAC under a key only the deployment's own mail server holds, over the
+        # exact header it attests (docs/19 section 2.1).
         #
         # The whole set is still stored in `auth_results_raw`, because a message carrying two of
         # these is itself a finding.
         out.auth_results_raw = " | ".join(str(a) for a in auth_headers)[:8000]
-        # The FIRST header is the only candidate, and it is believed only when a trusted MTA wrote
-        # it. A message the receiving server stamped nothing on (forwarded, exported) carries only
-        # the sender's own header, and the sender picks which domain it says passed.
-        believed, why_not = _auth_results_believed(msg, str(auth_headers[0]), trusted)
+        ring_unreadable = False
+        if stamp_keys is None:
+            try:
+                stamp_keys = mail_stamp.ring(os.environ)
+            except mail_stamp.StampKeyError:
+                # Fail closed, and say so without the ring's own sentence, which belongs to the
+                # operator and not in a parse gap an analyst reads.
+                stamp_keys, ring_unreadable = {}, True
+        believed, why_not, attested, stamps = _auth_results_believed(
+            data, trusted, stamp_keys, ring_unreadable=ring_unreadable)
         if believed:
-            _apply_auth_results(out, str(auth_headers[0]))
+            _apply_auth_results(out, attested)
+            out.auth_basis = AUTH_BASIS_STAMP
         else:
             out.gaps.append({
                 "step": "authentication_results",
@@ -595,10 +616,18 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
             out.gaps.append({
                 "step": "authentication_results",
                 "reason": f"{len(auth_headers)} Authentication-Results "
-                          "headers were present; only the first (the "
-                          "receiving MTA's) was believed. The others are "
-                          "in auth_results_raw and are attacker-writable. "
-                          "A message carrying a second one is suspicious in "
+                          "headers were present; only the one a valid mail "
+                          "stamp covers can be believed. The others are in "
+                          "auth_results_raw and are attacker-writable. A "
+                          "message carrying a second one is suspicious in "
+                          "itself."})
+        if stamps > mail_stamp.MAX_STAMPS:
+            out.gaps.append({
+                "step": "authentication_results",
+                "reason": f"{stamps} {mail_stamp.HEADER} headers were present "
+                          f"and only the first {mail_stamp.MAX_STAMPS} were "
+                          "read. The receiving server writes one, so the "
+                          "others were added after it, which is suspicious in "
                           "itself."})
     elif auth_unreadable is not None:
         out.gaps.append({
@@ -716,56 +745,47 @@ def _all_addrs(raw: str | None) -> list[str]:
 _AUTHSERV_ID = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
 
 
-def _auth_results_believed(msg: EmailMessage, value: str,
-                           trusted: tuple[str, ...] | None) -> tuple[bool, str]:
-    """(believed, why_not) for the first Authentication-Results header.
+def _auth_results_believed(data: bytes, trusted: tuple[str, ...] | None,
+                           keys: Mapping[str, bytes], *, ring_unreadable: bool = False,
+                           ) -> tuple[bool, str, str | None, int]:
+    """(believed, why_not, the attested value, how many stamps the message carries).
 
     Three things must hold, and each is a refusal when it does not:
 
-    1. Its authserv-id (the name before the first `;`) is a host of a trusted MTA
-       (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the same list the Received chain's boundary is read from.
-       With none declared nothing can be attributed to the recipient's own server ("unconfigured
-       means unknown").
-    2. The topmost Received header was written by a trusted MTA: the last server to handle the
-       message is ours, so what sits above its Received line was added by it, after it took the
-       message.
-    3. The header sits ABOVE every Received header. An MTA prepends, so a header below one was
-       written before that hop saw the message, by the sender or a relay the sender chose. The
-       authserv-id alone is no defence here, because a forger writes the victim organisation's own
-       name into it.
+    1. A trusted MTA is declared (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the same list the Received chain's
+       boundary is read from. With none, nothing can be attributed to the recipient's own server
+       ("unconfigured means unknown").
+    2. A mail stamp verifies under one of `keys` (`mail_stamp.verify`): the deployment's own mail
+       server attested one Authentication-Results header of this message as it now is. The header
+       is that one, wherever it sits, and not necessarily the first.
+    3. That header's authserv-id (the name before the first `;`) is a host of a trusted MTA. The
+       stamp already says our server attested it; this keeps `NOCTORNAL_TRUSTED_MTA_HOSTS` meaning
+       what it says, and refuses a verdict a misconfigured signer attested for another server.
 
-    Anything else is the sender's claim and is not read as a verdict."""
+    Where a header sits is not a rule: the sender writes every line of a message handed over as a
+    file, Received lines included. Anything else is the sender's claim and is not read as a
+    verdict."""
     suffixes = trusted_mta_suffixes() if trusted is None else tuple(trusted)
     if not suffixes:
         return False, ("no trusted MTA is declared (NOCTORNAL_TRUSTED_MTA_HOSTS), "
                        "so no such header can be attributed to the recipient's "
-                       "own server")
+                       "own server"), None, 0
+    if ring_unreadable:
+        return False, ("no valid mail stamp covers it, because the mail stamp key "
+                       f"ring in this server's environment ({mail_stamp.KEY_ENV}) "
+                       "cannot be read"), None, 0
+    result = mail_stamp.verify(data, keys)
+    if not result.ok:
+        return False, f"no valid mail stamp covers it, because {result.reason}", None, result.stamps
+    value = result.auth_value.decode("utf-8", "replace")
     words = value.split(";", 1)[0].split()
     authserv = words[0].lower().rstrip(".") if words else ""
     if not _AUTHSERV_ID.fullmatch(authserv) or not any(
             authserv == t or authserv.endswith("." + t) for t in suffixes):
-        return False, ("its authserv-id is not one of this deployment's trusted "
-                       "MTAs, or it names none")
-    try:
-        names = [str(k).lower() for k in msg.keys()]
-        received = [str(h) for h in (msg.get_all("Received") or [])][:_MAX_HEADERS]
-    except Exception:                                         # noqa: BLE001
-        return False, "the message's headers could not be read in order"
-    first_received = next((i for i, n in enumerate(names) if n == "received"), None)
-    if first_received is None or not received:
-        return False, ("the message carries no Received header, so nothing "
-                       "shows where the receiving server's own part begins")
-    top = parse_received_chain(received[:1], suffixes)
-    by_host = (top[0].by_host or "") if top else ""
-    if not any(by_host == t or by_host.endswith("." + t) for t in suffixes):
-        return False, ("the last server to handle the message is not a trusted "
-                       "MTA, so a header on it may have been written by anyone")
-    if names.index("authentication-results") > first_received:
-        return False, ("it sits below a Received header, so it may have been "
-                       "written by the sender or a relay before the receiving "
-                       "server saw the message; only a header above every "
-                       "Received header is believed")
-    return True, ""
+        return False, ("the header its stamp covers has an authserv-id that is "
+                       "not one of this deployment's trusted MTAs, or names "
+                       "none"), None, result.stamps
+    return True, "", value, result.stamps
 
 
 def _apply_auth_results(out: ParsedEmail, raw: str) -> None:
@@ -1336,7 +1356,7 @@ _EMAIL_COLUMNS = (
     "from_replyto_divergent, from_returnpath_divergent, "
     "display_name_impersonates, reply_to_is_freemail, body_text, "
     "has_html_body, extracted_urls, direction, recorded_by, recorded_at, "
-    "parse_gaps, classification, compartments, legal_hold"
+    "parse_gaps, classification, compartments, legal_hold, auth_basis"
 )
 _EMAIL_Q = ", ".join("x." + c.strip() for c in _EMAIL_COLUMNS.split(","))
 
@@ -1539,14 +1559,14 @@ class DeceptionService:
                         header_cc, subject, date_header, in_reply_to,
                         spf_result, spf_domain, dkim_result, dkim_domain,
                         dmarc_result, dmarc_domain, auth_results_raw,
-                        from_replyto_divergent, from_returnpath_divergent,
+                        auth_basis, from_replyto_divergent, from_returnpath_divergent,
                         display_name_impersonates, reply_to_is_freemail,
                         body_text, has_html_body, extracted_urls, direction,
                         victim_node_id, recorded_by, parse_gaps,
                         classification, compartments)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                           %s,%s)
+                           %s,%s,%s)
                    RETURNING id""",
                 (case_id, evidence_id, parsed.message_id,
                  msgid_norm(parsed.message_id) if parsed.message_id else None,
@@ -1556,7 +1576,8 @@ class DeceptionService:
                  parsed.subject, parsed.date_header, parsed.in_reply_to,
                  parsed.spf_result, parsed.spf_domain, parsed.dkim_result,
                  parsed.dkim_domain, parsed.dmarc_result, parsed.dmarc_domain,
-                 parsed.auth_results_raw, parsed.from_replyto_divergent,
+                 parsed.auth_results_raw, parsed.auth_basis,
+                 parsed.from_replyto_divergent,
                  parsed.from_returnpath_divergent, display_name_impersonates,
                  parsed.reply_to_is_freemail, parsed.body_text,
                  parsed.has_html_body, parsed.extracted_urls, direction,
@@ -2216,6 +2237,9 @@ def _email_row(r) -> dict:
         "recorded_at": r[29].isoformat(), "parse_gaps": r[30] or [],
         "classification": r[31], "compartments": sorted(r[32] or []),
         "legal_hold": r[33],
+        # MAIL_STAMP, or None: with a verdict and no basis, the row was recorded before the mail stamp
+        # (0197), and the sender may have chosen the verdict.
+        "auth_basis": r[34],
     }
 
 

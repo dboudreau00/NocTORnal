@@ -27497,7 +27497,8 @@ function renderCoParticipationCoverage(body) {
     cov.participants_excluded_unresolved));
   /* Not-visible is a clearance fact, not a data-quality one: the network is smaller because
      of who is asking, so it is kept distinct. Said only as the case allows: the number under
-     COUNT, whether under PRESENCE, and nothing at all under NONE. */
+     COUNT, whether under PRESENCE, and nothing at all under NONE. Under NONE and PRESENCE the
+     service counts those participants with the unresolved ones, so no handle is told apart. */
   const hiddenWhy = cov.withheld;
   if (typeof cov.participants_excluded_not_visible === 'number') {
     facts.appendChild(fact('excluded: not visible to you',
@@ -28977,6 +28978,13 @@ function emailProved(m) {
   auth.appendChild(authChip('SPF', m.spf_result));
   auth.appendChild(authChip('DKIM', m.dkim_result));
   auth.appendChild(authChip('DMARC', m.dmarc_result));
+  if (recordedBeforeStamp(m)) {
+    const legacy = el('span', 'chip warn', 'recorded before the mail stamp');
+    legacy.title = 'These results were recorded before this deployment read '
+      + 'only stamped headers, on where the header sat in the message. The '
+      + 'sender may have written them.';
+    auth.appendChild(legacy);
+  }
   if (m.dkim_domain) {
     const d = fact('authenticated', m.dkim_domain);
     d.title = 'DKIM PASSED for this domain: the only cryptographically '
@@ -29021,6 +29029,12 @@ function emailRow(m) {
   return card;
 }
 
+/* A verdict with no basis was stored before 0197, under the positional rule a sender can satisfy
+   (docs/19 section 2.1). */
+function recordedBeforeStamp(m) {
+  return Boolean(m.spf_result || m.dkim_result || m.dmarc_result) && !m.auth_basis;
+}
+
 function authChip(name, result) {
   const wrap = el('span', 'fact');
   wrap.appendChild(el('span', 'fact-k', name));
@@ -29029,10 +29043,12 @@ function authChip(name, result) {
        look the same. */
     const chip = el('span', 'chip subtle', 'not checked');
     /* A header the sender may have written is not a verdict, so it is kept and not read; the
-       parse gaps say so. */
-    chip.title = 'No Authentication-Results header from one of this '
-      + 'deployment\'s own mail servers said anything about '
-      + name + '. That is an absence, not a failure.';
+       parse gaps say so. Only a header this deployment's mail server stamped is read (docs/19
+       section 2.1). */
+    chip.title = 'No Authentication-Results header that this deployment\'s '
+      + 'own mail server stamped said anything about ' + name + ': the '
+      + 'message carries no valid mail stamp, or no stamp key is configured. '
+      + 'That is an absence, not a failure.';
     wrap.appendChild(chip);
     return wrap;
   }
@@ -33881,13 +33897,14 @@ async function loadEgressLog() {
   }
   renderList('egr-log', 'egr-log-empty', body.rows || [], egressLogRow);
   const hidden = $('egr-log-hidden');
-  /* The server counts the hidden rows over the whole log, whatever route, event or window is
-     chosen, so the sentence says so rather than reading as hidden rows that match the filter. */
-  hidden.textContent = body.withheld
-    ? 'The whole log also holds ' + countOf(body.withheld, 'row', 'rows')
-      + ' you are not cleared to see. That count ignores the route and event '
-      + 'chosen above.' : '';
-  show(hidden, body.withheld > 0);
+  /* The server says only whether the whole log holds rows above the reader, whatever route, event
+     or window is chosen, and never how many: a count, polled, would say when hidden rows arrive.
+     So the sentence names no number and does not read as hidden rows that match the filter. */
+  const someWithheld = body.some_withheld === true;
+  hidden.textContent = someWithheld
+    ? 'The log also holds rows you are not cleared to see, which are not shown or counted. '
+      + 'This notice is about the whole log, whatever route and event are chosen above.' : '';
+  show(hidden, someWithheld);
 }
 
 function egressLogRow(row) {
@@ -33932,9 +33949,11 @@ async function verifyEgressLog() {
   try {
     const res = await api('/admin/egress/connections/verify');
     out.className = 'msg ' + (res.first_break_seq === null ? 'ok' : 'bad');
+    /* A reader the log withholds rows from is sent no row count: the chain's length less the
+       rows shown would be how many were withheld. Every row is still checked. */
+    const checked = res.rows === null ? 'every row' : countOf(res.rows, 'row', 'rows');
     setMsg(out, res.first_break_seq === null
-      ? 'The chain holds: ' + countOf(res.rows, 'row', 'rows') + ' checked at '
-        + fmtTime(res.checked_at, true) + '.'
+      ? 'The chain holds: ' + checked + ' checked at ' + fmtTime(res.checked_at, true) + '.'
       : 'The chain breaks at row ' + res.first_break_seq + ': a row was changed or '
         + 'removed outside the egress proxy.');
   } catch (err) {

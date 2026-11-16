@@ -46,6 +46,8 @@ EXPECTED_CHECKS = (
     "totp_kek_set",
     "kek_ring_opens_stored_secrets",
     "ingest_pepper_set",
+    # The key of the audit log's address and sign-in identifier hashes.
+    "audit_pepper_set",
     # A credential some file in this repository (or MinIO) publishes, on any process.
     "credentials_not_published",
     "rate_limiting_enabled",
@@ -103,6 +105,8 @@ EXPECTED_CHECKS = (
     "telegram_collection",
     # The persona key's split.
     "collector_split",
+    # The mail stamp key ring (docs/19 section 2.1).
+    "mail_stamp_key",
 )
 
 

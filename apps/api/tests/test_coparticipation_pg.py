@@ -298,6 +298,17 @@ def test_an_identity_above_the_callers_clearance_is_not_a_vertex(conn):
     assert out["edges"] == []
     assert "secret" not in {n["label"] for n in out["nodes"]}
     assert out["coverage"]["participants_excluded_not_visible"] == 1
+    assert out["coverage"]["participants_excluded_unresolved"] == 0
+
+    # Drawn with the unresolved handles, it is one of them: its handle, never its identity
+    # (decision 232). It is still counted, for the router to say as the case allows.
+    drawn = _svc(conn, clearance="AMBER").project(
+        _params(case_id, include_unresolved=True))
+    assert {n["key"]: n["kind"] for n in drawn["nodes"]} == {
+        f"node:{a}": "IDENTITY", "handle:secret": "HANDLE"}
+    assert str(secret) not in {n["node_id"] for n in drawn["nodes"]}
+    assert drawn["coverage"]["participants_excluded_not_visible"] == 1
+    assert drawn["coverage"]["participants_excluded_unresolved"] == 0
 
 
 def test_one_person_under_two_handles_is_not_tied_to_themselves(conn):

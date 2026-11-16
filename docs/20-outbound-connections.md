@@ -862,7 +862,14 @@ application: OPEN, REFUSED, CLOSE (bytes, duration, a close reason),
 PREAUTH (refusals before the credentials held, counted per peer per
 minute) and REWRAP (exits sealed again under the active key). Each persona
 row names the source that labels it and is read under that source's
-current label and compartments; integration rows are GREEN. The process
+current label and compartments; integration rows are GREEN. A reader is
+told whether any row of the whole log is withheld from it, whatever route,
+event or window it asked about, and never how many, and the rows it is
+shown carry their sequence numbers only when nothing is withheld, because
+the gaps between them would count what was. For the same reason the chain
+check gives such a reader no row count; a broken chain is reported to
+every reader, with the sequence number of the first broken row (decision
+238). The process
 log carries a connection id, a route kind, a reason code and byte counts:
 never a destination, a route name or a credential.
 

@@ -638,3 +638,40 @@ def test_alembic_without_a_database_url_refuses_in_one_line():
     quoted = "DATABASE_URL is not set or is empty"
     assert quoted in refusal[0] and f'"{quoted}"' in _read(INSTALL_MD)
     assert not any(d in refusal[0] for d in DASHES), refusal[0]
+
+
+# ---------------------------------------------------------------------------
+# The audit pepper in a development .env.local
+# ---------------------------------------------------------------------------
+
+def _each_write_follows_a_checked_generator(text: str, generator: str, stop: str,
+                                            writes: list[str]) -> int:
+    """Every write of the pepper has a generator before it and, between the two, the stop that ends
+    the install when the generator printed nothing. Returns how many writes there are."""
+    found = sorted(at for write in writes for at in
+                   (m.start() for m in re.finditer(re.escape(write), text)))
+    for at in found:
+        drawn = text.rfind(generator, 0, at)
+        assert drawn >= 0, f"a write at {at} has no generator before it"
+        assert stop in text[drawn:at], f"the write at {at} is not guarded by {stop!r}"
+    return len(found)
+
+
+def test_install_scripts_generate_the_audit_pepper_into_env_local():
+    """Both installers write NOCTORNAL_AUDIT_PEPPER into a new .env.local, append it to an existing one
+    that lacks it, and stop before writing when the generator printed nothing. Text only: install.ps1 is
+    not run off Windows, and CI's no-skip gate would fail a skipped test."""
+    sh, ps1 = _read(INSTALL_SH), _read(INSTALL_PS1)
+    heredoc = sh[sh.index('cat > "$ENV_LOCAL" <<EOF'):]
+    assert "\nNOCTORNAL_AUDIT_PEPPER=$AUDIT_PEPPER\n" in heredoc[:heredoc.index("\nEOF\n")]
+    assert "if ! grep -q '^NOCTORNAL_AUDIT_PEPPER=' \"$ENV_LOCAL\"; then" in sh
+    assert _each_write_follows_a_checked_generator(
+        sh, "AUDIT_PEPPER=\"$(\"$VENV_PY\" -c 'import secrets; print(secrets.token_urlsafe(32))')\"",
+        "stop_with 'Could not generate the audit pepper.'",
+        ["NOCTORNAL_AUDIT_PEPPER=$AUDIT_PEPPER\n",
+         "printf 'NOCTORNAL_AUDIT_PEPPER=%s\\n' \"$AUDIT_PEPPER\""]) == 2
+    assert "$envText -notmatch '(?m)^NOCTORNAL_AUDIT_PEPPER='" in ps1
+    assert _each_write_follows_a_checked_generator(
+        ps1, "$auditPepper = & $VenvPython -c \"import secrets; print(secrets.token_urlsafe(32))\"",
+        "Stop-With 'Could not generate the audit pepper.'",
+        ["\"NOCTORNAL_AUDIT_PEPPER=$auditPepper\""]) == 2

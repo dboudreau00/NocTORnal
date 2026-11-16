@@ -38,6 +38,7 @@ def _production() -> dict[str, str]:
         "REDIS_URL": "redis://:Zm4tR@redis:6379/0",
         "NOCTORNAL_TOTP_KEK": _KEK,
         "NOCTORNAL_INGEST_PEPPER": "9f2c1ad4e6b8",
+        "NOCTORNAL_AUDIT_PEPPER": "Qz4-audit-pepper-of-its-own",
         "NOCTORNAL_BASE_URL": "https://noctornal.example.gov",
         "NOCTORNAL_SESSION_STRICT_BINDING": "1",
         "MINIO_ENDPOINT": "minio:9000",
@@ -157,6 +158,51 @@ def test_unset_ingest_pepper_is_refused():
     env = _production()
     del env["NOCTORNAL_INGEST_PEPPER"]
     _only(verify_environment(env), "NOCTORNAL_INGEST_PEPPER")
+
+
+@pytest.mark.parametrize("pepper", [None, "", "   "])
+def test_missing_audit_pepper_is_refused(pepper):
+    env = _production()
+    if pepper is None:
+        del env["NOCTORNAL_AUDIT_PEPPER"]
+    else:
+        env["NOCTORNAL_AUDIT_PEPPER"] = pepper
+    problem = _only(verify_environment(env), "NOCTORNAL_AUDIT_PEPPER")
+    assert problem.startswith("NOCTORNAL_AUDIT_PEPPER is not set, so ")
+    assert "release/install.sh --production-secrets" in problem and problem.endswith(".")
+
+
+def test_short_audit_pepper_is_refused():
+    env = _production()
+    env["NOCTORNAL_AUDIT_PEPPER"] = "Qz4-fifteen-chr"
+    problem = _only(verify_environment(env), "NOCTORNAL_AUDIT_PEPPER")
+    assert "is 15 characters, fewer than 16" in problem
+    assert "Qz4-fifteen-chr" not in problem
+
+
+def test_audit_pepper_equal_to_the_ingest_pepper_is_refused():
+    env = _production()
+    env["NOCTORNAL_INGEST_PEPPER"] = env["NOCTORNAL_AUDIT_PEPPER"]
+    problem = _only(verify_environment(env), "NOCTORNAL_AUDIT_PEPPER")
+    assert "is the same value as NOCTORNAL_INGEST_PEPPER" in problem
+    assert env["NOCTORNAL_AUDIT_PEPPER"] not in problem
+
+
+def test_audit_pepper_equal_to_the_totp_kek_is_refused():
+    env = _production()
+    env["NOCTORNAL_AUDIT_PEPPER"] = env["NOCTORNAL_TOTP_KEK"] + "\n"
+    problem = _only(verify_environment(env), "NOCTORNAL_AUDIT_PEPPER")
+    assert "is the same value as NOCTORNAL_TOTP_KEK" in problem
+    assert _KEK not in problem
+
+
+def test_a_published_audit_pepper_is_refused_once():
+    """The placeholder is the published-value refusal, naming the variable, and the rule above does not
+    refuse the same variable a second time."""
+    env = _production()
+    env["NOCTORNAL_AUDIT_PEPPER"] = "replace-me-audit-pepper"
+    problem = _only(verify_environment(env), "NOCTORNAL_AUDIT_PEPPER")
+    assert "replace-me-audit-pepper" not in problem
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +374,7 @@ def test_a_shared_endpoint_is_not_refused():
 
 _ALL_BROKEN_NAMES = (
     "DATABASE_URL", "MINIO_SECRET_KEY", "NOCTORNAL_TOTP_KEK",
-    "NOCTORNAL_INGEST_PEPPER", "REDIS_URL", "NOCTORNAL_RATELIMIT",
+    "NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_AUDIT_PEPPER", "REDIS_URL", "NOCTORNAL_RATELIMIT",
     "SMTP_ALLOW_PLAINTEXT", "MINIO_SECURE", "SAMPLE_SECURE",
     "NOCTORNAL_BASE_URL", "NOCTORNAL_SESSION_STRICT_BINDING",
     "NOCTORNAL_ENABLE_DOCS", "SAMPLE_ACCESS_KEY", "SAMPLE_SECRET_KEY",
@@ -368,7 +414,7 @@ def test_every_problem_is_reported_at_once():
 #: published password, the rate-limit off-switch, the SMTP plaintext exception and the published
 #: schema) cannot fire on an empty mapping and are held by `_all_broken` instead.
 _REFUSED_ON_AN_EMPTY_ENVIRONMENT = (
-    "NOCTORNAL_TOTP_KEK", "NOCTORNAL_INGEST_PEPPER", "REDIS_URL",
+    "NOCTORNAL_TOTP_KEK", "NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_AUDIT_PEPPER", "REDIS_URL",
     "MINIO_SECURE", "SAMPLE_SECURE", "NOCTORNAL_BASE_URL",
     "NOCTORNAL_SESSION_STRICT_BINDING", "SAMPLE_ACCESS_KEY",
     "SAMPLE_SECRET_KEY", "NOCTORNAL_MAX_EVIDENCE_BYTES",
@@ -381,7 +427,7 @@ def test_bare_production_environment_is_refused_on_every_count():
     -- or never ran them -- would pass every other test in this file by
     returning `[]`, and would be a boot refusal in name only.
 
-    It names the eleven rather than asserting a floor, because a floor is
+    It names the twelve rather than asserting a floor, because a floor is
     the weaker half of the same guard: `>= 8` goes on passing after
     somebody deletes a rule, which is the case this test exists for."""
     problems = verify_environment({"NOCTORNAL_ENV": "production"})

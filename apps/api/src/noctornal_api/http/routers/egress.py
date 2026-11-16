@@ -309,8 +309,9 @@ def connections(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """The connection log within the caller's clearance, newest first, each
-    OPEN paired with its CLOSE, and how many rows of the whole log were
-    withheld, whatever route, event or window was asked about."""
+    OPEN paired with its CLOSE, and whether any row of the whole log was
+    withheld, whatever route, event or window was asked about. Never how
+    many."""
     if since is not None and since.tzinfo is None:
         raise Problem(422, "Validation failed", "Times are UTC: send an offset.")
     clearance, held = _clearance(conn, user)
@@ -322,8 +323,14 @@ def connections(
 @router.get("/connections/verify", response_model=dict)
 def verify(user: CurrentUser = Depends(require_global(READ)),
            conn: psycopg.Connection = Depends(get_conn)) -> dict:
-    """Recompute the ledger's hash chain. Counts and a sequence number only."""
-    return egress_ledger.verify(conn)
+    """Recompute the ledger's hash chain. The number of rows checked goes only to a reader the log
+    hides nothing from, because the chain's length less the rows shown is how many were withheld;
+    a break is reported to every reader, with the sequence number of the first broken row."""
+    clearance, held = _clearance(conn, user)
+    out = egress_ledger.verify(conn)
+    if egress_ledger.withholds_any(conn, clearance=clearance, compartments=held):
+        out["rows"] = None
+    return out
 
 
 @router.post("/check", response_model=dict, dependencies=_WRITE)

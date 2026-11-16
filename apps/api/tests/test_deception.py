@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 
+from mail_stamp_support import KEYS, stamped
 from noctornal_api.deception import (
     HOSTILE_MEDIA_TYPES,
     ParsedEmail,
@@ -32,10 +33,15 @@ from noctornal_api.deception import (
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
-#: The Received line our own MTA writes when it takes a message: an Authentication-Results header is
-#: believed only when it sits above every Received header, the topmost of which is a trusted MTA's.
+#: The Received line our own MTA writes when it takes a message, which its mail stamp binds: an
+#: Authentication-Results header is believed only under a valid stamp (test_review46_auth_results.py).
 _STAMPED_BY_US = (b"Received: from sender.example ([203.0.113.9]) by mx.corp.example;"
                   b" Mon, 20 Jul 2026 09:00:00 +0000\r\n")
+
+
+def _as_received(raw: bytes):
+    """`raw` as the deployment's own mail server delivers it, stamped, parsed with the test ring."""
+    return parse_eml(stamped(raw), trusted=("corp.example",), stamp_keys=KEYS)
 
 
 # --- invariant 10: samples never render, never execute -------------------
@@ -245,7 +251,7 @@ def test_a_failing_dkim_domain_is_never_recorded_as_an_identity():
     by the attacker. Recording it would invite every downstream reader —
     and every report — to treat a forgery as authenticated. The DB has a
     CHECK saying the same thing."""
-    parsed = parse_eml(BEC, trusted=("corp.example",))
+    parsed = _as_received(BEC)
     assert parsed.dkim_result == "FAIL"
     assert parsed.dkim_domain is None
     assert parsed.spf_domain is None
@@ -257,7 +263,7 @@ def test_a_failing_dkim_domain_is_never_recorded_as_an_identity():
 def test_a_passing_dkim_domain_is_the_one_durable_sender_identity():
     good = BEC.replace(b"dkim=fail header.d=acme-holdings.example",
                        b"dkim=pass header.d=acme-holdings.example")
-    parsed = parse_eml(good, trusted=("corp.example",))
+    parsed = _as_received(good)
     assert parsed.dkim_result == "PASS"
     assert parsed.dkim_domain == "acme-holdings.example"
     durable = [c for c in selector_candidates_for_email(parsed)
@@ -274,7 +280,7 @@ def test_a_domain_is_scoped_to_the_method_that_passed():
         b"dkim=fail header.d=acme-holdings.example",
         b"spf=pass smtp.mailfrom=sender.example; "
         b"dkim=fail header.d=acme-holdings.example")
-    parsed = parse_eml(raw, trusted=("corp.example",))
+    parsed = _as_received(raw)
     assert parsed.spf_domain == "sender.example"
     assert parsed.dkim_domain is None
 
@@ -411,7 +417,7 @@ def test_an_inconclusive_auth_result_is_not_a_failure():
            + _STAMPED_BY_US
            + b"From: a@b.example\r\n"
            b"Subject: x\r\n\r\nbody\r\n")
-    parsed = parse_eml(msg, trusted=("corp.example",))
+    parsed = _as_received(msg)
     assert parsed.dkim_result == "TEMPERROR"
     assert parsed.spf_result == "NONE"
     # A non-PASS never carries a domain — that claim is the attacker's.
@@ -438,11 +444,10 @@ def test_an_appended_authentication_results_header_does_not_win():
     """An appended Authentication-Results header must not win: the forged-verdict defect of this
     subsystem.
 
-    An MTA PREPENDS, so index 0 is the receiving organisation's own verdict and anything the sender
-    wrote is LAST. Reading last-wins would let an attacker append their own
+    The receiving server's stamp attests its own verdict and nothing the sender wrote. Reading
+    last-wins over every header would let an attacker append their own
     `dkim=pass header.d=microsoft.com` and have it override the real `dkim=fail`, producing
-    microsoft.com as a DURABLE, "cryptographically authenticated" DOMAIN selector. `Received` is read
-    in the right direction; this must be too.
+    microsoft.com as a DURABLE, "cryptographically authenticated" DOMAIN selector.
 
     The DB CHECK could not help, because the parser would make the result and the domain agree on the
     forged value.
@@ -457,7 +462,7 @@ def test_an_appended_authentication_results_header_does_not_win():
         b" smtp.mailfrom=microsoft.com; dkim=pass header.d=microsoft.com;"
         b" dmarc=pass\r\n"
         b"From: a@evil.example\r\nSubject: x\r\n\r\nbody\r\n")
-    parsed = parse_eml(evil, trusted=("corp.example",))
+    parsed = _as_received(evil)
     assert parsed.dkim_result == "FAIL"
     assert parsed.dkim_domain is None
     assert parsed.spf_domain is None
@@ -481,7 +486,7 @@ def test_a_pass_then_fail_signature_pair_is_ordinary_mail_not_a_500():
            b" dkim=fail header.d=list.example\r\n"
            + _STAMPED_BY_US
            + b"From: a@acme.example\r\nSubject: x\r\n\r\nbody\r\n")
-    parsed = parse_eml(raw, trusted=("corp.example",))
+    parsed = _as_received(raw)
     assert parsed.dkim_result == "PASS"
     assert parsed.dkim_domain == "acme.example"
     # The invariant the DB constraint expresses, asserted here too.
@@ -493,7 +498,7 @@ def test_a_failing_method_never_carries_a_domain_even_alone():
            b" dkim=fail header.d=spoofed.example\r\n"
            + _STAMPED_BY_US
            + b"From: a@b.example\r\nSubject: x\r\n\r\nbody\r\n")
-    parsed = parse_eml(raw, trusted=("corp.example",))
+    parsed = _as_received(raw)
     assert parsed.dkim_result == "FAIL"
     assert parsed.dkim_domain is None
 
@@ -733,7 +738,7 @@ def test_a_helo_name_or_message_id_with_a_path_is_served_defanged():
                            "mx.corp.example", None, True))
     assert plain["host_defanged"] == "vps-9.hostmarket.example"
 
-    row: list = [None] * 34
+    row: list = [None] * 35
     row[0], row[1], row[2], row[28] = uuid4(), uuid4(), uuid4(), uuid4()
     row[3] = "<a1b2@pay.evil.example/verify>"
     row[29] = datetime(2026, 7, 20, 9, tzinfo=timezone.utc)

@@ -1,7 +1,8 @@
 """Bring the production secrets files in infra/production to the layout
-this release reads: the schema owner's credential out of secrets.env, and
-a Redis password and REDIS_URL for the limiter's own Redis user. Nothing
-it prints carries a value.
+this release reads: the schema owner's credential out of secrets.env, a
+Redis password and REDIS_URL for the limiter's own Redis user, and the
+pepper the audit log's hashes are keyed with. Nothing it prints carries a
+value.
 
     python3 scripts/production_secrets.py [--dir infra/production] [--new-database]
 
@@ -23,6 +24,10 @@ release/install.sh --production-secrets and release/install.ps1
 4. With --new-database, and only when no owner password was ever chosen, generates one into
    postgres-init.env and migrate.env. The installers pass it when the database volume does not
    exist yet: initdb fixes the owner's password for good.
+5. Writes NOCTORNAL_AUDIT_PEPPER when it is missing, a placeholder, shorter than the API accepts or
+   the same value as the ingest pepper or the TOTP key, with the template's comment above a line it
+   adds to an older secrets.env. A value the API accepts is never replaced: rotating it is the
+   operator's choice, and costs the correlation of new audit rows with older ones.
 
 Every file it changes is first copied to NAME.backup-UTCSTAMP (mode 600), the way back
 (release/secrets-upgrade/README.md). It writes nothing when it refuses. Exit 0 when the files are
@@ -68,6 +73,11 @@ MIGRATE = "migrate.env"
 MOVES = (("POSTGRES_PASSWORD", POSTGRES_INIT), ("NOCTORNAL_MIGRATION_DATABASE_URL", MIGRATE))
 #: The compose service the bundled Redis answers as.
 BUNDLED_REDIS_HOST = "redis"
+#: The audit pepper and what the API asks of it (security/audit_hash.py, held equal by a test): the
+#: shortest it accepts, and the secrets it must not be a copy of.
+AUDIT_PEPPER = "NOCTORNAL_AUDIT_PEPPER"
+AUDIT_PEPPER_MIN = 16
+AUDIT_PEPPER_DISTINCT_FROM = ("NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_TOTP_KEK")
 #: The comment an older secrets.env.example put above each line this script moves or rewrites, by
 #: a phrase only that comment carried.
 STALE_COMMENTS = {
@@ -397,6 +407,25 @@ def plan(directory: Path, *, new_database: bool = False):
     # no user name; the current template's replace them.
     for key in ("REDIS_PASSWORD", "REDIS_URL"):
         sec.replace_stale_comment(key, _template_comment(directory, key))
+
+    # 5. The audit pepper, whenever the API would refuse the one there, so the two never send an
+    # operator in a circle.
+    pepper = sec.get(AUDIT_PEPPER)
+    if _published(pepper):
+        why = "missing or a placeholder"
+    elif len(pepper) < AUDIT_PEPPER_MIN:
+        why = f"shorter than {AUDIT_PEPPER_MIN} characters"
+    else:
+        why = next((f"the same value as {other}" for other in AUDIT_PEPPER_DISTINCT_FROM
+                    if pepper == sec.get(other)), None)
+    if why:
+        if pepper is None:
+            # An older secrets.env, with no such line: it goes at the end, under the template's
+            # comment.
+            sec.lines.extend(([""] if sec.lines and sec.lines[-1].strip() else [])
+                             + _template_comment(directory, AUDIT_PEPPER))
+        sec.put(AUDIT_PEPPER, f"{AUDIT_PEPPER}={_generate()}")
+        said.append(f"generated {AUDIT_PEPPER} (it was {why})")
 
     for name, envfile in files.items():
         held = sorted({m.group(1) for line in envfile.lines

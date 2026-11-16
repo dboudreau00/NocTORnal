@@ -337,6 +337,7 @@ def test_the_production_boot_refuses_a_malformed_window_and_never_quotes_it():
         "REDIS_URL": "redis://:Zm4tR@redis:6379/0",
         "NOCTORNAL_TOTP_KEK": base64.b64encode(bytes(range(1, 33))).decode(),
         "NOCTORNAL_INGEST_PEPPER": "9f2c1ad4e6b8",
+        "NOCTORNAL_AUDIT_PEPPER": "Qz4-audit-pepper-of-its-own",
         "NOCTORNAL_BASE_URL": "https://noctornal.example.gov",
         "NOCTORNAL_SESSION_STRICT_BINDING": "1",
         "MINIO_ENDPOINT": "minio:9000", "MINIO_ACCESS_KEY": "evidence-writer",

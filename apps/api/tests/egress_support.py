@@ -74,6 +74,19 @@ def migration(stem: str):
     return module
 
 
+def empty_ledger(conn) -> None:
+    """The connection ledger with no row, inside a transaction the caller rolls back and never otherwise.
+    The shared test database keeps rows hidden from every reader (a compartmented row whose source is gone),
+    which an append-only ledger cannot lose, so a world in which a reader is hidden nothing is made as the
+    schema owner, with the ledger's own triggers off for the one statement, and undone with the transaction."""
+    from psycopg import pq
+    if conn.info.transaction_status != pq.TransactionStatus.INTRANS:
+        raise RuntimeError("empty_ledger runs only inside a transaction that is rolled back")
+    conn.execute("ALTER TABLE collect.egress_connection DISABLE TRIGGER USER")
+    conn.execute("DELETE FROM collect.egress_connection")
+    conn.execute("ALTER TABLE collect.egress_connection ENABLE TRIGGER USER")
+
+
 # ---------------------------------------------------------------------------
 # Accounts
 # ---------------------------------------------------------------------------

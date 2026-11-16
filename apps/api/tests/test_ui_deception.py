@@ -8,11 +8,17 @@ source, with no database and no browser. They live in their own file so the pane
   * capture and call notes are rendered;
   * an open card does not survive a case switch;
   * the BEC row shows the durable origin, not only headers the sender typed.
+  * a verdict recorded before the mail stamp is marked as one.
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 STATIC = (Path(__file__).resolve().parents[1]
           / "src" / "noctornal_api" / "http" / "static")
@@ -339,3 +345,34 @@ def test_the_filter_says_which_divergence_it_filters_on():
     label = re.search(r'<input id="dcp-divergent"[^>]*>\s*'
                       r'<span class="label">([^<]*)</span>', html)
     assert label and "Reply-To" in label.group(1)
+
+
+_WIN_NODE = Path("C:/Program Files/nodejs/node.exe")
+NODE = shutil.which("node") or (str(_WIN_NODE) if _WIN_NODE.exists() else None)
+
+
+@pytest.mark.skipif(not NODE, reason="Node is not installed here")
+def test_a_verdict_recorded_before_the_mail_stamp_is_marked_and_a_stamped_one_is_not(tmp_path):
+    """0197: a stored verdict with no `auth_basis` was read under the positional rule a sender can
+    satisfy (docs/19 section 2.1), and the detail card says so; a stamped verdict, and a row with no
+    verdict at all, carry no mark."""
+    cases = {
+        "legacy": {"dkim_result": "PASS", "auth_basis": None},
+        "stamped": {"dkim_result": "PASS", "auth_basis": "MAIL_STAMP"},
+        "none": {"spf_result": None, "dkim_result": None, "dmarc_result": None,
+                 "auth_basis": None},
+    }
+    lines = [_fn("recordedBeforeStamp") + "\n}",
+             "const cases = " + json.dumps(cases) + ";",
+             "const out = {};",
+             "for (const k of Object.keys(cases)) out[k] = recordedBeforeStamp(cases[k]);",
+             "console.log(JSON.stringify(out));"]
+    script = tmp_path / "run.js"
+    script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    run = subprocess.run([NODE, str(script)], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60, check=False)
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout) == {"legacy": True, "stamped": False, "none": False}
+    card = _js()
+    assert "if (recordedBeforeStamp(m)) {" in card
+    assert "'chip warn', 'recorded before the mail stamp'" in card

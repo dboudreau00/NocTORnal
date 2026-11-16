@@ -7,8 +7,6 @@ answerable.
 """
 from __future__ import annotations
 
-import hashlib
-import re
 import secrets
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -37,6 +35,7 @@ from noctornal_api.http.limits import (
     rate_limit_peek,
 )
 from noctornal_api.iam_admin import change_password, new_password_problem
+from noctornal_api.security import audit_hash
 from noctornal_api.security.auth import AuthService
 from noctornal_api.security.sessions import (
     IDLE_TIMEOUT,
@@ -60,32 +59,11 @@ class LoginBody(BaseModel):
     new_password: str | None = Field(default=None, max_length=4096)
 
 
-#: How much of a submitted address a failed sign-in records verbatim.
-AUDIT_EMAIL_CHARS = 64
-
-
-#: What an address looks like, and no more: one `@`, no whitespace, and a
-#: dot in the domain with something on each side of it. A shape test, not
-#: a validator; it exists to tell an address from something typed into the
-#: wrong box.
-_ADDRESS_SHAPE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
-
-
 def _audit_email(email: str) -> dict:
-    """The submitted address as a failed sign-in records it in the append-only log.
-
-    Verbatim up to AUDIT_EMAIL_CHARS when shaped like an address; past that the head, the length
-    and a sha256 prefix, so one unauthenticated request cannot write a huge permanent row and
-    repeated submissions can still be told apart. Anything else records only its length and the
-    prefix, because people type passwords into the sign-in box by mistake; an address-shaped
-    password is the residual docs/17 records."""
-    if not _ADDRESS_SHAPE.fullmatch(email):
-        return {"email_length": len(email),
-                "email_sha256": hashlib.sha256(email.encode()).hexdigest()[:16]}
-    if len(email) <= AUDIT_EMAIL_CHARS:
-        return {"email": email}
-    return {"email": email[:AUDIT_EMAIL_CHARS], "email_length": len(email),
-            "email_sha256": hashlib.sha256(email.encode()).hexdigest()[:16]}
+    """What a failed sign-in records of the value typed as the email: `audit_hash.typed_identifier`,
+    its length and keyed hash and never the value. Rows from before carry `email` or `email_sha256`
+    and stay as they are."""
+    return audit_hash.typed_identifier(email)
 
 
 def _ip_hash(request: Request) -> bytes | None:
@@ -93,12 +71,9 @@ def _ip_hash(request: Request) -> bytes | None:
 
     `client_ip` (the peer, or the outermost trusted proxy's client when
     `NOCTORNAL_TRUSTED_PROXY_HOPS` says so) is what the binding (0058) and the rate limiter read;
-    `request.client.host` behind a proxy would be the load balancer.
+    `request.client.host` behind a proxy would be the load balancer. Keyed, by `audit_hash.ip_hash`.
     """
-    ip = client_ip(request)
-    if ip is None:
-        return None
-    return hashlib.sha256(ip.encode()).digest()
+    return audit_hash.ip_hash(client_ip(request))
 
 
 def _audit(conn, action: str, actor_id, detail: dict, request: Request,

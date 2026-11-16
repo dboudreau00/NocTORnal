@@ -180,34 +180,46 @@ def _labelled_world(conn, classification="AMBER"):
     return sid, cid, rows[0]
 
 
-def _seqs(listing):
-    return {r["seq"] for r in listing["rows"]}
+def _ids(listing):
+    """The connection ids listed: a row's `seq` is None for a reader the log withholds anything from, and
+    the shared test database holds rows above every clearance these tests read at."""
+    return {r["connection_id"] for r in listing["rows"]}
 
 
-def test_listing_withholds_rows_above_clearance_and_counts_them(conn):
-    _sid, _cid, seq = _labelled_world(conn, "RED")
+def test_listing_withholds_rows_above_clearance_and_says_some_are_withheld(conn):
+    _sid, cid, _seq = _labelled_world(conn, "RED")
     amber = egress_ledger.listing(conn, clearance="AMBER", limit=500)
-    assert seq not in _seqs(amber) and amber["withheld"] >= 1
-    assert seq in _seqs(egress_ledger.listing(conn, clearance="RED", limit=500))
+    assert str(cid) not in _ids(amber) and amber["some_withheld"] is True
+    assert str(cid) in _ids(egress_ledger.listing(conn, clearance="RED", limit=500))
+
+
+def test_listing_asks_whether_rows_are_withheld_after_it_reads_them():
+    """A hidden row written between the two statements may only turn the flag on, which withholds
+    `seq`; asked first, the flag could be off while the rows show a gap that counts it. verify() orders
+    its count the same way."""
+    import inspect
+    body = inspect.getsource(egress_ledger.listing)
+    assert body.index(").fetchall()") < body.index("_withholds_any(")
 
 
 def test_a_source_raised_later_raises_its_earlier_rows(conn):
-    sid, _cid, seq = _labelled_world(conn, "GREEN")
-    assert seq in _seqs(egress_ledger.listing(conn, clearance="AMBER", limit=500))
+    sid, cid, _seq = _labelled_world(conn, "GREEN")
+    assert str(cid) in _ids(egress_ledger.listing(conn, clearance="AMBER", limit=500))
     conn.execute("UPDATE collect.source SET classification = 'RED' WHERE id = %s", (sid,))
-    assert seq not in _seqs(egress_ledger.listing(conn, clearance="AMBER", limit=500))
+    assert str(cid) not in _ids(egress_ledger.listing(conn, clearance="AMBER", limit=500))
 
 
 def test_a_deleted_sources_rows_stand_and_stay_shown_on_their_stored_label(conn):
-    sid, _cid, seq = _labelled_world(conn, "GREEN")
+    sid, cid, _seq = _labelled_world(conn, "GREEN")
     conn.execute("DELETE FROM collect.source WHERE id = %s", (sid,))
     shown = egress_ledger.listing(conn, clearance="GREEN", limit=500)
-    assert seq in _seqs(shown)
-    flagged = egress_ledger.write(conn, Row(
+    assert str(cid) in _ids(shown)
+    flagged = uuid4()
+    egress_ledger.write(conn, Row(
         event="REFUSED", route_id="persona:" + str(uuid4()), reason="authority_missing",
-        connection_id=uuid4(), protocol="SOCKS5", route_kind="persona",
+        connection_id=flagged, protocol="SOCKS5", route_kind="persona",
         source_id=uuid4(), source_compartmented=True, dest_digest=b"\x02" * 32))
-    assert flagged not in _seqs(egress_ledger.listing(conn, clearance="RED", limit=500))
+    assert str(flagged) not in _ids(egress_ledger.listing(conn, clearance="RED", limit=500))
 
 
 def test_a_compartmented_sources_rows_need_its_compartments(conn):
@@ -220,12 +232,12 @@ def test_a_compartmented_sources_rows_need_its_compartments(conn):
         conn.execute("ALTER TABLE collect.source ADD COLUMN compartments text[] "
                      "NOT NULL DEFAULT '{}'")
     try:
-        sid, _cid, seq = _labelled_world(conn, "GREEN")
+        sid, cid, _seq = _labelled_world(conn, "GREEN")
         conn.execute("UPDATE collect.source SET compartments = '{HUMINT-X}' WHERE id = %s",
                      (sid,))
-        assert seq not in _seqs(egress_ledger.listing(conn, clearance="RED", limit=500))
-        assert seq in _seqs(egress_ledger.listing(conn, clearance="RED",
-                                                  compartments={"HUMINT-X"}, limit=500))
+        assert str(cid) not in _ids(egress_ledger.listing(conn, clearance="RED", limit=500))
+        assert str(cid) in _ids(egress_ledger.listing(conn, clearance="RED",
+                                                      compartments={"HUMINT-X"}, limit=500))
     finally:
         if added:
             conn.execute("ALTER TABLE collect.source DROP COLUMN compartments")
@@ -233,11 +245,12 @@ def test_a_compartmented_sources_rows_need_its_compartments(conn):
 
 def test_listing_pairs_open_with_close_and_marks_an_open_left_unclosed(conn):
     closed, unclosed = uuid4(), uuid4()
-    first = egress_ledger.write(conn, _open(closed))
+    egress_ledger.write(conn, _open(closed))
     egress_ledger.write(conn, _close(closed, reason="upstream_closed"))
-    second = egress_ledger.write(conn, _open(unclosed))
-    rows = {r["seq"]: r for r in egress_ledger.listing(conn, clearance="GREEN",
-                                                        event="OPEN", limit=500)["rows"]}
+    egress_ledger.write(conn, _open(unclosed))
+    rows = {r["connection_id"]: r for r in egress_ledger.listing(
+        conn, clearance="GREEN", event="OPEN", limit=500)["rows"]}
+    first, second = str(closed), str(unclosed)
     assert rows[first]["closed"]["reason"] == "upstream_closed"
     assert rows[first]["closed"]["bytes_down"] == 20
     assert rows[second]["closed"] is None

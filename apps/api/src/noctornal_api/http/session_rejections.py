@@ -10,7 +10,6 @@ exactly, N processes N times it.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 import time
@@ -20,6 +19,7 @@ from uuid import UUID
 from fastapi import Request
 
 from noctornal_api.http.limits import client_ip
+from noctornal_api.security import audit_hash
 
 log = logging.getLogger("noctornal.api")
 
@@ -83,9 +83,8 @@ _unknown = _Sampler()
 
 def ip_hash(request: Request) -> bytes | None:
     """The hash of the address the rate limiter and the session binding
-    read (`client_ip`), the same value `routers/auth._ip_hash` records."""
-    ip = client_ip(request)
-    return hashlib.sha256(ip.encode()).digest() if ip else None
+    read (`client_ip`), the same value `routers/auth._ip_hash` records: `audit_hash.ip_hash`."""
+    return audit_hash.ip_hash(client_ip(request))
 
 
 def record_rejected_session(conn, request: Request, result) -> None:

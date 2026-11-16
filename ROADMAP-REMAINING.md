@@ -1,7 +1,7 @@
 # What is left
 
-**State (2026-10-29):** branch `main`, Alembic head `0196`,
-8603 tests counted as `def test_` functions across the two pytest roots,
+**State (2026-10-29):** branch `main`, Alembic head `0197`,
+8720 tests counted as `def test_` functions across the two pytest roots,
 version 0.9.5 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
@@ -235,16 +235,17 @@ are listed too, and are retracted by an analyst.
 None of the numbered questions is open (docs/00 questions 11 and 12, settled
 by decisions 170 and 169). Judgements in docs/17 wait on the owner: who runs
 the sweep of documents, dead letters and caseless ingest records, and under
-which authority (F30, with counsel); how a co-participation weight divides;
-whether a case's closure should look for a conversation nobody on the team
-can minimise; whether a missing id should cost the same as a hidden one;
-and whether the lab keeps a copy of a sample per label set (lab-6). The owner
-answered four others on 2026-10-08 (decisions 202 to 205): compartmented
-sources keep being polled, a sample download is not an egress, dead letters
-join the sweep, and a retirement over a hidden tie reads like any other
-refusal under NONE. On 2026-11-14 the owner answered that lifting a hold takes
-two people, for an exhibit, a case and a collected document alike (decision
-229).
+which authority (F30, with counsel); whether a case's closure should look for
+a conversation nobody on the team can minimise; whether a missing id should
+cost the same as a hidden one; and whether the lab keeps a copy of a sample
+per label set (lab-6). The owner answered four others on 2026-10-08
+(decisions 202 to 205): compartmented sources keep being polled, a sample
+download is not an egress, dead letters join the sweep, and a retirement over
+a hidden tie reads like any other refusal under NONE. On 2026-11-14 the owner
+answered that lifting a hold takes two people, for an exhibit, a case and a
+collected document alike (decision 229), and asked for the best estimate of a
+co-participation weight, which divides by the room's roster that every
+reader of the room can list (decision 232).
 
 ## Open questions for the operator
 

@@ -24,6 +24,7 @@ from uuid import uuid4
 import pytest
 
 import rls_support as s
+from noctornal_api.security import audit_hash
 
 pytestmark = s.GATED
 
@@ -125,7 +126,7 @@ def test_a_revoked_session_is_audited_once_per_window_with_its_source(owner, cli
         "SELECT detail, ip_hash FROM audit.event WHERE action = 'AUTH_SESSION_REJECTED' "
         "ORDER BY seq DESC LIMIT 1").fetchone()
     assert row[0] == {"reason": "revoked", "session_id": str(sid)}
-    assert bytes(row[1]) == hashlib.sha256(PEER.encode()).digest(), "the row names no source"
+    assert bytes(row[1]) == audit_hash.ip_hash(PEER), "the row names no source"
     # The window ends: the next presentation is worth another row.
     rej._window.clear()
     client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {raw}"})
@@ -295,11 +296,13 @@ def test_requests_without_a_body_and_the_static_console_are_untouched(client):
     assert client.get("/api/v1/auth/me").status_code == 401
 
 
-def _failed_login_row(conn, marker: str):
+def _failed_login_row(conn, typed: str):
+    """The latest AUTH_FAILED row for what was typed as the email, found by its keyed hash: the
+    suite and the app share one process, so one key."""
     return conn.execute(
         "SELECT detail, outcome, octet_length(detail::text) FROM audit.event "
-        "WHERE action = 'AUTH_FAILED' AND detail->>'email' LIKE %s "
-        "ORDER BY seq DESC LIMIT 1", (marker + "%",)).fetchone()
+        "WHERE action = 'AUTH_FAILED' AND detail->>'email_hmac' = %s "
+        "ORDER BY seq DESC LIMIT 1", (audit_hash.identifier_hash(typed),)).fetchone()
 
 
 def test_a_failed_login_records_a_bounded_email_and_is_denied(owner, client):
@@ -307,8 +310,9 @@ def test_a_failed_login_records_a_bounded_email_and_is_denied(owner, client):
     r = client.post("/api/v1/auth/login", json={
         "email": short, "password": "x", "totp_code": "000000"})
     assert r.status_code == 401
-    detail, outcome, _size = _failed_login_row(owner, short[:20])
-    assert detail["email"] == short and "email_sha256" not in detail
+    detail, outcome, _size = _failed_login_row(owner, short)
+    assert detail == {"reason": "unknown_user", "email_length": len(short),
+                      "email_hmac": audit_hash.identifier_hash(short)}
     assert outcome == "DENIED", "a refused sign-in was recorded as a success"
 
     marker = f"g45http-{uuid4().hex[:8]}"
@@ -317,10 +321,9 @@ def test_a_failed_login_records_a_bounded_email_and_is_denied(owner, client):
     r = client.post("/api/v1/auth/login", json={
         "email": longest, "password": "x", "totp_code": "000000"})
     assert r.status_code == 401
-    detail, outcome, size = _failed_login_row(owner, marker)
-    assert detail["email"] == longest[:64]
+    detail, outcome, size = _failed_login_row(owner, longest)
+    assert "email" not in detail and marker not in json.dumps(detail)
     assert detail["email_length"] == 254
-    assert detail["email_sha256"] == hashlib.sha256(longest.encode()).hexdigest()[:16]
     assert outcome == "DENIED" and size < 400
 
 
@@ -339,10 +342,11 @@ def test_the_login_fields_are_bounded(owner, client, body):
 
 def test_a_three_mebibyte_email_is_refused_and_nothing_is_stored(owner, client):
     marker = f"g45http-{uuid4().hex[:8]}"
+    before = _count(owner, "SELECT count(*) FROM audit.event WHERE action = 'AUTH_FAILED'")
     r = client.post("/api/v1/auth/login", json={
         "email": marker + "A" * (3 * MIB) + "@example.test", "password": "x"})
     assert r.status_code == 413
-    assert _failed_login_row(owner, marker) is None
+    assert _count(owner, "SELECT count(*) FROM audit.event WHERE action = 'AUTH_FAILED'") == before
 
 
 def test_the_password_change_body_is_bounded_too(client, world):
@@ -806,63 +810,77 @@ def test_an_unauthenticated_declared_length_over_the_cap_is_still_the_413(app):
     assert got["status"] == 413 and got["consumed"] == 0
 
 
-def _failed_login_by_hash(conn, digest: str):
-    return conn.execute(
-        "SELECT detail, outcome FROM audit.event WHERE action = 'AUTH_FAILED' "
-        "AND detail->>'email_sha256' = %s ORDER BY seq DESC LIMIT 1", (digest,)).fetchone()
-
-
 def test_a_password_typed_into_the_email_box_is_not_stored(owner, client):
-    """The 'email' of a failed sign-in is not kept verbatim up to 64 characters: a password typed into the
-    wrong box for an unknown account must not sit in the append-only log in clear."""
+    """The 'email' of a failed sign-in is not kept verbatim: a password typed into the wrong box must
+    not sit in the append-only log in clear."""
     typed = f"g45http-pw-{uuid4().hex[:6]}-Hunter2-typed-in-email-box"
-    assert len(typed) <= 64
     r = client.post("/api/v1/auth/login", json={"email": typed, "password": "x"})
     assert r.status_code == 401
-    digest = hashlib.sha256(typed.encode()).hexdigest()[:16]
-    detail, outcome = _failed_login_by_hash(owner, digest)
+    detail, outcome, _size = _failed_login_row(owner, typed)
     assert "email" not in detail and typed not in json.dumps(detail)
-    assert detail["email_length"] == len(typed) and detail["email_sha256"] == digest
+    assert detail["email_length"] == len(typed)
     assert detail["reason"] == "unknown_user" and outcome == "DENIED"
-    # An address still names its officer: kept as typed.
-    real = f"g45http-{uuid4().hex[:8]}@example.test"
-    client.post("/api/v1/auth/login", json={"email": real, "password": "x"})
-    detail, _outcome, _size = _failed_login_row(owner, real[:20])
-    assert detail["email"] == real and "email_sha256" not in detail
 
 
-@pytest.mark.parametrize("value,kept", [
-    ("analyst@agency.example.org", True),
-    ("a.b+tag@sub.example.test", True),
-    ("Hunter2 is my password", False),
-    ("correct-horse-battery-staple", False),
-    ("two@signs@example.test", False),
-    ("nodomain@localhost", False),
-    ("spaced out@example.test", False),
-    ("trailing@example.test ", False),
-    ("new\nline@example.test", False),
-    ("@example.test", False),
-    ("x@.", False),
-    ("", False),
+def test_an_address_shaped_password_for_an_unknown_account_is_never_stored_as_typed(owner, client):
+    """docs/17 'the failed-sign-in email': `Hunter2@home.net` is a password shaped like an address,
+    which no rule can tell from one, so no value is kept as typed."""
+    typed = f"Hunter2{uuid4().hex[:6]}@home.net"
+    r = client.post("/api/v1/auth/login", json={"email": typed, "password": "x"})
+    assert r.status_code == 401
+    detail, _outcome, _size = _failed_login_row(owner, typed)
+    assert detail == {"reason": "unknown_user", "email_length": len(typed),
+                      "email_hmac": audit_hash.identifier_hash(typed)}
+    stored = owner.execute(
+        "SELECT count(*) FROM audit.event WHERE detail::text LIKE %s",
+        ("%" + typed.split("@")[0] + "%",)).fetchone()[0]
+    assert stored == 0, "the typed value is in the audit log"
+
+
+def test_a_failed_signin_for_a_known_account_records_only_the_keyed_hash(owner, client):
+    """An account's own address is no exception (decision 237): the row carries the length and the
+    keyed hash, and whoever holds the pepper tells which account it was by recomputing the hash of
+    each account's address."""
+    uid = s.user(owner, prefix=PREFIX)
+    email = owner.execute("SELECT email FROM iam.app_user WHERE id = %s", (uid,)).fetchone()[0]
+    r = client.post("/api/v1/auth/login", json={"email": email, "password": "not-the-password"})
+    assert r.status_code == 401
+    detail, outcome, _size = _failed_login_row(owner, email)
+    assert detail["reason"] != "unknown_user", detail
+    assert "email" not in detail and email not in json.dumps(detail)
+    assert detail["email_length"] == len(email) and outcome == "DENIED"
+
+
+def test_the_failed_signin_hash_is_keyed_and_the_old_sha256_prefix_is_gone(owner, client):
+    typed = f"g45http-{uuid4().hex[:8]}@example.test"
+    client.post("/api/v1/auth/login", json={"email": typed, "password": "x"})
+    detail, _outcome, _size = _failed_login_row(owner, typed)
+    assert "email_sha256" not in detail
+    assert detail["email_hmac"] != hashlib.sha256(typed.encode()).hexdigest()[:16]
+    assert re.fullmatch(r"[0-9a-f]{16}", detail["email_hmac"])
+
+
+@pytest.mark.parametrize("value", [
+    "analyst@agency.example.org",
+    "a.b+tag@sub.example.test",
+    "Hunter2@home.net",
+    "Hunter2 is my password",
+    "two@signs@example.test",
+    "new\nline@example.test",
+    "a" * 70 + "@example.test",
+    "pw" * 40,
+    "",
 ], ids=lambda v: repr(v)[:30])
-def test_only_an_address_shaped_value_is_recorded_as_typed(value, kept):
+def test_no_typed_value_is_recorded_as_typed(value):
     from noctornal_api.http.routers.auth import _audit_email
     got = _audit_email(value)
-    if kept:
-        assert got == {"email": value}
-    else:
-        assert "email" not in got
-        assert got == {"email_length": len(value),
-                       "email_sha256": hashlib.sha256(value.encode()).hexdigest()[:16]}
+    assert got == {"email_length": len(value), "email_hmac": audit_hash.identifier_hash(value)}
+    if value:
+        assert value[:8] not in json.dumps(got)
 
 
-def test_a_long_address_keeps_its_head_and_a_long_non_address_keeps_nothing():
-    from noctornal_api.http.routers.auth import AUDIT_EMAIL_CHARS, _audit_email
-    long_address = "a" * 70 + "@example.test"
-    got = _audit_email(long_address)
-    assert got["email"] == long_address[:AUDIT_EMAIL_CHARS]
-    assert got["email_length"] == len(long_address)
-    secret = "pw" * 40
-    got = _audit_email(secret)
-    assert "email" not in got and got["email_length"] == 80
-    assert secret[:8] not in json.dumps(got)
+def test_with_no_key_a_failed_signin_records_only_the_length(monkeypatch):
+    from noctornal_api.http.routers.auth import _audit_email
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+    monkeypatch.delenv(audit_hash.PEPPER_ENV, raising=False)
+    assert _audit_email("Hunter2@home.net") == {"email_length": 16}

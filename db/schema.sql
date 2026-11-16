@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0196.
+-- GENERATED MIRROR of the schema at Alembic revision 0197.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0196
+-- Alembic revision: 0197
 -- =====================================================================
 
 --
@@ -7494,10 +7494,18 @@ CREATE TABLE deception.email_message (
     classification core.tlp DEFAULT 'AMBER'::core.tlp NOT NULL,
     compartments text[] DEFAULT '{}'::text[] NOT NULL,
     legal_hold boolean DEFAULT false NOT NULL,
+    auth_basis text,
+    CONSTRAINT email_auth_basis_known CHECK (((auth_basis IS NULL) OR (auth_basis = 'MAIL_STAMP'::text))),
     CONSTRAINT email_auth_result_known CHECK ((((spf_result IS NULL) OR (spf_result = ANY (ARRAY['PASS'::text, 'FAIL'::text, 'SOFTFAIL'::text, 'NEUTRAL'::text, 'NONE'::text, 'TEMPERROR'::text, 'PERMERROR'::text]))) AND ((dkim_result IS NULL) OR (dkim_result = ANY (ARRAY['PASS'::text, 'FAIL'::text, 'NONE'::text, 'TEMPERROR'::text, 'PERMERROR'::text]))) AND ((dmarc_result IS NULL) OR (dmarc_result = ANY (ARRAY['PASS'::text, 'FAIL'::text, 'NONE'::text, 'TEMPERROR'::text, 'PERMERROR'::text]))))),
     CONSTRAINT email_direction_known CHECK ((direction = ANY (ARRAY['INBOUND_TO_VICTIM'::text, 'OUTBOUND_FROM_VICTIM'::text, 'INTERNAL'::text, 'UNKNOWN'::text]))),
     CONSTRAINT email_dkim_domain_needs_pass CHECK (((dkim_domain IS NULL) OR (dkim_result = 'PASS'::text)))
 );
+
+--
+-- Name: COLUMN email_message.auth_basis; Type: COMMENT; Schema: deception; Owner: -
+--
+
+COMMENT ON COLUMN deception.email_message.auth_basis IS 'MAIL_STAMP: the SPF, DKIM and DMARC results were read from the Authentication-Results header a valid mail stamp attests (docs/19 section 2.1). NULL on a row that carries a verdict means it was recorded before the mail stamp (0197), on its place in the Received chain alone: the sender may have chosen it.';
 
 --
 -- Name: app_user; Type: TABLE; Schema: iam; Owner: -
@@ -9779,6 +9787,13 @@ ALTER TABLE ONLY deception.email_hop
 
 ALTER TABLE ONLY deception.email_message
     ADD CONSTRAINT email_message_pkey PRIMARY KEY (id);
+
+--
+-- Name: email_message email_verdict_needs_basis; Type: CHECK CONSTRAINT; Schema: deception; Owner: -
+--
+
+ALTER TABLE deception.email_message
+    ADD CONSTRAINT email_verdict_needs_basis CHECK ((((spf_result IS NULL) AND (dkim_result IS NULL) AND (dmarc_result IS NULL)) OR (auth_basis IS NOT NULL))) NOT VALID;
 
 --
 -- Name: app_user app_user_email_key; Type: CONSTRAINT; Schema: iam; Owner: -

@@ -73,6 +73,36 @@ def test_untouched_chain_verifies(tamperable):
     assert report.intact, [b.kind for b in report.breaks]
 
 
+def test_the_audit_chain_verifies_across_a_legacy_32_byte_row_and_a_new_16_byte_row(tamperable):
+    """`ip_hash` was a 32-byte plain sha256 and is a 16-byte keyed hash now (`security/audit_hash.py`),
+    and nothing rewrites the old rows. The trigger and the verifier both hash the column as hex
+    whatever its length, so a chain holding both verifies, and a 16-byte value edited in place breaks it."""
+    import hashlib
+
+    from noctornal_api.audit_verify import verify_chain
+    from noctornal_api.security import audit_hash
+
+    since = _seed(tamperable, n=1)
+    for value in (hashlib.sha256(b"203.0.113.9").digest(), audit_hash.ip_hash("203.0.113.9")):
+        tamperable.execute(
+            """INSERT INTO audit.event (actor_kind, action, outcome, detail, ip_hash)
+               VALUES ('SYSTEM', 'TEST_IP_HASH', 'DENIED', '{}'::jsonb, %s)""", (value,))
+    lengths = [r[0] for r in tamperable.execute(
+        "SELECT octet_length(ip_hash) FROM audit.event WHERE seq > %s AND ip_hash IS NOT NULL "
+        "ORDER BY seq", (since,)).fetchall()]
+    assert lengths == [32, 16]
+    report = verify_chain(tamperable, since_seq=since)
+    assert report.checked >= 3
+    assert report.intact, [b.kind for b in report.breaks]
+
+    tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    tamperable.execute(
+        "UPDATE audit.event SET ip_hash = %s WHERE seq = (SELECT max(seq) FROM audit.event)",
+        (audit_hash.ip_hash("198.51.100.1"),))
+    report = verify_chain(tamperable, since_seq=since)
+    assert not report.intact
+
+
 def test_in_place_edit_is_a_CONTENT_break(tamperable):
     """A row edited in place must be caught by the hash recompute."""
     from noctornal_api.audit_verify import verify_chain

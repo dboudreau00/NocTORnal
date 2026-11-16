@@ -145,6 +145,15 @@ def test_the_proxy_refuses_to_hold_a_platform_secret(name):
                         f"the internet and needs none of the platform's keys."]
 
 
+def test_the_proxy_refuses_to_hold_the_audit_pepper():
+    """The pepper keys the audit log's address and sign-in hashes, and the proxy writes no audit row; the
+    test above runs over the list, so this one holds the name in it."""
+    assert "NOCTORNAL_AUDIT_PEPPER" in egress_proxy.FORBIDDEN_ENV
+    problems = egress_proxy.verify_proxy_environment(
+        _proxy_env(NOCTORNAL_AUDIT_PEPPER="value-9f2"))
+    assert any("NOCTORNAL_AUDIT_PEPPER" in p for p in problems), problems
+
+
 @pytest.mark.parametrize("listen", ["0.0.0.0:3128", ":::3128", "[::]:3128"])
 def test_the_proxy_refuses_a_wildcard_listen_address(listen):
     problems = egress_proxy.verify_proxy_environment(_proxy_env(NOCTORNAL_EGRESS_LISTEN=listen))

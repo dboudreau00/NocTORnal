@@ -662,6 +662,10 @@ services:
       # bytes must never hold it. This blanks what secrets.env carries; the API refuses to start
       # here if it is set.
       NOCTORNAL_WORKER_DATABASE_URL: ""
+      # The mail stamp key forges the stamp the API reads Authentication-Results by (docs/19
+      # section 2.1), and this process parses no mail.
+      NOCTORNAL_MAIL_STAMP_KEY: ""
+      NOCTORNAL_MAIL_STAMP_KEY_RETIRED: ""
       # The same alias the api service carries, for the same reason. It
       # travels through the environment rather than being written into the
       # command because a YAML alias cannot be spliced into a string, and

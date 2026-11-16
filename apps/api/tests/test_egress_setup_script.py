@@ -220,6 +220,7 @@ def test_a_claimed_email_without_credentials_is_refused_and_writes_nothing(conn)
              answers=[email], secrets=["wrong password", "000000"])
     failed = _audit(conn, "AUTH_FAILED", before)
     assert len(failed) == 1 and failed[0][1]["via"] == "scripts/egress_setup.py"
+    assert "email" not in failed[0][1] and failed[0][1]["email_length"] == len(email)
     assert not _audit(conn, "EGRESS_ROUTE_CREATED", before)
     # A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
     assert conn.execute("SELECT outcome FROM audit.event WHERE action = 'AUTH_FAILED' "

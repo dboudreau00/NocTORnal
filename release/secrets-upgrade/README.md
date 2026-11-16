@@ -13,6 +13,7 @@ one command before `up`, and refuses to start without it.
 |---|---|---|
 | `migrate` | `migrate.env` is missing, so it has no owner DSN | `NOCTORNAL_MIGRATION_DATABASE_URL is not set for the migration job ...` |
 | `redis` | `REDIS_URL` names this Redis (host `redis`) and does not sign in as `noctornal_limiter` | `REDIS_URL does not sign in to this Redis as noctornal_limiter with REDIS_PASSWORD ...` |
+| `api`, `sample-origin`, `collector`, the Lab's workers | `NOCTORNAL_AUDIT_PEPPER` is missing, the placeholder, shorter than 16 characters or a copy of another secret (from 2026-11-15) | `NOCTORNAL_AUDIT_PEPPER is not set, so the hashes the audit log keeps ...` |
 
 Every service that waits on `migrate` or on a healthy `redis` stays down
 with them. Each sentence names the command below and none quotes a value.
@@ -46,6 +47,11 @@ or later on the host and no virtual environment. In `infra/production` it:
 * keeps `REDIS_PASSWORD` when it is URL-safe (generates one when it is not)
   and rewrites `REDIS_URL` as `redis://noctornal_limiter:PASSWORD@redis:6379/0`,
   replacing the old template's comments on both lines;
+* writes `NOCTORNAL_AUDIT_PEPPER`, the key of the audit log's address and
+  sign-in hashes, when it is missing, the placeholder, shorter than 16
+  characters or the same value as the ingest pepper or the TOTP key, and
+  adds the template's comment above a line it appends; one that is none of
+  those is kept;
 * prints each change by name, and exits non-zero with a `still to do:`
   line for anything left to you.
 

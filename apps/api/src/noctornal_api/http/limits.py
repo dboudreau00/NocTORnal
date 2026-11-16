@@ -34,6 +34,7 @@ from noctornal_api.ratelimit import (
     hashed,
     ip_subject,
 )
+from noctornal_api.security import audit_hash
 
 log = logging.getLogger("noctornal.ratelimit")
 
@@ -228,9 +229,7 @@ def _audit(conn, *, action: str, actor_id, detail: dict, ip_hash: bytes | None) 
 
 
 def _ip_hash(request: Request) -> bytes | None:
-    import hashlib
-    address = client_ip(request)
-    return hashlib.sha256(address.encode()).digest() if address else None
+    return audit_hash.ip_hash(client_ip(request))
 
 
 def refuse(decision: Decision) -> Problem:

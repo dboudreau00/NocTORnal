@@ -143,6 +143,19 @@ the Analysis pane and the analytics routes (`one_mode=forum`,
   size the Comms pane's co-participation view keeps, so that view remains
   the conversation projection.
 
+**Two sizes, one rule: a size is what the reader can list.** A forum or
+wallet venue counts the memberships the caller can see, because each
+membership is a recorded tie with labels of its own, and one above the
+caller is not theirs to count. A conversation in the Comms pane counts its
+roster, every participant row, because a participant row carries no labels:
+whoever may read the conversation may list all of its participants
+(`GET /comms/contact-graph`), so the size is the same for every reader of the
+room and a weight says nothing about who resolves above them. Dividing a
+conversation by the members the reader can resolve would say exactly that,
+and would give two analysts of one room two figures (docs/00 decision 232).
+Either size is a lower bound where the case recorded only part of a venue or
+a room, so a weight is an upper bound.
+
 ### Structural equivalence and roles
 
 - **CONCOR** and **blockmodelling**

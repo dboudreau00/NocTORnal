@@ -196,7 +196,9 @@ New node types:
 - `CONVERSATION`, a DM thread, MUC room, channel or forum conversation.
   Bipartite: identities participate in conversations. Projects to a
   co-participation network, which is often the cleanest social graph you
-  will get.
+  will get. A tie is weighted by the room's participant list, which anyone
+  who may read the conversation can see, so a weight is the same for every
+  reader of the room (docs/00 decision 232).
 
 New edge types: `USES_ACCOUNT`, `PARTICIPANT_IN`, `CO_DECLARED_WITH`,
 `SAME_DEVICE_AS`, `CONFIRMED_CONTROL_OF`.

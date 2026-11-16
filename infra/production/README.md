@@ -74,6 +74,11 @@ must agree across files:
 
 * the **Redis password** and `REDIS_URL`, which signs in as the limiter's
   own Redis user (see [The limiter's Redis](#the-limiters-redis));
+* the **audit pepper**, `NOCTORNAL_AUDIT_PEPPER`, which keys the hashes the
+  audit log keeps of a client's address and of what a failed sign-in typed
+  as its email, when it is missing, the placeholder, shorter than 16
+  characters or a copy of the ingest pepper or the TOTP key. One that is
+  none of those is never replaced;
 * the **schema owner's password**, into `postgres-init.env` and inside
   `migrate.env`'s DSN, but only when Docker says the database volume does
   not exist yet. initdb fixes the owner's password for good, so on a host
@@ -176,6 +181,25 @@ the envelope keeps a ring (`NOCTORNAL_TOTP_KEK_RETIRED`, see the
 template), the readiness check `kek_ring_opens_stored_secrets` says
 whether every stored secret still opens, and
 `scripts/rewrap_secrets.py --apply` moves them under the new key.
+
+**The mail stamp key** is optional, and without it uploaded mail records no
+SPF, DKIM or DMARC verdict: every `Authentication-Results` header is kept as
+the sender's claim, because nothing else in a message tells your mail
+server's verdict from a forged one (`docs/19` section 2.1). Your border mail
+server signs with it and the API verifies, so make it here and give the same
+text to both. It is base64 of 32 bytes:
+
+```sh
+python3 -c "import base64,secrets;print(base64.b64encode(secrets.token_bytes(32)).decode())"
+```
+
+Put it in `NOCTORNAL_MAIL_STAMP_KEY` (the template has the id and the
+rotation steps), set `NOCTORNAL_TRUSTED_MTA_HOSTS`, and install the signer on
+your mail server ([`mail-stamp/README.md`](mail-stamp/README.md)). A ring
+the API cannot read is refused at boot, by name. The sample origin has it
+blanked in `compose.yml`, and the egress proxy refuses to start holding it;
+the other services that read `secrets.env` hold it as they hold the TOTP
+key. The readiness row `mail_stamp_key` says whether it is set.
 
 Then lock the files down. Between them they hold every password in the
 deployment, and the egress files below hold the proxy's keys and database
@@ -514,7 +538,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Forty-seven checks, each with the evidence behind it and, when it fails, the
+Forty-nine checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -548,7 +572,7 @@ register is the one that answers for the deployment.
 
 ### What stays red, and what a red check refuses
 
-Four of the forty-seven are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the forty-nine are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It

@@ -689,3 +689,83 @@ def test_a_url_in_a_note_title_or_subject_comes_back_defanged(conn):
     quiet = [c for c in _svc(conn).captures(case_id, clearance="RED")
              if c["requested_url"] == "https://quiet.example/"]
     assert quiet[0]["note_segments"] == []
+
+
+# --- 0197: what a stored verdict rests on --------------------------------------------------------
+
+_STAMPABLE = (
+    b"Authentication-Results: mx.corp.example; spf=pass smtp.mailfrom=acme.example;"
+    b" dkim=pass header.d=acme.example; dmarc=pass header.from=acme.example\r\n"
+    b"Received: from s.example ([203.0.113.9]) by mx.corp.example;"
+    b" Mon, 20 Jul 2026 09:00:00 +0000\r\n"
+    b"From: jane@acme.example\r\nSubject: Remittance\r\n\r\nbody\r\n")
+
+
+def _stored(conn, raw, parsed=None):
+    """An exhibit holding `raw` (stamped with the test key when `parsed` is not given) and its parse."""
+    from mail_stamp_support import KEYS, stamped
+    from noctornal_api.deception import parse_eml
+    from noctornal_api.evidence import EvidenceService, EvidenceStorage
+
+    owner = _user(conn)
+    case_id = _case(conn, owner)
+    raw = b"Message-ID: <" + uuid4().hex.encode() + b"@acme.example>\r\n" + raw
+    if parsed is None:
+        raw = stamped(raw)
+        parsed = parse_eml(raw, trusted=("corp.example",), stamp_keys=KEYS)
+    exhibit = EvidenceService(conn, EvidenceStorage()).ingest(
+        case_id=case_id, title="m.eml", media_type="message/rfc822",
+        data=raw, acquired_by=owner, acquisition_method="MANUAL_UPLOAD")
+    return owner, case_id, exhibit.evidence_id, parsed
+
+
+def test_a_stamped_message_is_stored_with_its_basis(conn):
+    owner, case_id, evidence_id, parsed = _stored(conn, _STAMPABLE)
+    message_id = _svc(conn).record_email(case_id=case_id, evidence_id=evidence_id,
+                                         parsed=parsed, recorded_by=owner)
+    got = _svc(conn).email(message_id, clearance="RED")
+    assert (got["dkim_result"], got["dkim_domain"]) == ("PASS", "acme.example")
+    assert got["auth_basis"] == "MAIL_STAMP"
+    [row] = _svc(conn).emails(case_id, clearance="RED")
+    assert row["auth_basis"] == "MAIL_STAMP"
+
+
+def test_a_message_with_no_verdict_may_have_no_basis(conn):
+    from noctornal_api.deception import parse_eml
+    parsed = parse_eml(_STAMPABLE, trusted=("corp.example",), stamp_keys={})
+    assert parsed.dkim_result is None and parsed.auth_basis is None
+    owner, case_id, evidence_id, _ = _stored(conn, _STAMPABLE, parsed=parsed)
+    message_id = _svc(conn).record_email(case_id=case_id, evidence_id=evidence_id,
+                                         parsed=parsed, recorded_by=owner)
+    got = _svc(conn).email(message_id, clearance="RED")
+    assert got["auth_basis"] is None and got["dkim_result"] is None
+
+
+def test_the_database_refuses_a_new_verdict_with_no_basis(conn):
+    """The NOT VALID check holds every row written after 0197: a writer that forgets the basis, or reads a
+    verdict some other way, is refused by the database."""
+    from dataclasses import replace
+    owner, case_id, evidence_id, parsed = _stored(conn, _STAMPABLE)
+    forgot = replace(parsed, auth_basis=None)
+    with pytest.raises(psycopg.errors.CheckViolation, match="email_verdict_needs_basis"):
+        _svc(conn).record_email(case_id=case_id, evidence_id=evidence_id,
+                                parsed=forgot, recorded_by=owner)
+
+
+def test_a_legacy_row_with_a_verdict_and_no_basis_is_still_readable(conn):
+    """A row recorded before 0197 carries a verdict and no basis. It is kept and read, and the console marks
+    it (test_ui_deception.py); the check is dropped inside a rolled-back transaction to write one."""
+    from dataclasses import replace
+    owner, case_id, evidence_id, parsed = _stored(conn, _STAMPABLE)
+    legacy = replace(parsed, auth_basis=None)
+    with conn.transaction(force_rollback=True):
+        conn.execute("ALTER TABLE deception.email_message "
+                     "DROP CONSTRAINT email_verdict_needs_basis")
+        message_id = _svc(conn).record_email(case_id=case_id, evidence_id=evidence_id,
+                                             parsed=legacy, recorded_by=owner)
+        got = _svc(conn).email(message_id, clearance="RED")
+        assert got["dkim_result"] == "PASS" and got["auth_basis"] is None
+    still = conn.execute(
+        "SELECT convalidated FROM pg_constraint WHERE conname = 'email_verdict_needs_basis'"
+    ).fetchone()
+    assert still == (False,)

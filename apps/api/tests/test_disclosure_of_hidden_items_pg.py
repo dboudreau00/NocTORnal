@@ -3,7 +3,8 @@
 - The node-set member list says how many hidden entities each working set holds only as the case's
   withheld_disclosure allows.
 - The co-participation network says how many participants resolved to an entity the reader cannot see
-  only as the setting allows, with the filters narrowed to one room too.
+  only as the setting allows, with the filters narrowed to one room too, and under NONE and PRESENCE
+  counts them with the unresolved handles they are drawn as.
 - A comms binding takes only a node of its own case that the caller may see (another case's, one above the
   caller, or an unknown one must not be a 500).
 - For a change to an element above the caller the gate gives one answer whether the id is hidden or
@@ -111,11 +112,15 @@ def test_co_participation_counts_hidden_participants_only_as_the_case_allows(
     none = coverage("NONE")
     assert "participants_excluded_not_visible" not in none
     assert "withheld" not in none
+    # The room has no unresolved handle: the hidden one is counted as one (decision 232).
+    assert none["participants_excluded_unresolved"] == 1
     presence = coverage("PRESENCE")
     assert presence["withheld"] == {"incomplete": True, "mode": "PRESENCE"}
     assert "participants_excluded_not_visible" not in presence
+    assert presence["participants_excluded_unresolved"] == 1
     count = coverage("COUNT")
     assert count["participants_excluded_not_visible"] == 1
+    assert count["participants_excluded_unresolved"] == 0
     assert count["withheld"] == {"incomplete": True, "mode": "COUNT",
                                  "participants": 1}
 
@@ -125,21 +130,30 @@ def test_an_oversized_rooms_projectable_count_is_a_count_too():
 
     def out():
         return {"coverage": {
+            "participants_excluded_unresolved": 2,
             "participants_excluded_not_visible": 3,
             "oversized": [{"conversation_id": "c", "participants": 90,
                            "projectable_participants": 87}]}}
 
-    none, presence, count = out(), out(), out()
-    _disclose_hidden_participants(none, "NONE")
-    _disclose_hidden_participants(presence, "PRESENCE")
-    _disclose_hidden_participants(count, "COUNT")
-    assert none["coverage"] == {"oversized": [
+    def disclosed(mode, include_unresolved=False):
+        answer = out()
+        _disclose_hidden_participants(answer, mode,
+                                      include_unresolved=include_unresolved)
+        return answer["coverage"]
+
+    none, presence, count = (disclosed(m) for m in ("NONE", "PRESENCE", "COUNT"))
+    # Left out with the unresolved ones, the hidden are counted with them.
+    assert none == {"participants_excluded_unresolved": 5, "oversized": [
         {"conversation_id": "c", "participants": 90}]}
-    assert presence["coverage"]["oversized"] == none["coverage"]["oversized"]
-    assert presence["coverage"]["withheld"] == {"incomplete": True,
-                                                "mode": "PRESENCE"}
-    assert count["coverage"]["oversized"][0]["projectable_participants"] == 87
-    assert count["coverage"]["participants_excluded_not_visible"] == 3
+    assert presence["oversized"] == none["oversized"]
+    assert presence["participants_excluded_unresolved"] == 5
+    assert presence["withheld"] == {"incomplete": True, "mode": "PRESENCE"}
+    assert count["oversized"][0]["projectable_participants"] == 87
+    assert (count["participants_excluded_unresolved"],
+            count["participants_excluded_not_visible"]) == (2, 3)
+    # Drawn as handles, as the unresolved ones are, they are not counted as left out.
+    assert disclosed("NONE", include_unresolved=True)[
+        "participants_excluded_unresolved"] == 2
 
 
 # --- comms binding ---------------------------------------------------------------

@@ -11,6 +11,8 @@ against temporary directories only:
 * a second run changes nothing; a conflict writes nothing;
 * a fresh deployment gets its Redis password, and its owner password only when the database volume does
   not exist yet;
+* the audit pepper is written when it is missing, a placeholder, too short or a copy of another secret,
+  and one the API accepts is never replaced;
 * nothing printed carries a value;
 * install.sh --production-secrets runs the same helper as install.ps1 -ProductionSecrets. The PowerShell
   run exists on Windows only; what is held about install.ps1 everywhere is its text (no test here skips:
@@ -43,7 +45,8 @@ APP = "App9-app-pass"
 REDIS = "Rd3-redis-pass"
 EGRESS = "Eg5-egress-pass"
 WORKER = "Wk6-worker-pass"
-VALUES = (OWNER, APP, REDIS, EGRESS, WORKER)
+AUDIT = "Au8-audit-pepper-of-its-own"
+VALUES = (OWNER, APP, REDIS, EGRESS, WORKER, AUDIT)
 
 OLD_SECRETS = f"""# an older secrets.env
 POSTGRES_PASSWORD={OWNER}
@@ -636,14 +639,116 @@ def test_a_missing_template_is_refused(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The audit pepper
+# ---------------------------------------------------------------------------
+
+PEPPER_KEY = "NOCTORNAL_AUDIT_PEPPER"
+
+
+def _pepper_accepted(value: str, env: dict[str, str]) -> bool:
+    from noctornal_api.security import audit_hash
+    return (audit_hash.pepper_state({**env, PEPPER_KEY: value}).ok
+            and not config._published_in(value))
+
+
+def test_a_missing_audit_pepper_is_generated_with_its_comment(prod):
+    """An older secrets.env has no line: it gains one under the template's comment, at the end, and a
+    value the API accepts."""
+    status, said = _run(_old_layout(prod))
+    assert status == 0, said
+    assert f"generated {PEPPER_KEY} (it was missing or a placeholder)" in said
+    secrets = _env(prod / "secrets.env")
+    assert _pepper_accepted(secrets[PEPPER_KEY], secrets)
+    lines = (prod / "secrets.env").read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"{PEPPER_KEY}="))
+    wanted = _helper()._template_comment(prod, PEPPER_KEY)
+    assert len(wanted) > 3 and lines[at - len(wanted):at] == wanted
+    assert lines[at - len(wanted) - 1] == "", "the block is set off from the line before it"
+    assert _run(prod)[1] == ["nothing to change: the files are already in this release's layout"]
+
+
+def test_a_placeholder_audit_pepper_is_replaced(prod):
+    status, said = _run(prod, new_database=True)
+    assert status == 0, said
+    assert f"generated {PEPPER_KEY} (it was missing or a placeholder)" in said
+    text = (prod / "secrets.env").read_text(encoding="utf-8")
+    assert "replace-me-audit-pepper" not in text
+    secrets = _env(prod / "secrets.env")
+    assert _pepper_accepted(secrets[PEPPER_KEY], secrets)
+    # The template's own comment is above it once, not twice.
+    assert text.count("Keys the hashes the audit log keeps") == 1
+    assert not any(s.startswith("note:") and PEPPER_KEY in s for s in said), said
+
+
+def test_a_valid_audit_pepper_is_never_replaced(prod):
+    _old_layout(prod)
+    with (prod / "secrets.env").open("a", encoding="utf-8") as fh:
+        fh.write(f"{PEPPER_KEY}={AUDIT}\n")
+    status, said = _run(prod)
+    assert status == 0, said
+    assert _env(prod / "secrets.env")[PEPPER_KEY] == AUDIT
+    assert not any(PEPPER_KEY in s for s in said), said
+
+
+@pytest.mark.parametrize("value, why", [
+    ("Short-pepper-15", "shorter than 16 characters"),
+    ("", "missing or a placeholder"),
+    ("replace-me-audit-pepper", "missing or a placeholder"),
+    ("my-pepper-not-a-real-one", "missing or a placeholder"),
+])
+def test_a_short_or_published_audit_pepper_is_replaced(prod, value, why):
+    _old_layout(prod)
+    with (prod / "secrets.env").open("a", encoding="utf-8") as fh:
+        fh.write(f"{PEPPER_KEY}={value}\n")
+    status, said = _run(prod)
+    assert status == 0, said
+    assert f"generated {PEPPER_KEY} (it was {why})" in said
+    secrets = _env(prod / "secrets.env")
+    assert _pepper_accepted(secrets[PEPPER_KEY], secrets)
+    text = (prod / "secrets.env").read_text(encoding="utf-8")
+    assert text.count(f"{PEPPER_KEY}=") == 1 and "Keys the hashes" not in text, \
+        "a line that was there is rewritten in place, with no comment added"
+
+
+@pytest.mark.parametrize("other", ["NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_TOTP_KEK"])
+def test_an_audit_pepper_equal_to_the_ingest_pepper_is_replaced(prod, other):
+    """And equal to the TOTP key: the API refuses a copy of either, so the step that writes the pepper
+    replaces one, and leaves the other secret as it was."""
+    _old_layout(prod)
+    with (prod / "secrets.env").open("a", encoding="utf-8") as fh:
+        fh.write(f"{other}={AUDIT}\n{PEPPER_KEY}={AUDIT}\n")
+    status, said = _run(prod)
+    assert status == 0, said
+    assert f"generated {PEPPER_KEY} (it was the same value as {other})" in said
+    secrets = _env(prod / "secrets.env")
+    assert secrets[other] == AUDIT and secrets[PEPPER_KEY] != AUDIT
+    assert _pepper_accepted(secrets[PEPPER_KEY], secrets)
+
+
+def test_nothing_printed_carries_the_audit_pepper(prod):
+    _old_layout(prod)
+    said = []
+    assert _helper().apply(prod, out=said.append, stamp=STAMP) == 0
+    generated = _env(prod / "secrets.env")[PEPPER_KEY]
+    assert not any(generated in line for line in said), "the generated pepper was printed"
+    run = subprocess.run([sys.executable, str(HELPER), "--dir", str(prod)],
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0 and generated not in run.stdout + run.stderr
+
+
+# ---------------------------------------------------------------------------
 # The helper's own constants, and its command line
 # ---------------------------------------------------------------------------
 
 def test_the_helpers_constants_are_the_applications():
     """It imports nothing from the application (it runs on a host python),
     so the names it shares are held equal here."""
+    from noctornal_api.security import audit_hash
     helper = _helper()
     assert helper.LIMITER_USER == LIMITER_ACL_USER
+    assert helper.AUDIT_PEPPER == audit_hash.PEPPER_ENV
+    assert helper.AUDIT_PEPPER_MIN == audit_hash.MIN_PEPPER_CHARS
+    assert helper.AUDIT_PEPPER_DISTINCT_FROM == audit_hash.OTHER_SECRETS
     for marker in helper.PUBLISHED:
         assert config._published_in(f"x{marker}x") is not None, marker
     compose = (PROD / "compose.yml").read_text(encoding="utf-8")

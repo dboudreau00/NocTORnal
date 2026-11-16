@@ -132,6 +132,116 @@ originating IP the attacker typed. The UI therefore renders the chain
 recipient-first with an explicit "trust ends here" rule, and the extractor
 refuses to propose an `INFRA` node from a hop above the boundary.
 
+### 2.1 The mail stamp: which server wrote the verdict
+
+`Authentication-Results` is where the receiving server writes what SPF,
+DKIM and DMARC decided, and it is text. A sender can write one saying
+`dkim=pass header.d=microsoft.com`, above a forged `Received` line that
+names the recipient's own server, and no rule about where a header sits in
+the file can tell that from the real thing: every byte of a message handed
+over as a file is somebody's claim. What a sender cannot write is a MAC
+under a key they do not hold.
+
+So the deployment's own border MTA, after the milters that write
+`Authentication-Results`, adds one header
+(`apps/api/src/noctornal_api/mail_stamp.py`, one file with no dependency,
+which the mail server runs too):
+
+```
+X-NocTORnal-Stamp: v=1; k=mail:v1; t=1784538000; ah=...; rh=...; bh=...; b=...
+```
+
+| Tag | What it is |
+|---|---|
+| `k` | the key id, `mail:` and 1 to 32 letters, digits, dots, underscores or hyphens |
+| `t` | Unix seconds at signing; inside the MAC, so it cannot be backdated, and never a reason to refuse, because an investigation reads old mail |
+| `ah` | SHA-256 of the canonical value of the `Authentication-Results` header it attests |
+| `rh` | SHA-256 of the canonical value of the server's own `Received` line |
+| `bh` | SHA-256 of the canonical body |
+| `b` | HMAC-SHA256 over `k`, `t`, `ah`, `rh`, `bh` and the identity headers: From, Reply-To, To, Cc, Subject, Date, Message-ID, In-Reply-To, and the three MIME headers (MIME-Version, Content-Type, Content-Transfer-Encoding) that decide how the body's bytes are read |
+
+Every digest and the MAC are 32 bytes in standard base64. The canonical
+forms, which the signer and the verifier share and a test recomputes with
+an implementation of its own, are in the module's docstring. They survive
+what a mailbox export does (line endings rewritten, a header refolded,
+trailing blank lines) and nothing a reader would notice: one changed byte
+in the body or a covered header, a second From, or a swapped
+`Authentication-Results` value, and the stamp does not verify. The headers
+the stamp attests are found by digest, so a relay inside the organisation
+may add its own `Received` and `Authentication-Results` lines above them.
+
+The signer runs right after the milters and attests one header: the
+topmost `Authentication-Results`, which is the last milter's, and only when
+it carries the server's own authserv-id. A topmost header with another
+name means no milter here wrote one, and the message goes on unstamped
+rather than with a stranger's verdict attested. Where a header sits does
+not decide (Postfix hides its own `Received` line from milters, so their
+headers land below it), and a header the sender wrote with the server's
+own name is indistinguishable from a milter's: the server must remove
+those on receipt, before its milters run (RFC 8601 section 5), with a
+Postfix `header_checks` rule for example. The signer removes every
+`X-NocTORnal-Stamp` the message arrived with first.
+
+What the stamp withstands, and what it does not:
+
+- A stamp copied from message M1 onto M2 fails: M2's identity headers and
+  body are not M1's, and the attested header is not in M2 unless M2 is a
+  copy of M1.
+- A valid M1 replayed whole is truthful about M1, which is all it ever
+  said.
+- A stamped message with its Reply-To, its Content-Type or its body edited
+  fails. Return-Path is not covered, because final delivery writes it after
+  the stamp.
+- A stamp written outside the deployment is invalid without the key, and
+  the signer removes inbound stamps anyway.
+- Stamps prepended above a valid one do not hide it: the first of the
+  first four that verifies wins.
+- A stolen key forges stamps. The key belongs where the mail server already
+  is, the trust domain that already writes `Authentication-Results`.
+
+`parse_eml` believes an `Authentication-Results` header only when all
+three hold, and records SPF, DKIM and DMARC from that header alone:
+
+1. a trusted MTA is declared (`NOCTORNAL_TRUSTED_MTA_HOSTS`);
+2. a stamp verifies under the key ring (`NOCTORNAL_MAIL_STAMP_KEY`, its id
+   and its retired keys), and attests the header, wherever it sits;
+3. the attested header's authserv-id is one of the trusted MTA hosts.
+
+Otherwise every such header is the sender's claim: it is kept in
+`auth_results_raw`, no verdict is recorded, no domain is proposed, and a
+parse gap says which of the three failed. **This fails closed.** A
+deployment with no key, or whose mail server does not stamp, records no
+SPF, DKIM or DMARC verdict on uploaded mail; that is the honest answer,
+because nothing in such a message tells the server's verdict from the
+sender's. Where a header sits is no longer a rule: the earlier rules (the
+topmost `Received` header written by a trusted MTA, the header above every
+`Received` header) read bytes the sender writes, and a stamp is stronger
+and survives a relay inside the organisation.
+
+Hosted mail services (Exchange Online, Google Workspace) run no filter of
+the customer's, so their mail carries no stamp and keeps the sender's-claim
+reading. So does mail from a victim organisation's own server, which holds
+no key of this deployment's.
+
+The signer is `scripts/mail_stamp_sign.py` beside a copy of `mail_stamp.py`
+on the mail server, run after the milters (`infra/production/mail-stamp`
+has a Postfix content filter for it). The API's ring is
+`NOCTORNAL_MAIL_STAMP_KEY` under `NOCTORNAL_MAIL_STAMP_KEY_ID` and the
+verify-only `NOCTORNAL_MAIL_STAMP_KEY_RETIRED`. A routine rotation stamps
+with a new key under a new id and keeps the old one retired, so mail
+stamped before still verifies when it is parsed again; a key that leaked is
+removed and never retired, because a retired key still verifies
+(`secrets.env.example` has the steps). A ring that is set and cannot be
+read is a boot refusal, and the readiness row `mail_stamp_key` says
+whether one is set.
+
+The stamp does not yet decide the `Received` boundary of §2: a message whose
+sender forged a top `Received` line naming one of the trusted MTAs still
+has that hop taken as the boundary, and its address proposed as a durable
+selector (`docs/17`, the Received boundary of an unstamped message). The
+stamp binds the server's own `Received` line (`rh`) so that a later change
+can mark the boundary confirmed only at the attested hop.
+
 ---
 
 ## 3) Model
@@ -162,7 +272,14 @@ candidate `INFRA` node and each is separately attributable.
 allowed to disagree** (`header_from`, `header_from_display`,
 `header_reply_to`, `header_return_path`, `envelope_from`) plus what the
 receiving MTA *decided*: `spf_result`, `dkim_result`, `dkim_domain`,
-`dmarc_result`, and the raw `Authentication-Results`.
+`dmarc_result`, read only from the header a valid mail stamp attests
+(§2.1), and the raw `Authentication-Results`, which is every such header
+as the message carries it. `auth_basis` says what the verdicts rest on:
+`MAIL_STAMP`, or NULL on a row with none. A row with a verdict and no basis
+was recorded before the stamp (0197), when a header was believed on where it
+sat, and the console marks it "recorded before the mail stamp"; the
+database refuses a new one (`email_verdict_needs_basis`, `NOT VALID` so the
+older rows stay).
 
 `from_replyto_divergent` is stored, not computed on read, because it is
 the finding and a report must be able to cite it.

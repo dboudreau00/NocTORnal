@@ -45,7 +45,7 @@ def _refused(env: dict[str, str]) -> list[str]:
 
 _SECRETS = ("DATABASE_URL", "REDIS_URL", "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY",
             "PRESERVE_SECRET_KEY", "POSTGRES_PASSWORD", "SMTP_PASSWORD",
-            "NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_WEBHOOK_SECRET")
+            "NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_AUDIT_PEPPER", "NOCTORNAL_WEBHOOK_SECRET")
 
 
 @pytest.mark.parametrize("variable", _SECRETS)
@@ -382,6 +382,7 @@ _MUST_FIND = {
     ("secrets.env.example", "DATABASE_URL"), ("secrets.env.example", "REDIS_URL"),
     ("secrets.env.example", "NOCTORNAL_TOTP_KEK"),
     ("secrets.env.example", "NOCTORNAL_INGEST_PEPPER"),
+    ("secrets.env.example", "NOCTORNAL_AUDIT_PEPPER"),
     ("secrets.env.example", "PRESERVE_SECRET_KEY"),
     ("secrets.env.example", "SMTP_PASSWORD"),
     ("install.sh", "REDIS_URL"), ("install.sh", "MINIO_SECRET_KEY"),
