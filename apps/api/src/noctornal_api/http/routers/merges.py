@@ -267,6 +267,10 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
 
     try:
         with sconn.transaction():
+            # The merge's locks before the consume: its audit row takes the audit chain's lock, which
+            # every other merge and reversal takes last (`MergeService.lock_for_merge`).
+            MergeService(sconn).lock_for_merge(case_id, source_node_id,
+                                               target_node_id)
             svc.consume(body.approval_request_id, actor_id=user.user_id,
                         operation="node.merge", case_id=case_id, payload=payload)
             record = MergeService(sconn).merge(
