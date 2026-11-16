@@ -39,10 +39,13 @@ _FACT_READERS = {
     ("http/routers/graph.py", "_gate_for_change"): "facts_or_phantom",
     ("http/routers/graph.py", "retract_assertion"): "facts_or_phantom",
     ("http/routers/graph.py", "supersede_assertion"): "facts_or_phantom",
-    ("http/routers/graph.py", "_gate_tie_endpoints"): "facts_or_phantom",
+    # A tie's two entities, joined into its facts and a claim's, are read as facts too.
+    ("http/routers/graph.py", "_tie_facts"): "iam.element_facts",
     ("http/routers/curation.py", "_node_for_write"): "facts_or_phantom",
     ("http/routers/evidence.py", "_authorize_exhibit"): "facts_or_phantom",
-    ("http/routers/proposals.py", "_check_accept_labels"): "facts_or_phantom",
+    # The entity an ATTRIBUTE names and the two a proposed tie names (`_check_accept_labels`).
+    ("http/routers/proposals.py", "_gate_named_entity"): "facts_or_phantom",
+    ("http/routers/proposals.py", "_check_accept_labels"): "_gate_named_entity",
     ("http/routers/evidence.py", "_authorize_export"): "facts_or_phantom",
     # Comms are under policy (0122). The conversation's case is found as a fact before the gate's work
     # proceeds, through `element_gate.gate_element`, which reads it with `element_labels`.

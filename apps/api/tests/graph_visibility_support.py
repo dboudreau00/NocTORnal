@@ -84,8 +84,9 @@ class World:
 
 def cleanup(owner) -> None:
     """What `rls_support.cleanup` does not know about: merges and what they
-    moved, selectors, approvals, tags, working sets, and the communications
-    rows this unit seeds. Append-only rows (audit, custody) stay."""
+    moved, selectors, approvals, tags, working sets, the communications rows
+    this unit seeds and its proposals. Append-only rows (audit, custody)
+    stay."""
     users = f"(SELECT id FROM iam.app_user WHERE email LIKE '{PREFIX}%@noctornal.test')"
     cases = f'(SELECT id FROM core."case" WHERE owner_user_id IN {users})'
     for statement in (
@@ -101,6 +102,7 @@ def cleanup(owner) -> None:
         f"DELETE FROM comms.contact_block_entry WHERE block_id IN "
         f"(SELECT id FROM comms.contact_block WHERE case_id IN {cases})",
         f"DELETE FROM comms.contact_block WHERE case_id IN {cases}",
+        f"DELETE FROM collect.proposal WHERE case_id IN {cases}",
         f"DELETE FROM comms.participant WHERE conversation_id IN "
         f"(SELECT id FROM comms.conversation WHERE case_id IN {cases})",
         f"DELETE FROM comms.conversation WHERE case_id IN {cases}",

@@ -1262,11 +1262,16 @@ def link(
     # The link target must live in the SAME case: core.evidence_link has no
     # same-case constraint (unlike core.edge), so an unchecked node_id would
     # attach an evidentiary claim to a node in a case the caller has no
-    # rights over, audited only under this case.
+    # rights over, audited only under this case. A tie is the caller's to cite only when row
+    # security admits its two entities as well as the tie: one joining an entity above them is
+    # drawn for nobody below that entity, so it is refused as a missing tie is, in one statement.
     target_ok = conn.execute(
         "SELECT 1 FROM core.node WHERE id = %s AND case_id = %s"
         if body.node_id is not None else
-        "SELECT 1 FROM core.edge WHERE id = %s AND case_id = %s",
+        """SELECT 1 FROM core.edge e
+             JOIN core.node s ON s.id = e.src_node_id
+             JOIN core.node d ON d.id = e.dst_node_id
+            WHERE e.id = %s AND e.case_id = %s""",
         (body.node_id or body.edge_id, case_id),
     ).fetchone()
     if target_ok is None:

@@ -5,6 +5,10 @@
   cannot read.
 - A tie cannot be made to an entity above the caller, and the retirement guard compares more than a tie's
   own labels, so a retirement does not cascade through (and count) a tie to such an entity.
+- A tie to such an entity, labelled as its case is, is the missing tie to that caller: its claims, its
+  exhibits and its review are not read, its claims are not retracted, dated or scored against a
+  hypothesis, an exhibit is not cited for it, and a proposed tie that names such an entity is not
+  accepted. Each is asked with the entity at either end.
 - `edge_uniq_active` does not span labels, so making a tie between two entities the caller can see does
   not answer 400 "already exists" exactly when a tie of that type, above them, already joins the pair.
 - A tie cannot be made to a merged-away or retired entity.
@@ -415,14 +419,25 @@ def test_a_tie_to_a_merged_away_or_retired_entity_is_refused(owner, client):
     assert g.answer(_edge(client, w, w.lead, hidden_and_merged, c)) == g.answer(miss)
 
 
+#: Which end of the tie is the RED entity: every gate reads both, so each is asked of both.
+_EITHER_END = pytest.mark.parametrize("hidden_end", ("dst", "src"))
+
+
+def _tie_to_red(w, hidden_end: str):
+    """An AMBER entity, and an AMBER tie joining it to a RED one at `hidden_end`."""
+    amber, red = w.node("g42 amber"), w.node("g42 red", "RED")
+    ends = (amber, red) if hidden_end == "dst" else (red, amber)
+    return amber, w.edge(*ends, "AMBER")
+
+
+@_EITHER_END
 def test_a_write_on_a_tie_to_an_entity_above_the_caller_is_the_missing_tie(
-        owner, client):
+        owner, client, hidden_end):
     """The tie is labelled AMBER and joins an AMBER entity to a RED one: drawn
     for no AMBER reader, but its own label let one who held its id correct,
     retire or add a claim to it."""
     w = g.World(owner)
-    amber, red = w.node("g42 amber"), w.node("g42 red", "RED")
-    tie = w.edge(amber, red, "AMBER")
+    _, tie = _tie_to_red(w, hidden_end)
     H = w.headers(w.analyst)
     calls = {
         "correct": lambda i: client.patch(
@@ -450,6 +465,169 @@ def test_a_write_on_a_tie_to_an_entity_above_the_caller_is_the_missing_tie(
     assert client.patch(w.url(f"/graph/edges/{own}"), headers=H,
                         json={"weight": 0.5, "assertion": CLAIM}
                         ).status_code == 200
+
+
+@_EITHER_END
+def test_a_read_of_a_tie_to_an_entity_above_the_caller_is_the_missing_tie(
+        owner, client, hidden_end):
+    """Its claims, its exhibits and its review: the tie is drawn for nobody below its RED end, and
+    its own AMBER label let a reader holding its id read why it is believed and who reviewed it."""
+    w = g.World(owner)
+    amber, tie = _tie_to_red(w, hidden_end)
+    reads = {
+        "claims": lambda i, uid: client.get(
+            w.url(f"/edges/{i}/assertions"), headers=w.headers(uid)),
+        "exhibits": lambda i, uid: client.get(
+            w.url(f"/edges/{i}/evidence"), headers=w.headers(uid)),
+        "review": lambda i, uid: client.get(
+            w.url(f"/graph/edges/{i}/review"), headers=w.headers(uid)),
+    }
+    for name, read in reads.items():
+        hit, miss = read(tie, w.analyst), read(uuid4(), w.analyst)
+        assert hit.status_code == 404, (name, hit.text)
+        assert g.answer(hit) == g.answer(miss), name
+        assert read(tie, w.boss).status_code == 200, name
+    assert len(reads["claims"](tie, w.boss).json()) == 1
+    # A tie between entities the caller can read is still theirs to read.
+    own = w.edge(amber, w.node("g42 b"))
+    for name, read in reads.items():
+        assert read(own, w.analyst).status_code == 200, name
+
+
+@_EITHER_END
+def test_a_claim_on_a_tie_to_an_entity_above_the_caller_is_the_missing_claim(
+        owner, client, hidden_end):
+    """Retracting a tie's last claim takes it out of every analyst's graph, and dating a claim
+    records a new one on the tie: neither is for a caller who cannot see the tie's RED end."""
+    w = g.World(owner)
+    amber, tie = _tie_to_red(w, hidden_end)
+    claim = owner.execute("SELECT id FROM core.assertion WHERE edge_id = %s",
+                          (tie,)).fetchone()[0]
+    H = w.headers(w.analyst)
+    calls = {
+        "retract": lambda i, h=H: client.post(
+            w.url(f"/assertions/{i}/retract"), headers=h, json={"reason": "probe"}),
+        "date": lambda i, h=H: client.post(
+            w.url(f"/assertions/{i}/supersede"), headers=h,
+            json={"observed_at": "2026-01-01T00:00:00Z", "rationale": "probe"}),
+    }
+    for name, call in calls.items():
+        hit, miss = call(claim), call(uuid4())
+        assert g.answer(hit) == g.answer(miss) == (
+            404, "no such assertion in this case"), name
+    assert owner.execute(
+        "SELECT retracted_at IS NULL AND superseded_at IS NULL FROM core.assertion "
+        "WHERE id = %s", (claim,)).fetchone()[0]
+    assert owner.execute("SELECT count(*) FROM core.assertion WHERE edge_id = %s",
+                         (tie,)).fetchone()[0] == 1
+    # Each refusal is the gate's, with its denial row, for the claim and the missing id alike.
+    denied = owner.execute(
+        "SELECT detail->>'permission' FROM audit.event "
+        "WHERE actor_id = %s AND action = 'AUTHZ_DENIED'", (w.analyst,)).fetchall()
+    assert [r[0] for r in denied] == ["assertion.retract"] * 4
+    # The cleared owner dates it and retracts the claim that replaced it, and the caller still
+    # retracts a claim on a tie between entities they can read.
+    B = w.headers(w.boss)
+    dated = calls["date"](claim, B)
+    assert dated.status_code == 201, dated.text
+    assert calls["retract"](dated.json()["id"], B).status_code == 204
+    own = w.edge(amber, w.node("g42 b"))
+    own_claim = owner.execute("SELECT id FROM core.assertion WHERE edge_id = %s",
+                              (own,)).fetchone()[0]
+    assert calls["retract"](own_claim).status_code == 204
+
+
+@_EITHER_END
+def test_a_stance_or_an_exhibit_on_a_tie_to_an_entity_above_the_caller_is_the_missing_one(
+        owner, client, hidden_end):
+    """Scoring a claim on the tie against a hypothesis, clearing that score and citing an exhibit
+    for the tie: row security admits the tie at its own AMBER label, and none of the three is for
+    a caller who cannot see its RED end, whose row the matrix never shows them."""
+    w = g.World(owner)
+    amber, tie = _tie_to_red(w, hidden_end)
+    claim = owner.execute("SELECT id FROM core.assertion WHERE edge_id = %s",
+                          (tie,)).fetchone()[0]
+    hypothesis = owner.execute(
+        """INSERT INTO core.hypothesis (case_id, statement, created_by)
+           VALUES (%s, 'g42 hypothesis', %s) RETURNING id""",
+        (w.case_id, w.boss)).fetchone()[0]
+    exhibit = s.exhibit(owner, w.case_id, w.boss)
+    stance = w.url(f"/ach/hypotheses/{hypothesis}/stance")
+
+    def score(i, uid, value=1):
+        return client.put(stance, headers=w.headers(uid),
+                          json={"assertion_id": str(i), "stance": value})
+
+    def clear(i, uid):
+        return client.delete(f"{stance}/{i}", headers=w.headers(uid))
+
+    def cite(i, uid):
+        return client.post(w.url(f"/evidence/{exhibit}/links"), headers=w.headers(uid),
+                           json={"edge_id": str(i)})
+
+    assert score(claim, w.boss, 2).status_code == 200
+    for name, call in (("score", score), ("clear", clear), ("cite", cite)):
+        hit, miss = call(claim if name != "cite" else tie, w.analyst), call(uuid4(), w.analyst)
+        assert hit.status_code in (400, 404), (name, hit.text)
+        assert g.answer(hit) == g.answer(miss), name
+    assert owner.execute(
+        "SELECT stance FROM core.hypothesis_evidence WHERE hypothesis_id = %s "
+        "AND assertion_id = %s", (hypothesis, claim)).fetchone()[0] == 2
+    assert owner.execute("SELECT count(*) FROM core.evidence_link WHERE evidence_id = %s",
+                         (exhibit,)).fetchone()[0] == 0
+    # The cleared owner clears their own score, and the caller scores, clears and cites a tie
+    # between entities they can read.
+    assert clear(claim, w.boss).status_code == 200
+    own = w.edge(amber, w.node("g42 b"))
+    own_claim = owner.execute("SELECT id FROM core.assertion WHERE edge_id = %s",
+                              (own,)).fetchone()[0]
+    assert score(own_claim, w.analyst).status_code == 200
+    assert clear(own_claim, w.analyst).status_code == 200
+    assert cite(own, w.analyst).status_code == 204
+
+
+def test_a_proposed_tie_to_an_entity_above_the_reviewer_is_the_missing_entity(
+        owner, client):
+    """Accepting a proposed tie writes it, at a label the reviewer may write, between the two
+    entities it names: an AMBER reviewer could tie an entity they cannot see, and a named entity
+    that did not exist reached the foreign key."""
+    from noctornal_api.proposals import ProposalStore
+    w = g.World(owner)
+    amber, red = w.node("g42 amber"), w.node("g42 red", "RED")
+    other_owner = s.user(owner, "RED", prefix=g.PREFIX)
+    other_case = s.case(owner, other_owner, "AMBER")
+    foreign = s.node(owner, other_case, other_owner, "g42 foreign")
+
+    def propose(src, dst):
+        return ProposalStore(owner).propose(
+            case_id=w.case_id, kind="EDGE", origin="g42_probe_v1",
+            payload={"edge_type": "VOUCHED_FOR", "src_node_id": str(src),
+                     "dst_node_id": str(dst)},
+            rationale="g42 probe", score=0.5)
+
+    def accept(pid, uid):
+        return client.post(w.url(f"/proposals/{pid}/accept"),
+                           headers=w.headers(uid), json={})
+
+    refusal = (409, "an entity this proposal would tie is not in this case; "
+                    "nothing was written")
+    hidden = {}
+    for end in ("src", "dst"):
+        def pair(named, end=end):
+            return (amber, named) if end == "dst" else (named, amber)
+
+        hidden[end] = propose(*pair(red))
+        assert g.answer(accept(hidden[end], w.lead)) == refusal, end
+        assert g.answer(accept(propose(*pair(uuid4())), w.lead)) == refusal, end
+        assert g.answer(accept(propose(*pair(foreign)), w.lead)) == refusal, end
+    assert _live_ties(owner, w) == 0
+    assert {r[0] for r in owner.execute(
+        "SELECT state FROM collect.proposal WHERE case_id = %s",
+        (w.case_id,)).fetchall()} == {"PROPOSED"}
+    # The cleared owner accepts it, and the reviewer accepts a tie between entities they can see.
+    assert accept(hidden["src"], w.boss).status_code == 200
+    assert accept(propose(amber, w.node("g42 b")), w.lead).status_code == 200
+    assert _live_ties(owner, w) == 2
 
 
 # --- retirement through a tie to an entity above the caller -----------------

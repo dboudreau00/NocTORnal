@@ -37,6 +37,15 @@ _LIVE = ("PROPOSED", "ACCEPTED", "DISPUTED")
 #: A status change that needs its reason written down. Rejecting is a
 #: finding ("we ruled this out"), and so is taking it back.
 _NEEDS_A_NOTE = "REJECTED"
+#: A claim `a` the caller may score: one on an entity, or on a tie whose two entities row security
+#: admits as well as the tie. A tie labelled as its case is, joining an entity above the caller, is
+#: drawn for nobody below that entity and `ach_cells` never shows its row, so a stance on its claim
+#: is refused as a missing claim's is, in the same one statement.
+_CLAIM_TIE_ENDS_SEEN = """(a.edge_id IS NULL OR EXISTS (
+    SELECT 1 FROM core.edge e
+      JOIN core.node s ON s.id = e.src_node_id
+      JOIN core.node d ON d.id = e.dst_node_id
+     WHERE e.id = a.edge_id))"""
 
 
 class HypothesisBody(BaseModel):
@@ -322,8 +331,9 @@ def set_stance(
     if owned is None:
         raise Problem(404, "Not found", "no such hypothesis in this case")
     live = conn.execute(
-        """SELECT 1 FROM core.assertion
-            WHERE id = %s AND case_id = %s AND retracted_at IS NULL""",
+        """SELECT 1 FROM core.assertion a
+            WHERE a.id = %s AND a.case_id = %s AND a.retracted_at IS NULL
+              AND """ + _CLAIM_TIE_ENDS_SEEN,
         (body.assertion_id, case_id)).fetchone()
     if live is None:
         raise Problem(404, "Not found",
@@ -380,6 +390,8 @@ def clear_stance(
             USING core.hypothesis h
             WHERE he.hypothesis_id = h.id AND h.id = %s AND h.case_id = %s
               AND he.assertion_id = %s
+              AND EXISTS (SELECT 1 FROM core.assertion a
+                           WHERE a.id = he.assertion_id AND """ + _CLAIM_TIE_ENDS_SEEN + """)
         RETURNING he.stance, he.note""",
         (hypothesis_id, case_id, assertion_id)).fetchone()
     if row is None:
