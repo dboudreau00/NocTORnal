@@ -410,6 +410,16 @@ def test_the_image_lock_is_hashed_and_matches_the_constraints():
 _MAILPIT = re.compile(r"axllent/mailpit:([^\s@]+)")
 
 
+def test_ci_runs_pip_audit_on_the_pinned_constraints():
+    """A new advisory on a pinned version must fail the build, not wait
+    for a manual review. The job audits constraints.txt with --no-deps
+    because that file carries no hashes."""
+    job = _job(_ci(), "pip-audit")
+    assert "pipx install pip-audit==2.10.1" in job
+    step = _step(job, "Audit the pinned constraints")
+    assert "pip-audit --no-deps -r constraints.txt" in step
+
+
 def test_mailpit_is_a_release_tag_and_the_same_one_everywhere():
     tags = {}
     for rel in ("infra/docker-compose.yml", ".github/workflows/ci.yml"):
