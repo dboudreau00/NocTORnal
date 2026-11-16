@@ -764,3 +764,86 @@ def test_the_body_defanger_stays_linear_on_hostile_input():
                     ("x" * 60 + ".") * 5_000):
         defang_text(hostile)
     assert time.perf_counter() - start < 5.0
+
+
+#: Bytes that open as markup or mail whatever the client said they were (independent review, CONSOLE-01).
+_MARKUP_BYTES = {
+    "doctype": b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>",
+    "doctype after white space": b"\r\n\t  <!doctype HTML>\n<html>",
+    "tag": b"<html><head></head></html>",
+    "script": b"<script>fetch('/api/v1/cases')</script>",
+    "comment first": b"<!-- saved from url=(0014)about:internet --><html>",
+    "svg": b"<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>",
+    "xml declaration": b"<?xml version='1.0'?><svg/>",
+    "with a UTF-8 byte order mark": b"\xef\xbb\xbf<html>",
+    "UTF-16 with a byte order mark": "<html>".encode("utf-16"),
+    "UTF-16 with none": "<html>".encode("utf-16-le"),
+    "mail headers": (b"Received: from evil.example ([203.0.113.7]) by mx.corp.example\r\n"
+                     b"From: payroll@evil.example\r\nSubject: remittance change\r\n\r\nbody"),
+    "mail starting at From": b"From: a@evil.example\nTo: b@corp.example\n\nbody",
+    "an mbox": b"From MAILER-DAEMON Mon Jul 20 09:00:00 2026\nFrom: a@b.example\n\nbody",
+}
+
+#: Bytes that are not markup, however a name or a type dresses them.
+_PLAIN_BYTES = {
+    "png": PNG,
+    "jpeg": JPEG,
+    "pdf": b"%PDF-1.7\n1 0 obj",
+    "zip": b"PK\x03\x04" + b"\x00" * 30,
+    "text": b"The meeting is at nine. See <below> for the minutes.",
+    "json": b'{"html": "<html>"}',
+    "csv": b"handle,platform\r\nvendor,tox\r\n",
+    "one mail field": b"From: a lone line of prose\nthen more prose, no headers\n",
+    "empty": b"",
+}
+
+
+def test_invariant_10_markup_is_recognised_from_its_bytes_not_its_declared_type():
+    """The declared type is the uploader's word. An HTML page sent as `application/octet-stream`, with no
+    type or as `text/plain`, was exported from the application origin: its first bytes say what it is."""
+    from noctornal_api.deception import is_hostile_content, looks_like_markup
+    for name, data in _MARKUP_BYTES.items():
+        assert looks_like_markup(data), name
+        for declared in ("application/octet-stream", "text/plain", "", None, "image/png"):
+            assert is_hostile_content(declared, data, "capture"), (name, declared)
+
+
+def test_invariant_10_bytes_that_are_not_markup_are_not_marked_by_their_bytes():
+    from noctornal_api.deception import is_hostile_content, looks_like_markup
+    for name, data in _PLAIN_BYTES.items():
+        assert not looks_like_markup(data), name
+        assert not is_hostile_content("application/octet-stream", data, "notes.txt"), name
+
+
+def test_invariant_10_a_markup_extension_on_a_title_or_a_file_name_marks_the_exhibit():
+    """The console saves an exhibit under its title's extension, so what a name says is judged as the
+    bytes are, whatever they are and whatever the type says."""
+    from noctornal_api.deception import (
+        MARKUP_EXTENSIONS,
+        has_markup_extension,
+        is_hostile_content,
+    )
+    for ext in sorted(MARKUP_EXTENSIONS):
+        for name in (f"lure.{ext}", f"lure.{ext.upper()}", f"lure.{ext}. ", f"a b.c.{ext}"):
+            assert has_markup_extension(name), name
+            assert is_hostile_content("application/octet-stream", PNG, name), name
+            assert is_hostile_content("application/octet-stream", PNG, "plain", name), name
+    for name in ("notes.txt", "photo.png", "report.pdf", "html", ".html.txt", "page.html.bak",
+                 "a.htmlx", "x." + "h" * 9, "", None):
+        assert not has_markup_extension(name), name
+    assert not is_hostile_content("application/octet-stream", PNG, "photo.png", None)
+
+
+def test_invariant_10_the_declared_type_still_marks_what_the_bytes_and_the_name_do_not():
+    """The three signals are alternatives: the new ones add to the type's, never replace it."""
+    from noctornal_api.deception import is_hostile_content
+    for declared in ("text/html", "message/rfc822", "image/svg+xml", "application/x-har"):
+        assert is_hostile_content(declared, PNG, "photo.png")
+
+
+def test_invariant_10_only_the_leading_bytes_are_read():
+    """A 20 MiB exhibit is not decoded to be flagged: markup far past the window is not what a browser
+    sniffs, and the cost of the check does not grow with the exhibit."""
+    from noctornal_api.deception import looks_like_markup
+    assert not looks_like_markup(b"x" * 4096 + b"<html>")
+    assert looks_like_markup(b" " * 1000 + b"<html>")

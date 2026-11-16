@@ -1161,7 +1161,8 @@ class PgpLookupService(PgpKeyService):
                              clearance: str) -> tuple:
         row = self._c.execute(
             """SELECT id, state, expires_at <= now(), requested_by, domain,
-                      wkd_hash, classification::text, address
+                      wkd_hash, classification::text, address,
+                      channel_binding_id, contact_block_id
                  FROM comms.pgp_key_lookup
                 WHERE id = %s AND case_id = %s
                   AND classification <= %s::core.tlp
@@ -1170,6 +1171,29 @@ class PgpLookupService(PgpKeyService):
         if row is None:
             raise PgpNotFound("no such key lookup in this case")
         return row
+
+    def _citations_keep_their_labels(self, case_id: UUID, classification: str,
+                                     channel_binding_id: UUID | None,
+                                     contact_block_id: UUID | None) -> bool:
+        """Whether the channel binding and the contact block a lookup cites still carry no label the lookup
+        does not: nothing above its classification and no compartment, the comparison the INSERT trigger
+        makes (a lookup is never filed below or beside a compartment of what it cites).
+
+        A request is floored at what it cites, but the cited row can be raised afterwards, and the case row
+        the approval re-reads does not move with it. Read as the approver, so a row raised out of their view
+        and a row that is gone are the same answer, and neither tells them which: the caller says one
+        sentence for both."""
+        for table, object_id in (("comms.channel_binding", channel_binding_id),
+                                 ("comms.contact_block", contact_block_id)):
+            if object_id is None:
+                continue
+            row = self._c.execute(
+                f"""SELECT classification::text, compartments FROM {table}
+                     WHERE id = %s AND case_id = %s""",   # noqa: S608
+                (object_id, case_id)).fetchone()
+            if row is None or row[1] or strictest(classification, row[0]) != classification:
+                return False
+        return True
 
     def decline(self, *, case_id: UUID, lookup_id: UUID, decided_by: UUID,
                 reason: str, clearance: str, held: frozenset[str]) -> dict:
@@ -1207,14 +1231,19 @@ class PgpLookupService(PgpKeyService):
         audit before anything leaves, so a process that dies mid-request
         leaves the right destinations named. The request goes through the
         wkd route only. Tx 2 files the key first (its guard admits a WKD
-        acquisition only while the lookup is SENDING), then the outcome."""
+        acquisition only while the lookup is SENDING), then the outcome.
+
+        Before Tx 1 sends anything the labels are read again, the case's AND those of the contact block and
+        channel binding the lookup cites: either can be raised after the request, and the case row does not
+        move with them. The database repeats only the case's half on the SENDING update (docs/17)."""
         from noctornal_api.egress import Destination, RouteUnavailable, can_egress
         from noctornal_api.egress_policy import Rule
         fetch = fetcher or _default_fetcher
         expired = False
         with self._c.transaction():
             row = self._lookup_for_decision(case_id, lookup_id, clearance=clearance)
-            _id, state, lapsed, requester, domain, digest, cls, _addr = row
+            (_id, state, lapsed, requester, domain, digest, cls, _addr,
+             binding_id, block_id) = row
             if state != "REQUESTED":
                 raise PgpConflict(f"that key lookup is no longer waiting: it is "
                                   f"{state}")
@@ -1255,6 +1284,11 @@ class PgpLookupService(PgpKeyService):
                     raise PgpConflict(
                         "The case's labels changed since the lookup was asked "
                         "for, so it is not sent.")
+                if not self._citations_keep_their_labels(
+                        case_id, cls, binding_id, block_id):
+                    raise PgpConflict(
+                        "The labels of what the lookup cites changed since it "
+                        "was asked for, so it is not sent.")
                 urls = wkd_urls(domain, digest)
                 planned = [(m, urls[m]) for m in (ADVANCED, DIRECT) if m in methods]
                 try:

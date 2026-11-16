@@ -497,6 +497,7 @@ class EvidenceService:
         is_hostile_markup: bool | None = None,
         authority_ref: str | None = None,
         reader_ceiling: tuple | None = None,
+        filename: str | None = None,
     ) -> IngestResult:
         """Store bytes as an exhibit.
 
@@ -505,16 +506,19 @@ class EvidenceService:
         connection is row security's answer.
 
         `is_hostile_markup` (migration 0046, docs/19) marks attacker-authored markup: a captured phishing DOM, a
-        HAR, a `.eml`. Left as None it is DERIVED from the media type, so a caller cannot forget it; pass True
-        explicitly to mark something the type does not reveal. Passing False overrides the derivation and is the
-        only way to un-mark a hostile type, which is deliberately the awkward direction.
+        HAR, a `.eml`. Left as None it is DERIVED, so a caller cannot forget it, from what the lodging knows and
+        not from the declared media type alone, which the uploader chooses: the type, the leading bytes (an HTML
+        doctype or tag, an SVG, XML, a mail header block) and a markup extension on the title or on
+        `filename`, the uploaded file's own name (`deception.is_hostile_content`). Pass True explicitly to mark
+        something none of them reveals. Passing False overrides the derivation and is the only way to un-mark a
+        hostile exhibit, which is deliberately the awkward direction.
 
         `acquired_at` is when the material was OBTAINED, which the caller states; the row's `created_at` is when
         the server received it, and the two are shown apart. `authority_ref` names the warrant or production order
         a legal-process acquisition rests on. Both, and whether a time was stated at all, are written into the
         ACQUIRED custody row, the record that goes to court.
         """
-        from noctornal_api.deception import is_hostile_media_type
+        from noctornal_api.deception import is_hostile_content
 
         # Everything the row would refuse is refused before anything is stored.
         _refuse_unstorable(title=title, description=description,
@@ -531,7 +535,7 @@ class EvidenceService:
         # set as a set.
         compartments = sorted(set(compartments or []))
         if is_hostile_markup is None:
-            is_hostile_markup = is_hostile_media_type(media_type)
+            is_hostile_markup = is_hostile_content(media_type, data, title, filename)
         digest = _sha256(data)
         blake = _blake3d(data)
         shahex = digest.hex()

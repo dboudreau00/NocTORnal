@@ -810,15 +810,34 @@ def content_digest(report: Report) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+#: Characters that change what a string looks like without changing what it is: bidirectional overrides and
+#: isolates, the zero-width family, and the C0 and C1 controls but for the tab and the line breaks. This is the
+#: set the console's `visibleText` replaces (`_DECEPTIVE` in app.js), written as escapes for the same reason
+#: it is there, and `test_the_saved_report_is_the_text_the_console_previews` runs the two against each other.
+_DECEPTIVE = re.compile(
+    r"[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff"
+    r"\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _visible(match: re.Match) -> str:
+    """One deceptive character as the console shows it: `U+202E` between single angle quotes."""
+    return f"\u2039U+{ord(match.group()):04X}\u203a"
+
+
 def _line(value) -> str:
-    """`value` as ONE line: every character an editor or a renderer may end a line on becomes a space.
+    """`value` as ONE line: every character an editor or a renderer may end a line on becomes a space, and every
+    character that changes what a line looks like (`_DECEPTIVE`) becomes its code point, as the console's
+    preview shows it.
 
     Labels, exhibit titles, assumptions and hypothesis statements go into the document verbatim, and a label is
     only checked for being blank. A collected handle holding a newline would end its table row and put text of
     the forum's choosing on a line of its own in the file the egress gate cleared: "\\n\\n**TLP:CLEAR**" is a
-    false handling mark partway through an AMBER document. `str()` first so a missing value still prints as it
-    always did."""
-    return " ".join(str(value).splitlines())
+    false handling mark partway through an AMBER document. A right-to-left override in a label does the same
+    from inside the line: it reorders what follows it, the TLP cell of that row included, in any viewer that
+    applies the Unicode bidirectional algorithm. The console previews the document through `visibleText`, so
+    without the substitution here the file and the text shown as "the full text as it would be saved" differed
+    in exactly the characters that matter. `str()` first so a missing value still prints as it always did."""
+    return _DECEPTIVE.sub(_visible, " ".join(str(value).splitlines()))
 
 
 def _cell(value) -> str:

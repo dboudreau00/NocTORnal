@@ -100,6 +100,7 @@ import hmac
 import logging
 import math
 import os
+import re
 import secrets
 import struct
 import threading
@@ -513,6 +514,45 @@ def public_origin() -> str:
             or app_origin())
 
 
+#: A URL's userinfo, up to the LAST "@" of its authority. `https://user:secret@host` is the usual way a
+#: credential ends up in an origin setting, and a password may hold an "@" of its own.
+_USERINFO = re.compile(r"(?<=//)[^/?#\s]*@")
+
+
+def masked_origin(raw: str) -> str:
+    """`raw` as an origin setting with its userinfo masked, for a log line or the readiness register: a
+    credential in the value is the operator's mistake and must not travel on."""
+    return _USERINFO.sub("***@", raw)
+
+#: What `origin_split` says when `NOCTORNAL_SAMPLE_ORIGIN` is set and is not an origin. The same sentence for
+#: every such value, because the refusal reaches a caller with no session (the download routes ask the split
+#: before they read one) and a signed-in account that reads the policy: a setting that holds credentials, a
+#: path or a host name must not be told back to either. The log has the value.
+_SAMPLE_ORIGIN_UNUSABLE = (
+    "sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN is set to a value "
+    "that is not an origin. It must be scheme://host[:port] with no path, "
+    "query or credentials. A path is a location on an origin, not an origin, "
+    "and app.internal/samples is not separate from app.internal. The value "
+    "is in the server log.")
+
+#: The values already put in the log, by digest, so a refusal asked for on every download is one line.
+_NOTED_UNUSABLE: set[str] = set()
+
+
+def _note_unusable_origin(setting: str, raw: str) -> None:
+    """Put an origin setting that cannot be read in the server log, once per value, with any userinfo masked.
+
+    The operator needs the value to find the mistake; the caller who is refused does not (see
+    `_SAMPLE_ORIGIN_UNUSABLE`), and a credential in the value must not reach the log either."""
+    digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+    if digest in _NOTED_UNUSABLE or len(_NOTED_UNUSABLE) >= 16:
+        return
+    _NOTED_UNUSABLE.add(digest)
+    log.warning("%s is set to %r, which is not an origin (scheme://host[:port], with no path, query or "
+                "credentials); the value is shown with any userinfo masked", setting,
+                masked_origin(raw)[:200])
+
+
 def normalise_origin(value: str, *, allow_path: bool = False) -> str | None:
     """`scheme://host[:port]`, lower-cased, default port dropped, or None when not an http(s) origin.
 
@@ -598,13 +638,8 @@ def origin_split(*, this: str | None = None) -> OriginSplit:
             "deployment suggestion.")
     sample = normalise_origin(raw_sample)
     if sample is None:
-        return OriginSplit(
-            "invalid", None, app, this_origin,
-            f"sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN="
-            f"{raw_sample!r} is not an origin. It must be scheme://host[:port] "
-            f"with no path, query or credentials. A path is a location on "
-            f"an origin, not an origin, and app.internal/samples is not "
-            f"separate from app.internal.")
+        _note_unusable_origin("NOCTORNAL_SAMPLE_ORIGIN", raw_sample)
+        return OriginSplit("invalid", None, app, this_origin, _SAMPLE_ORIGIN_UNUSABLE)
     if app is not None and sample == app:
         return OriginSplit(
             "same_origin", sample, app, this_origin,
@@ -614,13 +649,15 @@ def origin_split(*, this: str | None = None) -> OriginSplit:
             f"there is a drive-by attack on every analyst's session. "
             f"Give samples their own host.")
     if this_origin != sample:
+        if this_origin is None:
+            _note_unusable_origin("NOCTORNAL_PUBLIC_ORIGIN or NOCTORNAL_BASE_URL", raw_this)
         return OriginSplit(
             "app", sample, app, this_origin,
             f"sample bytes are served only from the configured sample origin, "
             f"never from the application origin: fetch this download from "
             f"{sample}. This process is configured as "
-            f"{this_origin or raw_this!r} (NOCTORNAL_PUBLIC_ORIGIN, or "
-            f"NOCTORNAL_BASE_URL when that is unset).")
+            f"{this_origin or 'a value that is not an origin'} "
+            f"(NOCTORNAL_PUBLIC_ORIGIN, or NOCTORNAL_BASE_URL when that is unset).")
     return OriginSplit("sample", sample, app, this_origin, None)
 
 

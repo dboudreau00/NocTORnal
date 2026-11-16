@@ -77,15 +77,108 @@ _RASTER_MAGIC: tuple[tuple[bytes, str], ...] = (
 def is_hostile_media_type(media_type: str | None) -> bool:
     """Should bytes of this declared type be marked hostile?
 
-    Answers on the declared type because this runs at INGEST, before
-    anything has looked at the bytes, and the conservative direction is to
-    believe a client that says "this is HTML". The read path does not
+    Answers on the declared type alone, and the conservative direction is to
+    believe a client that says "this is HTML". It is one of three signals
+    and never the only one: `is_hostile_content` adds the leading bytes and
+    a markup extension on the name, because a client that says nothing, or
+    "this is octet-stream", is the one that matters. The read path does not
     believe the declared type in the other direction — see `raster_type_of`.
     """
     if not media_type:
         return False
     base = media_type.split(";", 1)[0].strip().lower()
     return base in HOSTILE_MEDIA_TYPES
+
+
+#: Extensions a browser, an e-mail client or Windows opens as markup or script when the saved file is
+#: double-clicked: the three things a name can give away that a declared type may not. The console saves an
+#: exhibit under its title's extension, so a title ending in one of these is judged the same as the bytes.
+MARKUP_EXTENSIONS = frozenset({
+    "html", "htm", "xhtml", "xht", "shtml", "mht", "mhtml", "hta",
+    "svg", "svgz", "xml", "xsl", "xslt",
+    "eml", "emlx", "mbox", "har",
+})
+
+#: The last extension of a name, as the console's save name reads it: a dot and 1 to 8 letters or digits at the
+#: end.
+_NAME_EXTENSION = re.compile(r"\.([A-Za-z0-9]{1,8})$")
+
+#: How much of an exhibit is read to decide what it is. The leading bytes decide: a browser sniffs the same
+#: window, and an exhibit is not read whole for a flag.
+_SNIFF_BYTES = 2048
+
+#: Text that opens with a tag, a doctype, a comment, a processing instruction or an `<?xml` declaration. An
+#: HTML file declared `application/octet-stream` begins this way, and so does an SVG or an XML file.
+_LEADING_MARKUP = re.compile(r"<[!?/A-Za-z]")
+
+#: The header fields an e-mail file opens with, and the `From ` line of an mbox.
+_MAIL_FIRST_FIELD = re.compile(
+    r"(?:received|return-path|delivered-to|x-[a-z0-9-]+|mime-version|message-id|"
+    r"from|to|cc|bcc|date|subject|reply-to|sender|content-type|dkim-signature|"
+    r"authentication-results|arc-[a-z-]+)[ \t]*:", re.I)
+_MAIL_FIELD_LINE = re.compile(r"[!-9;-~]+:(?:[ \t]|$)")
+_MBOX_ENVELOPE = re.compile(r"From (?:MAILER-DAEMON|\S+@\S+)[ \t]")
+
+
+def has_markup_extension(name: str | None) -> bool:
+    """Does this title or file name end in an extension that opens as markup (`MARKUP_EXTENSIONS`)?
+
+    The spaces and dots a file system drops from the end of a name are dropped first, so `page.html. ` is
+    `page.html`."""
+    tail = name or ""
+    while tail and (tail[-1].isspace() or tail[-1] == "."):
+        tail = tail[:-1]
+    found = _NAME_EXTENSION.search(tail[-16:])
+    return found is not None and found.group(1).lower() in MARKUP_EXTENSIONS
+
+
+def _leading_text(data: bytes) -> str:
+    """The first `_SNIFF_BYTES` of `data` as text, as a browser would pick its encoding: a byte order mark
+    first, then the NUL a UTF-16 `<` leaves, then UTF-8. Never raises."""
+    head = bytes(data[:_SNIFF_BYTES])
+    if head.startswith(b"\xef\xbb\xbf"):
+        return head[3:].decode("utf-8", errors="ignore")
+    if head.startswith(b"\xff\xfe"):
+        return head[2:].decode("utf-16-le", errors="ignore")
+    if head.startswith(b"\xfe\xff"):
+        return head[2:].decode("utf-16-be", errors="ignore")
+    if len(head) >= 2 and head[0] != 0 and head[1] == 0:
+        return head.decode("utf-16-le", errors="ignore")
+    if len(head) >= 2 and head[0] == 0 and head[1] != 0:
+        return head.decode("utf-16-be", errors="ignore")
+    return head.decode("utf-8", errors="ignore")
+
+
+def looks_like_markup(data: bytes | None) -> bool:
+    """Do these bytes OPEN as markup or a mail file, whatever type they were declared as?
+
+    True for text that starts (after white space and a byte order mark) with `<` and a letter, `!`, `?` or
+    `/`: an HTML doctype or tag, a comment, an `<?xml` declaration, an SVG. True for an e-mail header block (a
+    first line that is a mail header field and a second line that is a field too) and for an mbox's `From `
+    line. The direction is deliberate: a plain text file that starts with a tag is marked, and the cost is an
+    analyst's one extra click, where an HTML file called `application/octet-stream` that is not marked is
+    served from this origin and saved as a page."""
+    if not data:
+        return False
+    text = _leading_text(data).lstrip("\t\n\x0c\r ")
+    if _LEADING_MARKUP.match(text) or _MBOX_ENVELOPE.match(text):
+        return True
+    lines = text.splitlines()[:12]
+    if not lines or _MAIL_FIRST_FIELD.match(lines[0]) is None:
+        return False
+    return sum(1 for line in lines if _MAIL_FIELD_LINE.match(line)) >= 2
+
+
+def is_hostile_content(media_type: str | None, data: bytes | None, *names: str | None) -> bool:
+    """Should this exhibit be marked hostile, from everything the lodging knows: the declared type, the
+    leading bytes and the names it carries (the title, the uploaded file's name)?
+
+    `is_hostile_media_type` answers on the client's word alone, and the client chooses it: an HTML page sent as
+    `application/octet-stream`, or with no type, was exported from the application origin and saved under its
+    title's `.html`. Any one of the three is enough, so a name or bytes that say markup are believed over a
+    type that does not."""
+    return (is_hostile_media_type(media_type) or looks_like_markup(data)
+            or any(has_markup_extension(name) for name in names))
 
 
 def raster_type_of(data: bytes) -> str | None:
@@ -2292,7 +2385,9 @@ def _call_row(r) -> dict:
 __all__ = [
     "FREEMAIL_DOMAINS", "HOSTILE_MEDIA_TYPES", "MAX_EML_BYTES",
     "DeceptionError", "DeceptionService", "Hop", "ParsedEmail",
-    "defang", "defang_text", "is_hostile_media_type", "parse_eml",
+    "MARKUP_EXTENSIONS",
+    "defang", "defang_text", "has_markup_extension", "is_hostile_content",
+    "is_hostile_media_type", "looks_like_markup", "parse_eml",
     "parse_received_chain",
     "raster_type_of", "selector_candidates_for_call",
     "selector_candidates_for_email", "trusted_mta_suffixes",

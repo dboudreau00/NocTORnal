@@ -50,6 +50,24 @@ Three consequences, enforced not documented:
    409 and audit the refusal (`EVIDENCE_EGRESS_REFUSED`, reason
    `hostile_markup`).
 
+   **What marks a row.** The upload's declared type is the uploader's
+   word, so it is one of three signals and none is believed over the
+   others: the declared type (HTML, XHTML, SVG, XML, `message/rfc822`, mbox,
+   HAR), the leading bytes (text that opens with a tag, a doctype, a
+   comment, `<?xml` or an SVG, or a mail header block or an mbox `From`
+   line, read from the first 2 KiB in UTF-8 or UTF-16), and a markup
+   extension on the title or on the uploaded file's name (`.html`, `.htm`,
+   `.xhtml`, `.svg`, `.xml`, `.eml`, `.mht`, `.hta`, `.har` and their
+   kin). Any one is enough. A page sent as `application/octet-stream`, or
+   with no type, is marked as a page sent as `text/html` is; the cost of
+   the direction is a false positive (a text file that happens to begin
+   with a tag is produced through the sample origin), which is one extra
+   click. The flag is derived once, at lodging
+   (`deception.is_hostile_content`, called by `EvidenceService.ingest`),
+   and it is the only thing the two routes above and the console's save
+   name read; nothing re-derives it on read. An exhibit lodged before
+   this rule keeps the flag it was given (docs/17).
+
    **Producing one** (migration 0068). The exhibit's card offers
    "Produce through the sample origin", which takes the Lab download's two
    legs. The console mints a one-shot ticket on the application origin,
