@@ -653,6 +653,17 @@ SELECT id, case_id, title
 | Redis's and MinIO's copies of their lines | `redis.env` and `minio.env` are copies the installer step writes of lines of `secrets.env`, so a value changed there reaches Redis, MinIO and `minio-init` only when the step runs again. Until then Redis keeps the old password, so the limiter cannot sign in and every limit that fails closed refuses, the sign-in included, and MinIO keeps the old root pair. | None proposed: compose cannot give a service part of an env file. |
 | the host rule under `ingress` | A connection Caddy starts leaves the host's interface with a private source address nothing routes back, unless the host drops it; the `DOCKER-USER` rule that does is described in `infra/production/README.md` and installed by nothing (the owner's decision). | The operator adds the rule to the host's firewall. |
 
+### Ingest and MaaSSpec spectra
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| a runtime toggle | `NOCTORNAL_MAASSPEC` is a host setting in `secrets.env`, as the outbound lookups switch is. An administrator cannot turn spectra on or off through the API or the console, and a change needs a restart of the API and the cron. | A two-person, audited toggle in the console, if the owner wants one. |
+| proposals from a spectrum | A spectrum fills no proposal: an ingest record has no collected document to hang a proposal on, so a person reads the finding and enters what they accept by hand. | A collected document built from a spectrum, with its own provenance, if the owner wants one. |
+| typed selector scoring | Triage scoring reads the payload text as it does for any record. The typed selectors in a spectrum are mapped and counted, but they do not raise or lower the score. | A scoring term read from the typed selectors. |
+| 24 hours, then forever | An `Idempotency-Key` is burned per API key. A repeat after 24 hours is answered as a duplicate with the first batch, and a repeat with a different body is answered the same way and its body is not stored. A partner that reuses a key for new content loses it without an error. | A refusal that says the body differs, if the owner wants one. |
+| a spectrum's values | A spectrum's values are readable only through the stored body. The queue and the record's `maasspec` block show counts and names, never a value, so a person who wants a value opens the raw object. | A reviewed, redacted view of selected fields. |
+| unmapped selector kinds | Eight MaaSSpec selector kinds have no NocTORnal selector type (`gimphash`, `telfhash`, `cert_serial`, `ipv4_port`, `ipv6_port`, `domain_port`, `campaign`, `botnet`). They are counted as unmapped, not dropped, and stay in the stored body. A kind the contract does not list is counted under `unlisted`. | Selector types for them, with a migration. |
+
 ### Load and performance
 
 Measured on a database of 300 users and 60 cases with one AMBER case of 101,000

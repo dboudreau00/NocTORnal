@@ -88,7 +88,11 @@ Nothing alerts on them; an `ingest.manage` holder looks.
 ### Request handling
 
 - `POST /api/v1/ingest` with `Authorization: Bearer noct_sk_live_…`
-- **Idempotency key** per request (`Idempotency-Key`), deduped for 24h.
+- **Idempotency key** per request (`Idempotency-Key`). A repeat of the same key
+  on the same API key always answers as the first batch, whatever its age and
+  whatever its body: the new body is not stored. The same key on another API
+  key is independent. A request with no key is never folded, but a body already
+  seen is marked `duplicate_of` the first record (flagged, not dropped).
   Retrying clients are the norm, not the exception.
 - Optional HMAC request signing (`X-NocTORnal-Signature` over timestamp and
   raw body) for higher assurance is **not built**.
@@ -237,6 +241,95 @@ The analytic value is real: infection timelines, victim organisation
 attribution, and the C2 and builder metadata that links logs back to the
 operator. You can extract almost all of that from the metadata without
 ever exposing the credential contents. Design for that.
+
+---
+
+## MaaSSpec spectra
+
+MaaSSpec is a provenance-first malware spectrometer that emits one JSON
+"Spectrum" per input. NocTORnal can take that document through the ordinary
+ingest route, unchanged. The integration is optional and off by default.
+
+- **The switch.** `NOCTORNAL_MAASSPEC` in `secrets.env`. Only `on` (stripped,
+  any case) enables it; unset, empty, `off`, `true`, `1` and `yes` mean off. It is
+  read each time a record is parsed, and `GET /api/v1/ingest/maasspec` (permission
+  `ingest.read`) answers `{enabled, switch, contract_versions, max_spectrum_bytes,
+  category, notice}`. There is no route that changes it.
+- **Sending one.** The same request as any partner: `POST /api/v1/ingest` with a
+  `noct_sk_` key, `Idempotency-Key` set to the spectrum's `analysis_id`,
+  `Content-Type: application/json`, the raw bytes of the document as the body.
+  The route's 1 MiB (1,048,576 byte) cap applies.
+- **When it happens.** At parse time, `POST /ingest/batches/{id}/parse` by an
+  `ingest.manage` holder. `POST /ingest` parses nothing.
+- **Off, or not a spectrum.** Categorised exactly as before. A spectrum is a
+  top-level object with the key `maasspec_version`.
+- **On and valid.** Category IOC_FEED, confidence 1.0, category source STRUCTURE.
+  The record stays in the quarantine queue with no case; the payload is stored
+  whole; the labels come from the key, never from the document. No node, tie,
+  assertion or proposal is written, and scoring is unchanged.
+- **On and invalid.** A dead letter with the error class `SpectrumRefused` and the
+  text `maasspec: <path> <rule>`, which names no value from the document. The
+  rest of the batch is still stored.
+- **Versions.** `maasspec_version` is the contract version and must be `0.1.0`.
+  It does not move when the MaaSSpec package does; `tool.version` is the package
+  version and is informational.
+- **The record's detail.** `GET /ingest/records/{id}` carries a `maasspec` block
+  only when the switch is on and the record is a valid spectrum: `maasspec_version`,
+  `analysis_id`, `input_type`, `tool_name`, `tool_version`, `findings_total`,
+  `findings_by_type`, `selectors_total`, `selectors_by_kind`,
+  `selectors_unmapped`, `claimed_findings`, `graded_findings`, `grade_counts`,
+  `artifacts_total`, `errors_by_severity` and `family_claimed`. Counts and names
+  only; a value is never shown.
+
+### Parity matrix
+
+Every contract element of the spectrum, and what NocTORnal does with it.
+
+| Contract element | What NocTORnal does |
+|---|---|
+| JSON types | Exact. A string `"1"` is not an integer, `1.0` is refused for an integer, a boolean is not a number, NaN and Infinity are refused. |
+| Unknown keys | Refused at every one of the 12 models: top level, `tool`, `input`, `summary`, `summary.family`, `findings[i]`, `extracted_by`, `source`, `selectors[j]`, `proposed_grade`, `artifacts[i]`, `errors[i]`. |
+| Required fields | All required fields must be present. A nullable field accepts null. |
+| `maasspec_version` | Must be `0.1.0`. |
+| `analysis_id` | A hyphenated UUID. |
+| `generated_at`, `first_seen_in_analysis` | RFC 3339 with a zone. |
+| `input.type` | One of six input types. |
+| `input.sha256` | `^[a-f0-9]{64}$`. |
+| `input.size_bytes`, `c2_count` | Integers, 0 or more. |
+| `findings[].type` | One of ten finding types. |
+| `confidence` | A number from 0 to 1. |
+| `source.reliability` | A to F. |
+| `source.credibility` | The strings `"1"` to `"6"`. |
+| `errors[].severity` | `info`, `warning` or `error`. |
+| `selectors[].kind` | Mapped to a NocTORnal selector type where one exists (next table). |
+| `Artifact.type` | A free string. Known: `input`, `feed_record`, `sample_reference`, `submitted_sample`, `unpacked_layer`, `sandbox_payload`. Any other value is accepted. |
+| Free-form fields (`value`, `normalized`, `context`, `family_data`, `metadata`, `Artifact.type`) | Any JSON up to 24 levels deep, string keys without NUL. |
+| Size | At most 1,048,576 bytes a spectrum. |
+| Counts | At most 250,000 JSON values; 10,000 findings; 10,000 artifacts; 1,000 errors; 100 selectors a finding; 1,000 tags, 1,000 capabilities and 1,000 risk signals each. |
+| Strings | None over 1,048,576 characters, and no NUL anywhere. |
+| The summary | Metadata only, as listed above. Never a value. |
+| Claims, proposed grades | Counted (`claimed_findings`, `graded_findings`, `grade_counts`), never turned into a claim or a grade in the graph. |
+| Artifacts and errors | Counted by total and by severity. |
+
+Selector kinds map to NocTORnal selector types:
+
+| MaaSSpec kind | NocTORnal type |
+|---|---|
+| `url` | `URL` |
+| `domain` | `DOMAIN` |
+| `ipv4` | `IPV4` |
+| `ipv6` | `IPV6` |
+| `email` | `EMAIL` |
+| `bitcoin` | `BTC_ADDR` |
+| `md5` | `HASH_MD5` |
+| `sha1` | `HASH_SHA1` |
+| `sha256` | `HASH_SHA256` |
+| `imphash` | `IMPHASH` |
+| `ssdeep` | `SSDEEP` |
+| `tlsh` | `TLSH` |
+| `mutex` | `MUTEX` |
+| `gimphash`, `telfhash`, `cert_serial`, `ipv4_port`, `ipv6_port`, `domain_port`, `campaign`, `botnet` | None. Counted as unmapped and kept in the stored body. |
+| any other kind | Counted under `unlisted`. |
 
 ---
 
