@@ -19,6 +19,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api.collection import PERSONA_VISIBLE_SQL, _held
 from noctornal_api.db import SystemContextUnavailable, is_exempt
 from noctornal_ontology import normalise as _canonical
 from noctornal_ontology import refusal
@@ -59,11 +60,28 @@ UNKNOWN_PROVENANCE = "UNKNOWN"
 _NEEDS_AUTHORITY = frozenset({SEIZED_DEVICE, PLATFORM_DISCLOSURE,
                               THIRD_PARTY_REPORT})
 
+#: The comms platform a conversation must be on for a persona of each kind to be named in it. A
+#: persona is an account on a forum, Telegram or Discord (`collect.collection_account.platform`,
+#: 0082); the private messages of a forum are `FORUM_PM`. A persona of no kind, or on a platform not
+#: listed here, has no conversation it could have been in.
+PERSONA_KIND_PLATFORM: dict[str, str] = {
+    "TELEGRAM": "TELEGRAM",
+    "DISCORD": "DISCORD",
+    "XENFORO": "FORUM_PM",
+    "MYBB": "FORUM_PM",
+    "PHPBB": "FORUM_PM",
+}
+
 _HEX = re.compile(r"^[0-9a-fA-F]+$")
 
 
 class CommsError(Exception):
     pass
+
+
+class CommsNotFound(CommsError):
+    """The persona a conversation names does not exist or is above the caller. One class for both,
+    so no caller can tell them apart: a route answers it 404, as the persona routes do."""
 
 
 @dataclass(frozen=True)
@@ -371,7 +389,9 @@ class CommsService:
     `coparticipation.py` filter the same way.
 
     Clearance is optional so the write paths and the platform catalogue, which carry no case-scoped
-    data, can construct the service without it. Every method that returns case content REQUIRES it.
+    data, can construct the service without it. Every method that returns case content REQUIRES it,
+    and so does opening a conversation that names a collection account, which the caller may name
+    only as far as they may see it.
     """
 
     def __init__(self, conn: psycopg.Connection, *,
@@ -593,6 +613,11 @@ class CommsService:
         distinct from capturing one it is not (docs/16 L4), so PERSONA_PARTY must name the persona
         and anything obtained another way must carry an authority. The software cannot judge whether
         the authority is good; it can refuse to let there be none recorded.
+
+        A collection account, when one is named for any class, is a persona the caller can see
+        (`_check_account`): one that does not exist and one above the caller's ceiling raise
+        `CommsNotFound` alike, and one on another platform than the conversation's raises
+        `CommsError`. Nothing is written before the check.
         """
         if provenance_class not in {
                 PERSONA_PARTY, SEIZED_DEVICE, PLATFORM_DISCLOSURE,
@@ -615,6 +640,10 @@ class CommsService:
         ).fetchone()
         if not exists:
             raise CommsError(f"unknown platform {platform_key!r}")
+        # The same for the account: its foreign key would otherwise answer an id that names nothing
+        # as a 500, and accept any real one whatever the caller may see of it.
+        if collection_account_id is not None:
+            self._check_account(collection_account_id, platform_key)
 
         row = self._c.execute(
             """INSERT INTO comms.conversation
@@ -641,6 +670,45 @@ class CommsService:
              (legal_authority or "").strip() or None, classification,
              sorted(compartments))).fetchone()
         return row[0]
+
+    def _check_account(self, account_id: UUID, platform_key: str) -> None:
+        """Refuse a collection account the caller may not name in a conversation on this platform.
+
+        A persona is global, not the case's, so what the caller may see of it is their own ceiling
+        against the venues it is placed on (`PERSONA_VISIBLE_SQL`, as every persona route reads
+        it), never a break-glass grant scoped to this case. One statement answers a persona that
+        does not exist and one that is hidden, so the two cost the same, write the same rows and
+        say the same sentence. With no ceiling given the check refuses outright: the worker's
+        reading of a persona (a NULL clearance, which sees every one) is not reachable from here.
+
+        A burnt or locked persona is still named: a conversation records what was captured, and the
+        persona may have been a party before it was stopped.
+        """
+        if self._clearance is None:
+            raise CommsError(
+                "naming a collection account needs the caller's clearance: construct "
+                "CommsService(conn, clearance=..., compartments=...)")
+        row = self._c.execute(
+            f"""SELECT a.platform::text FROM collect.collection_account a
+                 WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
+            {"id": account_id, "clearance": self._clearance,
+             "held": _held(self._comp)}).fetchone()
+        if row is None:
+            raise CommsNotFound("no such persona, or it is above your clearance")
+        kind = row[0]
+        if kind is None:
+            raise CommsError(
+                f"This persona is not placed on any platform, so it cannot have been a party "
+                f"to a conversation on {platform_key}.")
+        on = PERSONA_KIND_PLATFORM.get(kind)
+        if on is None:
+            raise CommsError(
+                f"This persona is a {kind} account, which is on no platform a conversation "
+                f"can be recorded for.")
+        if on != platform_key:
+            raise CommsError(
+                f"This persona is a {kind} account, so it can be named only on "
+                f"{on} conversations, and this one is on {platform_key}.")
 
     def add_message(self, conversation_id: UUID, *, sender_handle: str,
                     body: str | None, sent_at: datetime | None = None,

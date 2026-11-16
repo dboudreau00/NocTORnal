@@ -20,7 +20,13 @@ import psycopg
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, model_validator
 
-from noctornal_api.comms import CommsService, CommsError, coverage_note, normalise
+from noctornal_api.comms import (
+    CommsError,
+    CommsNotFound,
+    CommsService,
+    coverage_note,
+    normalise,
+)
 from noctornal_api.contact_blocks import ContactBlockError, ContactBlockService
 from noctornal_api.coparticipation import (
     CoParticipationError,
@@ -939,12 +945,20 @@ def open_conversation(
     `provenance_class` is mandatory: capturing a conversation a persona is party to is legally
     distinct from capturing one it is not (docs/16 L4), so PERSONA_PARTY must name the persona and
     anything else must carry a written authority, whose quality the software cannot judge.
+
+    A `collection_account_id` names a persona the caller can see, on the conversation's own
+    platform. 404 for one that names nothing and for one above the caller's ceiling alike, as on the
+    persona routes, so the answer is no oracle over which personas exist; 400 for a persona on
+    another platform.
     """
     compartments = frozenset(body.compartments)
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=compartments)
+    # A persona is global: only the caller's own ceiling counts, never a grant scoped to this case.
+    clearance, held = user_ceiling(conn, user.user_id)
+    service = CommsService(conn, clearance=clearance.name, compartments=held)
     try:
-        conv_id = CommsService(conn).open_conversation(
+        conv_id = service.open_conversation(
             case_id=case_id, platform_key=body.platform_key,
             provenance_class=body.provenance_class,
             external_ref=body.external_ref, title=body.title,
@@ -952,6 +966,8 @@ def open_conversation(
             collection_account_id=body.collection_account_id,
             legal_authority=body.legal_authority,
             classification=body.classification, compartments=compartments)
+    except CommsNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CommsError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(conv_id),

@@ -122,6 +122,16 @@ whichever route produced it. A persona reading a forum's private messages is
 not built: the authenticated forum adapters read posts and member profiles
 (docs/04).
 
+A conversation that names a persona (`collection_account_id`, for any class
+and not only `PERSONA_PARTY`) names one the caller can see, on the
+conversation's own platform: a Telegram persona on Telegram, a Discord persona
+on Discord, a forum persona on `FORUM_PM`. A persona that does not exist and
+one above the caller's clearance or compartments answer the same 404, with the
+same sentence and the same audit rows, as on the persona routes, so the
+route says nothing about which personas exist. A persona on another platform,
+or placed on none, is a 400 that says so. A burnt or locked persona can still
+be named, because it may have been a party before it was stopped.
+
 **XenForo conversation specifics:** stable `conversation_id`, an explicit
 participant list (excellent graph data, a multi-party conversation is a
 direct affiliation signal), and title/starter metadata. Participants can
