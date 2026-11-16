@@ -130,7 +130,7 @@ if (-not (Test-Path -LiteralPath $Python)) {
 # Probe what the API needs, numpy, selectolax, pefile and psycopg_pool included, so a stale venv is
 # told to reinstall here rather than at the first CONCOR run, forum poll or pooled request. The
 # optional extras (telegram, yara) are not probed: their absence is a readiness gap.
-$probe = Invoke-Capture $Python @('-c', 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile, psycopg_pool')
+$probe = Invoke-Capture $Python @('-c', 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile, psycopg_pool, defusedxml')
 if ($probe.Code -ne 0) {
     Write-Indented $probe.Text
     Stop-With 'the virtual environment is missing packages the API needs' @(
