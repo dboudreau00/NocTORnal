@@ -490,14 +490,101 @@ def _has_default_route() -> bool | None:
     return False if seen else None
 
 
-def _uses_docker_dns() -> bool | None:
+def _nameservers() -> list[str] | None:
+    """The resolvers this process's resolver file names, or None when it cannot be read."""
     try:
         with open(_RESOLV, encoding="ascii", errors="replace") as handle:
             text = handle.read()
     except OSError:
         return None
-    return any(line.split()[1:2] == [DOCKER_DNS]
-               for line in text.splitlines() if line.startswith("nameserver"))
+    return [fields[1] for fields in (line.split() for line in text.splitlines()
+                                     if line.startswith("nameserver")) if len(fields) > 1]
+
+
+def _uses_docker_dns() -> bool | None:
+    servers = _nameservers()
+    return None if servers is None else DOCKER_DNS in servers
+
+
+def boundary_mode(env: Mapping[str, str] | None = None) -> str | None:
+    """`network_policy` when the environment asks for it AND is a pod, else None. A mode the kubelet's variable
+    does not back is not honoured here, whatever the setting says, so a compose deployment cannot switch the
+    route-table rule off by typing a variable (config refuses it by name in production as well)."""
+    env = os.environ if env is None else env
+    if (env.get(egress_policy.BOUNDARY_ENV, "").strip() == egress_policy.BOUNDARY_NETWORK_POLICY
+            and env.get(egress_policy.POD_ENV, "").strip()):
+        return egress_policy.BOUNDARY_NETWORK_POLICY
+    return None
+
+
+CANARY_ACTION = (
+    "Run the egress canary (a pod the application's pods have no network policy permission to reach, "
+    "listening on the host and port in NOCTORNAL_EGRESS_CANARY) and apply a network policy that allows "
+    "this pod egress to the egress proxy and the cluster's DNS only, on a network plugin that enforces "
+    "NetworkPolicy (infra/production/README.md, Egress).")
+
+
+def _canary_verdict(evidence: str) -> ProbeVerdict:
+    """The verdict of the boundary under a NetworkPolicy, after the proxy half passed (`evidence`). A pod has a
+    default route whatever its policy says, so the route table proves nothing: the policy is proved by a
+    connection to the canary, which it must not let this process reach. Only a connection that goes
+    UNANSWERED passes. A connection that is answered fails (the policy is not enforced), and a refusal, an
+    unreachable address, a name that does not resolve and an address outside the declared networks each fail as
+    "cannot tell": a plugin that rejects instead of dropping, or a canary that is not running, looks like these,
+    and a boundary this row cannot prove is not one it reports as in force."""
+    env = os.environ
+    where = egress_policy.hostport(env.get(egress_policy.CANARY_ENV, ""))
+    if where is None:
+        return ProbeVerdict(
+            False, evidence + f" {egress_policy.CANARY_ENV} is not a HOST:PORT, so nothing proves that the "
+            f"network policy is enforced for this pod: cannot tell.", action=CANARY_ACTION)
+    try:
+        networks = egress_policy.internal_networks(env, production=egress._production(env))
+    except ValueError as exc:
+        return ProbeVerdict(False, evidence + f" {exc} Cannot tell where the canary may be.",
+                            action=CANARY_ACTION)
+    outcome = pinned_http.canary_connect(where[0], where[1], networks=networks)
+    if outcome == "connected":
+        return ProbeVerdict(
+            False, evidence + " This process opened a connection to the egress canary, which the network "
+            "policy must not let it reach: NetworkPolicy is not enforced for this pod, so the proxy can "
+            "be bypassed and the boundary is not in force.",
+            action="Use a network plugin (CNI) that enforces NetworkPolicy, and apply the policy that "
+                   "allows this pod egress to the egress proxy and the cluster's DNS only.")
+    if outcome != "timed_out":
+        why = {
+            "refused": "the canary refused the connection, so either it is not running or the policy "
+                       "rejects instead of dropping",
+            "unreachable": "the canary could not be reached, so either it is not running or the policy "
+                           "rejects instead of dropping",
+            "unresolved": "the canary's name did not resolve",
+            "outside": f"the canary is outside the deployment's own networks "
+                       f"({egress_policy.INTERNAL_CIDRS_ENV}), so it was not dialled",
+        }[outcome]
+        return ProbeVerdict(
+            False, evidence + f" Cannot tell whether the network policy is enforced for this pod: {why}.",
+            action=CANARY_ACTION)
+    route = _has_default_route()
+    fact = ("This process has a default route, as every pod does" if route else
+            "This process has no default route, which a pod does not usually lack" if route is False else
+            "This process's routes could not be read here")
+    caveats = [
+        f"{fact}: the boundary here is the network policy, not the route table, and it holds only while a "
+        f"policy that allows this pod egress to the proxy and DNS alone is applied and enforced. An "
+        f"unanswered connection is also what a canary that is not running looks like, so confirm once, "
+        f"from a pod the policy allows, that the canary answers."]
+    servers = _nameservers()
+    if servers is None:
+        caveats.append("This process's resolver file could not be read, so how names resolve here cannot "
+                       "be ruled out.")
+    else:
+        caveats.append("Names may still resolve through this pod's resolver, which is the cluster's DNS and "
+                       "forwards names outside the cluster to its upstream, so a name can leave as a lookup "
+                       "even though no connection can: check the cluster as infra/production/README.md, "
+                       "Egress, says.")
+    return ProbeVerdict(
+        True, evidence + " The egress canary, which the network policy must not let this process reach, "
+        "did not answer.", caveat=" ".join(caveats))
 
 
 def boundary_probe(conn, settings: ProxySettings) -> ProbeVerdict:
@@ -507,7 +594,11 @@ def boundary_probe(conn, settings: ProxySettings) -> ProbeVerdict:
     private-range rule ran. Then this process's routing table: a default
     route is a way around the proxy. No DNS query is made (a fixed
     lookup on every evaluation would be a beacon off the host); the DNS
-    channel is reported as a standing caveat."""
+    channel is reported as a standing caveat.
+
+    In a pod, with NOCTORNAL_EGRESS_BOUNDARY=network_policy, the second half is the canary's instead
+    (`_canary_verdict`): every pod has a default route, so the route table cannot tell a policy that holds
+    from one that does not. The mode is honoured only where the kubelet's variable is set."""
     result = probe(settings)
     if result.problem is not None:
         return ProbeVerdict(False, result.problem, action=BOUNDARY_ACTION)
@@ -533,6 +624,8 @@ def boundary_probe(conn, settings: ProxySettings) -> ProbeVerdict:
     shown = f"{settings.host}:{settings.port}"
     evidence = (f"The egress proxy at {shown} accepted this process's client key "
                 f"and refused a private destination.")
+    if boundary_mode() == egress_policy.BOUNDARY_NETWORK_POLICY:
+        return _canary_verdict(evidence)
     route = _has_default_route()
     if route:
         return ProbeVerdict(

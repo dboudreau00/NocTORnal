@@ -392,7 +392,8 @@ Read its Restoring paragraphs before you rely on a backup: a restore needs
 the three runtime roles to exist before `pg_restore` runs, and a mirror of
 the evidence bucket keeps the bytes of an exhibit lodged since Alembic 0139
 but not the object version it records, so a restored exhibit reads as
-missing until an owner step is run.
+missing until `scripts/restore_object_versions.py` has put its bytes back and
+recorded the version the store gave them.
 
 ---
 

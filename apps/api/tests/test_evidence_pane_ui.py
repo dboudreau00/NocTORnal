@@ -683,6 +683,22 @@ console.log(JSON.stringify([
                       "as one step sets it")
 
 
+@needs_node
+def test_custody_says_a_restored_exhibit_was_lodged_again_and_until_when(tmp_path):
+    got = _run(tmp_path, ["methodName", "custodyDetailText"], """
+console.log(JSON.stringify([
+  custodyDetailText('RESTORED', { lock_ends_at: '2027-11-15T10:00:00+00:00',
+    new_version_id: 'v-new', old_version_id: 'v-old' }),
+  custodyDetailText('RESTORED', {}),
+]));
+""", consts=("EV_METHODS",))
+    with_lock, without = got
+    assert with_lock == ("re-lodged from a backup after its bytes matched the recorded digests, "
+                         "locked in storage until T(2027-11-15T10:00:00+00:00,s)")
+    assert without == "re-lodged from a backup after its bytes matched the recorded digests"
+    assert "v-new" not in with_lock, "a version id is for the auditor, not the card"
+
+
 def test_the_custody_detail_lets_the_new_keys_through():
     from noctornal_api.http.routers.evidence import custody_detail
     out = custody_detail({"via": "sample_origin", "ticket_id": "t", "origin": "o",

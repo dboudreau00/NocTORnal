@@ -677,6 +677,11 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
         problems.append(
             f"{egress_policy.INTERNAL_CIDRS_ENV} is not a comma list of networks, "
             f"so the deployment's own networks cannot be kept out of every route.")
+    # How the boundary is proved (decision 239): network_policy only in a pod, and with a canary to try.
+    boundary = egress_policy.boundary_problem(env)
+    if boundary:
+        problems.append(f"{boundary}; without that the readiness register cannot prove the boundary "
+                        f"or the analysis worker's isolation.")
     # The static-triage and YARA settings, through their one reader each, so the runner, readiness
     # and this cannot disagree about what is usable. Named, never quoted.
     from noctornal_api.lab_archive import archive_settings
@@ -755,6 +760,11 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
                 f"the private certificate authority it should add is missing.")
     from noctornal_api.egress_routes import _serves_samples
     sends = outbound and not _serves_samples(env)
+    # A pod must name the cluster's own networks (decision 239): the compose subnets it would otherwise
+    # default to guard nothing there. A process that sends nothing out is not asked.
+    cluster = egress_policy.cluster_problem(env)
+    if sends and cluster:
+        problems.append(f"{cluster}.")
     lookups = env.get("NOCTORNAL_OUTBOUND_LOOKUPS", "").strip().lower()
     if sends and lookups == "on" and egress.proxy_problem(env) is None \
             and not env.get(egress.PROXY_URL_ENV, "").strip():
@@ -1038,6 +1048,14 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
     if not holds_owner_credential:
         problems.extend(owner_credential_problems(
             env, skip={p.variable for p in published}))
+    # The jobs that route a connection (notify, poll, lookups, embeddings, the collector) in a pod must
+    # name the cluster's own networks; the migration job, which holds the owner's DSN and sends nothing
+    # out, and a job told it sends nothing are not asked.
+    if outbound and not holds_owner_credential:
+        from noctornal_api import egress_policy
+        cluster = egress_policy.cluster_problem(env)
+        if cluster:
+            problems.append(f"{cluster}.")
     if not holds_persona_key:
         problems.extend(persona_key_problems(env, collector=False))
     from noctornal_api.db import WORKER_DSN_ENV

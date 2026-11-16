@@ -40,6 +40,7 @@ from noctornal_api.config import EVIDENCE_CAP_ENV
 from noctornal_api.objectstore.settings import StoreConfigError, StoreSettings
 from noctornal_api.objectstore.settings import bucket_for as store_bucket_for
 from noctornal_api.objectstore.settings import resolve as resolve_store
+from noctornal_api.readyz import migration_heads
 from noctornal_api.wording import agree, count_of
 
 log = logging.getLogger("noctornal.readiness")
@@ -2252,12 +2253,7 @@ def _migrations_at_head(conn: psycopg.Connection) -> Check:
             "layout right (this check locates the scripts relative to the "
             "package)")
 
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
-
-    cfg = Config()
-    cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    heads = ScriptDirectory.from_config(cfg).get_heads()
+    heads = migration_heads(_MIGRATIONS_DIR)
     stamped = [r[0] for r in conn.execute(
         "SELECT version_num FROM alembic_version ORDER BY version_num").fetchall()]
     evidence = (f"database at {', '.join(stamped) or '(no alembic_version row)'}; "
@@ -2681,6 +2677,67 @@ _WORKER_ACTION = ("run the analysis-worker service from "
                   "Analysis worker)")
 
 
+def _address_of(host: str, port) -> str | None:
+    """The address `host` resolves to from this process, as a literal (`host` itself when it is one
+    already), or None when it does not resolve."""
+    import ipaddress
+    import socket
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        answers = socket.getaddrinfo(host, port if isinstance(port, int) else None,
+                                     type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    return answers[0][4][0] if answers else None
+
+
+def _hand_addresses(probe: dict) -> list[str]:
+    """Replace the names in the self-test's `probe` (the database host, the canary) with the addresses
+    this process resolves them to, in place. A name that does not resolve is taken out of the probe, so
+    the child is not left to wait out its time limit on a lookup it cannot make, and is returned by
+    label ("database", "canary") as not tried."""
+    unresolved = []
+    if probe.get("host"):
+        address = _address_of(probe["host"], probe.get("port"))
+        if address is None:
+            unresolved.append("database")
+            del probe["host"]
+            probe.pop("port", None)
+        else:
+            probe["host"] = address
+    canary = probe.get("canary")
+    if isinstance(canary, dict) and canary.get("host"):
+        address = _address_of(canary["host"], canary.get("port"))
+        if address is None:
+            unresolved.append("canary")
+            del probe["canary"]
+        else:
+            canary["host"] = address
+    return unresolved
+
+
+def _isolation_unproved(exposure: dict, *, canary_declared: bool) -> str | None:
+    """Why a pod worker's self-test proves nothing, in a clause, or None when each target it was
+    given was tried and not answered. Called only after an answered target has failed the row, so
+    what is left is a target that was not tried: no usable one (None), or a name that did not resolve."""
+    unresolved = exposure.get("unresolved")
+    unresolved = unresolved if isinstance(unresolved, list) else []
+    untried = []
+    if exposure.get("database_reachable") is not False or "database" in unresolved:
+        untried.append("the database host")
+    if canary_declared and (exposure.get("canary_reachable") is not False
+                            or "canary" in unresolved):
+        untried.append("the canary")
+    if not untried:
+        return None
+    return (" and ".join(untried) + (" was" if len(untried) == 1 else " were")
+            + " not tried (no address to connect to)")
+
+
 def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
     """The isolated worker's own account, judged: (a failing Check or None, the sentence for the evidence, a
     caveat). Readiness asks the worker rather than trusting the compose file: its environment's names, how it
@@ -2700,11 +2757,11 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
     name = "sample_static_analysis"
     own = ", ".join(sorted(analysis_runner.WORKER_OWN_ENV))
     try:
-        status = analysis_runner.hello(choice.socket_path)
+        status = analysis_runner.hello(choice.target)
     except analysis_runner.WorkerUnavailable:
         return (Check(name, False,
                       f"The isolated analysis worker did not answer at "
-                      f"{choice.socket_path}, so static triage and forum "
+                      f"{choice.target}, so static triage and forum "
                       f"parsing are refused until it does.",
                       "start the analysis-worker service and read its log "
                       "(infra/production/README.md, Analysis worker)"), "", "")
@@ -2787,13 +2844,17 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
                       "judged.",
                       "rebuild and restart the analysis-worker service from "
                       "the same image as the API (up -d --build)"), "", "")
-    pids = pids_problem(status.get("pids_max"), slots)
+    declared = status.get("pids_max_source") == "declared"
+    pids = pids_problem(status.get("pids_max"), slots, "declared" if declared else None)
     if pids:
         return (Check(name, False, pids,
                       f"set pids_limit on the analysis-worker service to a "
                       f"number from {pids_needed(slots)} to "
                       f"{pids_ceiling(slots)}, as infra/production/compose.yml "
-                      f"does, and restart it"), "", "")
+                      f"does, and restart it" if not declared else
+                      f"set podPidsLimit on the nodes that run the analysis-worker pod "
+                      f"and declare the same number, from {pids_needed(slots)} to "
+                      f"{pids_ceiling(slots)}, in NOCTORNAL_ANALYSIS_PIDS_LIMIT"), "", "")
     left = status.get("state_left_open")
     if not isinstance(left, list):
         return (Check(name, False,
@@ -2855,7 +2916,25 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
                       "network_mode none, as infra/production/compose.yml "
                       "does"), "", "")
     others = sorted(str(i)[:32] for i in interfaces if i != "lo")
-    if others:
+    if status.get("transport") == "tcp_tls":
+        # A worker reached over TCP is a pod, and a pod has one interface and a route: its isolation is
+        # the cluster's NetworkPolicy, which an interface list cannot show, so the list is held to "no
+        # more than one" and the self-test (a connection to the database and to the canary, which must
+        # not be answered) is the proof.
+        if len(others) > 1:
+            return (Check(name, False,
+                          f"The isolated analysis worker has {len(others)} network interfaces "
+                          f"besides loopback ({', '.join(others[:5])}), and a pod's worker has "
+                          f"one, so a parser exploit in it could reach more than the cluster's "
+                          f"policy was written for.",
+                          "run the analysis-worker as a pod of its own with a single "
+                          "network interface, and no sidecar that adds one (infra/production/"
+                          "README.md, Analysis worker)"), "", "")
+        network = (f"{count_of(len(others), 'network interface', 'network interfaces')} "
+                   f"besides loopback"
+                   + (f" ({', '.join(others)})" if others else "")
+                   + ", whose isolation the self-test proves and the interface list does not")
+    elif others:
         return (Check(name, False,
                       f"The isolated analysis worker has a network interface "
                       f"besides loopback ({', '.join(others[:5])}), so a parser "
@@ -2864,6 +2943,8 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
                       "run the analysis-worker service with network_mode none, "
                       "as infra/production/compose.yml does, and restart it"),
                 "", "")
+    else:
+        network = "no network interface but loopback"
     tasks = children.get("max_tasks")
     if (isinstance(tasks, bool) or not isinstance(tasks, int)
             or not 1 <= tasks <= CHILD_MAX_TASKS):
@@ -2875,12 +2956,19 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
                       "rebuild and restart the analysis-worker service from "
                       "the same image as the API (up -d --build)"), "", "")
     caveat = ""
-    words = (f"Analysis runs in the isolated worker at {choice.socket_path}: "
+    if declared:
+        # A pod's limit is on the pod's cgroup, which no container can read: what was told is passed, and
+        # what nothing here can check is said.
+        caveat = ("The pids limit is declared in NOCTORNAL_ANALYSIS_PIDS_LIMIT, not read: a container in a "
+                  "pod cannot read the pod's limit, so nothing here shows that the cluster applies it. "
+                  "Set podPidsLimit on the nodes that run the worker.")
+    words = (f"Analysis runs in the isolated worker at {choice.target}: "
              f"{count_of(len(keys), 'environment variable', 'environment variables')}, "
              f"none a secret and none a setting but its own; each child a user "
-             f"of its own with at most {tasks} processes and threads; no "
-             f"network interface but loopback; a pids limit of "
-             f"{status.get('pids_max')} for {slots} slots; no state a child "
+             f"of its own with at most {tasks} processes and threads; "
+             f"{network}; a pids limit of "
+             f"{status.get('pids_max')} for {slots} slots"
+             f"{', declared and not read' if declared else ''}; no state a child "
              f"can leave behind.")
     return None, words, caveat
 
@@ -2901,7 +2989,14 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
     with no-new-privileges and a read-only root, have no network interface but loopback, run this process's
     parser versions, take a request as large as the analysis maximum, run under a pids limit that holds its
     slots and bounds the container, leave no state a child could create behind it, have retired no slot, and
-    have a child that must not reach the database host; otherwise in local child processes. Production with
+    have a child that must not reach the database host; otherwise in local child processes. A worker reached
+    over mutual TLS (NOCTORNAL_ANALYSIS_ADDR, a pod) is held to every rule but the interface one, which becomes
+    "at most one interface beside loopback": a pod has an interface and a route whatever its NetworkPolicy
+    says, so its isolation is proved by the child's connection to the database host and to the canary
+    (NOCTORNAL_EGRESS_CANARY, when set), neither of which may be answered, and both of which must have been
+    tried: the child is handed the addresses this process resolves the two names to (a worker with no
+    egress has no DNS, so a name it cannot look up proves nothing), and a target that was not tried fails
+    the row. Production with
     neither setting refuses every analysis and fails here; production that chose the local child
     (NOCTORNAL_ANALYSIS_LOCAL=1) fails too, because the residual docs/17 F42 names is then the deployment's.
     Development's local child passes with a caveat for what it can still reach (lab_static's docstring).
@@ -2934,7 +3029,7 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
             return Check(
                 name, False,
                 "No isolated analysis worker is configured "
-                "(NOCTORNAL_ANALYSIS_SOCKET is not set) in this production "
+                "(NOCTORNAL_ANALYSIS_SOCKET and NOCTORNAL_ANALYSIS_ADDR are not set) in this production "
                 "deployment, so static triage and forum parsing are refused: "
                 "nothing hostile is parsed, and the triage queue waits.",
                 _WORKER_ACTION + "; NOCTORNAL_ANALYSIS_LOCAL=1 would parse in "
@@ -2952,6 +3047,20 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
             if dsn.hostname else {}
     except ValueError:
         probe = {}
+    # The canary, where one is declared (a pod's NetworkPolicy must not let the worker reach it): the same
+    # connection the egress boundary tries from this process, tried from inside the worker.
+    from noctornal_api import egress_policy
+    canary = analysis_runner.hostport(os.environ.get(egress_policy.CANARY_ENV, ""))
+    if canary is not None:
+        probe["canary"] = {"host": canary[0], "port": canary[1]}
+    unresolved_here: list[str] = []
+    if choice.address is not None:
+        # A pod's worker has no egress at all, DNS included, so a name given to its child could never
+        # resolve and "cannot reach" would be true whatever the policy did to the address. This process
+        # has DNS: the child is handed what the names resolve to. A name that does not resolve here is
+        # not handed on (the child's own lookup would only wait out its time limit) and is recorded as
+        # not tried.
+        unresolved_here = _hand_addresses(probe)
     try:
         out = lab_triage.selftest(settings, probe=probe)
     except RuntimeError as exc:
@@ -2963,15 +3072,38 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
         return Check(name, False, f"the analysis child failed its selftest: {exc}",
                      "check that this server's Python can run "
                      "python -m noctornal_api.lab_static, and its log")
-    exposure = out.get("exposure") or {}
+    exposure = dict(out.get("exposure") or {})
+    exposure["unresolved"] = [*(exposure.get("unresolved") or []), *unresolved_here]
     if choice.mode == "isolated":
+        isolate = ("apply a NetworkPolicy to the analysis-worker pod that allows it no egress "
+                   "at all, on a CNI that enforces it (infra/production/README.md, Analysis "
+                   "worker)" if choice.address is not None else
+                   "run the analysis-worker service with network_mode none, as "
+                   "infra/production/compose.yml does")
         if exposure.get("database_reachable"):
             return Check(name, False,
                          f"{where} Its analysis child can open a connection to "
                          f"the database host, so the worker is not isolated.",
-                         "run the analysis-worker service with network_mode "
-                         "none, as infra/production/compose.yml does")
-        where += " Its analysis child cannot reach the database host."
+                         isolate)
+        if exposure.get("canary_reachable"):
+            return Check(name, False,
+                         f"{where} Its analysis child can open a connection to "
+                         f"the egress canary ({egress_policy.CANARY_ENV}), which "
+                         f"the cluster's policy must not allow, so the worker is "
+                         f"not isolated.", isolate)
+        if choice.address is not None:
+            unproved = _isolation_unproved(exposure, canary_declared=canary is not None)
+            if unproved:
+                return Check(name, False,
+                             f"{where} The worker's isolation from the network is proved by its analysis "
+                             f"child failing to connect, and {unproved}, so it is not proved.",
+                             "give the database host" + (f" and {egress_policy.CANARY_ENV}"
+                                                         if canary is not None else "")
+                             + " as a name that resolves from this process, or as an address, "
+                             "then check the NetworkPolicy of the analysis-worker pod "
+                             "(infra/production/README.md, Analysis worker)")
+        where += (" Its analysis child cannot reach the database host"
+                  + (" or the canary." if exposure.get("canary_reachable") is False else "."))
     else:
         where = ("Analysis runs in local child processes on this host"
                  + (" by explicit choice (NOCTORNAL_ANALYSIS_LOCAL=1)."

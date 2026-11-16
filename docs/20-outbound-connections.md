@@ -92,9 +92,11 @@ and none has a classifier of its own.
 - `AddressClass` (PUBLIC, PRIVATE, LOOPBACK, LINK_LOCAL, METADATA, OTHER),
   `classify(address)` and `locality(address)` ("loopback", "private",
   "global" or "refused").
-- `RESERVED_SERVICE_NAMES`: postgres, redis, minio, minio-init, migrate,
-  api, sample-origin, cron, caddy, egress-proxy, mailpit and localhost. No
-  integration rule may name one (the exception for `localhost` is in 2.5).
+- `RESERVED_SERVICE_NAMES`: postgres, redis, minio, minio-init,
+  object-store-init, migrate, api, sample-origin, cron, caddy, egress-proxy,
+  mailpit, localhost, and the three a cluster adds for its own Services:
+  analysis-worker, collector and egress-canary. No integration rule may name
+  one (the exception for `localhost` is in 2.5).
 - `internal_networks(env, production=...)`: the deployment's own networks,
   from `NOCTORNAL_EGRESS_INTERNAL_CIDRS` (a comma list). Blank is unset,
   and unset means 172.31.243.0/24, 172.31.244.0/24, 172.31.247.0/24 and
@@ -103,6 +105,24 @@ and none has a classifier of its own.
   refuses it in production and `route_for` answers it with `config_error`.
   No rule may overlap these networks and no answer inside them is admitted,
   on any route.
+- `cluster_problem(env)`: in a pod (`KUBERNETES_SERVICE_HOST` is set) a blank
+  `NOCTORNAL_EGRESS_INTERNAL_CIDRS` is refused, and so is a list that holds
+  no network the cluster's own service address falls in. The compose
+  subnets that production would otherwise default to are no network in a
+  cluster, so the pod, service and node networks would be silently
+  unguarded and a hostile name that resolved into the service network would
+  pass the internal-address check. `internal_networks` itself is unchanged.
+  Outside a pod it says nothing. A malformed list is `internal_networks`'s
+  own sentence and is not repeated.
+- `hostport(raw)`, the one reader of `HOST:PORT` (a name or an IPv4
+  address, or `[IPv6]:PORT`; no space, scheme or path, a port from 1 to
+  65535), and `is_own_address(address, networks)`: loopback or inside the
+  given networks, an IPv4-mapped address read as the IPv4 it carries. A
+  connection that is neither HTTP through the proxy nor a volume is held to
+  this (section 10, point 8) and so is the canary of section 6.4.
+- `BOUNDARY_ENV`, `CANARY_ENV`, `POD_ENV` and `boundary_problem(env)`: the
+  settings that say how the boundary is proved in a pod, and the sentence
+  that refuses them (section 6.5).
 - `DECISION_REF`: the docs/00 row every user-facing sentence about the
   egress decision cites. Tests build their expected text from it.
 
@@ -191,7 +211,8 @@ destination no rule names):
 
 1. The host is normalised; a metadata name is `metadata_host`. With
    `refuse_special_names`, a single label or a name under .local,
-   .localhost, .internal, .home.arpa, .lan or .arpa is `blocked_name`, and
+   .localhost, .internal, .home.arpa, .lan, .arpa or .svc (a cluster's own
+   Services: `name.namespace.svc`) is `blocked_name`, and
    an onion name without `policy.onion` is `onion_not_allowed`.
 2. An IP literal that is a metadata address is `metadata_address`, always.
 3. The first rule whose name part (or, for a literal, whose network)
@@ -486,6 +507,16 @@ after STARTTLS replaces it. The SMTP transport (`transports.py`) opens its
 relay connection this way, on port 465 with implicit TLS and otherwise
 with STARTTLS on the returned socket.
 
+`canary_connect(host, port, networks=...)` is the one connection this
+module makes that is meant NOT to be answered: a bare TCP connect to the
+egress canary (section 6.4), which sends nothing and closes at once. It
+resolves the name once, refuses before any connect (`outside`) when an
+answer is neither loopback nor inside the deployment's own networks, so a
+probe never leaves the cluster, and dials the address it checked. It says
+`connected`, `timed_out` (every address unanswered within 3 seconds, which
+is how a policy that drops looks), `refused`, `unreachable`, `unresolved`
+or `outside`. The route provider calls it, because the provider never dials.
+
 ### 5.8 Redaction and the collector's wrappers
 
 `redact()`, `secret_in_scope()` and the credential patterns live here and
@@ -569,6 +600,9 @@ applied in process, and no ledger (section 10).
   production start refuses it without quoting the value. One variable
   names the proxy for every client, because one listener serves both
   protocols.
+- `NOCTORNAL_EGRESS_BOUNDARY` is unset (the route-table rule of section
+  6.4) or `network_policy`, and `NOCTORNAL_EGRESS_CANARY` is `HOST:PORT`
+  (section 6.4). Blank is unset.
 - `INTEGRATIONS` (append-only): `smtp`, `webhook`, `wkd`, `embeddings`,
   `jira`, `sandbox`. `INTEGRATION_FAMILIES` (append-only): `lookup-`, one
   route per lookup provider.
@@ -601,11 +635,43 @@ Not blocking, with no consequence entry.
 - A proxy set and no provider: fails, because every connection that asks
   for a route is refused.
 - A proxy set and the provider present: the provider's probe (section 7).
+- With `NOCTORNAL_EGRESS_BOUNDARY=network_policy`, in a pod only, the
+  provider's probe judges the second half by a canary and not by the route
+  table. A pod has a default route whatever its NetworkPolicy says (a policy
+  drops packets at the node and removes no route), so the route-table rule
+  would be red in every pod, and a network plugin that ignores NetworkPolicy
+  could not be told from one that enforces it. The canary is a host and port
+  (`NOCTORNAL_EGRESS_CANARY`) that the policy must not let this process
+  reach, inside the deployment's own networks, and the probe makes one bare
+  connection to it (`pinned_http.canary_connect`, section 5.7). A
+  connection that goes unanswered passes, and says that a default route is
+  normal in a pod and the boundary is the policy. A connection that is
+  answered FAILS: "NetworkPolicy is not enforced for this pod", with the
+  action to use a network plugin that enforces it. A refusal, an unreachable
+  address, a name that does not resolve and an address outside the declared
+  networks each FAIL as "cannot tell", because a plugin that rejects
+  instead of dropping, or a canary that is not running, looks like them.
+  The proxy half is unchanged and comes first. The caveat says a resolver
+  is the cluster's, which forwards names outside the cluster to its
+  upstream, so a name can leave as a lookup though no connection can. An
+  unanswered connection is also what a canary that is not running looks
+  like, so confirm once, from a pod the policy allows, that it answers.
+- The mode is honoured only where `KUBERNETES_SERVICE_HOST` is set, so a
+  compose deployment cannot switch the route-table rule off by typing a
+  variable. Unset, the rule is the one above and nothing changes.
 
 ### 6.5 Configuration refusals and the production start refusal
 
 `config.verify_environment` refuses, in production, a malformed
-`NOCTORNAL_EGRESS_PROXY_URL` or `NOCTORNAL_EGRESS_INTERNAL_CIDRS`, and,
+`NOCTORNAL_EGRESS_PROXY_URL` or `NOCTORNAL_EGRESS_INTERNAL_CIDRS`, a
+`NOCTORNAL_EGRESS_BOUNDARY` that is not `network_policy`, `network_policy`
+without `KUBERNETES_SERVICE_HOST` ("this mode is for a pod") or without a
+well formed `NOCTORNAL_EGRESS_CANARY`, a canary that is set and is not
+`HOST:PORT`, in a pod a blank `NOCTORNAL_EGRESS_INTERNAL_CIDRS` or one that
+holds no network the service address falls in (`cluster_problem`, section
+2.2; the egress proxy and every job that routes a connection make the same
+refusal, and the migration job and a job that sends nothing out are not
+asked), and,
 with a proxy configured, a missing or malformed client key or fingerprint
 key, and a seal public key that is set and malformed, naming the variable
 and never the value. A missing seal public key is not refused at boot: it
@@ -668,6 +734,9 @@ def outbound_uses(conn) -> list[str]:
   destination, and this process has no default route of its own; it makes
   no DNS query and sends nothing off the host. That Docker's embedded
   resolver forwards names off the host is a standing caveat (docs/16 C19).
+  In a pod with `NOCTORNAL_EGRESS_BOUNDARY=network_policy` the second half
+  is the canary's (section 6.4), and the caveat names the cluster's resolver
+  instead.
 - **Uses.** Counts of active integration routes and persona-capable
   profiles, never names.
 - The provider never dials. The pinned client is the only client in both
@@ -939,6 +1008,17 @@ internal network, not through a route (docs/17).
    as its credentials: probe connections are not logged and never dial or
    resolve, refusals before authentication are logged as counts per peer
    per minute, and a development process writes no row.
+8. **One connection is neither the client's nor a volume's**, and is fenced
+   instead (decision 239). Where the analysis worker is a pod of its own,
+   `analysis_runner.py` dials it over TCP with mutual TLS 1.3
+   (`NOCTORNAL_ANALYSIS_ADDR`). It carries decrypted sample bytes and does
+   not go through the proxy, so a caller resolves the name once and dials
+   only an answer that is loopback or inside the deployment's declared
+   networks (`NOCTORNAL_EGRESS_INTERNAL_CIDRS`, section 2.2), every answer
+   or none, and dials the address it checked; it trusts the channel's own CA
+   and never the system roots; and it presents a client certificate.
+   `test_egress_single_exit.py` names that module and says why. The Unix
+   socket the compose stack uses is not a connection to an address.
 
 ---
 

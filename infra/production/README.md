@@ -786,6 +786,41 @@ is blocking, and each row's action says the same:
 
 ---
 
+## Health and readiness endpoints
+
+Two unauthenticated paths answer a probe, on the API and on the sample origin
+alike, and neither is rate limited:
+
+| Path | Answers | Use it as |
+|---|---|---|
+| `GET /healthz` | 200 `{"status":"ok"}` while the process is up; it asks nothing | liveness: restart the process when it stops answering |
+| `GET /readyz` | 200 `{"status":"ok"}` when a connection with the process's own `DATABASE_URL` answers within 2 seconds and `public.alembic_version` holds exactly the heads of `db/migrations`; otherwise 503 `{"status":"unavailable"}` | readiness: send traffic only when it is 200 |
+
+`/readyz` is the question compose answers with `depends_on` the migrate
+service completing, for a deployment that has no such thing (a cluster's
+Pod starts when it is scheduled). It names no version, no revision and no
+reason; the reason goes to the process's log by name
+(`schema_not_at_head`, `database_unreachable`, `schema_absent`,
+`database_url_unusable`, `migrations_unreadable`). It does not look at Redis,
+the object store, the egress proxy or the worker, so the console is served
+while those are down and the register says which. The verdict is held for
+5 seconds and asked by one caller at a time, so a flood of probes costs the
+database one connection a window per process. A probe that arrives while that
+question is open is not made to wait for it: it is told the last verdict, or
+503 before there has been one, so a database that accepts and never answers
+holds one of the server's threads and not the ones `/healthz` needs. This compose file uses
+`/healthz` only, and nothing here changes unless you point a probe at
+`/readyz`.
+
+A process that serves no HTTP (the collector, the cron loop, the Lab's
+workers) asks the same question with `python scripts/wait_for_schema.py
+--wait 120`: exit 0 once the schema is at head, 1 when the wait ran out, 2 when
+the environment is refused as every job refuses it (it connects with
+`DATABASE_URL`, never the schema owner's credential). It prints one line that
+names a class of failure and never a revision, a host or a credential.
+
+---
+
 ## The limiter's Redis
 
 Redis holds the rate limiter's meters and nothing else, and that is a
@@ -1057,6 +1092,55 @@ the host itself is reached by adding
 `extra_hosts: ["host.docker.internal:host-gateway"]` to `egress-proxy` and
 an entry naming `host.docker.internal` with its network.
 
+### Under Kubernetes: a NetworkPolicy is the boundary
+
+This stack ships no manifest, and compose is unchanged unless you set the
+variables below. For an agency that runs the same images on a cluster, the
+boundary cannot be what it is here. A compose application container has no
+route out, and the register proves it by reading its route table. A pod has a
+default route whatever its NetworkPolicy says, because a policy drops packets
+at the node and removes no route, so the same rule would fail in every pod, and
+a network plugin that ignores NetworkPolicy could not be told from one that
+enforces it. Two settings move the proof to a connection:
+
+| Variable | On | Meaning |
+|---|---|---|
+| `NOCTORNAL_EGRESS_BOUNDARY` | `api` | unset: the route-table rule above. `network_policy`: judge the boundary by the canary. Refused at start unless `KUBERNETES_SERVICE_HOST` is set (this mode is for a pod) and unless the canary is set |
+| `NOCTORNAL_EGRESS_CANARY` | `api`, and every pod that runs the analysis self-test | `HOST:PORT` of a service inside the cluster that no application pod may reach |
+| `NOCTORNAL_EGRESS_INTERNAL_CIDRS` | the api, the proxy and every job that routes a connection | the cluster's pod, service and node networks, a comma list. In production it defaults to the compose subnets, which guard nothing in a cluster, so a pod refuses to start with it blank or without the cluster's service address in it |
+
+With the mode set, `egress_boundary` still asks the proxy first, and then makes
+one bare connection to the canary (nothing is sent). It passes only when the
+connection goes unanswered for 3 seconds. A connection that is answered fails the
+row as "NetworkPolicy is not enforced for this pod": use a network plugin that
+enforces it. A refusal, an unreachable address, a name that does not resolve and
+an address outside `NOCTORNAL_EGRESS_INTERNAL_CIDRS` each fail as "cannot tell",
+because a plugin that rejects instead of dropping, or a canary that is not
+running, looks like them, and the row will not report a boundary it cannot
+prove. The probe never dials outside the declared networks.
+
+What you provide, and what the row cannot see:
+
+* a NetworkPolicy for every application pod that allows egress to the egress
+  proxy and to the cluster's DNS only, and none to the canary. The policy is the
+  boundary; the row only checks that it holds;
+* the canary: a pod, with a service in front of it if you name it, listening on
+  the port you gave. An unanswered connection is also what a canary that is
+  not running looks like, so once, from a pod the policy does allow, confirm
+  that it answers. Nothing here can do that for you;
+* the proxy is reached by its service name in `NOCTORNAL_EGRESS_PROXY_URL`
+  (`http://egress-proxy:3128`): the client resolves it once and refuses only a
+  metadata, link-local, multicast or unspecified answer;
+* the cluster's own networks are listed in `NOCTORNAL_EGRESS_INTERNAL_CIDRS`.
+  Every route refuses an answer inside them, so a hostile forum name that
+  resolves into the service network is not admitted, and a probe or the
+  analysis worker's channel dials only addresses inside them. The check that
+  your list holds the service address is a floor and not a proof: the pod and
+  node networks are yours to list;
+* names are not closed. The cluster's DNS forwards names outside the cluster to
+  its upstream, so a name can leave as a lookup although no connection can, and
+  the row's caveat says so. Closing it is the cluster's DNS configuration.
+
 ### Upgrading an existing deployment
 
 `release/egress-upgrade/README.md` has the order: keys, the three files,
@@ -1083,7 +1167,16 @@ It is not a task worker: there is no queue, nothing is scheduled, and each
 request is one connection and one child. What `compose.yml` gives it:
 
 * no `env_file` and no variable but its own three settings (the table
-  below) and what Docker and the base image set. The worker refuses to
+  below) and what Docker and the base image set, and, under Kubernetes, the
+  nine names a kubelet adds to every container once the pod sets
+  `enableServiceLinks: false` (`KUBERNETES_SERVICE_HOST`,
+  `KUBERNETES_SERVICE_PORT`, `KUBERNETES_SERVICE_PORT_HTTPS`, `KUBERNETES_PORT`,
+  `KUBERNETES_PORT_443_TCP`, its `_ADDR`, `_PORT` and `_PROTO`, and `POD_IP`),
+  allowed by exact name and none a secret. With the Kubernetes default
+  (`enableServiceLinks` true) the kubelet adds a set of names for every
+  Service of the namespace as well (`POSTGRES_SERVICE_HOST`, `API_SERVICE_PORT`
+  and the rest), which are not the worker's own, so the worker's pod must turn
+  service links off. The worker refuses to
   start holding any other variable, and readiness asks it what it holds;
 * `network_mode: none`, so loopback only: no route, no DNS, no database;
 * a read-only root, a `/tmp` that only root can write, `no-new-privileges`,
@@ -1107,6 +1200,100 @@ request is one connection and one child. What `compose.yml` gives it:
   group) mount it read-only and can pass through it to the socket, which is
   mode `0660`.
   No child's user can even enter it.
+
+### The worker over TCP, for a pod of its own
+
+A worker that cannot share a volume with its callers (a pod of its own under
+Kubernetes) is reached over TCP with mutual TLS 1.3 instead of a socket, and
+nothing else about it changes: the same frames, the same children, the same
+refusals. It is selected by `NOCTORNAL_ANALYSIS_LISTEN` on the worker and
+`NOCTORNAL_ANALYSIS_ADDR` on each caller, with the three
+`NOCTORNAL_ANALYSIS_TLS_*` paths on both, and there is no plaintext form: an
+address without the paths is refused at start by name, and so are the socket
+and an address set together.
+
+The channel carries decrypted sample bytes, so it is fenced:
+
+* a caller resolves the host once and dials only an answer that is loopback
+  or inside `NOCTORNAL_EGRESS_INTERNAL_CIDRS`, and every answer must be, or
+  nothing is dialled. In a cluster that list names the pod and service
+  networks, or the service address of a worker is "outside" and refused;
+* a caller trusts the channel's own CA and never the system's roots, checks
+  that the worker's certificate names the host it was given, and requires TLS
+  1.3 and presents its own certificate;
+* the worker requires a client certificate from that CA, finishes the
+  handshake in its connection's own thread within 5 seconds, and reads no
+  frame before it. It refuses to start on a wildcard address, on a key that a
+  group or another user can read (its children are other users), or on a
+  file it cannot read;
+* any certificate the CA issued may call the worker, whatever name it
+  carries. Keep that CA for this channel and issue nothing else from it; the
+  internal CA of this stack is constrained to `minio`, `postgres` and
+  `redis` and is not it. The worker's certificate needs both server and
+  client authentication, since `python -m noctornal_api.analysis_worker
+  --check` presents it as the client's.
+
+`scripts/internal_tls.py` does not issue these: its CA is held to the three
+names above, on purpose, so that a stolen CA key cannot mint anything else.
+The channel's certificates come from the cluster's own tooling (a certificate
+manager with a CA issuer kept for this channel, for one), and they need:
+
+| Certificate | Held by | Key usage | Name |
+|---|---|---|---|
+| the worker's | the worker pod alone, key mode `0600` | server and client authentication | the name callers dial in `NOCTORNAL_ANALYSIS_ADDR` (its Service name), as a DNS name in the subject alternative names, or the IP address they dial |
+| a caller's | each of `api`, `collector` and `lab-triage` | client authentication | not read: the worker takes any certificate its CA issued |
+| the CA's | every pod on the channel, as a file | | `NOCTORNAL_ANALYSIS_TLS_CA` holds this certificate and nothing else, never the system roots |
+
+The worker's own `--check` dials the pod's own address, which no certificate
+names, so it does not check the name; a caller always does.
+
+The worker reads its certificate, key and CA once, when it starts, so a
+rotated one (a certificate manager's renewal) takes effect when the pod
+restarts. Roll the worker after a renewal and before the old certificate
+expires, or its callers read the worker as unavailable. A caller reads its own
+files on every connection, so a rotated caller certificate needs no restart.
+
+**The port needs an ingress policy.** A Unix socket is reached only by the
+containers that mount its volume. A TCP port is reached by whatever the
+network lets in, so the worker's pod needs a NetworkPolicy with an ingress
+rule that admits only the `api`, `collector` and `lab-triage` pods on the
+listen port, on a plugin that enforces one. The worker does not stand in for
+that policy: a peer with no certificate is refused at the handshake and reads
+nothing, but it can open a connection. What the worker does about it is bound
+the damage. No more than eight connections are in their handshake at once; a
+newer one ends the oldest, and a connection that has finished its handshake is
+never ended for it, so a peer with no certificate cannot hold the slots the
+callers need and a caller is still served while the port is being flooded. The
+handshake itself ends at 5 seconds. A flood is logged as one line in ten
+seconds with a count of the rest.
+
+What this does not give you is `network_mode: none`. A pod has an interface
+and a route, so the worker's isolation from the network is the cluster's
+NetworkPolicy, and the register does not judge it by the interface list. For a
+worker reached over TCP the row `sample_static_analysis` allows one interface
+beside loopback and fails on two, and then proves the isolation itself: the
+analysis child, inside the worker, tries a connection to the database host and
+to the canary (`NOCTORNAL_EGRESS_CANARY`, a host and port the policy must not
+let it reach), and either being answered fails the row as "not isolated". The
+child is handed the addresses this process resolves those names to, because a
+worker with no egress has no DNS either and a name it cannot look up proves
+nothing; a name that resolves to nothing here, or a canary the child was not
+given, fails the row and names what was not tried. The worker's pod therefore
+needs a NetworkPolicy that allows it no egress at all, on a network plugin
+that enforces one; a plugin that ignores the policy shows
+as this row going red, not as a quiet pass.
+
+Nor does a pod give the worker a pids limit it can read. Kubernetes applies
+the limit (the kubelet's `podPidsLimit`) to the pod's cgroup, a container
+reads its own as `max`, and a worker that cannot read a limit refuses to start.
+So in a pod, and only there (the worker looks for the `KUBERNETES_SERVICE_HOST`
+the kubelet sets), the limit may be declared in
+`NOCTORNAL_ANALYSIS_PIDS_LIMIT`. It is held to the same window as a limit the
+worker reads, it is used only where the cgroup gives no number and never in
+place of one, and the worker refuses to start with it set anywhere else. The
+register passes a declared limit and says it was declared and not read: it
+cannot show that the cluster applies it, so set `podPidsLimit` on the nodes
+that run the worker to the number declared.
 
 ### YARA in the worker
 
@@ -1207,6 +1394,14 @@ What remains:
 | `NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY` | the worker | requests run at once, 1 to 16 (default 2); others wait up to 30 seconds for a slot. The service's `pids_limit` must hold 40 plus 20 a slot and be at most four times that, and the worker refuses to start when it is not |
 | `NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` | the worker | the largest request it reads (default `1GiB`); it must hold a sample at the analysis maximum plus a compiled YARA build, and readiness says when it cannot |
 | `NOCTORNAL_ANALYSIS_LOCAL` | nowhere, by default | `1` runs analysis in a local child instead, beside this deployment's secrets |
+| `NOCTORNAL_ANALYSIS_ADDR` | `api`, `collector`, `lab-triage`, only where the worker is reached over TCP | the worker's `HOST:PORT` (an IPv6 address in square brackets); in place of `NOCTORNAL_ANALYSIS_SOCKET`, never beside it |
+| `NOCTORNAL_ANALYSIS_LISTEN` | the worker, only over TCP | the one `ADDRESS:PORT` it listens on, an IP address and never a wildcard (a pod's own is `$(POD_IP):9443`); in place of `NOCTORNAL_ANALYSIS_SOCKET` |
+| `NOCTORNAL_ANALYSIS_TLS_CERT`, `_KEY`, `_CA` | the worker and every caller over TCP | absolute paths to this side's certificate and key and to the CA both trust |
+| `NOCTORNAL_ANALYSIS_PIDS_LIMIT` | the worker, only in a pod | the pids limit the pod runs under, a whole number inside the same window as `pids_limit` (40 plus 20 a slot, at most four times that); used only where the cgroup gives the worker no number |
+
+Nothing in this stack sets the last four rows: they are the second transport,
+for a worker that cannot share a volume with its callers, below. The compose
+file is unchanged and reaches the worker over its socket.
 
 **When it is down, nothing falls back.** A triage pass prints `refused:`
 and exits 1, leaving the queue as it was; an analyst's "run it now" waits
@@ -1403,6 +1598,52 @@ hand and claims no other, within the 180 second `stop_grace_period`.
 
 ---
 
+## On a cluster: the piping, and nothing else
+
+This directory ships no Kubernetes manifest and the compose file above is
+unchanged: every setting below does nothing until it is set. What exists is the
+application's side of a cluster deployment, so that an agency that runs
+something other than one Docker host can write the manifests without finding
+that the application refuses to start or reports red in every pod. A later
+step, the kustomize base in `kubernetes-manifests`, is written against this
+table and is still a specification (docs/00, decision 239).
+
+| What compose gives | What a cluster gives it | Where it is set and described |
+|---|---|---|
+| `depends_on` the migrate service completing | an init container running `python scripts/wait_for_schema.py --wait 120` for a pod that serves no HTTP, and a readiness probe on `GET /readyz` for the API and the sample origin; a liveness probe on `GET /healthz` | [Health and readiness endpoints](#health-and-readiness-endpoints) |
+| the worker's Unix socket on a volume the application mounts | the worker as a pod of its own, reached over TCP with mutual TLS 1.3 under a CA of its own | [The worker over TCP](#the-worker-over-tcp-for-a-pod-of-its-own) |
+| `network_mode: none` on the worker | a NetworkPolicy that allows the worker pod no egress at all, and an ingress rule that admits only the `api`, `collector` and `lab-triage` pods on its port; the register proves the first by the child's connections to the database host and the canary, and nothing proves the second | the same section |
+| the worker's own environment, which holds nothing | `enableServiceLinks: false` on the worker pod, or the kubelet's per-Service variables (`POSTGRES_SERVICE_HOST` and the rest) are refused and the worker does not start; the nine names the kubelet adds even then are allowed | the same section |
+| an internal network with no route out | a NetworkPolicy on every application pod that allows egress to the egress proxy and DNS only, and `NOCTORNAL_EGRESS_BOUNDARY=network_policy` with a canary | [Under Kubernetes: a NetworkPolicy is the boundary](#under-kubernetes-a-networkpolicy-is-the-boundary) |
+| the four compose subnets as the deployment's own networks | `NOCTORNAL_EGRESS_INTERNAL_CIDRS` naming the pod, service and node networks, refused at start when blank or when it misses the service address | the same section |
+| `pids_limit` on the worker | `podPidsLimit` on the nodes that run it, declared in `NOCTORNAL_ANALYSIS_PIDS_LIMIT` because a container cannot read it | the worker section |
+| `env_file` and `environment:` with the owner's credential blanked | `envFrom` for the secrets and `env` for the blanking: an explicit `env` entry beats `envFrom`, so compose's blank `POSTGRES_PASSWORD` and `NOCTORNAL_MIGRATION_DATABASE_URL` map one to one | `compose.yml` |
+| a service called `postgres`, `redis`, `egress-proxy`, `api` | a Service of the same name; `analysis-worker`, `collector` and `egress-canary` are reserved from integration rules as well, and a `.svc` name is never a public one | docs/20, section 2 |
+
+The cluster is held to what compose is held to: the proxy is the only way out,
+the worker holds no secret and no credential, and no connection leaves
+except through the one client or the one fenced worker channel. What is NOT
+here, and is not decided:
+
+* **a manifest of any kind**, and a run on a cluster. The readiness rows
+  `sample_static_analysis`, `egress_boundary` and `collector_split`, `/readyz`
+  answering 503 until the migration Job has run, and the worker starting with
+  the kubelet's variables present have each been tested only against stand-ins
+  (docs/17, "no Kubernetes path");
+* a way to read a secret from a file: a secret reaches a pod as an environment
+  variable, as it reaches a compose container, and anyone who can exec into the
+  pod or read the runtime's inspect output can read it. Revisit if an agency's
+  policy forbids that;
+* a sandboxed runtime (gVisor, Kata) for the worker: it judges itself from
+  `/proc` and its cgroup and refuses to start on a runtime that hides them;
+* a name check on the worker's certificate per caller (the api, the collector,
+  the Lab's triage): any certificate its CA issued may call it;
+* moving the `exits` and `models` networks: they are constants of the route
+  provider, so a Tor or VPN sidecar or a model server is reached through an
+  ordinary route, not a network of its own.
+
+---
+
 ## Day-to-day
 
 **Logs.** Everything logs to stdout.
@@ -1568,28 +1809,152 @@ If it printed a `role ... does not exist`, run `scripts/runtime_roles.py ensure
 --production` as step 2 shows, which replays every grant and revoke in chain
 order. Then run `scripts/audit_verify.py`: both chains must be INTACT.
 
-*The evidence mirror does not carry the object version of an exhibit.* From
-Alembic 0139 every exhibit lodged after that revision records the
-object-store version it was written as, and every read asks for exactly that
-version. `mc mirror` keeps bytes, not version ids, and an upload cannot choose
-its version id, so evidence restored into a new MinIO from that mirror reads
-as **missing**: every such exhibit raises an integrity alarm until the
-database stops asking for a version. The recovery is an owner step that keeps
-every hash fixed and makes those exhibits read the latest version of their
-key again, each read still verifying the SHA-256 it was lodged with. Run it as
-the schema owner, once, after the bucket is restored:
+*The mirror does not carry object versions, so objects restored from it need the restore tool.* From
+Alembic 0139 every exhibit lodged after that revision records the object-store version it was written as,
+and every read asks for exactly that version; a preserved sample's row does the same for the held copy a
+retrieval reads. `mc mirror` keeps bytes, not version ids, and an upload cannot choose its version id, so
+objects restored into a new store from that mirror read as **missing**: every such exhibit raises an
+integrity alarm and every such retrieval fails. `scripts/restore_object_versions.py` is the recovery
+(decision 240, `docs/08`). It puts each object's mirrored bytes into the new store, proves they are the
+object's, and records the version the store gave them as one new hash-chained row. It rewrites nothing:
+the version an exhibit was lodged as stays on its row, every hash stays fixed, and a read follows the
+newest `RESTORED` row to where the bytes live now, still checking SHA-256 and BLAKE3 against the bytes it
+reads. An exhibit lodged before 0139 has no recorded version and is not affected. The owner step that this
+section used to give, setting every `storage_version_id` to NULL under the anchor trigger, is withdrawn:
+it made reads take whatever was newest under a key, which undoes the pin for good, and it recorded
+nothing.
 
-```sql
-ALTER TABLE core.evidence DISABLE TRIGGER evidence_anchors_fixed;
-UPDATE core.evidence SET storage_version_id = NULL WHERE storage_version_id IS NOT NULL;
-ALTER TABLE core.evidence ENABLE TRIGGER evidence_anchors_fixed;
+**What has to be true first.**
+
+* The database is restored, the runtime roles exist, `migrate` has run (the tool needs 0198 and 0199) and
+  `scripts/audit_verify.py` says both chains are INTACT.
+* The new buckets exist, made with object lock and versioning on: the evidence bucket and, if samples are
+  restored, the preservation bucket. `minio-init` makes them on the bundled MinIO and
+  `scripts/object_store_provision.py --apply` on another store (Your own object store, above). A bucket
+  made without object lock refuses the locked put, and the tool says which.
+* The mirror is a directory the container can read, the one `mc mirror` wrote: `/srv/noctornal-backup/evidence`
+  and, if counsel said to keep a copy of the preservation bucket, `/srv/noctornal-backup/preserved`. Mount
+  it read-only.
+* A person answers for the run: an active account that holds `retention.manage` through a global role
+  (`SYS_ADMIN` and `CASE_OWNER` do), and an authority reference an auditor can follow, a restore ticket or
+  an incident number. Both are recorded on every row the run writes.
+
+**The restore account.** Do not run the tool with the API's credential. Make an account of its own on the
+store, for this restore, with this policy (`EVIDENCE_BUCKET` and `PRESERVE_BUCKET` are the bucket names):
+
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion",
+    "s3:PutObjectRetention", "s3:GetObjectRetention"], "Resource": ["arn:aws:s3:::EVIDENCE_BUCKET/*"]},
+  {"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion",
+    "s3:GetObjectLegalHold"], "Resource": ["arn:aws:s3:::PRESERVE_BUCKET/*"]},
+  {"Effect": "Allow", "Action": ["s3:PutObjectLegalHold"], "Resource": ["arn:aws:s3:::PRESERVE_BUCKET/*"],
+    "Condition": {"StringEquals": {"s3:object-lock-legal-hold": ["ON"]}}},
+  {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketLocation"],
+    "Resource": ["arn:aws:s3:::EVIDENCE_BUCKET", "arn:aws:s3:::PRESERVE_BUCKET"]}]}
 ```
 
-An exhibit lodged before 0139 has no recorded version and is not affected.
-Preserved samples have the same limit, which the paragraph on the
-preservation bucket below states.
+It lists versions, which the preservation account's policy does not allow and the tool needs to find an
+object an interrupted run left, and it puts under a COMPLIANCE lock or a legal hold. It grants no delete of
+any kind, sets a hold only ON so it cannot lift one, and never `s3:BypassGovernanceRetention`, so a mistake
+with it cannot remove or unlock anything. Remove the account when the restore is done. Put its key pair in a file that only root can
+read (`install -m 0600`), as `NAME='value'` lines for the names your `secrets.env` already sets for the
+store (`MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`, or `OBJECT_STORE_ACCESS_KEY` and `OBJECT_STORE_SECRET_KEY`)
+and, for samples, `PRESERVE_ACCESS_KEY` and `PRESERVE_SECRET_KEY`. The command reads the file inside the
+container, so the secret is never an argument of any command: an argument is readable by every local
+account for as long as its process lives. Name each variable only once under one set of names, because
+production refuses a neutral name set against its alias with a different value.
 
-The second command runs `mc` in a one-off container of the `minio-init`
+**Look first.** A dry run is the default. It reads the store and the mirror, opens each sample's key and
+writes nothing anywhere:
+
+```sh
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
+  run --rm --no-deps --user 0:0 -v /srv/noctornal-backup:/backup:ro \
+  -v /srv/noctornal-restore.env:/restore.env:ro cron /bin/sh -c '
+    cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt | tee /tmp/ca-bundle.crt >/dev/null
+    export SSL_CERT_FILE=/tmp/ca-bundle.crt
+    set -a; . /restore.env; set +a
+    python scripts/restore_object_versions.py \
+      --evidence-mirror /backup/evidence --preserved-mirror /backup/preserved'
+# restore dry run 6f1c...: restored=0 would_restore=212 already_present=0 refused=3 failed=0 purged=2 unpinned=0
+# left: exhibit 9a41...: refused (mirror_missing)
+```
+
+It runs in the `cron` service's image and environment, because that is the job that holds the system
+database role and the key ring, and it refuses, as every job does, to run where the schema owner's
+credential or a published one is set. `--user 0:0` is there because the backup directory and the key file
+are root's, mode 0700 and 0600, and the image's own user (10001) could not open them; the container keeps
+no capability, and the mirror and the key file are mounted read-only. Leave `--preserved-mirror` out when there is no copy of the
+preservation bucket, and `--evidence-mirror` for a restore of samples alone.
+
+**Then restore.** The same command with `--apply`, the account and the authority; `--report` writes each
+object's outcome as JSON, mode 0600, to a file that must not exist, in a directory you mount for it (`install -d -m 0700
+/srv/noctornal-backup/reports`):
+
+```sh
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
+  run --rm --no-deps --user 0:0 -v /srv/noctornal-backup:/backup:ro \
+  -v /srv/noctornal-backup/reports:/reports -v /srv/noctornal-restore.env:/restore.env:ro cron /bin/sh -c '
+    cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt | tee /tmp/ca-bundle.crt >/dev/null
+    export SSL_CERT_FILE=/tmp/ca-bundle.crt
+    set -a; . /restore.env; set +a
+    python scripts/restore_object_versions.py \
+      --evidence-mirror /backup/evidence --preserved-mirror /backup/preserved \
+      --apply --actor you@example.org --authority RESTORE-2026-014 \
+      --report /reports/restore-2026-11-15.json'
+```
+
+A real run needs all three of `--apply`, `--actor` and `--authority`, and refuses with exit 2, writing
+nothing, without any of them; the account has to be active and hold `retention.manage`, and the reference
+cannot be a placeholder. The exit code is the channel back: `0`, the run did what it was asked; `1`,
+something is left (a mirror file missing, a digest that differs, a store that refused), so read the
+report and run again; `2`, it refused to run. `--case ID` (repeatable) and `--limit N` take up part of the
+restore, in a stable order. `--limit N` counts the objects the run restores (a dry run, the ones it would
+restore). An object already in place, one refused and one that failed do not use it up, so a restore taken in
+parts goes on from where the last part ended, and one object that cannot be restored never holds the rest back.
+
+What each object ends as:
+
+* `RESTORED`: the bytes verified, were put (or an earlier run's copy was found and adopted), read back by
+  their own version id and proved again, and the `RESTORED` row was written. `ALREADY_PRESENT`: the version
+  reads ask for is in the store and verifies, so nothing was written; a run that finished says this on the
+  next run.
+* `REFUSED`, with a reason, and nothing written to the store or the ledger for that object (the refusal is
+  an audit row, outcome DENIED): `mirror_missing`; `size_mismatch`, `hash_mismatch` or `anchor_mismatch`
+  (the file is not the exhibit the database and its hash-chained ACQUIRED row describe, or a sample's
+  ciphertext does not open to its digests: restore that file from another copy of the backup, never from
+  this one); `path_refused` (a link or a `..` in the mirror); `current_version_fails` (the version reads
+  ask for is in the store and does not verify, which is an integrity alarm to investigate and not
+  something a restore papers over); `bucket_differs` (a sample's row names another bucket than the one
+  configured: moving a sample between buckets is a separate decision); `hold_missing` (a sample's copy is
+  in place with no legal hold: place the hold at the store, which the tool does not do for an object it
+  did not put); `custody_undeclared` (the store is outside the deployment and counsel has not declared it
+  for AMBER_STRICT or RED); `store_refused` (the store answered no: the code is in the report, and a store
+  that will not list versions needs `--no-adopt`, which risks a second locked version after an interrupted
+  run).
+* `FAILED` with `data_key_unavailable`: the key ring in this container is not the one that sealed the
+  sample's data key, so nothing could be proved and nothing was written; run where the key ring is the
+  deployment's own.
+* `FAILED`, any other reason: the object may exist in the store and the ledger does not name it, the one
+  thing to look at before running again. The report names the bucket, the key and the version id. Run again: the tool adopts
+  the version it finds and records it. Nothing is deleted to put it right, because a COMPLIANCE lock and a
+  legal hold cannot be removed by anyone.
+* `PURGED`: the exhibit was purged on purpose and is never restored. If the mirror still holds its bytes
+  the run says so, and they are removed under the purge's authority. `UNPINNED`: recorded with no version,
+  so reads take the latest and there is nothing to restore.
+
+An exhibit is locked for at least as long as its custody rows say it was, and otherwise for what a
+lodging would be given now (a recorded lock that had already ended is replaced by a fresh default period,
+and the row says so); a preserved sample is protected by a legal hold set in the put, which has no end.
+Each restored object gets one `RESTORED` row (a custody row for an exhibit, an access row for a sample)
+naming the version it replaced, the version the store gave, the account, the authority and where the tool
+ran, one `EVIDENCE_RESTORED` or `SAMPLE_PRESERVED_RESTORED` audit row, and the run one `RESTORE_RUN` row of
+counts, also when nothing was restored. Afterwards run `scripts/audit_verify.py` (both chains INTACT), look
+at an exhibit's custody card, which says it was lodged again, and remove the restore account and the file
+with its key pair.
+
+The second command of the backup script runs `mc` in a one-off container of the `minio-init`
 service, because that service already has what `mc` needs: the compose
 network (MinIO publishes no port), the root credentials and bucket names
 from `secrets.env`, the CA from step 3, and `mc-alias.sh`, which
@@ -1623,8 +1988,9 @@ quote:
 
 Know what it does not carry. A mirror to disk keeps the bytes only: not
 the legal hold, and not the object version each preserved sample's row
-names, which is the version a retrieval reads. Nothing in this release
-restores one.
+names, which is the version a retrieval reads. `scripts/restore_object_versions.py
+--preserved-mirror` puts each file back as a new held version and records it
+(Restoring, above), after proving that it opens to the sample it belongs to.
 
 Copy the env files every time you copy the database, and keep them as
 carefully as the dump: together they open every sealed column except a

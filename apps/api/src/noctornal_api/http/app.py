@@ -14,11 +14,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from noctornal_api import __version__
+from noctornal_api import __version__, readyz
 from noctornal_api.config import enforce_environment
 from noctornal_api.http.errors import install_error_handlers, problem_response
 from noctornal_api.http.limits import build_limiter, install_rate_limit_middleware
@@ -148,12 +148,12 @@ def _allowed_on_sample_origin(request: Request) -> bool:
     The sample origin exists so that no page with an analyst's session runs on it, but this
     process is the same codebase as the application. Serving only the two downloads (a sample,
     and an exhibit of attacker markup, docs/19 section 1.1) and their preflight, the health
-    check and the readiness register makes the split a property of the process rather than of
+    check, the readiness probe and the readiness register makes the split a property of the process rather than of
     a proxy allow-list nobody tests. Neither download reads a session; each takes a one-shot
     ticket minted on the application.
     """
     path = request.url.path
-    if path == "/healthz":
+    if path in ("/healthz", "/readyz"):
         return True
     if _is_download_path(path):
         return request.method in ("POST", "OPTIONS")
@@ -293,6 +293,15 @@ def create_app() -> FastAPI:
     def healthz() -> dict:
         # No version: an unauthenticated caller does not need the build.
         return {"status": "ok"}
+
+    @app.get("/readyz", tags=["meta"], include_in_schema=False)
+    def readyz_probe() -> JSONResponse:
+        # Whether the database answers and the schema is at head, and nothing else (readyz.py): a
+        # cluster's readiness probe, not the register. The body names no version and no reason.
+        ready = readyz.verdict()
+        return JSONResponse({"status": "ok" if ready else "unavailable"},
+                            status_code=200 if ready else 503,
+                            headers={"Cache-Control": "no-store"})
 
     for router in (auth.router,
                    # The first-run door (open only while iam.app_user is

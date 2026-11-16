@@ -619,14 +619,15 @@ def case_lock_bounds(conn: psycopg.Connection, case_id: UUID,
     return short_before, lock_target(row[0], now)[0]
 
 
-#: The newest lock end per exhibit: the ACQUIRED row's, or a later LOCK_EXTENDED row's once the
-#: case's retention lengthened it. The register, its count of short locks and the inspector's list
-#: all read it from here, so they cannot disagree.
+#: The newest lock end per exhibit: the ACQUIRED row's, a later LOCK_EXTENDED row's once the
+#: case's retention lengthened it, or a RESTORED row's once the exhibit was re-lodged into a new store
+#: (that object's lock, not the lost one's). The register, its count of short locks and the inspector's
+#: list all read it from here, so they cannot disagree.
 NEWEST_LOCK_SQL = """LEFT JOIN LATERAL (
                    SELECT c.detail ->> 'lock_ends_at' AS lock_ends_at
                      FROM core.evidence_custody c
                     WHERE c.evidence_id = {ev}.id
-                      AND c.action IN ('ACQUIRED', 'LOCK_EXTENDED')
+                      AND c.action IN ('ACQUIRED', 'LOCK_EXTENDED', 'RESTORED')
                       AND c.detail ? 'lock_ends_at'
                     ORDER BY c.occurred_at DESC, c.id DESC LIMIT 1) lk ON true"""
 

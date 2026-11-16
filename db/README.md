@@ -101,6 +101,30 @@ counts, never the stored value.
   HAVING count(*) > 1;
   ```
 
+Two revisions refuse for another reason: what they add is read by a restored database, and taking
+it away would change what that database answers. Each counts and names no value.
+
+- **0198**, restored exhibits. A `RESTORED` custody row says where an exhibit's verified bytes now
+  live, and `core.evidence_current_version` resolves it. Dropping the function would send each
+  restored exhibit back to a version its store never held. The custody rows are append-only and
+  stay; the way back is a backup taken before 0198, never an edit of the ledger.
+
+  ```sql
+  SELECT evidence_id, count(*), max(occurred_at)
+    FROM core.evidence_custody WHERE action = 'RESTORED'
+   GROUP BY evidence_id;
+  ```
+
+- **0199**, restored preserved samples. The same, for a preserved sample's `RESTORED` row on
+  `lab.sample_access` and `lab.sample_current_preserved_version`; narrowing the closed action set
+  back to eight would also fail on those rows with a violation that prints one.
+
+  ```sql
+  SELECT sample_id, count(*), max(occurred_at)
+    FROM lab.sample_access WHERE action = 'RESTORED'
+   GROUP BY sample_id;
+  ```
+
 ## The roles
 
 A production deployment has four Postgres roles (docs/00 decision 138), and

@@ -392,6 +392,11 @@ class NothingToPreserve(SampleError):
     did not answer."""
 
 
+class HeldKeyUnavailable(SampleError):
+    """A sample's data key could not be opened, so nothing can be proved against it. Names the exception's
+    class and never its text, which can carry key material."""
+
+
 class _StoreFailed(Exception):
     """The working-store put of a matched submission failed; carries
     the cause so the second transaction can record it."""
@@ -2706,7 +2711,7 @@ class SampleService:
         row = self._c.execute(
             """SELECT s.storage_key, k.data_key_ciphertext, k.data_key_id,
                       s.sha256, s.byte_size, s.preserved_bucket,
-                      s.preserved_key, s.preserved_version_id
+                      s.preserved_key, lab.sample_current_preserved_version(s.id)
                  FROM lab.sample s
                  LEFT JOIN LATERAL lab.sample_data_key(s.id) k ON true
                 WHERE s.id = %s""", (sample_id,)).fetchone()
@@ -3368,12 +3373,13 @@ class SampleService:
         """The label and state half of a retrieval: the same composition
         `_downloadable` makes, then "is it preserved". Returns
         `(sha256, whether a data key is held, data_key_id, preserved_bucket,
-        preserved_key, preserved_version_id)`."""
+        preserved_key, the version a retrieval reads)`: where a restore put the ciphertext when one
+        did (`lab.sample_current_preserved_version`), else the version it was preserved as."""
         _require_clearance(clearance)
         row = self._c.execute(
             f"""SELECT s.sha256, NOT s.data_key_destroyed, s.data_key_id,
                        s.preserved_bucket, s.preserved_key,
-                       s.preserved_version_id
+                       lab.sample_current_preserved_version(s.id)
                   FROM lab.sample s
                   LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
                  WHERE s.id = %(id)s AND {lab_gate()}""",
@@ -4068,6 +4074,12 @@ class SampleService:
                  "submitted": bool(r[5]) and r[20] != "NOT_SENT"}
                 for r in rows]
 
+    #: What a RESTORED row shows a reader of the sample record, and nothing else, so a key a future writer
+    #: adds reaches the console only once it is named here. The row keeps, for whoever audits it, the host and
+    #: the account the restore ran on, the store's host, the authority it ran under and the run's id.
+    _RESTORED_DETAIL_KEYS = ("old_version_id", "new_version_id", "bucket", "adopted", "verified",
+                             "hold_confirmed", "digests", "byte_size", "sha256", "via")
+
     def custody(self, sample_id: UUID, *, clearance: str | None = None,
                 compartments: frozenset[str] = frozenset()) -> list[dict]:
         """The custody ledger, with who is in it.
@@ -4083,6 +4095,9 @@ class SampleService:
         labels) keeps its person and time and loses its kind and analysis id, so the ledger stays complete
         without saying that a hidden rule set produced a finding here. The residual: the reader can count
         an analysis they cannot open.
+
+        A RESTORED row is cut to `_RESTORED_DETAIL_KEYS`: where the restore ran and under what authority are
+        for the audit log and the row itself, not for every reader of the sample.
         """
         rows = self._c.execute(
             """SELECT a.actor_id, a.action, a.occurred_at, a.archive_format,
@@ -4100,6 +4115,8 @@ class SampleService:
         out = []
         for r in rows:
             detail = dict(r[4] or {})
+            if r[1] == "RESTORED":
+                detail = {k: v for k, v in detail.items() if k in self._RESTORED_DETAIL_KEYS}
             if r[1] == "ANALYSED" and detail.get("analysis_id"):
                 if seen is None:
                     seen = {a["id"] for a in self.analyses(
@@ -4198,6 +4215,46 @@ class SampleService:
                VALUES (%s, %s, %s, 'sample', %s, %s, %s, %s, %s)""",
             (actor_id, "USER" if actor_id else "SYSTEM", action, sample_id,
              outcome, Json(detail), ip_hash, session_id))
+
+
+def held_ciphertext_differs(conn: psycopg.Connection, sample_id: UUID, ciphertext: bytes) -> str | None:
+    """None when `ciphertext` is this sample's: it opens, under the sample's own data key, to the size and
+    the SHA-256 its row records (and the SHA-1 and MD5 where the row has them), else the first fact it
+    disagrees with in one word (`size`, `sha256`, `sha1`, `md5`).
+
+    The proof `_adopt_held_copy` and `_verified_plaintext` make before they trust held bytes, for a caller
+    that has no sample to read and no actor to name: the restore, which proves a mirror file before it
+    puts it anywhere. A sample row carries no BLAKE3, so none is checked. The key is read through its
+    definer (0180), which answers an exempt caller (the system role); the plaintext exists in this
+    process's memory for the length of the hashes and is never written, rendered or logged
+    (invariant 10). Raises `HeldKeyUnavailable` when the key cannot be opened."""
+    row = conn.execute(
+        """SELECT s.sha256, s.sha1, s.md5, s.byte_size, k.data_key_ciphertext, k.data_key_id
+             FROM lab.sample s
+             LEFT JOIN LATERAL lab.sample_data_key(s.id) k ON true
+            WHERE s.id = %s""", (sample_id,)).fetchone()
+    if row is None:
+        raise SampleError("no such sample")
+    sha256, sha1, md5, size, blob, key_id = row
+    if not blob:
+        raise HeldKeyUnavailable("this sample has no data key")
+    if len(ciphertext) != size:
+        return "size"
+    try:
+        data_key = bytes.fromhex(envelope.decrypt(bytes(blob), key_id=key_id))
+    except Exception as err:
+        raise HeldKeyUnavailable(type(err).__name__) from err
+    plain = _xor_stream(ciphertext, data_key)
+    try:
+        if hashlib.sha256(plain).digest() != bytes(sha256):
+            return "sha256"
+        if sha1 is not None and hashlib.sha1(plain, usedforsecurity=False).digest() != bytes(sha1):
+            return "sha1"
+        if md5 is not None and hashlib.md5(plain, usedforsecurity=False).digest() != bytes(md5):
+            return "md5"
+        return None
+    finally:
+        del plain
 
 
 def _xor_stream(data: bytes, key: bytes) -> bytes:

@@ -150,6 +150,9 @@ mode, not GOVERNANCE, so not even the API's own credentials can delete
 before retention expires (decision 26). Three buckets: evidence (locked),
 raw ingest bytes (`rawstore.py`, persisted before any parser runs), and
 samples (never locked, because rejection must be able to destroy bytes).
+An exhibit and a preserved sample each name the version the store gave them, and a backup mirror keeps bytes and
+not versions, so a restore into a new store (`restore.py`, decision 240) puts the verified bytes back and records
+the version the store gave them as one new ledger row, never on the row the object was lodged under.
 
 **Redis** for the rate-limit meter (GCRA in one Lua script, so several
 API processes share one clock and one decision (decision 43)) and cache.
@@ -231,6 +234,24 @@ the only published ports, a database role that does not own the tables, a
 process that refuses to start on a development secret, and the sample
 origin as a second process. `infra/production/README.md` is its runbook
 and lists what a correctly configured stack still comes up red on.
+
+The isolated analysis worker has two transports (decision 239). The compose
+stack reaches it over a Unix socket on a volume only the application
+containers mount. Where no volume can be shared, a pod of its own, the same
+frames cross TCP under mutual TLS 1.3, chosen by `NOCTORNAL_ANALYSIS_ADDR`
+on a caller and `NOCTORNAL_ANALYSIS_LISTEN` on the worker: a caller dials only
+its own declared networks, trusts only the channel's CA and presents a
+certificate, and the worker refuses a wildcard address and a key its children
+could read. Nothing about compose changes unless those variables are set.
+`infra/production/README.md`, Analysis worker, has the settings.
+
+The rest of a cluster deployment's piping is of the same kind, a setting that
+does nothing until it is set (decision 239): `GET /readyz` answers whether the
+database is reachable and the schema is at head, so a pod's probe has a question
+to ask; the egress boundary can be proved by a canary under a NetworkPolicy
+where the route table cannot tell; and a pod is refused unless it declares the
+cluster's own networks. No manifest is shipped. `infra/production/README.md`,
+"On a cluster", maps each of compose's guarantees to the setting that holds it.
 
 ## Superseded from the 2026-07 sketch (recorded, not deleted)
 

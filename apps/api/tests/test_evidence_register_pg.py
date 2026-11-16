@@ -305,6 +305,26 @@ def test_a_recorded_lock_instant_is_the_one_the_store_holds_to(conn, world):
     assert after.lock_lapsed is True, "not a second past the store's own lock"
 
 
+def test_a_restored_exhibit_shows_the_lock_of_the_object_it_was_restored_to(conn, world):
+    """A restore re-lodges the bytes under a lock of their own. The register reads the newest row that set a
+    lock, a RESTORED one included, so it never claims the lock of the store that was lost."""
+    from noctornal_api.evidence import EvidenceService
+    case_id, uid, *_ = world
+    ended = _at(2027, 9, 24, 3, 2, 3)
+    restored = _at(2028, 11, 15, 10, 0, 0)
+    ev = _exhibit(conn, case_id, uid, title="restored.png", retention_until=restored.date())
+    svc = EvidenceService(conn, storage=None)
+    svc._custody(ev, "ACQUIRED", uid, hash_verified=True,
+                 detail={"acquisition_method": "MANUAL_UPLOAD", "acquired_at_stated": False,
+                         "lock_ends_at": ended.isoformat()})
+    svc._custody(ev, "RESTORED", uid, hash_verified=True,
+                 detail={"new_version_id": "v-new", "old_version_id": "v-old",
+                         "lock_ends_at": restored.isoformat()})
+    item = _page(conn, case_id, now=_at(2028, 1, 1))["items"][0]
+    assert (item.lock_ends_at, item.lock_lapsed) == (restored, False)
+    assert _page(conn, case_id, now=restored)["items"][0].lock_lapsed is True
+
+
 def test_a_lock_instant_that_is_not_this_lock_falls_back_to_the_day():
     from noctornal_api.http.routers.evidence import lock_state
     day = date(2027, 9, 24)

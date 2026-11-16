@@ -178,6 +178,12 @@ def verify_proxy_environment(env: Mapping[str, str] | None = None) -> list[str]:
     except ValueError as exc:
         problems.append(str(exc))
         internal = ()
+    if production:
+        # In a pod the default (the compose subnets) guards nothing: the proxy refuses an upstream inside the
+        # deployment's own networks, so it must know the cluster's.
+        cluster = egress_policy.cluster_problem(env)
+        if cluster:
+            problems.append(f"{cluster}.")
     listen = env.get(LISTEN_ENV, "")
     if production and not listen.strip():
         problems.append(f"{LISTEN_ENV} is not set: in production the proxy listens on "

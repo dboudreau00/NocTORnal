@@ -29,6 +29,10 @@ _COMPARTMENT_WRITE = re.compile(
 _REGISTRATION = re.compile(
     r"INSERT\s+INTO\s+iam\.compartment|register_compartment\(", re.I)
 
+#: A call to a helper that registers: a local `_register` or `_registered`, or the shared
+#: `rls_support.register` (`s.register(conn, "KEY")`), which runs the same INSERT.
+_REGISTERING_CALL = re.compile(r"\b_?regist\w*\(")
+
 #: A write that registers nothing: the empty array.
 _EMPTY_WRITE = re.compile(r"compartments\s*=\s*'\{\}'", re.I)
 
@@ -66,7 +70,7 @@ def _writers_without_registration(path: Path) -> list[str]:
             src = ast.unparse(stmt)
             # A local helper named like `_register`/`_registered` counts as
             # registration when it is called before the write.
-            if _REGISTRATION.search(sql) or re.search(r"\b_regist\w*\(", src):
+            if _REGISTRATION.search(sql) or _REGISTERING_CALL.search(src):
                 registered_so_far = True
             if _EMPTY_WRITE.search(sql):
                 continue
@@ -94,6 +98,18 @@ def test_every_raw_compartment_write_registers_its_key_first():
         "the key in the same function (refused by 0059 on a fresh database): "
         f"{offenders}. Insert into iam.compartment ... ON CONFLICT (key) DO "
         "NOTHING for each key first, in that function.")
+
+
+def test_the_scan_counts_the_shared_register_helper_and_still_refuses_a_bare_write(tmp_path):
+    """`s.register(conn, KEY)` is the shared INSERT, so a write after it is registered; the same write
+    with nothing before it is not."""
+    sql = 'conn.execute("UPDATE core.evidence SET compartments = %s WHERE id = %s", (["K1"], 1))'
+    good = tmp_path / "test_good.py"
+    good.write_text("def test_x(conn):\n    s.register(conn, 'K1')\n    " + sql + "\n", encoding="utf-8")
+    bare = tmp_path / "test_bare.py"
+    bare.write_text("def test_y(conn):\n    " + sql + "\n", encoding="utf-8")
+    assert _writers_without_registration(good) == []
+    assert _writers_without_registration(bare) == ["test_bare.py::test_y"]
 
 
 def test_the_scan_sees_the_fixtures_it_is_meant_to_guard():

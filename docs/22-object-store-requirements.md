@@ -157,8 +157,9 @@ attached to that network (a Ceph RGW container in this compose project, say); a 
 route, and giving it one is the later step docs/17 F41 records.
 
 **Backups.** The `mc mirror` commands in `infra/production/README.md` are the bundled MinIO's. On another store
-use its replication. On any store a mirror keeps bytes and not version ids (docs/17, "what a mirror backup does
-not carry").
+use its replication. On any store a mirror keeps bytes and not version ids, so objects restored from one are put
+back with `scripts/restore_object_versions.py`, which records the version the store gave each (decision 240, the
+restore runbook in `infra/production/README.md`, docs/08).
 
 ---
 

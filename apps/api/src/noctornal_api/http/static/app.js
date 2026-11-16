@@ -7331,6 +7331,12 @@ function custodyDetailText(action, d) {
   if (action === 'EXPORTED' && d.via === 'sample_origin') {
     bits.push('produced through the sample origin, in a password-protected archive');
   }
+  /* A restore into a new store: bytes that matched every recorded digest, lodged again, under
+     the lock that object holds. */
+  if (action === 'RESTORED') {
+    bits.push('re-lodged from a backup after its bytes matched the recorded digests');
+    if (d.lock_ends_at) bits.push('locked in storage until ' + fmtTime(d.lock_ends_at, true));
+  }
   /* The case's retention was extended past the lock, and the lock with it. */
   if (action === 'LOCK_EXTENDED') {
     if (d.lock_ends_at) bits.push('locked in storage until ' + fmtTime(d.lock_ends_at, true));
@@ -35213,6 +35219,11 @@ function custodyLine(c) {
     case 'SCANNED':
       return ['Read in memory by static triage, SHA-256 verified; nothing '
         + 'was written to disk or served', null];
+    // A restore from a backup into a new preservation store: the file opened to this sample and the
+    // copy was held when it was written.
+    case 'RESTORED':
+      return ['Restored from a backup into the preservation store, after its ciphertext '
+        + 'opened to this sample, under a legal hold', 'notable'];
     default:
       return [String(c.action || 'Unknown event'), null];
   }

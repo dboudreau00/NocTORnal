@@ -249,12 +249,32 @@ def capabilities() -> dict:
     }
 
 
+def _connect_state(host, port) -> str | None:
+    """What came of a TCP connection to `host`:`port` within two seconds: "answered", "unanswered" (a
+    timeout, a refusal, no route) or "unresolved" (the name did not resolve, so nothing was tried), or
+    None when the parent named no usable target. Sends nothing."""
+    if not host or isinstance(port, bool) or not isinstance(port, int):
+        return None
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return "answered"
+    except socket.gaierror:
+        return "unresolved"
+    except OSError:
+        return "unanswered"
+
+
 def _exposure(probe: dict | None) -> dict:
     """What a compromised child could reach: whether it can
-    read PID 1's environment, and whether it can open a TCP connection to
-    the database host the parent names. Neither reads anything past the
-    first byte, and neither is ever reported beyond a yes or no."""
-    out: dict = {"proc_environ_readable": None, "database_reachable": None}
+    read PID 1's environment, whether it can open a TCP connection to
+    the database host the parent names, and whether it can open one to the canary the parent names (a
+    host and port the deployment's policy must not let it reach, which in a pod is the only proof of
+    that). None of them reads anything past the first byte, and none is ever reported beyond a yes or
+    no. `unresolved` names the targets (database, canary) whose host did not resolve: a worker with no
+    DNS answers "no" to a name whatever the network allows, so the parent hands an address where it
+    needs the answer to prove something, and a target listed here proves nothing."""
+    out: dict = {"proc_environ_readable": None, "database_reachable": None,
+                 "canary_reachable": None, "unresolved": []}
     if os.path.exists("/proc/1/environ"):
         try:
             with open("/proc/1/environ", "rb") as f:
@@ -262,14 +282,17 @@ def _exposure(probe: dict | None) -> dict:
             out["proc_environ_readable"] = True
         except OSError:
             out["proc_environ_readable"] = False
-    host = (probe or {}).get("host")
-    port = (probe or {}).get("port")
-    if host and isinstance(port, int):
-        try:
-            with socket.create_connection((host, port), timeout=2):
-                out["database_reachable"] = True
-        except OSError:
-            out["database_reachable"] = False
+    probe = probe if isinstance(probe, dict) else {}
+    state = _connect_state(probe.get("host"), probe.get("port"))
+    out["database_reachable"] = None if state is None else state == "answered"
+    if state == "unresolved":
+        out["unresolved"].append("database")
+    canary = probe.get("canary")
+    if isinstance(canary, dict):
+        state = _connect_state(canary.get("host"), canary.get("port"))
+        out["canary_reachable"] = None if state is None else state == "answered"
+        if state == "unresolved":
+            out["unresolved"].append("canary")
     return out
 
 

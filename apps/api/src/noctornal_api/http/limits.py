@@ -441,10 +441,12 @@ def install_rate_limit_middleware(app) -> None:
     @app.middleware("http")
     async def _blanket(request: Request, call_next):
         limiter: RateLimiter = request.app.state.limiter
-        # /healthz is what a load balancer polls. Limiting it means a burst
-        # of user traffic can make the instance look dead and get it pulled
-        # out of rotation, turning a rate limit into an outage.
-        if request.url.path == "/healthz":
+        # /healthz and /readyz are what a load balancer and a cluster's
+        # probes poll. Limiting them means a burst of user traffic can make
+        # the instance look dead and get it pulled out of rotation, turning
+        # a rate limit into an outage. /readyz costs the database at most
+        # one connection a window (readyz.py), which is why it may be open.
+        if request.url.path in ("/healthz", "/readyz"):
             return await call_next(request)
 
         decision = await run_in_threadpool(

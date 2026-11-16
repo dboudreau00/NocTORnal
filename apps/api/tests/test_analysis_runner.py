@@ -729,13 +729,58 @@ def test_the_worker_refuses_a_variable_nobody_named(monkeypatch):
         ["NOCTORNAL_SAMPLE_ORIGIN", "REDIS_URL"]
 
 
+def test_the_kubelets_cluster_variables_are_allowed_and_a_service_account_token_variable_is_not(
+        monkeypatch):
+    """The kubelet injects the cluster API's address into every container, enableServiceLinks off or
+    not, and the downward API's POD_IP is one a manifest asks for: a worker that refused them would
+    refuse to start in every cluster. They are named exactly, so a variable that merely starts the same
+    way is still foreign, and a child inherits none of them."""
+    monkeypatch.setattr(ar, "HAS_UNIX", True)
+    kubelet = {"KUBERNETES_SERVICE_HOST": "10.96.0.1", "KUBERNETES_SERVICE_PORT": "443",
+               "KUBERNETES_SERVICE_PORT_HTTPS": "443",
+               "KUBERNETES_PORT": "tcp://10.96.0.1:443",
+               "KUBERNETES_PORT_443_TCP": "tcp://10.96.0.1:443",
+               "KUBERNETES_PORT_443_TCP_ADDR": "10.96.0.1",
+               "KUBERNETES_PORT_443_TCP_PORT": "443",
+               "KUBERNETES_PORT_443_TCP_PROTO": "tcp", "POD_IP": "10.244.1.7"}
+    assert set(kubelet) == ar.KUBELET_ENV
+    assert aw.start_problems({ar.SOCKET_ENV: SOCK, **kubelet}, facts=SUPERVISED) == []
+    for name in ("KUBERNETES_SERVICE_ACCOUNT_TOKEN", "KUBERNETES_TOKEN", "KUBERNETES_PORT_80_TCP",
+                 "KUBERNETES_SERVICE_HOST_FILE", "POD_NAME", "POD_IPS", "NOCTORNAL_POD_IP"):
+        assert ar.foreign_environment([name]) == [name], name
+        problems = aw.start_problems({ar.SOCKET_ENV: SOCK, **kubelet, name: "x"},
+                                     facts=SUPERVISED)
+        assert problems and name in problems[0], name
+    assert not set(kubelet) & set(ar.child_env())
+
+
+def test_a_service_link_variable_is_refused_and_the_refusal_says_to_turn_service_links_off(
+        monkeypatch):
+    """With the Kubernetes default (enableServiceLinks true) the kubelet adds a set of names for every
+    Service in the namespace. They are not the worker's, and it refuses to start on them, so the sentence
+    says where they come from instead of leaving an operator to find it."""
+    monkeypatch.setattr(ar, "HAS_UNIX", True)
+    links = {"POSTGRES_SERVICE_HOST": "10.96.0.12", "POSTGRES_SERVICE_PORT": "5432",
+             "POSTGRES_PORT_5432_TCP": "tcp://10.96.0.12:5432",
+             "ANALYSIS_WORKER_SERVICE_HOST": "10.96.0.40"}
+    problems = aw.start_problems({ar.SOCKET_ENV: SOCK, **links}, facts=SUPERVISED)
+    assert problems and all(name in problems[0] for name in links)
+    assert "enableServiceLinks: false" in problems[0]
+    assert "10.96.0.12" not in problems[0]
+    other = aw.start_problems({ar.SOCKET_ENV: SOCK, "REDIS_URL": "redis://x"}, facts=SUPERVISED)
+    assert other and "enableServiceLinks" not in other[0]
+
+
 def test_a_secret_carrying_the_workers_prefix_is_still_foreign():
-    """The allow-list names the three settings, not a prefix, so any other NOCTORNAL_ANALYSIS_ name is
-    foreign."""
+    """The allow-list names the worker's settings, not a prefix, so any other NOCTORNAL_ANALYSIS_ name is
+    foreign. The address a CALLER dials is not the worker's: a worker that held it is refused."""
     sneaky = ["NOCTORNAL_ANALYSIS_TOKEN", "NOCTORNAL_ANALYSIS_LOCAL",
-              "NOCTORNAL_ANALYSIS_WORKER_SECRET"]
+              "NOCTORNAL_ANALYSIS_WORKER_SECRET", "NOCTORNAL_ANALYSIS_TLS_PASSPHRASE",
+              ar.ADDR_ENV]
     assert ar.foreign_environment(sneaky + sorted(ar.WORKER_OWN_ENV)) == sorted(sneaky)
-    assert ar.WORKER_OWN_ENV == {ar.SOCKET_ENV, aw.CONCURRENCY_ENV, aw.MAX_BYTES_ENV}
+    assert ar.WORKER_OWN_ENV == {ar.SOCKET_ENV, aw.CONCURRENCY_ENV, aw.MAX_BYTES_ENV,
+                                 ar.LISTEN_ENV, ar.PIDS_LIMIT_ENV, ar.TLS_CERT_ENV,
+                                 ar.TLS_KEY_ENV, ar.TLS_CA_ENV}
 
 
 def test_the_worker_refuses_a_missing_socket(monkeypatch):

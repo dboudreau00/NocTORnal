@@ -6,7 +6,9 @@ Prosecution-grade (decision 13, US + Canada). The load-bearing properties:
   object store and recomputes, never trusting a mutated copy. The row's hashes, size, case and stored object
   cannot be rewritten by any role once lodged (0140), the exhibit names the object VERSION it was lodged as
   (0139) and is read at exactly that version, and verification also compares the hash-chained ACQUIRED custody
-  row, so substituting an object and rewriting the row to match is detected.
+  row, so substituting an object and rewriting the row to match is detected. After a restore into a new store
+  the read asks for the version a RESTORED custody row names instead (`core.evidence_current_version`, 0198,
+  `restore.py`); the lodged version stays on the row, and every read still checks both digests.
 - Bytes land in an object store bucket with object-lock retention (WORM; the bundled store is MinIO), so the
   exhibit cannot be altered or deleted before its retention expires, the API process included.
 - Every touch (ACQUIRED, VIEWED, EXPORTED, HASH_VERIFIED) is written to the append-only custody ledger AND to
@@ -775,8 +777,9 @@ class EvidenceService:
                       storage_key, shahex, detail["reason"])
 
     def _read(self, key: str, version: str | None) -> bytes:
-        """The exhibit's bytes: the version it was lodged as when the store
-        returned one, the latest otherwise (legacy rows and the doubles)."""
+        """The exhibit's bytes at `version`, which is `core.evidence_current_version`: the version the exhibit
+        was lodged as, or where a restore into a new store put the verified bytes (a RESTORED custody row,
+        decision 240); the latest when there is none (legacy rows and the doubles)."""
         if version:
             return self._s.get(key, version_id=version)
         return self._s.get(key)
@@ -831,8 +834,8 @@ class EvidenceService:
 
     def verify_integrity(self, evidence_id: UUID, actor_id: UUID) -> bool:
         row = self._c.execute(
-            """SELECT storage_key, sha256, blake3, case_id, storage_version_id,
-                      purged_at
+            """SELECT storage_key, sha256, blake3, case_id,
+                      core.evidence_current_version(id), purged_at
                  FROM core.evidence WHERE id = %s""",
             (evidence_id,),
         ).fetchone()
@@ -948,8 +951,8 @@ class EvidenceService:
         recording a failed HASH_VERIFIED and raising IntegrityError on
         mismatch — so a tampered/ swapped object is never served."""
         row = self._c.execute(
-            """SELECT storage_key, sha256, case_id, blake3, storage_version_id,
-                      purged_at
+            """SELECT storage_key, sha256, case_id, blake3,
+                      core.evidence_current_version(id), purged_at
                  FROM core.evidence WHERE id = %s""",
             (evidence_id,),
         ).fetchone()

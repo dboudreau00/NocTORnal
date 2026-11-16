@@ -1,5 +1,497 @@
 # Changelog
 
+## Unreleased: remediation round, 2026-11-15
+
+A remediation round on Beta 1.5c, still version 0.9.5. It is not a release yet and
+carries no release name or date: the owner names it at release time, and the word
+Unreleased is a placeholder. The Alembic head is 0199, fifteen revisions on 0184
+(0185 to 0199). It adds decisions 229 to 241 and builds what the review of
+2026-11-14 and the owner's rulings of that day asked for. It has not been audited,
+and it is still not lawful to operate against real material until docs/16 L1 to L5
+are settled outside this codebase. Legal review is required before any active case
+load.
+
+### Access and disclosure
+
+- **Case membership is filtered for the request role** (0191, 0192, decision 241).
+  Who holds which role on which case (`iam.case_assignment`) is under a row policy.
+  A request reads its own assignments whatever the case's labels, and the team of
+  every case it may open, which is what the case's roster already shows. A
+  connection bound to nobody reads none. Row-level security now stands on 83
+  tables. A member whose clearance falls below a case's labels keeps their own
+  assignment and no longer sees that case's team through the database. The Lab's
+  detonation sign-off reads a case's leads through a new definer, `iam.case_leads`,
+  which names user ids only and never answers a case above the caller's reach. The
+  live socket's per-delivery checks now run on a connection bound to the
+  subscriber's session, and a session that ends between deliveries closes the
+  socket as ended. A production ticket redeemed at the sample origin binds its
+  holder before the export gate decides.
+- **A missing id costs what a hidden one costs** (decision 230). Every route that
+  names an element gates an id that names nothing, or names another case's element,
+  at labels nobody can hold. It sends the same database statements, writes the same
+  AUTHZ_DENIED row and gets the same answer as an element hidden from the caller.
+  Before, a missing id was answered after one read with no row, and paired medians
+  on the development machine put it 12.9 to 15.3 ms ahead of a hidden one. The
+  equality is held by the statements and rows each request sends and adds, not by a
+  clock. A proposal accept that names an entity above the reviewer now answers the
+  409 a missing entity gets (it was a 403), and a legal hold on an exhibit in a
+  case the officer is not on answers "no such exhibit". A quarantined queue record
+  the operator may not see is answered as a missing one. Every id that names nothing
+  now appends a denial row; the meter for that is not built (below).
+- **The request role writes no column of a case, and no queue or heartbeat**
+  (0186 to 0190). A case edit, a status move and the policy switches are written on
+  a system connection after the route's gate, step-up and refusals, and their audit
+  rows still name the caller. The collector's heartbeat, the embedding queue and the
+  YARA compile queue are read-only to the request role, which reaches them through
+  definer triggers and `lab.yara_compile_enqueue`. An ingest batch is created only
+  through `ingest.batch_accept`, by a caller holding the HMAC of the key's secret,
+  on a live key; a batch refused that way answers "the batch was refused: this key
+  is no longer live". The three similarity vector tables, `lab.yara_compiled_rejected`
+  and `collect.collection_run` stay request-writable and are listed under Known
+  residuals.
+- **The connection log says that rows are withheld, not how many** (decision 238).
+  `GET /admin/egress/connections` answers `some_withheld`, a boolean, in place of
+  `withheld`, a number that could be polled and subtracted. A reader who has rows
+  withheld gets `seq: null` on every row shown, because hidden rows draw from the
+  same sequence, and `GET /admin/egress/connections/verify` answers `rows: null` to
+  that reader. A broken chain is still reported to every reader with its first
+  broken number. A script that reads `withheld` gets nothing now.
+- **A conversation above everyone assigned is traceable by role** (0196, decision
+  231). Minimising still acts only on a conversation the minimiser can read, so
+  where nobody assigned to a case is cleared for one of its conversations, nobody
+  on the team can minimise it. That is counted live and never stored. Closing the
+  case is never refused; the closure, or archiving straight from a draft, writes
+  `CASE_CLOSED_WITH_UNMINIMISABLE_CONVERSATIONS` with a count and a TLP tier, after
+  the reply, so the reply does the same work with a gap or without. Every Security
+  officer gets a notice (`COMMS_MINIMISATION_GAP`) that names no case, and the
+  case's Lead investigators are told as its withheld-disclosure setting allows:
+  nothing under NONE. A new permission, `comms.minimise.oversee`, held by the
+  Security officer alone and not step-up, reads
+  `GET /api/v1/admin/minimisation-gaps` and the console's Oversight, Minimisation
+  gaps. The remedy is a Lead investigator cleared for the conversation, added
+  through Share. Flagging a participant is not counted.
+- **A co-participation weight is one figure for every reader** (decision 232). It
+  still divides by the room's roster. The register row that called that a
+  differencing channel is closed: a participant row carries no labels, and the
+  contact graph already lists every handle of a readable conversation to the same
+  reader, so dividing by the visible size would have created the channel, and a test
+  pins the premise. What did leak is fixed: a handle resolved to an identity above
+  the reader was dropped while an unresolved handle was drawn. It is now drawn as an
+  unresolved handle, with the same note, and counted with them under NONE and
+  PRESENCE.
+
+### Hold lifts and retention
+
+- **Lifting a legal hold takes two people** (0193, 0194, 0195, decision 229, which
+  supersedes 193). This covers an exhibit's hold, a case's hold and a collected
+  document's hold. The one who lifts asks for a second signature from the hold with
+  a written reason. A different account that could lift it too and is cleared for
+  everything the lift releases approves it with a sign-in from the last 15 minutes,
+  and the one who asked spends it once, within 72 hours, on the hold as it stood
+  when they asked. Both people are judged again at the spend. The approver is not
+  seasoned and whoever placed the hold may be either of the two. A request is shown,
+  counted and notified only to readers cleared for what it releases. A document's
+  lift is a deployment-wide request, approved or refused on the document's card
+  under Feeds, Collected, not in a case's approvals pane. The database refuses a
+  lift that no consumed approval accounts for, whoever writes the row. Placing a
+  hold is still one person's act.
+
+### Secrets and transport
+
+- **The audit log keeps a keyed hash, never the value, of what a failed sign-in
+  typed** (decision 237, which supersedes 194). Every failed sign-in records
+  `email_length` and `email_hmac`, whatever was typed and whether or not the account
+  exists, an account's own address included. `ip_hash` on `audit.event` and
+  `lab.download_ticket` is a 16-byte HMAC-SHA256 where it was a plain sha256. One
+  module, `security/audit_hash.py`, computes both. Rows from before stay as they
+  were, since the log is append-only; `detail ? 'email'`, `detail ? 'email_sha256'`
+  and `octet_length(ip_hash) = 32` find them, and they are as guessable as before.
+- **New secret `NOCTORNAL_AUDIT_PEPPER`.** A production API, sample origin,
+  collector or Lab worker refuses to start when it is unset, the placeholder,
+  shorter than 16 characters, or the same value as `NOCTORNAL_INGEST_PEPPER` or
+  `NOCTORNAL_TOTP_KEK`; the egress proxy refuses to start holding it. Outside
+  production an unset pepper gets a random key for that process.
+- **Uploaded mail is believed only under the mail stamp** (0197, decision 234).
+  Until your own mail server adds `X-NocTORnal-Stamp`, an HMAC-SHA256 header under
+  `NOCTORNAL_MAIL_STAMP_KEY`, every Authentication-Results header is kept as the
+  sender's claim: no SPF, DKIM or DMARC verdict is recorded and no DKIM domain is
+  proposed. The old rule believed a forged Received line beside a forged
+  `dkim=pass`. The stamp covers the header it attests, the server's own Received
+  line, the identity and MIME headers and the body; the authserv-id must still be
+  one of `NOCTORNAL_TRUSTED_MTA_HOSTS`. `scripts/mail_stamp_sign.py` signs and
+  verifies, and `infra/production/mail-stamp` has a Postfix content filter example
+  that was checked against Postfix's documentation and not run on a Postfix. A
+  verdict recorded before 0197 has no basis and the email detail marks it "recorded
+  before the mail stamp". The Received boundary of an unstamped message is still
+  open.
+- **TLS on every internal hop** (decision 236). `scripts/internal_tls.py` issues a
+  deployment CA, name-constrained to `minio`, `postgres` and `redis`, and a
+  1095-day certificate for each. Postgres serves TLS 1.3 behind a hostssl-only
+  `pg_hba.conf`, Redis serves TLS 1.3 alone (`--port 0`), and every DSN asks for
+  `sslmode=verify-full`. Production refuses a DSN that does not, and a `redis://`
+  `REDIS_URL` or one that switches off the check of the server. Each key is mounted
+  into its own server alone and the CA's key into nothing: keep `tls/ca/ca.key` off
+  the host. Caddy runs as uid 10002 on `frontend` and `ingress`, sharing no network
+  with the database, Redis, MinIO or the egress proxy, and a one-shot `caddy-init`
+  holding `CHOWN` and `DAC_READ_SEARCH` hands it its volumes at every start. ACME is
+  `infra/production/compose.acme.yml`, which gives Caddy a route out by choice. The
+  `DOCKER-USER` host rule that stops a private source address leaving is described
+  in `infra/production/README.md` and installed by nothing. Nothing renews a
+  certificate by itself.
+- **Every input the build pulls is pinned.** CI's service and `docker run`
+  containers carry the digests the compose files pin, and the Pinned images job
+  fails on a tag-only pull or a tag with two digests. pip 26.2.2 is installed by
+  both installers and CI from `requirements-pip.txt` with `--require-hashes`. The
+  Dockerfile installs `gnupg=2.4.7-21+deb13u1` and refuses a build whose gnupg or
+  gpg comes from another source upload, so a Debian update to gnupg2 fails the build
+  until the pin moves with the base digest. A new CI job builds the production
+  image on every push.
+- **The production image carries yara-x by default.** `NOCTORNAL_EXTRAS` defaults
+  to `yara`, installed from `requirements-yara.txt` by the sha256 of its two Linux
+  wheels, about 35 MiB larger; only an explicitly empty value builds without it,
+  and telegram stays opt-in. The worker's selftest now compiles and scans with
+  yara-x under the child's own limits, and `sample_static_analysis` fails when the
+  engine is installed and that scan fails. No limit was raised: the scan passed at
+  2 GiB, 512 MiB and 256 MiB of address space.
+
+### The connection pool
+
+- **A request's connection comes from a pool** (decision 233). A psycopg-pool pool
+  (new pinned dependency, 3.3.3) is on by default in production only
+  (`NOCTORNAL_DB_POOL=on` or `off`), holds at most `NOCTORNAL_DB_POOL_MAX`
+  connections a process (default 10, 1 to 50) and answers a request that waits
+  `NOCTORNAL_DB_POOL_TIMEOUT` (default 10 seconds, 1 to 60) with a 503 and
+  `Retry-After: 1`. The number allowed to wait is capped below the threadpool so
+  waiters cannot starve the requests that hold a connection. Every connection that
+  comes back is rolled back, reset, and read back against what it reported when new
+  (bound to nobody, same user, role and settings, no lock, LISTEN, prepared
+  statement, cursor or temporary table); one that differs is closed and replaced.
+  A pooled connection never prepares a statement. The live channel's LISTEN
+  connection, the websocket helpers and every system connection are still opened
+  per use. PgBouncer in transaction mode is not supported, because the row-security
+  binding is a session setting. CI runs the row-security, binding, authorisation,
+  sample-origin, download-ticket and break-glass suites a second time with the pool
+  on. Nothing was measured under load.
+
+### Storage without MinIO
+
+- **Another S3 store can hold evidence** (decision 235). `NOCTORNAL_OBJECT_STORE`
+  is `minio` (the default, nothing changes on the shipped stack) or `s3`, which
+  reads a refused write to a locked version by state, the bucket's lock
+  configuration and the version's retention or hold, with a delete-marker
+  permission control so a plain AccessDenied never counts as proof. `OBJECT_STORE_*`
+  names are accepted beside `MINIO_*`, and a boot with the two disagreeing is
+  refused. All storage goes through one adapter, the only module that imports the
+  minio SDK. A conformance suite (`apps/api/store_conformance`) runs against any
+  endpoint by environment variable and passed 23 of 23 on the pinned MinIO and on
+  Zenko CloudServer 8.8.32, whose in-memory backend is not a recommendation for
+  production. `scripts/object_store_provision.py` makes and checks the five buckets,
+  `scripts/object_store_check.py` is a read-only preflight, and
+  `infra/production/compose.external-store.yml` runs the production stack without
+  the bundled MinIO. The operator page is docs/22.
+- **A store somebody else operates holds no AMBER_STRICT or RED until counsel
+  declares it.** Each new exhibit's lodging custody row names the store's profile
+  and host (rows already written are not rewritten), and a new readiness row,
+  `object_store_custody_declared`, fails while an outside store has no declared
+  operator, jurisdiction and legal-process contact. Fixes found on the way: a
+  delete in a versioned working bucket removes every version instead of leaving
+  bytes behind a marker, and a denied or unreachable raw read is no longer reported
+  as a missing object.
+- **A restore puts exhibits and preserved samples back where reads look, and records
+  where they went** (decision 240, 0198 and 0199). A backup mirror keeps the bytes of
+  an object and not the version the store gave it, and an upload cannot choose its
+  version id, so an exhibit restored into a new store read as missing and raised an
+  integrity alarm, and a preserved sample's retrieval read a version its store never
+  had. The one recovery was an owner step that set every `storage_version_id` to NULL,
+  which made reads take whatever was newest under a key and undid the 0139 pin for
+  good; nothing restored a preserved sample. `scripts/restore_object_versions.py` puts
+  each mirrored object into the new store after proving it: an exhibit's SHA-256 and
+  BLAKE3 must match its row and its hash-chained ACQUIRED row, and a sample's
+  ciphertext must open under its own data key to the size, SHA-256 and recorded SHA-1
+  and MD5 of the sample, with the plaintext only in memory. An exhibit goes in under a
+  COMPLIANCE lock never shorter than the one it had, a sample under a legal hold set
+  in the put and read back, and each is read back by its own version id and proved
+  again before anything is recorded. The version an object was lodged as stays on its
+  row; one `RESTORED` row (custody for an exhibit, access for a sample) says where the
+  bytes live now, which `core.evidence_current_version` and
+  `lab.sample_current_preserved_version` resolve, so the log reads lodged as X,
+  restored as Y, by whom, when and from where. The one column a restore moves on
+  `core.evidence` is `retention_until`, and only forward. Only the system role may
+  write such a row, and a forged one buys nothing because every read still checks the
+  digests. The tool is a dry run unless `--apply`, which needs an active holder of
+  `retention.manage` (`--actor`) and an authority reference (`--authority`). It adopts
+  a verified version an interrupted run left instead of putting a second locked one;
+  `--limit` counts only the objects it restores, so repeated batches reach the rest;
+  it never restores a purged exhibit; it refuses a sample's bucket other than the
+  row's; it refuses AMBER_STRICT and RED on an undeclared outside store; and it can
+  delete nothing, lift no hold and shorten no lock, with a restore account whose
+  policy (`infra/production/README.md`) grants none of them, proved on the dev MinIO.
+  The sample access ledger shows a restored sample's line and not the host, account or
+  authority behind it. The register's lock column and the exhibit custody card know
+  the new object's lock. The README's owner step is withdrawn. 0198 and 0199 are
+  reversible on an empty database and refuse, naming a count and no value, over a
+  database that has restored. The tool has run against the bundled MinIO only.
+
+### Running on a cluster
+
+The application is laid out for a cluster, and no cluster is shipped (decision 239).
+The owner asked for the piping for an agency that wishes to use Kubernetes. Nothing
+here is a manifest, every setting below does nothing until it is set, and the compose
+stack's file, behaviour and tests are unchanged. Nothing here has run on a cluster.
+
+- **`GET /readyz` answers whether a pod can serve.** It is 200 only when a connection
+  with the process's own `DATABASE_URL` answers within 2 seconds and
+  `public.alembic_version` holds exactly the heads of `db/migrations`, otherwise 503.
+  It names no version, revision or reason, asks nothing of Redis, the store, the proxy
+  or the worker, and holds its verdict 5 seconds per process. One caller asks the
+  database at a time; a caller that finds the question in flight is answered with the
+  last verdict, or not ready when there is none, and never waits, so an
+  unauthenticated flood costs one database connection a window and cannot park the
+  shared threadpool. It is never rate limited as `/healthz` is, and the sample origin
+  serves it too. `scripts/wait_for_schema.py` asks the same question of a pod that
+  serves no HTTP (an init container): exit 0 at head, 1 when `--wait` ran out, 2 when
+  the environment is refused.
+- **The analysis worker has a second transport beside its Unix socket: TCP with mutual
+  TLS 1.3.** `NOCTORNAL_ANALYSIS_LISTEN` on the worker, `NOCTORNAL_ANALYSIS_ADDR` on
+  the api, the collector and lab triage, with `NOCTORNAL_ANALYSIS_TLS_CERT`, `_KEY`
+  and `_CA` on both. There is no plaintext form. The channel carries decrypted sample
+  bytes and is fenced three ways: a caller resolves the host once and dials only an
+  answer that is loopback or inside the declared networks, and dials the address it
+  checked; it trusts the channel's own CA and never the system roots; and it requires
+  TLS 1.3 with a client certificate. The worker refuses a wildcard listen address, a
+  key a group or another user can read, and a certificate file it cannot read. At most
+  8 connections may be in their handshake at once, a newer one ends the oldest, and
+  one past its handshake is never touched, so a peer with no certificate cannot hold
+  the worker's 32 connections; handshake failures are logged once per 10 seconds with
+  a count. Any certificate the CA issued may call the worker, so that CA is the
+  channel's alone, and the pod needs an ingress NetworkPolicy that admits only the
+  api's pods, which nothing in the register proves. The worker's environment
+  allow-list gains the kubelet's nine names by exact name; any other name, a service
+  account token variable included, is still refused, so the worker's pod sets
+  `enableServiceLinks: false`.
+- **`sample_static_analysis` judges a TCP worker by its self-test, not its interface
+  list.** At most one interface beside loopback, and the child inside the worker tries
+  the database host and the egress canary, either of which being answered fails the
+  row as not isolated, with the action to apply a NetworkPolicy that allows the pod no
+  egress. The readiness process resolves those names itself and hands the child
+  addresses; a name that does not resolve counts as not tried, and in TCP mode the row
+  fails, naming what was not tried, unless the database host (and the canary, when
+  declared) was really tried and not answered. A pids limit a pod's container cannot
+  read may be declared in `NOCTORNAL_ANALYSIS_PIDS_LIMIT`, only where the cgroup gives
+  no number and only where `KUBERNETES_SERVICE_HOST` is set (anywhere else the worker
+  refuses to start with it set); the row passes it with a caveat that it was declared
+  and not read, to be matched by the nodes' `podPidsLimit`.
+- **`egress_boundary` can rest on a NetworkPolicy.** A pod has a default route
+  whatever its policy says, so the route-table rule would be red in every pod and
+  could not tell a plugin that ignores NetworkPolicy from one that enforces it. With
+  `NOCTORNAL_EGRESS_BOUNDARY=network_policy` and `NOCTORNAL_EGRESS_CANARY=HOST:PORT`,
+  after the proxy half passes, the row makes one bare connection to the canary:
+  unanswered for 3 seconds passes; answered fails as 'NetworkPolicy is not enforced
+  for this pod'; a refusal, an unreachable address, a name that does not resolve and
+  an address outside the declared networks fail as 'cannot tell'. An unanswered
+  connection is also what a canary that is not running looks like, so the operator
+  confirms once, from a pod the policy allows, that it answers. The mode is honoured
+  only where `KUBERNETES_SERVICE_HOST` is set and is refused at start in production
+  without it or without a canary; unset, the route-table rule is exactly what it was.
+  The caveat names the cluster's DNS resolver, which forwards names outside the
+  cluster to its upstream.
+- **A pod must declare the cluster's own networks.** In production
+  `NOCTORNAL_EGRESS_INTERNAL_CIDRS` defaults to the compose subnets, which are no
+  network in a cluster, so a hostile forum name resolving into the service network
+  would have passed the internal-address check. In a pod a blank list, or one that
+  holds no network the service address falls in, is refused at start by the api, the
+  egress proxy and every job that routes a connection. The migration job, the sample
+  origin, a job that sends nothing out and the schema waiter are not asked; outside a
+  pod nothing changes. `.svc` is a special name, and `analysis-worker`, `collector`
+  and `egress-canary` are reserved service names that no integration rule may name.
+- The readiness register is still 51 checks; no row is new, and there is no migration,
+  no schema change and no new dependency. `infra/production/README.md` gains 'Health
+  and readiness endpoints', 'The worker over TCP, for a pod of its own', 'Under
+  Kubernetes: a NetworkPolicy is the boundary' and 'On a cluster: the piping, and
+  nothing else', which maps each compose guarantee to the setting that holds it for
+  the later manifests step. docs/17 gains the rows 'no Kubernetes path' and 'the
+  worker's TCP channel'.
+
+### The collection watches
+
+- **A watch can be stopped, resumed and edited.** `POST .../watches/{watch_id}/stop`
+  and `/resume` and `PATCH .../watches/{watch_id}` sit behind `watch.manage` and the
+  case's collection read gate; any collection manager on the case may change any
+  watch of it. Stop is a flag and works on a closed case, because the collector
+  keeps matching one; resume and edit are content writes a closed case refuses. An
+  edit changes name, keywords, patterns, selectors, priority and repeat window,
+  never the source, kind or target, obeys the rules a new watch does and writes by
+  compare-and-set. Each change is audited (`WATCH_STOPPED`, `WATCH_RESUMED`,
+  `WATCH_EDITED`); a stop or resume records where the watch is aimed, an edit the
+  fields it changed and counts, and none a term or the name. An edit made while
+  someone else changed the watch is refused with a 409 and writes nothing.
+- **A poll stamps `last_hit_at` only on the watches that hit.** It stamped every
+  watch of the source when any one hit.
+- **A watch pattern says what bounds it.** A pattern is stopped by a 5 second CPU
+  limit (Linux and macOS), an 8 second wall clock per batch of texts and a 30 second
+  budget per run, and one that does not finish is tried again, at the same cost, on
+  every run until its watch is edited or stopped. docs/04, the module docstring and
+  the run warning say so, and a test holds the figures to the constants. The CPU
+  test runs on Linux only and has not been run.
+
+### The migrations
+
+Fifteen revisions, all on the way to head 0199, each with a downgrade:
+
+- `0185` rewrites the comment on `core.node_merge_edge.deleted_by_merge` to name both
+  reasons a merge sets a tie aside. No data changes.
+- `0186` takes every UPDATE on a column of `core."case"` from the request role.
+- `0187` makes `collect.collector_heartbeat` read-only to the request role.
+- `0188` makes `core.embedding_pending` read-only to the request role and its
+  triggers definers.
+- `0189` queues a YARA compile only through `lab.yara_compile_enqueue`.
+- `0190` creates an ingest batch only through `ingest.batch_accept`, which holds the
+  key's proof.
+- `0191` adds `iam.case_leads(uuid)`, the Lab's read of a case's leads.
+- `0192` puts `iam.case_assignment` under a read row policy.
+- `0193`, `0194` and `0195` add each hold's lift epoch and a guard that refuses a
+  lift no consumed approval accounts for: exhibit, case and collected document.
+- `0196` adds the permission `comms.minimise.oversee` and grants it to
+  `SECURITY_OFFICER`.
+- `0197` adds `deception.email_message.auth_basis` and the check that a new verdict
+  carries one, `NOT VALID` so earlier rows stand.
+- `0198` adds `core.evidence_current_version` and a guard that lets only the system
+  role write a `RESTORED` custody row, which a restore uses to say where an
+  exhibit's bytes now live. It refuses a downgrade over a restored exhibit.
+- `0199` adds `RESTORED` to the sample access actions, `lab.sample_current_preserved_version`
+  and the same guard for a preserved sample. It refuses a downgrade over a restored
+  sample.
+
+- **A migration's search path ends with its revision.** 77 statements in 53 released
+  revisions said `SET search_path`, which outlives the transaction that ends a
+  revision. They say `SET LOCAL search_path` now, and a test fails on a session-wide
+  one. Nothing used the carried path, and `db/schema.sql` did not change.
+- **A downgrade that cannot rebuild its key names a count, never the key.** The
+  downgrades of 0133, 0134, 0141 and 0147 rebuild an older key that cannot hold two
+  rows that differ only by labels (0141's also two exhibits of the same bytes in one
+  case). Postgres's unique violation printed the key into the job log, which could be
+  a selector value or a room's external id. Each now counts the collisions, stops
+  before it changes anything and says `refusing to downgrade NNNN:` with the number.
+  `db/README.md` gives the queries that find the rows by id. Each revision commits
+  on its own, so a downgrade across several has already undone the ones above the
+  one that refuses: the database sits at that revision, `migrations_at_head` fails,
+  and `alembic upgrade head` returns it.
+
+### The console
+
+- **Lifting a hold is four steps in the place the hold is.** The exhibit card, the
+  case header's Hold dialog and a collected document's card offer **Ask for a second
+  signature to lift**, then **Waiting for a second person until** a UTC time with
+  **Withdraw the request**, **Review the request to lift this hold** for the
+  colleague who may sign, and **Lift the legal hold (approved by** a name**)** for
+  the person who asked. A document's notice asks for a recent sign-in first.
+- **Minimisation is said where the case is.** Closing or archiving a case with
+  conversations above everyone assigned raises a warning that stays until dismissed,
+  and the case record has a Minimisation row, both in the words the case's
+  withheld-disclosure setting allows. The Security officer's Oversight gains
+  **Minimisation gaps**, which names a case code, its status, when it closed, how
+  many conversations, the highest TLP they need, how many Lead investigators are
+  assigned and how many cleared ones sit elsewhere, and never a conversation, a
+  platform, a compartment or a name. The officer's notice has an **Open Oversight** button
+  that goes there.
+- **Watch rows carry Stop or Resume and Edit** on the Collected tab.
+- **The Connection log's footer and Verify the chain** say that some rows are not
+  shown or counted, and a chain check for such a reader says every row was checked.
+
+### Readiness
+
+- **The register has 51 checks, five more.** `conversations_minimisable`,
+  `audit_pepper_set`, `internal_hops_encrypted`, `object_store_custody_declared` and
+  `mail_stamp_key`, none blocking. `sample_static_analysis` also fails now when
+  yara-x is installed and the worker's scan fails, and both YARA caveats say a
+  production image built before this release has none and needs `up -d --build`.
+
+### Small fixes
+
+- **A call record gates both its exhibits.** `POST /cases/{id}/deception/calls`
+  checked neither `evidence_id` nor `recording_evidence_id` against the case or the
+  caller's labels, so a caller holding `evidence.upload` could link any exhibit in
+  the system to a call, and an unknown id was a 500. Both are gated as a capture's
+  exhibits are: another case's exhibit, one above the caller and one that does not
+  exist answer the same 404 and write the same denial row. A call that names an
+  exhibit now needs `evidence.read` as well. An exhibit id that is not a UUID is a
+  422, and a capture's `egress_profile_id` that names no profile is a 422 sentence.
+- **Propose from a call reads that call by id.** It fetched the newest 500 calls and
+  searched them, so an older call answered "no such call".
+- **An ingest key's allowlist reads the client address the rest of the product
+  does.** At one declared proxy it is the socket peer uvicorn resolved, and the
+  header is never read; at two or more, the entry counted from the right of
+  `X-Forwarded-For`, only when the chain ends at the peer. A key with an allowlist
+  is still refused when no address can be determined. Two hops needs the API
+  reachable only through the proxies, which the production compose file enforces.
+- **The egress authorisation no longer queries `information_schema` on every call**
+  to learn whether `collect.source` has a `compartments` column. It has had one since
+  0163, and a test fails if it is renamed.
+- **The documents say what the product is.** The Dockerfile says ten services from
+  one image, not five commands. `ROADMAP-REMAINING.md` lists Beta 1.4 to 1.5c and
+  names 1.5c the latest release. docs/17's "Known residuals at Beta 1.1" is "Known
+  residuals". The README names the four blocking readiness checks in its first-run
+  notes.
+
+### What the round did not do
+
+- It did not close lab-6, the 409 that tells a caller whether a sample is held, which
+  stays in docs/17 as stated and not fixed.
+- It did not ship Kubernetes manifests, and nothing has run on a cluster: the
+  application's side is built (decision 239) and the manifests are a spec only, as
+  are the later steps of storage without MinIO (retiring the mc-based
+  provisioning, a CI leg for the conformance suite, the boundary and exit
+  questions). The restore tool has run on the bundled MinIO only.
+- It did not build the `authz.denied` meter, and it left the one-visible-one-hidden
+  merge residual, the console re-requesting an id that has gone, and the other
+  `information_schema` probes (`egress_admin.py`, `egress_ledger.py`,
+  `egress_routes.py`) as residuals.
+- It did not make the Linux CPU-limit test for a watch pattern run, run the Postfix
+  mail stamp filter on a Postfix, bring up the production stack with the new TLS and
+  application image end to end, or run a pooled load test. Its limits are in docs/17.
+- It leaves the owner's judgements in docs/17's Open section, and the Known
+  residuals marked as decisions, as they were.
+- It did not run the whole suite on the integrated head; each unit ran the files it
+  touched and the files that read what it changed. The test count at this head is
+  9076 (`def test_` functions).
+
+### Upgrading from Beta 1.5c
+
+Read this before `up`. An upgrade that skips a step either stops by name or, for the
+mail stamp, records less.
+
+```sh
+git pull
+sudo python3 scripts/internal_tls.py migrate
+sudo python3 scripts/internal_tls.py check
+sudo bash release/install.sh --production-secrets
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml down
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+```
+
+- `internal_tls.py migrate` makes the CA and the three server certificates, and
+  `--production-secrets` writes `NOCTORNAL_AUDIT_PEPPER`, adds `sslmode=verify-full`
+  to every DSN naming `postgres` and rewrites a bundled `REDIS_URL` as `rediss://`.
+  It keeps a backup of each file. Without the pepper the API refuses to start and
+  names the variable. Add `-f infra/production/compose.acme.yml` to both compose
+  commands under ACME. The `down` is needed because two networks are added and
+  Caddy's address moves. Move `tls/ca/ca.key` off the host afterwards.
+- `--build` is needed once even if nothing else changed: an image built before this
+  round has no yara-x and keeps its tag.
+- Run `alembic upgrade head` (the migration job does). A downgrade of 0133, 0134, 0141
+  or 0147 may now refuse with a count.
+- After restoring a backup, do not set `storage_version_id` to NULL as the schema
+  owner any more. Run `scripts/restore_object_versions.py`, a dry run first
+  (decision 240).
+- Uploaded mail records no verdict until the stamp is deployed
+  (`infra/production/mail-stamp`).
+- The request pool is on in production by default. `NOCTORNAL_DB_POOL=off` restores a
+  connection per request.
+- `withheld` is gone from the connection log's answer; `seq` and the verify answer's
+  `rows` can be null.
+- On a development machine the installers write the pepper into `.env.local` and
+  install pip from the hashed file; `psycopg-pool` joins the pinned set.
+
 ## Beta 1.5c: 2026-11-13
 
 A console release on Beta 1.5b, still version 0.9.5. It changes how the console

@@ -14,9 +14,10 @@ the worker starts the child with `run_local`, so the parsers, their limits and t
 never fork. In the worker the child also runs as a uid of its own, under a task limit
 (analysis_worker says why).
 
-`runner_choice`: NOCTORNAL_ANALYSIS_SOCKET set means isolated; unset, development runs locally.
+`runner_choice`: NOCTORNAL_ANALYSIS_SOCKET (a Unix socket) or NOCTORNAL_ANALYSIS_ADDR (TCP with
+mutual TLS 1.3, below) set means isolated; unset, development runs locally.
 Unset in production is not a fallback: every analysis is refused, nothing is decrypted or parsed,
-and the readiness row `sample_static_analysis` says why, until the socket is set or
+and the readiness row `sample_static_analysis` says why, until one is set or
 NOCTORNAL_ANALYSIS_LOCAL=1 accepts the local child (reported as not ready). A worker that does not
 answer is refused the same way, never replaced by a local child: a silent fallback would put the
 hostile bytes back beside the secrets on the day the sandbox broke. config.verify_environment
@@ -30,15 +31,27 @@ is capped before it is made and bounded by a deadline and an idle limit, and not
 says is believed beyond its shape: an unknown failure, a wrong id or an overlong output is
 `worker_bad_answer`. A Unix socket on a volume is not an outbound connection
 (test_egress_single_exit names this module for that reason).
+
+The second transport is for a worker that is a pod of its own, where no volume is shared (decision
+239): the same frames over TCP under mutual TLS 1.3 (NOCTORNAL_ANALYSIS_ADDR for a caller,
+NOCTORNAL_ANALYSIS_LISTEN for the worker, each with a certificate, a key and a CA path). It carries
+decrypted sample bytes and is a connection that is neither HTTP through the egress proxy nor a
+volume, so a caller fences it three ways: it dials only an address that is loopback or inside the
+deployment's declared networks (`egress_policy.internal_networks`), and dials the address it checked,
+never a second lookup; it trusts the channel's own CA and never the system roots; and it requires TLS
+1.3 with a client certificate. There is no plaintext form. Any certificate the CA issued may call the
+worker, so that CA is the channel's alone.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import re
 import signal
 import socket
+import ssl
 import stat
 import struct
 import subprocess
@@ -48,6 +61,9 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+
+from noctornal_api import egress_policy
+from noctornal_api.egress_policy import hostport
 
 log = logging.getLogger("noctornal.analysis")
 
@@ -59,6 +75,16 @@ MIB = 1 << 20
 
 SOCKET_ENV = "NOCTORNAL_ANALYSIS_SOCKET"
 LOCAL_ENV = "NOCTORNAL_ANALYSIS_LOCAL"
+#: The TCP transport: a caller's HOST:PORT, the worker's own address to listen on, and the three files
+#: both sides hold (absolute paths). Mutual TLS 1.3 is the only form; see the module docstring.
+ADDR_ENV = "NOCTORNAL_ANALYSIS_ADDR"
+LISTEN_ENV = "NOCTORNAL_ANALYSIS_LISTEN"
+TLS_CERT_ENV = "NOCTORNAL_ANALYSIS_TLS_CERT"
+TLS_KEY_ENV = "NOCTORNAL_ANALYSIS_TLS_KEY"
+TLS_CA_ENV = "NOCTORNAL_ANALYSIS_TLS_CA"
+TLS_ENV = (TLS_CERT_ENV, TLS_KEY_ENV, TLS_CA_ENV)
+#: The longest a TLS handshake may take in all, on either side. A module attribute so a test can shrink it.
+HANDSHAKE_TIMEOUT_S = 5.0
 #: sun_path is 108 bytes on Linux and 104 on macOS; a path that does not
 #: fit is refused by name rather than truncated by the kernel.
 SOCKET_PATH_MAX = 100
@@ -68,7 +94,8 @@ SOCKET_PATH_MAX = 100
 HAS_UNIX = hasattr(socket, "AF_UNIX")
 
 NOT_CONFIGURED = (
-    "No isolated analysis worker is configured (NOCTORNAL_ANALYSIS_SOCKET), "
+    "No isolated analysis worker is configured (NOCTORNAL_ANALYSIS_SOCKET, or "
+    "NOCTORNAL_ANALYSIS_ADDR for a worker reached over mutual TLS), "
     "and this production deployment does not parse hostile input beside its "
     "own secrets, so nothing was analysed; run the analysis-worker service, "
     "or set NOCTORNAL_ANALYSIS_LOCAL=1 to parse in a local child on this "
@@ -81,6 +108,27 @@ WORKER_SILENT = (
     "The isolated analysis worker did not answer on its socket "
     "(NOCTORNAL_ANALYSIS_SOCKET), so nothing was analysed; start the "
     "analysis-worker service and read its log")
+WORKER_SILENT_TCP = (
+    "The isolated analysis worker did not answer over mutual TLS "
+    "(NOCTORNAL_ANALYSIS_ADDR), so nothing was analysed; start the "
+    "analysis-worker and read its log, and check that its certificate and "
+    "this process's were issued by the one CA both hold")
+
+
+@dataclass(frozen=True)
+class TcpTarget:
+    """A worker reached over TCP with mutual TLS: where, and the three files this side presents and
+    trusts. `own_listener` is the worker's own `--check` dialling the listener it just opened, where no
+    network fence and no name check apply (nothing is reached that the worker is not)."""
+    host: str
+    port: int
+    cert: str
+    key: str
+    ca: str
+    own_listener: bool = False
+
+    def __str__(self) -> str:
+        return f"[{self.host}]:{self.port}" if ":" in self.host else f"{self.host}:{self.port}"
 
 
 @dataclass(frozen=True)
@@ -93,6 +141,13 @@ class RunnerChoice:
     production: bool = False
     #: Why `refused`, in a sentence that names variables and never a value.
     reason: str | None = None
+    #: The worker reached over mutual TLS, when NOCTORNAL_ANALYSIS_ADDR chose it.
+    address: TcpTarget | None = None
+
+    @property
+    def target(self) -> str | TcpTarget | None:
+        """What `run_isolated` and `hello` dial: the socket's path, or the TCP target."""
+        return self.address if self.address is not None else self.socket_path
 
 
 def _production(env: Mapping[str, str]) -> bool:
@@ -101,19 +156,50 @@ def _production(env: Mapping[str, str]) -> bool:
     return is_production(env)
 
 
+def tls_problem(env: Mapping[str, str], variable: str) -> str | None:
+    """Why the three TLS paths, as set, cannot serve the transport `variable` names: one of them
+    missing, or not an absolute path. None when all three are. The sentence names the variables and
+    never a value."""
+    missing = [name for name in TLS_ENV if not env.get(name, "").strip()]
+    if missing:
+        return (f"{variable} is set and {', '.join(missing)} "
+                f"{'is' if len(missing) == 1 else 'are'} not: the channel is mutual TLS and has no "
+                f"plaintext form, so it needs {', '.join(TLS_ENV)} together")
+    for name in TLS_ENV:
+        value = env[name]
+        if value != value.strip() or "\x00" in value or not os.path.isabs(value):
+            return f"{name} must be an absolute path to a file"
+    return None
+
+
 def setting_problem(env: Mapping[str, str] | None = None) -> str | None:
-    """Why the two settings, as SET, cannot be used; None when they can or
+    """Why the settings, as SET, cannot be used; None when they can or
     are unset. The one reader of their shape: the runner refuses on it and
     a production boot refuses on it (config.verify_environment). Whether an
-    UNSET socket is acceptable is `runner_choice`'s question, not this."""
+    UNSET socket is acceptable is `runner_choice`'s question, not this.
+
+    At most one of the socket, the address (the TCP transport) and the local child is set, and an
+    address comes with the three TLS paths."""
     env = os.environ if env is None else env
     raw = env.get(SOCKET_ENV, "")
+    addr = env.get(ADDR_ENV, "")
     local = env.get(LOCAL_ENV, "").strip()
     if local and local != "1":
         return f"{LOCAL_ENV} must be 1 or unset"
     if raw.strip() and local:
         return (f"{SOCKET_ENV} and {LOCAL_ENV} are both set, so it is not "
                 f"said whether analysis runs in the isolated worker or here")
+    if addr.strip() and local:
+        return (f"{ADDR_ENV} and {LOCAL_ENV} are both set, so it is not "
+                f"said whether analysis runs in the isolated worker or here")
+    if addr.strip() and raw.strip():
+        return (f"{SOCKET_ENV} and {ADDR_ENV} are both set, so it is not "
+                f"said which transport reaches the isolated worker")
+    if addr.strip():
+        if addr != addr.strip() or hostport(addr) is None:
+            return (f"{ADDR_ENV} must be HOST:PORT, a DNS name or an IP address and a "
+                    f"port (an IPv6 address in square brackets)")
+        return tls_problem(env, ADDR_ENV)
     path = raw.strip()
     if not path:
         return None
@@ -133,6 +219,11 @@ def runner_choice(env: Mapping[str, str] | None = None) -> RunnerChoice:
     problem = setting_problem(env)
     if problem:
         return RunnerChoice("refused", production=production, reason=problem)
+    addr = env.get(ADDR_ENV, "").strip()
+    if addr:
+        host, port = hostport(addr)
+        return RunnerChoice("isolated", production=production, address=TcpTarget(
+            host, port, env[TLS_CERT_ENV], env[TLS_KEY_ENV], env[TLS_CA_ENV]))
     path = env.get(SOCKET_ENV, "").strip()
     if path:
         if not HAS_UNIX:
@@ -619,6 +710,136 @@ def _connect_unix(path: str):
     return sock
 
 
+def _stop_socket(sock) -> None:
+    """End a connection from another thread, so a read or a handshake blocked on it returns. The
+    base class's shutdown, because an SSLSocket's own would drop its TLS state under a thread that
+    is using it."""
+    try:
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+#: How long a handshake that can be cancelled waits for its peer before it looks at the flag again.
+HANDSHAKE_POLL_S = 0.02
+
+
+def tls_handshake(context: ssl.SSLContext, raw, *, server_side: bool,
+                  server_hostname: str | None = None, cancelled=None):
+    """`raw` wrapped in `context` with its handshake finished within HANDSHAKE_TIMEOUT_S in all, not
+    per read: a peer that trickles one byte at a time is ended at the deadline. Raises OSError
+    (`ssl.SSLError` is one) and closes `raw` when it fails.
+
+    `cancelled`, when given, is a function the handshake asks every HANDSHAKE_POLL_S: when it answers
+    True the handshake ends with a ConnectionAbortedError. It is how the worker makes room for a newer
+    connection (`analysis_worker.Worker._admit`): the thread ends its own handshake, as no thread has to
+    shut a socket under another's read, which wakes a blocked read on Linux and not everywhere."""
+    raw.settimeout(HANDSHAKE_TIMEOUT_S)
+    tls = None
+    try:
+        tls = context.wrap_socket(raw, server_side=server_side, server_hostname=server_hostname,
+                                  do_handshake_on_connect=False)
+        if cancelled is not None:
+            end = time.monotonic() + HANDSHAKE_TIMEOUT_S
+            tls.settimeout(HANDSHAKE_POLL_S)
+            while True:
+                if cancelled():
+                    raise ConnectionAbortedError("the handshake was ended to make room")
+                if time.monotonic() >= end:
+                    raise TimeoutError("the TLS handshake did not finish in time")
+                try:
+                    tls.do_handshake()
+                    break
+                except (TimeoutError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                    continue
+            tls.settimeout(HANDSHAKE_TIMEOUT_S)
+            return tls
+        timer = threading.Timer(HANDSHAKE_TIMEOUT_S, _stop_socket, args=(tls,))
+        timer.daemon = True
+        timer.start()
+        try:
+            tls.do_handshake()
+        finally:
+            timer.cancel()
+        return tls
+    except BaseException:
+        for sock in (tls, raw):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        raise
+
+
+def client_context(target: TcpTarget) -> ssl.SSLContext:
+    """The caller's side of the channel. Built directly and not with `create_default_context`, which
+    would load the system roots: the only certificate authority trusted is the channel's own, so a
+    certificate any public CA issued is refused whatever name it carries. TLS 1.3 at least, the
+    worker's certificate and its name checked, and this side's certificate presented."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.check_hostname = not target.own_listener
+    context.load_verify_locations(cafile=target.ca)
+    context.load_cert_chain(target.cert, target.key)
+    return context
+
+
+def server_context(cert: str, key: str, ca: str) -> ssl.SSLContext:
+    """The worker's side: TLS 1.3 at least, its own certificate, and a client certificate required
+    that the channel's CA issued (no other CA, and none from the system's roots)."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.load_verify_locations(cafile=ca)
+    context.load_cert_chain(cert, key)
+    return context
+
+
+def _connect_tcp(target: TcpTarget, *, env: Mapping[str, str] | None = None):
+    """A TLS connection to the worker, or OSError. The fence of a connection that is neither HTTP
+    through the egress proxy nor a volume: the name is resolved ONCE and every answer must be loopback
+    or inside the deployment's declared networks, or nothing is dialled; the address that was checked
+    is the one dialled (a second lookup could be answered otherwise); the certificate must chain to
+    the channel's own CA and name the configured host. A worker's own `--check` (`own_listener`)
+    dials only the listener it just opened and is not fenced."""
+    env = os.environ if env is None else env
+    infos = socket.getaddrinfo(target.host, target.port, type=socket.SOCK_STREAM)
+    if not target.own_listener:
+        try:
+            networks = egress_policy.internal_networks(env, production=_production(env))
+        except ValueError:
+            raise OSError("the declared networks are unusable") from None
+        for info in infos:
+            address = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+            if not egress_policy.is_own_address(address, networks):
+                raise OSError("outside the deployment's own networks")
+    if not infos:
+        raise OSError("no address")
+    context = client_context(target)
+    last: OSError | None = None
+    for family, socktype, proto, _canon, sockaddr in infos:
+        raw = socket.socket(family, socktype, proto)
+        raw.settimeout(CONNECT_TIMEOUT_S)
+        try:
+            raw.connect(sockaddr)
+            return tls_handshake(context, raw, server_side=False,
+                                 server_hostname=target.host)
+        except OSError as exc:
+            raw.close()
+            last = exc
+    raise last if last is not None else OSError("no address")
+
+
+def _connector(target, connect):
+    """The function that opens a connection to `target`: the caller's own (a test's), else this
+    module's, looked up now so a test can replace either."""
+    if connect is not None:
+        return connect
+    return _connect_tcp if isinstance(target, TcpTarget) else _connect_unix
+
+
 def _valid_reply(reply: dict, rid: str, stdout_cap: int) -> bool:
     if reply.get("v") != WIRE_VERSION or reply.get("id") != rid:
         return False
@@ -640,9 +861,9 @@ def _valid_reply(reply: dict, rid: str, stdout_cap: int) -> bool:
     return True
 
 
-def run_isolated(path: str, kind: str, header: dict, payloads: tuple = (), *,
+def run_isolated(path: str | TcpTarget, kind: str, header: dict, payloads: tuple = (), *,
                  wall_s: float, stdout_cap: int, connect=None) -> ChildResult:
-    """One request to the worker, answered as `run_local` answers. The
+    """One request to the worker (at a socket's path, or a TcpTarget), answered as `run_local` answers. The
     worker's own failures are `worker_unavailable` (no connection, the
     connection ended, or no answer by the deadline) and
     `worker_bad_answer`; what it says it refused is `worker_refused` or
@@ -662,7 +883,7 @@ def run_isolated(path: str, kind: str, header: dict, payloads: tuple = (), *,
     deadline = (started + float(wall_s) + QUEUE_WAIT_S + 2 * TRANSFER_BASE_S
                 + (sum(sizes) + int(stdout_cap)) / MIN_RATE)
     try:
-        sock = (connect or _connect_unix)(path)
+        sock = _connector(path, connect)(path)
     except OSError:
         log.warning("analysis request %s: the worker could not be reached", rid)
         return ChildResult(False, failure="worker_unavailable")
@@ -693,7 +914,7 @@ def run_isolated(path: str, kind: str, header: dict, payloads: tuple = (), *,
                        returncode=reply.get("returncode"))
 
 
-def hello(path: str, *, connect=None, timeout_s: float = CONNECT_TIMEOUT_S) -> dict:
+def hello(path: str | TcpTarget, *, connect=None, timeout_s: float = CONNECT_TIMEOUT_S) -> dict:
     """The worker's account of itself (`Worker.status`). Raises
     WorkerUnavailable. Short: `unavailable` asks it before a pass or a
     forum poll (remembering the answer briefly), readiness and the
@@ -702,7 +923,7 @@ def hello(path: str, *, connect=None, timeout_s: float = CONNECT_TIMEOUT_S) -> d
     rid = uuid.uuid4().hex
     deadline = time.monotonic() + 2 * timeout_s
     try:
-        sock = (connect or _connect_unix)(path)
+        sock = _connector(path, connect)(path)
     except OSError:
         raise WorkerUnavailable("unreachable") from None
     try:
@@ -731,7 +952,7 @@ def worker_request_cap(env: Mapping[str, str] | None = None, *,
     if choice.mode != "isolated":
         return None
     try:
-        status = hello(choice.socket_path, connect=connect, timeout_s=HELLO_TIMEOUT_S)
+        status = hello(choice.target, connect=connect, timeout_s=HELLO_TIMEOUT_S)
     except WorkerUnavailable:
         return None
     cap = status.get("max_request_bytes")
@@ -750,7 +971,7 @@ def run(kind: str, header: dict, payloads: tuple = (), *, wall_s: float,
         log.warning("analysis refused: %s", choice.reason)
         return ChildResult(False, failure="isolation_refused")
     if choice.mode == "isolated":
-        return run_isolated(choice.socket_path, kind, header, payloads,
+        return run_isolated(choice.target, kind, header, payloads,
                             wall_s=wall_s, stdout_cap=stdout_cap, connect=connect)
     result = run_local(header, payloads, wall_s=wall_s, stdout_cap=stdout_cap,
                        argv=argv)
@@ -761,7 +982,7 @@ def run(kind: str, header: dict, payloads: tuple = (), *, wall_s: float,
     return result
 
 
-#: socket path -> (monotonic expiry, verdict). See VERDICT_TTL_S.
+#: where the worker is (a socket path, or host:port) -> (monotonic expiry, verdict). See VERDICT_TTL_S.
 _verdicts: dict[str, tuple[float, str | None]] = {}
 _verdict_lock = threading.Lock()
 
@@ -789,17 +1010,18 @@ def unavailable(env: Mapping[str, str] | None = None, *, connect=None) -> str | 
         return choice.reason
     if choice.mode == "local":
         return None
-    path = choice.socket_path
+    target = choice.target
+    key = str(target)
     with _verdict_lock:
-        known = _verdicts.get(path)
+        known = _verdicts.get(key)
         if known is not None and time.monotonic() < known[0]:
             return known[1]
         try:
-            hello(path, connect=connect, timeout_s=HELLO_TIMEOUT_S)
+            hello(target, connect=connect, timeout_s=HELLO_TIMEOUT_S)
             verdict = None
         except WorkerUnavailable:
-            verdict = WORKER_SILENT
-        _verdicts[path] = (time.monotonic() + VERDICT_TTL_S, verdict)
+            verdict = WORKER_SILENT_TCP if choice.address is not None else WORKER_SILENT
+        _verdicts[key] = (time.monotonic() + VERDICT_TTL_S, verdict)
         return verdict
 
 
@@ -810,19 +1032,38 @@ def unavailable(env: Mapping[str, str] | None = None, *, connect=None) -> str | 
 #: The worker's own settings (read in analysis_worker).
 CONCURRENCY_ENV = "NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY"
 MAX_BYTES_ENV = "NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES"
+#: The pids limit the worker is told it runs under, for a pod, whose limit is on the pod's cgroup and
+#: reads as "max" from inside a container (decision 239). Used only where the cgroup gives no number.
+PIDS_LIMIT_ENV = "NOCTORNAL_ANALYSIS_PIDS_LIMIT"
 #: The worker's own settings, by exact name: a prefix match would let through a secret that
 #: happened to carry the prefix.
-WORKER_OWN_ENV = frozenset({SOCKET_ENV, CONCURRENCY_ENV, MAX_BYTES_ENV})
+#: The address a caller dials (ADDR_ENV) is a CALLER's setting and is not here: a worker holding it is
+#: refused like any foreign name.
+WORKER_OWN_ENV = frozenset({SOCKET_ENV, CONCURRENCY_ENV, MAX_BYTES_ENV, LISTEN_ENV, PIDS_LIMIT_ENV,
+                            *TLS_ENV})
+#: What a Kubernetes kubelet puts in every container of a pod once enableServiceLinks is false: the
+#: address of the cluster's API server, which it injects even then (the `kubernetes` master service),
+#: and the downward API's POD_IP when a manifest asks for it. With the default (true) it adds a set per
+#: Service of the namespace too (POSTGRES_SERVICE_HOST and the rest), which are not here and are
+#: refused: the worker's pod must set enableServiceLinks: false. By exact name, never a prefix (a prefix
+#: would let a service account token variable through). None is a secret, and the child never
+#: inherits one (`child_env` builds its environment from nothing). Without them the worker would
+#: refuse to start in every cluster.
+KUBELET_ENV = frozenset({
+    "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
+    "KUBERNETES_SERVICE_PORT_HTTPS", "KUBERNETES_PORT", "KUBERNETES_PORT_443_TCP",
+    "KUBERNETES_PORT_443_TCP_ADDR", "KUBERNETES_PORT_443_TCP_PORT",
+    "KUBERNETES_PORT_443_TCP_PROTO", "POD_IP"})
 #: The only variables the worker's environment may carry: what the base
 #: image and Docker set (GPG_KEY is the python image's release signing key
-#: fingerprint, public by design), and the worker's own settings. An
+#: fingerprint, public by design), the kubelet's, and the worker's own settings. An
 #: allow-list, not a deny-list: a variable nobody named is refused, so a
 #: credential added to the service later stops it rather than riding in.
 WORKER_ALLOWED_ENV = frozenset({
     "PATH", "HOME", "HOSTNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ",
     "container", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256",
     "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE",
-    "PYTHONPATH", "PIP_DISABLE_PIP_VERSION_CHECK"}) | WORKER_OWN_ENV
+    "PYTHONPATH", "PIP_DISABLE_PIP_VERSION_CHECK"}) | WORKER_OWN_ENV | KUBELET_ENV
 
 
 def foreign_environment(keys) -> list[str]:
@@ -833,9 +1074,11 @@ def foreign_environment(keys) -> list[str]:
 
 
 __all__ = [
-    "ChildResult", "HAS_UNIX", "KINDS", "LOCAL_ENV", "RunnerChoice",
-    "SANDBOX_FAILURES", "SOCKET_ENV", "WORKER_OWN_ENV", "WorkerUnavailable",
-    "child_env", "foreign_environment", "forget_verdicts", "hello",
-    "launch_argv", "run", "run_isolated", "run_local", "runner_choice",
-    "setting_problem", "unavailable",
+    "ADDR_ENV", "ChildResult", "HAS_UNIX", "KINDS", "KUBELET_ENV", "LISTEN_ENV", "LOCAL_ENV",
+    "PIDS_LIMIT_ENV", "RunnerChoice", "SANDBOX_FAILURES", "SOCKET_ENV", "TLS_CA_ENV",
+    "TLS_CERT_ENV", "TLS_ENV", "TLS_KEY_ENV", "TcpTarget", "WORKER_OWN_ENV", "WorkerUnavailable",
+    "child_env",
+    "client_context", "foreign_environment", "forget_verdicts", "hello", "hostport",
+    "launch_argv", "run", "run_isolated", "run_local", "runner_choice", "server_context",
+    "setting_problem", "tls_handshake", "tls_problem", "unavailable",
 ]

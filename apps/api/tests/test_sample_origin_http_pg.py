@@ -482,8 +482,8 @@ def test_the_sample_process_serves_downloads_and_nothing_else(
         conn, client, store, monkeypatch):
     """The sample origin exists so that no page with an analyst's session runs there. The process is the
     same codebase as the application, so it would otherwise serve the console, the login form and every
-    case route at the sample hostname. It refuses everything but the download, its preflight, /healthz
-    and the readiness register."""
+    case route at the sample hostname. It refuses everything but the download, its preflight, /healthz,
+    /readyz and the readiness register."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
     token, sample = _analyst(conn)   # a session, minted without HTTP
@@ -497,6 +497,7 @@ def test_the_sample_process_serves_downloads_and_nothing_else(
     r = client.post(f"{API}/auth/login", json={})
     assert r.status_code == 404, r.text
     assert client.get("/healthz").status_code == 200
+    assert client.get("/readyz").status_code == 200
     assert _download(client, token, sample.id).status_code == 200
     check = _readiness(conn, client)["sample_origin_configured"]
     assert "as the sample origin" in check["evidence"], check

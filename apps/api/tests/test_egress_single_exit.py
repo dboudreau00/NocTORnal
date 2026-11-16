@@ -58,9 +58,12 @@ ALLOWED = {
                         "class that refuses any other proxy, a local address or a "
                         "destination outside Telegram's networks (docs/20 section 8.4)",
     "analysis_runner.py": "the client of the isolated analysis worker: a Unix "
-                          "socket on a volume, never a network address",
-    "analysis_worker.py": "the isolated analysis worker's Unix socket listener; "
-                          "the worker has no network at all",
+                          "socket on a volume, or mutual-TLS TCP to an address that "
+                          "is loopback or inside the deployment's own declared "
+                          "networks, checked before it is dialled, trusting the "
+                          "channel's own CA alone (decision 239)",
+    "analysis_worker.py": "the isolated analysis worker's listener: a Unix socket, "
+                          "or one TCP address under mutual TLS 1.3; it dials nothing",
 }
 
 #: Script -> why it may start a program that opens connections of its own. The scripts run beside the

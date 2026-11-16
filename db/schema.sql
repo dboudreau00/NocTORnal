@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0197.
+-- GENERATED MIRROR of the schema at Alembic revision 0199.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0197
+-- Alembic revision: 0199
 -- =====================================================================
 
 --
@@ -2086,6 +2086,31 @@ BEGIN
 END $$;
 
 --
+-- Name: evidence_current_version(uuid); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.evidence_current_version(p_evidence uuid) RETURNS text
+    LANGUAGE sql STABLE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT CASE WHEN r.id IS NOT NULL THEN r.detail ->> 'new_version_id'
+              ELSE e.storage_version_id END
+    FROM core.evidence e
+    LEFT JOIN LATERAL (
+         SELECT c.id, c.detail
+           FROM core.evidence_custody c
+          WHERE c.evidence_id = e.id AND c.action = 'RESTORED'
+          ORDER BY c.id DESC LIMIT 1) r ON true
+   WHERE e.id = p_evidence
+$$;
+
+--
+-- Name: FUNCTION evidence_current_version(p_evidence uuid); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.evidence_current_version(p_evidence uuid) IS 'The object version a read of this exhibit asks for: where the newest RESTORED custody row put the verified bytes, else the version the exhibit was lodged as. NULL reads the latest (decision 240, 0198).';
+
+--
 -- Name: evidence_embedding_case(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -2307,6 +2332,40 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+--
+-- Name: guard_custody_restored(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.guard_custody_restored() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF NOT iam.rls_caller_exempt() THEN
+    RAISE EXCEPTION USING ERRCODE = 'insufficient_privilege', MESSAGE =
+      'core.evidence_custody: a RESTORED row is written by the restore job on a system connection, '
+      || 'never by a request';
+  END IF;
+  IF NOT (NEW.detail ? 'new_version_id') THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'core.evidence_custody: a RESTORED row names the version the restored object was given '
+      || '(new_version_id)';
+  END IF;
+  IF NEW.hash_verified IS DISTINCT FROM true THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'core.evidence_custody: a RESTORED row attests a read-back of the restored object that matched '
+      || 'the recorded hashes';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_custody_restored(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.guard_custody_restored() IS 'A RESTORED custody row redirects an exhibit''s reads, so only an exempt caller writes one, and only one that names the new version and attests a verified read-back (decision 240, 0198).';
 
 --
 -- Name: guard_evidence_anchors(); Type: FUNCTION; Schema: core; Owner: -
@@ -4504,6 +4563,41 @@ BEGIN
 END $$;
 
 --
+-- Name: guard_sample_restored(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_sample_restored() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF NOT iam.rls_caller_exempt() THEN
+    RAISE EXCEPTION USING ERRCODE = 'insufficient_privilege', MESSAGE =
+      'lab.sample_access: a RESTORED row is written by the restore job on a system connection, '
+      || 'never by a request';
+  END IF;
+  IF NOT (NEW.detail ? 'new_version_id') THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'lab.sample_access: a RESTORED row names the version the restored object was given '
+      || '(new_version_id)';
+  END IF;
+  IF (NEW.detail ->> 'verified') IS DISTINCT FROM 'true'
+     OR (NEW.detail ->> 'hold_confirmed') IS DISTINCT FROM 'true' THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'lab.sample_access: a RESTORED row attests a copy that opened to the sample''s SHA-256 and '
+      || 'reads back under a legal hold (verified and hold_confirmed)';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_sample_restored(); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.guard_sample_restored() IS 'A RESTORED access row redirects a preserved sample''s retrievals, so only an exempt caller writes one, and only one that names the new version and attests a verified, held copy (decision 240, 0199).';
+
+--
 -- Name: guard_screening_hash_delete(); Type: FUNCTION; Schema: lab; Owner: -
 --
 
@@ -4727,6 +4821,31 @@ END $$;
 --
 
 COMMENT ON FUNCTION lab.sample_access_numbered() IS 'Draws lab.sample_access.id as the owner, so neither runtime role holds the sequence and none can read the ledger''s volume from it (0175).';
+
+--
+-- Name: sample_current_preserved_version(uuid); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.sample_current_preserved_version(p_sample uuid) RETURNS text
+    LANGUAGE sql STABLE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT CASE WHEN r.id IS NOT NULL THEN r.detail ->> 'new_version_id'
+              ELSE s.preserved_version_id END
+    FROM lab.sample s
+    LEFT JOIN LATERAL (
+         SELECT a.id, a.detail
+           FROM lab.sample_access a
+          WHERE a.sample_id = s.id AND a.action = 'RESTORED'
+          ORDER BY a.id DESC LIMIT 1) r ON true
+   WHERE s.id = p_sample
+$$;
+
+--
+-- Name: FUNCTION sample_current_preserved_version(p_sample uuid); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.sample_current_preserved_version(p_sample uuid) IS 'The held version a retrieval of this sample reads: where the newest RESTORED access row put the verified ciphertext, else the version the sample was preserved as (decision 240, 0199).';
 
 --
 -- Name: sample_data_key(uuid); Type: FUNCTION; Schema: lab; Owner: -
@@ -8512,7 +8631,7 @@ CREATE TABLE lab.sample_access (
     archive_format text,
     detail jsonb DEFAULT '{}'::jsonb NOT NULL,
     actor_kind text DEFAULT 'USER'::text NOT NULL,
-    CONSTRAINT sample_access_action_known CHECK ((action = ANY (ARRAY['VIEWED_META'::text, 'DOWNLOADED'::text, 'SHARED'::text, 'DETONATED'::text, 'REJECTED'::text, 'ASSIGNED'::text, 'ANALYSED'::text, 'SCANNED'::text]))),
+    CONSTRAINT sample_access_action_known CHECK ((action = ANY (ARRAY['VIEWED_META'::text, 'DOWNLOADED'::text, 'SHARED'::text, 'DETONATED'::text, 'REJECTED'::text, 'ASSIGNED'::text, 'ANALYSED'::text, 'SCANNED'::text, 'RESTORED'::text]))),
     CONSTRAINT sample_access_actor_kind_known CHECK ((actor_kind = ANY (ARRAY['USER'::text, 'SYSTEM'::text]))),
     CONSTRAINT sample_access_system_actions CHECK (((actor_kind = 'USER'::text) OR (action = ANY (ARRAY['SCANNED'::text, 'VIEWED_META'::text, 'REJECTED'::text, 'ANALYSED'::text])))),
     CONSTRAINT sample_access_system_names_nobody CHECK (((actor_kind = 'SYSTEM'::text) = (actor_id IS NULL)))
@@ -12558,6 +12677,12 @@ CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments O
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON core.selector FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
+-- Name: evidence_custody custody_a_restored_exempt_only; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER custody_a_restored_exempt_only BEFORE INSERT ON core.evidence_custody FOR EACH ROW WHEN ((new.action = 'RESTORED'::text)) EXECUTE FUNCTION core.guard_custody_restored();
+
+--
 -- Name: evidence_custody custody_chain; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -13084,6 +13209,12 @@ CREATE TRIGGER preservation_authorisation_guarded BEFORE DELETE OR UPDATE ON lab
 --
 
 CREATE TRIGGER preservation_authorisation_no_truncate BEFORE TRUNCATE ON lab.preservation_authorisation FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_preservation_authorisation();
+
+--
+-- Name: sample_access sample_access_a_restored_exempt_only; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER sample_access_a_restored_exempt_only BEFORE INSERT ON lab.sample_access FOR EACH ROW WHEN ((new.action = 'RESTORED'::text)) EXECUTE FUNCTION lab.guard_sample_restored();
 
 --
 -- Name: sample_access sample_access_append_only; Type: TRIGGER; Schema: lab; Owner: -

@@ -142,6 +142,48 @@ past its review date rather than letting it roll on silently.
   row can never be sent. A provider test, which carries no case material,
   has no case clock and is never selected
 
+### Restoring exhibits and preserved samples from a backup
+
+A backup mirror keeps the bytes of an object and not the version the store gave them, and an upload cannot choose
+its version id, so an exhibit restored into a new object store reads as missing and raises an integrity alarm, and a
+preserved sample's retrieval reads a version its store never had. `scripts/restore_object_versions.py` puts the
+mirrored bytes into the new store and records where they now live (decision 240); the runbook is in
+`infra/production/README.md`.
+
+- Nothing on the exhibit is rewritten. Its hashes, its key and the version it was lodged as stay as lodging fixed them
+  (0140). The restore appends one `RESTORED` row to the hash-chained custody ledger: the version it replaced, the
+  version the store gave, the bucket, both digests, the size, the lock's end and why that end, the run, the authority
+  and the account that answers for it, and where the tool ran (the script, the host, the operating-system account).
+  Reads resolve the newest such row, else the lodged version, so the custody log shows lodged as X, restored as Y.
+- It runs as the system role and refuses to run without an active holder of `retention.manage` through a global role and
+  an authority reference an auditor can follow, recorded and not verifiable, as for the retention sweep. A dry run is the
+  default and writes nothing anywhere. Applying is explicit, because a COMPLIANCE lock cannot be taken back.
+- Nothing is put before the mirror file proves out: its size, its SHA-256 and its BLAKE3 must match the exhibit's row and
+  the hash-chained ACQUIRED row. A difference is refused and recorded (`EVIDENCE_RESTORE_REFUSED`, outcome DENIED, with
+  the reason: the file is missing, a digest or the size differs, the ACQUIRED row disagrees, a path leaves the mirror, the
+  store refused, or the store is outside the deployment and counsel has not declared it for AMBER_STRICT or RED). A version
+  of the key already in the store whose bytes verify is adopted instead of putting a second locked one, so a run
+  interrupted between the put and the record converges. The object is read back by its own version id and both digests
+  are recomputed before the database is written.
+- The new lock is never shorter than the longest the exhibit's custody rows record, and is otherwise what a lodging would
+  be given now; a recorded lock that had already ended is replaced by a fresh default period, and the row says so. The
+  day on the exhibit's row moves forward as a lock extension moves it.
+- A purged exhibit is never restored: the product destroyed those bytes on purpose, so the run counts it and names it
+  when the mirror still holds the file, which is then removed under the purge's authority. An exhibit recorded with no
+  version is listed and left, because its reads take the latest.
+- One `EVIDENCE_RESTORED` audit row per exhibit and one `RESTORE_RUN` row of counts, also when nothing was restored.
+  The tool deletes nothing, lifts no hold and shortens no lock, and the restore account's policy grants none of them.
+- A preserved sample goes the same way into the preservation bucket, and only into the bucket its row names. The
+  mirrored ciphertext must open, under the sample's own data key, to the size, the SHA-256 and, where the row records
+  them, the SHA-1 and MD5 of the sample; a sample has no BLAKE3, and the record says which digests proved it. The
+  plaintext exists in memory for the length of the hashes and is never written, rendered or logged (invariant 10). The
+  legal hold is set in the put and read back before anything is recorded, and the tool places no hold on an object it did
+  not put, so a copy already in place that carries no hold is refused and named for the operator to hold at the store.
+  The record is one `RESTORED` row in `lab.sample_access`, a USER row naming the account (0199), with
+  `SAMPLE_PRESERVED_RESTORED` in the audit log and `SAMPLE_PRESERVED_RESTORE_REFUSED`, outcome DENIED, for a refusal. A
+  retrieval resolves the newest such row, else the version the sample was preserved as, and still opens the ciphertext
+  to the sample's SHA-256 before it hands anything over.
+
 ## Subject rights and minimisation
 
 Even in criminal intelligence, incidental third parties exist and have

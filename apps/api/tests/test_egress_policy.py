@@ -231,6 +231,18 @@ def test_validate_rule_refuses_wide_foreign_reserved_and_internal_networks():
         assert "(s)" not in sentence
 
 
+@pytest.mark.parametrize("name", ["analysis-worker", "collector", "egress-canary", "egress-proxy",
+                                   "postgres", "redis", "minio", "api", "sample-origin"])
+def test_the_services_a_cluster_reuses_and_adds_are_reserved_from_integration_rules(name):
+    """The names a Kubernetes Service takes for the compose services, and the three it adds, are the
+    deployment's own and no route may name one, beside the compose names that were already."""
+    assert name in egress_policy.RESERVED_SERVICE_NAMES
+    for text in (f"{name}:443", f"{name}:8080"):
+        problems = validate_rule(parse_rule(text), kind="integration", production=True,
+                                 internal=internal_networks({}, production=True))
+        assert any("one of this deployment's own services" in p for p in problems), (text, problems)
+
+
 def test_localhost_is_a_development_integration_host_only():
     """CI and development send mail to a local Mailpit (ci.yml SMTP_HOST:
     localhost; the installers write 127.0.0.1), so both spellings are
@@ -316,9 +328,22 @@ def test_a_mapped_metadata_name_is_still_the_metadata_host():
 
 def test_special_names_are_refused_only_where_the_policy_says():
     special = RoutePolicy("persona", refuse_special_names=True, admission="proxy")
-    for host in ("localhost", "printer.local", "db.internal", "nas.home.arpa"):
+    for host in ("localhost", "printer.local", "db.internal", "nas.home.arpa",
+                 "postgres.noctornal.svc", "api.noctornal.svc.cluster.local"):
         _refused("blocked_name", check_destination, special, host, 443)
         assert check_destination(PUBLIC_POLICY, host, 443) is None
+
+
+@pytest.mark.parametrize("host, special", [
+    ("postgres.noctornal.svc", True), ("a.svc", True), ("svc", True), ("A.B.SVC", True),
+    ("x.svc.cluster.local", True), ("svc.example.com", False), ("mysvc.example.com", False),
+    ("a.svcs", False), ("example.com", False),
+])
+def test_svc_is_a_special_name(host, special):
+    """`.svc` is a cluster's own name, never a public one, so it is refused with the other special names
+    (`.svc.cluster.local` was already refused through `.local`; the short form was not). A label that merely
+    contains or begins with it is a public name."""
+    assert egress_policy._special_name(normalise_host(host)) is special
 
 
 def test_an_onion_name_needs_the_onion_flag():

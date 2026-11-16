@@ -131,3 +131,12 @@ def test_new_copy_has_no_dash_double_hyphen_or_s_in_brackets():
             assert not re.search(r"\s--(\s|$)", literal), literal
             assert "(s)" not in literal, literal
     assert "(s)" not in _object("GAP_STATUS_WORDS")
+
+
+def test_restored_has_words_of_its_own_and_names_the_person_who_answers_for_it():
+    line = _fn("custodyLine")
+    assert "case 'RESTORED':" in line
+    assert "Restored from a backup into the preservation store" in line
+    assert "under a legal hold" in line
+    # The row is a USER row, so the panel draws the account that answers for the restore, not the product.
+    assert "c.actor_kind === 'SYSTEM'" in _fn("custodyPanel")

@@ -155,12 +155,13 @@ _NOT_PUBLIC = tuple(BLOCKED_NETWORKS) + _NEVER_ADMISSIBLE + tuple(
 _GLOBAL_UNICAST_V6 = ipaddress.ip_network("2000::/3")
 
 #: The compose services (infra/production/compose.yml, infra/docker-
-#: compose.yml) plus the egress proxy. No integration rule may name
+#: compose.yml) plus the egress proxy, and the names a cluster's Services reuse for the same parts and adds
+#: for its own (the analysis worker, the collector and the egress canary). No integration rule may name
 #: one, except `localhost` outside production (see `validate_rule`).
 RESERVED_SERVICE_NAMES = frozenset({
     "postgres", "redis", "minio", "minio-init", "migrate", "api",
     "sample-origin", "cron", "caddy", "egress-proxy", "mailpit", "localhost",
-    "object-store-init",
+    "object-store-init", "analysis-worker", "collector", "egress-canary",
 })
 
 #: The production compose networks `noctornal`, `edge`, `frontend` (Caddy, api and
@@ -170,6 +171,49 @@ RESERVED_SERVICE_NAMES = frozenset({
 DEFAULT_INTERNAL_NETWORKS = ("172.31.243.0/24", "172.31.244.0/24", "172.31.247.0/24",
                              "172.31.248.0/24")
 INTERNAL_CIDRS_ENV = "NOCTORNAL_EGRESS_INTERNAL_CIDRS"
+#: A host and port that policy must not let a process reach (decision 239): the egress boundary in a pod and
+#: the analysis worker's isolation are each proved by a connection to it that must not be answered.
+CANARY_ENV = "NOCTORNAL_EGRESS_CANARY"
+#: How the egress boundary is proven. Unset, by the process's own route table (an application container of the
+#: compose stack has no default route). `network_policy`, in a pod only, by the canary: a pod has a default
+#: route whatever its NetworkPolicy says, so the table cannot tell, and a connection to a host the policy must
+#: not let it reach that goes unanswered is the proof (decision 239).
+BOUNDARY_ENV = "NOCTORNAL_EGRESS_BOUNDARY"
+BOUNDARY_NETWORK_POLICY = "network_policy"
+#: The kubelet puts this in every container of a pod, and nothing else tells a process that it is one, so it is
+#: what "in a pod" means for a setting that only a pod may use. It can be set by anyone who controls the
+#: environment, as every setting can: it only ever makes a check stricter, or is what a mode needs.
+POD_ENV = "KUBERNETES_SERVICE_HOST"
+
+
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+
+
+def hostport(raw: str) -> tuple[str, int] | None:
+    """`(host, port)` for `HOST:PORT` (a DNS name or an IPv4 address) or `[IPv6]:PORT`, or None for
+    anything else: no space, no scheme, no path, a port from 1 to 65535. The one reader of the shape:
+    an analysis worker's address, its listener's and the egress canary's."""
+    if not raw or raw != raw.strip() or not raw.isascii() or any(c.isspace() or ord(c) < 32
+                                                                  for c in raw):
+        return None
+    if raw.startswith("["):
+        host, closing, rest = raw[1:].partition("]")
+        if not closing or not rest.startswith(":"):
+            return None
+        port = rest[1:]
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            return None
+    else:
+        host, colon, port = raw.rpartition(":")
+        if not colon or not host or ":" in host or len(host) > 253:
+            return None
+        if not all(_HOST_LABEL.fullmatch(label) for label in host.rstrip(".").split(".")):
+            return None
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        return None
+    return host, int(port)
 
 
 class AddressClass(str, Enum):
@@ -188,6 +232,14 @@ def _unwrap(address: IPAddress) -> IPAddress:
 
 def _inside(address: IPAddress, networks: Iterable[IPNetwork]) -> bool:
     return any(address.version == n.version and address in n for n in networks)
+
+
+def is_own_address(address: IPAddress, networks: Iterable[IPNetwork]) -> bool:
+    """Whether `address` is loopback or inside one of `networks`, an IPv4-mapped IPv6 address read as the IPv4
+    address it carries. What a connection that is neither HTTP through the proxy nor a volume is held to: it
+    may reach the deployment's own networks and nothing else."""
+    address = _unwrap(address)
+    return address.is_loopback or _inside(address, networks)
 
 
 def classify(address: IPAddress) -> AddressClass:
@@ -241,6 +293,65 @@ def internal_networks(env: Mapping[str, str], *, production: bool) -> tuple[IPNe
                 f"deployment's own networks cannot be kept out of every "
                 f"route.") from None
     return tuple(networks)
+
+
+def cluster_problem(env: Mapping[str, str]) -> str | None:
+    """Why a process in a pod does not know the deployment's own networks; None outside a pod, and in a pod
+    that declares them. `internal_networks` defaults, in production, to the compose subnets, which in a
+    cluster are no network at all: the pod, service and node networks would be silently unguarded, and a
+    hostile forum name that resolved into the service network would pass the internal-address check. So in a
+    pod (the kubelet's variable is set) a blank NOCTORNAL_EGRESS_INTERNAL_CIDRS is refused, and so is a list
+    that does not hold the cluster's own service address, the one address every pod is told. A malformed
+    list is `internal_networks`'s sentence, not repeated here. Callers ask it in production only, as they
+    ask `internal_networks`. Names the variables and never quotes a value."""
+    host = env.get(POD_ENV, "").strip()
+    if not host:
+        return None
+    raw = env.get(INTERNAL_CIDRS_ENV, "")
+    if not raw.strip():
+        return (f"{INTERNAL_CIDRS_ENV} is blank in a pod ({POD_ENV} is set), where it would default to the "
+                f"compose subnets and leave the pod and service networks unguarded, so a hostile name "
+                f"that resolved into them would be admitted: list the cluster's pod, service and node "
+                f"networks")
+    try:
+        networks = internal_networks(env, production=True)
+    except ValueError:
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return (f"{POD_ENV} is not an IP address, so whether {INTERNAL_CIDRS_ENV} holds the cluster's "
+                f"service network cannot be checked")
+    if not _inside(_unwrap(address), networks):
+        return (f"{INTERNAL_CIDRS_ENV} does not hold the cluster's service network ({POD_ENV} is inside "
+                f"none of the networks it lists), so a name that resolved into the service network would "
+                f"be admitted: add the service network, with the pod and node networks")
+    return None
+
+
+def boundary_problem(env: Mapping[str, str]) -> str | None:
+    """Why the egress boundary settings, as SET, cannot be used; None when they can or are unset. The canary,
+    when set, is HOST:PORT. The mode is `network_policy` or unset, and `network_policy` needs a pod (the
+    kubelet's variable) and a canary: nothing else could prove the boundary there, and on a host with a
+    route table to read it would only switch that rule off. Names the variables and never quotes a value."""
+    mode = env.get(BOUNDARY_ENV, "").strip()
+    canary = env.get(CANARY_ENV, "")
+    if canary.strip() and (canary != canary.strip() or hostport(canary) is None):
+        return (f"{CANARY_ENV} must be HOST:PORT, a DNS name or an IP address and a port (an IPv6 "
+                f"address in square brackets)")
+    if not mode:
+        return None
+    if mode != BOUNDARY_NETWORK_POLICY:
+        return f"{BOUNDARY_ENV} must be {BOUNDARY_NETWORK_POLICY}, or unset"
+    if not env.get(POD_ENV, "").strip():
+        return (f"{BOUNDARY_ENV} is {BOUNDARY_NETWORK_POLICY} and {POD_ENV} is not set: this mode is for a "
+                f"pod, where a NetworkPolicy and not the route table keeps a process from the network, "
+                f"and it would only switch off the route-table rule anywhere else")
+    if not canary.strip():
+        return (f"{BOUNDARY_ENV} is {BOUNDARY_NETWORK_POLICY} and {CANARY_ENV} is not set: a pod has a "
+                f"default route whatever its policy says, so the boundary is proved by a connection to a "
+                f"host and port the policy must not let it reach, and there is none to try")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +612,9 @@ def is_onion(host: str) -> bool:
     return host == "onion" or host.endswith(".onion")
 
 
-_SPECIAL_SUFFIXES = ("local", "localhost", "internal", "home.arpa", "lan", "arpa")
+#: `svc` is a cluster's own: a Service is `name.namespace.svc`, and with the cluster domain `.svc.cluster.local`,
+#: which `local` already covered, so the short form would otherwise be read as a public name.
+_SPECIAL_SUFFIXES = ("local", "localhost", "internal", "home.arpa", "lan", "arpa", "svc")
 
 
 def _special_name(host: str) -> bool:

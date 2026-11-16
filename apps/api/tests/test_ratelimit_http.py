@@ -210,6 +210,19 @@ def test_healthz_is_never_limited(app_with_tiny_blanket_limit):
         assert client.get("/healthz").status_code == 200
 
 
+def test_readyz_is_not_rate_limited_like_healthz(app_with_tiny_blanket_limit, monkeypatch):
+    """A cluster's readiness probe polls /readyz as a load balancer polls /healthz, and a limit on it
+    would take a pod out of its Service because analysts were busy. The verdict is held and asked by
+    one caller at a time (readyz.py), which is what makes it safe to leave open; here it is stood in
+    for so the blanket limit is the only thing under test."""
+    from noctornal_api import readyz
+    monkeypatch.setattr(readyz, "verdict", lambda: True)
+    client = TestClient(app_with_tiny_blanket_limit)
+    for _ in range(50):
+        assert client.get("/readyz").status_code == 200
+    assert "RateLimit-Limit" not in client.get("/readyz").headers
+
+
 def test_successful_responses_advertise_the_limit(app_with_tiny_blanket_limit):
     client = TestClient(app_with_tiny_blanket_limit)
     response = client.get("/healthz")  # exempt, so the middleware adds nothing

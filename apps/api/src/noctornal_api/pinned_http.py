@@ -942,6 +942,71 @@ def probe_proxy(host: str, port: int, *, token: str, target_host: str,
     return ProbeReply(reply.status, reply.code, kept)
 
 
+#: How long the readiness probe waits on the canary, and how many of its addresses it tries.
+CANARY_TIMEOUT_S = 3.0
+CANARY_ADDRESSES = 4
+
+#: What `canary_connect` can say. `timed_out` is the one a network policy that drops gives; `connected` is a
+#: policy that does not hold; the rest are "cannot tell".
+CANARY_OUTCOMES = ("connected", "timed_out", "refused", "unreachable", "unresolved", "outside")
+
+
+def canary_connect(host: str, port: int, *, networks: Iterable,
+                   timeout: float = CANARY_TIMEOUT_S) -> str:
+    """One bare TCP connect to the egress canary, for the egress_boundary readiness row of a pod whose
+    boundary is a NetworkPolicy (docs/20 section 6.4). It sends nothing and closes at once: the only question is
+    whether the connection is answered. One of `CANARY_OUTCOMES`:
+
+    `connected` (any answer is a connection the policy let through), `timed_out` (every address went
+    unanswered, which is how a policy that drops looks), `refused` (a reset: the canary is not listening, or the
+    policy rejects instead of dropping), `unreachable` (no route or an ICMP refusal, the same ambiguity),
+    `unresolved` (the name did not resolve, or answered a metadata or link-local address) and `outside` (an
+    answer is not loopback and not inside `networks`:
+    nothing is dialled, because the canary is inside the cluster and a probe must not leave it).
+
+    The name is looked up ONCE, by the same function that resolves the proxy (`_proxy_hop`: the canary is
+    operator infrastructure on the internal network, as the proxy is, and this module has no third place that
+    asks a resolver), every answer is checked before the first is dialled, and the address that was checked is
+    the one dialled. A literal is not looked up."""
+    try:
+        hop = _proxy_hop(host, port)
+    except RouteUnavailable:
+        return "unresolved"
+    entries = []
+    for family, kind, proto, sockaddr in hop.addresses:
+        address = ipaddress.ip_address(str(sockaddr[0]).split("%")[0])
+        if not egress_policy.is_own_address(address, networks):
+            return "outside"
+        entries.append((family, kind, proto, sockaddr))
+    seen = set()
+    for entry in entries[:CANARY_ADDRESSES]:
+        try:
+            _canary_attempt(*entry, timeout)
+        except TimeoutError:
+            seen.add("timed_out")
+        except (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError):
+            seen.add("refused")
+        except OSError:
+            seen.add("unreachable")
+        else:
+            return "connected"
+    for outcome in ("refused", "unreachable"):
+        if outcome in seen:
+            return outcome
+    return "timed_out"
+
+
+def _canary_attempt(family: int, kind: int, proto: int, sockaddr, timeout: float) -> None:
+    """One connect to a checked address, closed at once. Raises OSError when it does not connect; a module
+    function so a suite can say what the network answered."""
+    sock = socket.socket(family, kind, proto)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(sockaddr)
+    finally:
+        sock.close()
+
+
 # ---------------------------------------------------------------------------
 # resolve (docs/20 section 5.6)
 # ---------------------------------------------------------------------------

@@ -19,6 +19,27 @@ one channel is a Unix socket on a tmpfs volume only the application containers m
 A parser exploit in a child can read an environment that holds nothing and reach nothing beyond
 its own pipes.
 
+Where no volume can be shared (a pod of its own, decision 239) the channel is instead TCP on one
+address with mutual TLS 1.3: NOCTORNAL_ANALYSIS_LISTEN names the address (never a wildcard), and a
+certificate, a key and a CA path (NOCTORNAL_ANALYSIS_TLS_*) are the whole of what it holds beside its
+two sizing settings. A caller must present a certificate the CA issued, so any certificate of that CA
+may call the worker and the CA is the channel's alone; the handshake is finished inside
+`ar.HANDSHAKE_TIMEOUT_S` in the connection's own thread, so a stalled one never holds the accept
+loop, and no frame is read before it. A TCP port is reached by whatever the network lets in, so no
+more than `MAX_HANDSHAKES` connections may be in their handshake at once: a newer one ends the oldest,
+and a peer with no certificate cannot hold the slots of `MAX_CONNECTIONS` the callers need. That is a
+bound on the damage and not a gate: the pod's NetworkPolicy must admit only the callers
+(infra/production/README.md). The key must not be readable by any user but this one, since
+every child runs as another user and must not read it. Everything else, the refusals included, is the
+same in both: nothing here judges a network by its interface list, so a pod's isolation is the
+cluster's NetworkPolicy and the self-test the register runs (readiness, `sample_static_analysis`).
+
+A pod's pids limit is on the pod's cgroup, which a container reads as "max", so the worker could never
+read it and would refuse to start. In a pod only (`KUBERNETES_SERVICE_HOST` is set) the limit may be
+declared in NOCTORNAL_ANALYSIS_PIDS_LIMIT: it is used only where the cgroup gives no number, it is held
+to the same window as a read one (`pids_problem`), and the hello says `pids_max_source: "declared"` so
+readiness can say it was told and not read. Declared outside a pod, it refuses the start.
+
 Each child is a user of its own: a child sharing the worker's uid could unlink and rebind its
 socket, outlive its request with setsid and answer later requests, or spend the container's pids.
 So the worker is a supervisor, root with those three capabilities behind no-new-privileges, and
@@ -82,11 +103,13 @@ What remains:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import os
 import queue
 import signal
 import socket
+import ssl
 import stat
 import sys
 import threading
@@ -102,6 +125,21 @@ MAX_BYTES_ENV = ar.MAX_BYTES_ENV
 DEFAULT_CONCURRENCY = 2
 DEFAULT_MAX_BYTES = 1 << 30
 MAX_CONNECTIONS = 32
+#: Connections of a TCP worker that may be in their TLS handshake at once, the peer not yet shown to
+#: hold a certificate the CA issued. A Unix socket is reached only by the containers that mount its
+#: volume, but a TCP port is reached by whatever the network lets in, so an unauthenticated peer must not
+#: be able to hold the slots of `MAX_CONNECTIONS` that the callers need. When a newer connection finds
+#: this many ahead of it the OLDEST is ended (a real handshake is milliseconds, so the oldest is the one
+#: that is stalling), and a connection that has finished its handshake is never touched. Each is a
+#: thread already counted in `MAX_CONNECTIONS`.
+MAX_HANDSHAKES = 8
+#: A refused handshake is logged once in this many seconds and counted in between, so a peer that
+#: opens connections as fast as it can writes one line and not a thousand.
+HANDSHAKE_LOG_EVERY_S = 10.0
+#: How long the accept loop waits for the slot of a handshake it has just ended, when the cap is full.
+#: The ended connection's thread sees the flag within `ar.HANDSHAKE_POLL_S` and unwinds, so this is the
+#: time to be scheduled, not a wait on a peer.
+SHED_WAIT_S = 0.25
 
 #: Slot N's child runs as this uid plus N, gid the same: 10100 to 10115,
 #: above the application's 10001, owning nothing in the image. They must
@@ -180,29 +218,63 @@ def pids_ceiling(concurrency: int) -> int:
     return PIDS_CEILING_FACTOR * pids_needed(concurrency)
 
 
-def pids_problem(pids_max, concurrency: int) -> str | None:
+def pids_problem(pids_max, concurrency: int, source: str | None = None) -> str | None:
     """Why this pids limit, as the running process reads it, is not one a
     worker with `concurrency` slots may serve under; None when it is a whole
     number from what the slots need up to the ceiling. The one reader: the
     worker refuses to start on it and readiness fails on it, so the
     compose file's pids_limit is judged on the running process and not on
-    its text."""
+    its text. `source` is "declared" for a limit the worker was told
+    (`declared_pids_limit`) and did not read from its cgroup: the window is
+    the same, and the sentence names the variable to correct."""
     need = pids_needed(concurrency)
+    declared = source == "declared"
     if isinstance(pids_max, bool) or not isinstance(pids_max, int):
         return ("The analysis worker's container has no pids limit it can "
                 f"read, so nothing bounds its tasks but each child's own: set "
                 f"pids_limit on the service ({need} to {pids_ceiling(concurrency)} "
-                f"for {concurrency} slots).")
+                f"for {concurrency} slots), or, in a pod, whose limit a container "
+                f"cannot read, declare it in {ar.PIDS_LIMIT_ENV}.")
+    where = (f"The pids limit declared in {ar.PIDS_LIMIT_ENV} is" if declared
+             else "The service's pids limit is")
+    raise_it = (f"correct {ar.PIDS_LIMIT_ENV} and the nodes' podPidsLimit" if declared
+                else "raise pids_limit")
+    lower_it = (f"correct {ar.PIDS_LIMIT_ENV} and the nodes' podPidsLimit" if declared
+                else "lower pids_limit")
     if pids_max < need:
-        return (f"The service's pids limit is {pids_max}, and {concurrency} "
+        return (f"{where} {pids_max}, and {concurrency} "
                 f"slots need {need} (each child may hold {CHILD_MAX_TASKS}): "
-                f"raise pids_limit or lower {CONCURRENCY_ENV}.")
+                f"{raise_it} or lower {CONCURRENCY_ENV}.")
     if pids_max > pids_ceiling(concurrency):
-        return (f"The service's pids limit is {pids_max}, above the "
+        return (f"{where} {pids_max}, above the "
                 f"{pids_ceiling(concurrency)} that {concurrency} slots are "
                 f"allowed ({PIDS_CEILING_FACTOR} times the {need} they need), "
-                f"so it bounds nothing: lower pids_limit.")
+                f"so it bounds nothing: {lower_it}.")
     return None
+
+
+#: The kubelet puts this in every container of a pod, and nothing else the worker holds says where it
+#: runs, so it is what "in a pod" means for a setting that only a pod may use.
+POD_ENV = "KUBERNETES_SERVICE_HOST"
+
+
+def declared_pids_limit(env: Mapping[str, str]) -> tuple[int | None, str | None]:
+    """`(limit, None)` for the pids limit declared in NOCTORNAL_ANALYSIS_PIDS_LIMIT, `(None, None)`
+    when none is, and `(None, problem)` for a value that cannot be one or is set outside a pod.
+    Kubernetes applies a pids limit to the pod's cgroup, which a container reads as "max", so the
+    worker can never read it; a declaration is the one way it is told. It is honoured only where
+    the cgroup gave no number (`process_facts`) and only in a pod, so a compose deployment cannot
+    switch off the rule that judges the running process by typing a variable."""
+    raw = env.get(ar.PIDS_LIMIT_ENV, "").strip()
+    if not raw:
+        return None, None
+    if not env.get(POD_ENV, "").strip():
+        return None, (f"{ar.PIDS_LIMIT_ENV} is set outside a pod ({POD_ENV} is not): a container "
+                      f"reads its own pids limit, only a pod's cannot be read, and a "
+                      f"declaration here would stand in for a limit nobody checked")
+    if not raw.isascii() or not raw.isdigit() or int(raw) < 1:
+        return None, f"{ar.PIDS_LIMIT_ENV} must be a whole number of at least 1"
+    return int(raw), None
 
 
 def _pids_candidates(root: str, cgroup_file: str):
@@ -304,16 +376,20 @@ def state_left_open(*, sys_root: str = "/proc/sys",
     return sorted(left)
 
 
-def process_facts() -> dict:
+def process_facts(env: Mapping[str, str] | None = None) -> dict:
     """This process's user, pid, effective capabilities, no-new-privileges
     flag, whether its root is read-only, its container's pids limit and the
     state a child could leave behind. What the worker decides on at start
     and reports in its hello, so readiness judges the running process, not
-    the compose file."""
+    the compose file. The pids limit is what the cgroup says
+    (`pids_max_source` "cgroup"); only where the cgroup says "max" or cannot
+    be read, and only in a pod, the limit declared in NOCTORNAL_ANALYSIS_PIDS_LIMIT
+    ("declared"). A declaration never overrides a number the cgroup gave."""
+    env = os.environ if env is None else env
     facts: dict = {"euid": os.geteuid() if hasattr(os, "geteuid") else None,
                    "pid": os.getpid(), "capabilities": None,
                    "no_new_privileges": None, "read_only_root": None,
-                   "pids_max": None, "state_left_open": None}
+                   "pids_max": None, "pids_max_source": None, "state_left_open": None}
     try:
         with open("/proc/self/status", encoding="ascii", errors="replace") as f:
             for line in f:
@@ -328,7 +404,13 @@ def process_facts() -> dict:
         facts["read_only_root"] = bool(os.statvfs("/").f_flag & os.ST_RDONLY)
     except (AttributeError, OSError):
         pass
-    facts["pids_max"] = read_pids_max()
+    read = read_pids_max()
+    if read is not None:
+        facts["pids_max"], facts["pids_max_source"] = read, "cgroup"
+    else:
+        declared, _problem = declared_pids_limit(env)
+        if declared is not None:
+            facts["pids_max"], facts["pids_max_source"] = declared, "declared"
     facts["state_left_open"] = state_left_open()
     return facts
 
@@ -337,15 +419,56 @@ def process_facts() -> dict:
 # Settings and the start refusals
 # ---------------------------------------------------------------------------
 
+def listen_problem(env: Mapping[str, str]) -> tuple[tuple[str, int] | None, str | None]:
+    """`((host, port), None)` for the worker's TCP address, or `(None, problem)`. One address, written
+    as an IP literal (a pod's own is `$(POD_IP):PORT`), never a wildcard: a worker that listened on
+    every interface would be reachable from networks nobody declared. The TLS paths come with it."""
+    raw = env.get(ar.LISTEN_ENV, "")
+    parsed = ar.hostport(raw)
+    if parsed is None:
+        return None, (f"{ar.LISTEN_ENV} must be ADDRESS:PORT, an IP address and a port (an IPv6 "
+                      f"address in square brackets)")
+    host, port = parsed
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None, (f"{ar.LISTEN_ENV} must name an IP address, the one address the worker "
+                      f"listens on, and not a host name")
+    if address.is_unspecified:
+        return None, (f"{ar.LISTEN_ENV} is a wildcard address: the worker listens on one "
+                      f"address, never on every interface.")
+    problem = ar.tls_problem(env, ar.LISTEN_ENV)
+    if problem:
+        return None, problem
+    return (host, port), None
+
+
 def worker_settings(env: Mapping[str, str]) -> tuple[dict | None, str | None]:
-    """`({path, concurrency, max_bytes}, None)` or `(None, problem)`."""
+    """`({transport, path or listen, concurrency, max_bytes}, None)` or `(None, problem)`. `transport`
+    is `unix` (`path`, the socket) or `tcp_tls` (`listen`, a host and port, and `tls`, the certificate,
+    key and CA paths)."""
     from noctornal_api.config import parse_size
     problem = ar.setting_problem(env)
     if problem:
         return None, problem
     path = env.get(ar.SOCKET_ENV, "").strip()
-    if not path:
-        return None, f"{ar.SOCKET_ENV} is not set: it names the socket to listen on"
+    listen = env.get(ar.LISTEN_ENV, "").strip()
+    if path and listen:
+        return None, (f"{ar.SOCKET_ENV} and {ar.LISTEN_ENV} are both set, so it is not said "
+                      f"which transport the worker serves")
+    if not path and not listen:
+        return None, (f"{ar.SOCKET_ENV} is not set: it names the socket to listen on (or set "
+                      f"{ar.LISTEN_ENV} to serve over mutual TLS)")
+    where: dict = {"transport": "unix", "path": path}
+    if listen:
+        address, problem = listen_problem(env)
+        if problem:
+            return None, problem
+        where = {"transport": "tcp_tls", "path": None, "listen": address,
+                 "tls": tuple(env[name] for name in ar.TLS_ENV)}
+    _declared, problem = declared_pids_limit(env)
+    if problem:
+        return None, problem
     raw = env.get(CONCURRENCY_ENV, "").strip()
     concurrency = DEFAULT_CONCURRENCY
     if raw:
@@ -362,7 +485,7 @@ def worker_settings(env: Mapping[str, str]) -> tuple[dict | None, str | None]:
                           f"number with a binary K, M or G, such as 1GiB)")
         if not ar.MIB <= max_bytes <= 64 << 30:
             return None, f"{MAX_BYTES_ENV} must be between 1 MiB and 64 GiB"
-    return {"path": path, "concurrency": concurrency, "max_bytes": max_bytes}, None
+    return {**where, "concurrency": concurrency, "max_bytes": max_bytes}, None
 
 
 def start_problems(env: Mapping[str, str], *, shared: bool = False,
@@ -370,21 +493,29 @@ def start_problems(env: Mapping[str, str], *, shared: bool = False,
     """Every reason this process must not serve, as sentences that name a
     variable or a setting and never a value. `facts` is
     `process_facts()`'s shape, injectable so the rules can be tested."""
-    facts = process_facts() if facts is None else facts
+    facts = process_facts(env) if facts is None else facts
     problems = []
     foreign = ar.foreign_environment(env)
     if foreign:
+        # With the Kubernetes default (enableServiceLinks true) the kubelet adds a set of names for every
+        # Service of the namespace, and the cluster's own are all the worker is allowed.
+        links = any(k.endswith("_SERVICE_HOST") or "_SERVICE_PORT" in k for k in foreign)
         problems.append(
             "The analysis worker must hold no setting but its own, and its "
             "environment carries " + ", ".join(foreign) + ": it parses hostile "
             "input, so anything it holds a parser exploit holds too. Remove "
-            "them from the service (no env_file).")
-    if not ar.HAS_UNIX:
+            "them from the service (no env_file)."
+            + (" In a pod the kubelet adds the names of every Service in the namespace "
+               "unless the pod sets enableServiceLinks: false." if links else ""))
+    settings, problem = worker_settings(env)
+    tcp = bool(env.get(ar.LISTEN_ENV, "").strip())
+    if not ar.HAS_UNIX and not tcp:
         problems.append("This platform has no Unix sockets, so the analysis "
                         "worker has nothing to listen on.")
-    settings, problem = worker_settings(env)
     if problem:
-        problems.append(problem + ".")
+        problems.append(problem + ("" if problem.endswith(".") else "."))
+    elif settings and settings["transport"] == "tcp_tls":
+        problems.extend(tls_file_problems(settings["tls"]))
     euid = facts.get("euid")
     if shared:
         if euid == 0:
@@ -416,7 +547,7 @@ def start_problems(env: Mapping[str, str], *, shared: bool = False,
             "service, so the processes killed after each request are reaped.")
     concurrency = settings["concurrency"] if settings else DEFAULT_CONCURRENCY
     # A pids limit that is absent, unreadable or enormous refuses the start, as one too small does.
-    pids = pids_problem(facts.get("pids_max"), concurrency)
+    pids = pids_problem(facts.get("pids_max"), concurrency, facts.get("pids_max_source"))
     if pids:
         problems.append(pids)
     # State a child leaves behind outlives its request, and the purge of its uid cannot reach it.
@@ -434,6 +565,27 @@ def start_problems(env: Mapping[str, str], *, shared: bool = False,
             "sysctls kernel.shmmax 0, kernel.msgmni 0, kernel.sem \"0 0 0 0\" "
             "and fs.mqueue.queues_max 0, and a /tmp that only root can write "
             "(compose.yml, analysis-worker).")
+    return problems
+
+
+def tls_file_problems(paths: tuple[str, str, str]) -> list[str]:
+    """Why the worker's three TLS files cannot serve: one it cannot read, or a key a group or another
+    user can read. Every child runs as a user of its own, a user that is neither this one nor in its
+    group, so a key readable by anyone else is a key a parser exploit holds. The mode is judged where
+    modes mean something (POSIX). Names the variable, never the path's contents."""
+    problems = []
+    for name, path in zip(ar.TLS_ENV, paths, strict=True):
+        try:
+            with open(path, "rb"):
+                pass
+            mode = os.stat(path).st_mode
+        except OSError:
+            problems.append(f"The file {name} names cannot be read by the analysis worker.")
+            continue
+        if name == ar.TLS_KEY_ENV and os.name == "posix" and stat.S_IMODE(mode) & 0o077:
+            problems.append(
+                f"The file {name} names is readable by a group or another user, and every analysis "
+                f"child is another user: give it mode 0600 or 0400, owned by the worker's user.")
     return problems
 
 
@@ -472,6 +624,21 @@ def bind_unix(path: str):
     # directory is the worker's (compose.yml, analysis-socket).
     os.chmod(path, 0o660)
     sock.listen(64)
+    return sock
+
+
+def bind_tcp(host: str, port: int):
+    """Listen on one address. The TLS handshake is made per connection, in that connection's own
+    thread (`Worker._serve_one`), so accepting never waits on a peer."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(64)
+    except OSError:
+        sock.close()
+        raise
     return sock
 
 
@@ -541,6 +708,15 @@ def _interfaces() -> list[str] | None:
         return None
 
 
+class _Handshake:
+    """One accepted connection that has not yet finished its TLS handshake. `shed` is set when a newer
+    connection took its place; its own thread sees that and ends it."""
+    __slots__ = ("shed",)
+
+    def __init__(self) -> None:
+        self.shed = False
+
+
 class Worker:
     """Serves requests from one listening socket until stopped.
 
@@ -550,10 +726,15 @@ class Worker:
 
     def __init__(self, listener, *, concurrency: int = DEFAULT_CONCURRENCY,
                  max_bytes: int = DEFAULT_MAX_BYTES,
-                 child_uids: list[int] | None = None):
+                 child_uids: list[int] | None = None,
+                 tls: ssl.SSLContext | None = None):
         if child_uids is not None and len(child_uids) != concurrency:
             raise ValueError("one child uid per slot")
         self.listener = listener
+        #: The server side of mutual TLS (`ar.server_context`) when the listener is TCP; each
+        #: accepted connection is wrapped in it, in its own thread. None: the connection is a
+        #: Unix socket's (or a test's loopback stand-in for one) and carries the frames as they are.
+        self.tls = tls
         self.concurrency = concurrency
         self.max_bytes = max_bytes
         self.child_uids = list(child_uids) if child_uids is not None else None
@@ -563,6 +744,12 @@ class Worker:
         for slot in range(concurrency):
             self._free.put(slot)
         self._connections = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        #: The connections in their TLS handshake, oldest first, and what ends the oldest
+        #: (`_admit`). Held for an instant and never across I/O.
+        self._handshaking: dict[_Handshake, None] = {}
+        self._handshake_lock = threading.Lock()
+        self._turned_away = 0
+        self._turned_away_logged = float("-inf")
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self.retired = 0
@@ -580,6 +767,7 @@ class Worker:
         facts = process_facts()
         own = self.child_uids is not None
         return {"protocol": ar.WIRE_VERSION, "child_protocol": lab_static.PROTOCOL,
+                "transport": "tcp_tls" if self.tls is not None else "unix",
                 "kinds": list(ar.KINDS),
                 "versions": {"pefile": lab_static._version("pefile"),
                              "yara_x": lab_static._version("yara-x")},
@@ -594,6 +782,7 @@ class Worker:
                 "no_new_privileges": facts["no_new_privileges"],
                 "read_only_root": facts["read_only_root"],
                 "pids_max": facts["pids_max"],
+                "pids_max_source": facts["pids_max_source"],
                 "state_left_open": facts["state_left_open"],
                 "network_interfaces": _interfaces(),
                 "concurrency": self.concurrency,
@@ -624,26 +813,81 @@ class Worker:
             if not self._stop.is_set():
                 time.sleep(0.1)
             return
+        handshake, ended = self._admit() if self.tls is not None else (None, 0)
         if not self._connections.acquire(blocking=False):
-            # Over the connection cap: closed at once, which the client
-            # reads as an unavailable worker.
-            conn.close()
-            return
+            # Over the connection cap. Where this connection took the place of peers still in their
+            # handshake, those are on their way out and their slots are about to be free: wait for one,
+            # briefly, so a flood of them cannot leave the caller that ended them with none. Otherwise
+            # the connection is closed at once, which the client reads as an unavailable worker.
+            if not (ended and self._connections.acquire(timeout=SHED_WAIT_S)):
+                self._leave(handshake)
+                conn.close()
+                return
         try:
-            threading.Thread(target=self._serve_one, args=(conn,),
+            threading.Thread(target=self._serve_one, args=(conn, handshake),
                              daemon=True).start()
         except Exception:  # noqa: BLE001 - RuntimeError when no thread can start
             # No thread to be had (the container's tasks are spent, which a child held to its task
             # limit cannot cause): this caller is told at once by a closed connection, and the loop
             # goes on.
+            self._leave(handshake)
             self._connections.release()
             conn.close()
             log.warning("an analysis request was turned away: no thread could "
                         "be started for it")
             time.sleep(0.1)
 
-    def _serve_one(self, conn) -> None:
+    def _admit(self) -> tuple[_Handshake, int]:
+        """Count a new connection among those in their handshake, ending the oldest ones if that makes
+        more than `MAX_HANDSHAKES`; returns it and how many were ended. Called by the accept loop
+        alone, so the order is arrival's."""
+        entry = _Handshake()
+        ended = 0
+        with self._handshake_lock:
+            while len(self._handshaking) >= MAX_HANDSHAKES:
+                oldest = next(iter(self._handshaking))
+                del self._handshaking[oldest]
+                oldest.shed = True
+                ended += 1
+            self._handshaking[entry] = None
+        return entry, ended
+
+    def _leave(self, handshake: _Handshake | None) -> None:
+        if handshake is not None:
+            with self._handshake_lock:
+                self._handshaking.pop(handshake, None)
+
+    def _handshake_failed(self, handshake: _Handshake, exc: OSError) -> None:
+        """Say that a connection ended in its handshake: the first in a window by name, the rest
+        counted into the next line. No peer content is ever in it."""
+        with self._handshake_lock:
+            now = time.monotonic()
+            if now - self._turned_away_logged < HANDSHAKE_LOG_EVERY_S:
+                self._turned_away += 1
+                return
+            more, self._turned_away = self._turned_away, 0
+            self._turned_away_logged = now
+        why = ("shed to make room for a newer connection" if handshake.shed
+               else type(exc).__name__ + (f", {exc.reason}" if getattr(exc, "reason", None) else ""))
+        log.warning("an analysis connection failed its TLS handshake (%s)%s", why,
+                    f"; {more} more since the last report" if more else "")
+
+    def _serve_one(self, conn, handshake: _Handshake | None = None) -> None:
         try:
+            if self.tls is not None:
+                # Before a byte of the request is read, and in this thread, so a peer that stalls the
+                # handshake holds one connection and not the accept loop. A peer with no certificate,
+                # or one the CA did not issue, ends here, and is the first to go when a newer
+                # connection needs the room (`_admit`).
+                handshake = handshake if handshake is not None else _Handshake()
+                try:
+                    conn = ar.tls_handshake(self.tls, conn, server_side=True,
+                                            cancelled=lambda: handshake.shed)
+                except OSError as exc:
+                    self._handshake_failed(handshake, exc)
+                    return
+                finally:
+                    self._leave(handshake)
             self._handle(conn)
         except Exception:  # noqa: BLE001 - one request never takes the worker down
             log.warning("an analysis request failed in the worker", exc_info=True)
@@ -813,14 +1057,24 @@ class Worker:
 # ---------------------------------------------------------------------------
 
 def check(env: Mapping[str, str] | None = None) -> int:
-    """The healthcheck: 0 when the worker answers on its socket."""
+    """The healthcheck: 0 when the worker answers on its socket, or, serving over TCP, on its own
+    listener under mutual TLS with its own certificate as the client's (so that certificate must carry
+    both server and client authentication)."""
     env = os.environ if env is None else env
     path = env.get(ar.SOCKET_ENV, "").strip()
-    if not path:
+    target = path
+    if env.get(ar.LISTEN_ENV, "").strip():
+        address, problem = listen_problem(env)
+        if problem:
+            print(problem, file=sys.stderr)
+            return 1
+        cert, key, ca = (env[name] for name in ar.TLS_ENV)
+        target = ar.TcpTarget(address[0], address[1], cert, key, ca, own_listener=True)
+    elif not path:
         print(f"{ar.SOCKET_ENV} is not set", file=sys.stderr)
         return 1
     try:
-        ar.hello(path)
+        ar.hello(target)
     except ar.WorkerUnavailable:
         print("the analysis worker did not answer", file=sys.stderr)
         return 1
@@ -848,31 +1102,38 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     settings, _problem = worker_settings(os.environ)
     child_uids = None
+    tcp = settings["transport"] == "tcp_tls"
     if not args.shared_uid:
-        try:
-            st = os.stat(os.path.dirname(settings["path"]))
-        except OSError:
-            print(f"The directory of {ar.SOCKET_ENV} does not exist.",
-                  file=sys.stderr)
-            return 2
-        problem = socket_directory_problem(st, euid=os.geteuid())
-        if problem:
-            print(problem, file=sys.stderr)
-            return 2
+        if not tcp:
+            try:
+                st = os.stat(os.path.dirname(settings["path"]))
+            except OSError:
+                print(f"The directory of {ar.SOCKET_ENV} does not exist.",
+                      file=sys.stderr)
+                return 2
+            problem = socket_directory_problem(st, euid=os.geteuid())
+            if problem:
+                print(problem, file=sys.stderr)
+                return 2
         child_uids = [CHILD_UID_BASE + n for n in range(settings["concurrency"])]
         for uid in child_uids:
             if not purge_user(uid):
                 print(f"uid {uid} holds processes that cannot be stopped, so "
                       f"its slot cannot start empty.", file=sys.stderr)
                 return 2
+    context = None
     try:
-        listener = bind_unix(settings["path"])
+        if tcp:
+            context = ar.server_context(*settings["tls"])
+            listener = bind_tcp(*settings["listen"])
+        else:
+            listener = bind_unix(settings["path"])
     except (OSError, RuntimeError) as exc:
-        print(f"The analysis worker could not listen on its socket "
-              f"({type(exc).__name__}).", file=sys.stderr)
+        print(f"The analysis worker could not listen on its "
+              f"{'address' if tcp else 'socket'} ({type(exc).__name__}).", file=sys.stderr)
         return 2
     worker = Worker(listener, concurrency=settings["concurrency"],
-                    max_bytes=settings["max_bytes"], child_uids=child_uids)
+                    max_bytes=settings["max_bytes"], child_uids=child_uids, tls=context)
     # PID 1 in a container ignores SIGTERM unless it says otherwise, and
     # init forwards it here.
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -885,10 +1146,11 @@ def main(argv: list[str] | None = None) -> int:
         worker.serve_forever()
     finally:
         listener.close()
-        try:
-            os.unlink(settings["path"])
-        except OSError:
-            pass
+        if not tcp:
+            try:
+                os.unlink(settings["path"])
+            except OSError:
+                pass
     return 3 if worker.failed else 0
 
 
