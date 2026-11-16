@@ -1,0 +1,2506 @@
+{
+ "archive": {
+  "analysis_id": "00000000-0000-4000-8000-000000000002",
+  "artifacts": [
+   {
+    "description": "Original input, hashed, not stored in the spectrum.",
+    "id": "art_input",
+    "parent_artifact_id": null,
+    "produced_by": "static@0.1.0",
+    "sha256": "4522659872ec1b1ea89bca91aa038370d60a162f16a0f4b697b11faa7f523221",
+    "size_bytes": 183,
+    "type": "input"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.95,
+    "confidence_method": "magic_bytes",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "magic",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "zip",
+    "proposed_grade": null,
+    "selectors": [],
+    "source": {
+     "artifact_id": null,
+     "method": "static",
+     "offset": "0x0",
+     "section": null
+    },
+    "subtype": "file_magic",
+    "tags": [
+     "static"
+    ],
+    "type": "other",
+    "value": "ZIP archive"
+   },
+   {
+    "confidence": 0.9,
+    "confidence_method": "zip_central_directory",
+    "context": {
+     "compressed_size": 75,
+     "crc32": "70195555",
+     "file_size": 75,
+     "note": "Name only. Contents were not extracted or executed."
+    },
+    "extracted_by": {
+     "module": "static",
+     "technique": "archive_list",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": null,
+    "proposed_grade": null,
+    "selectors": [],
+    "source": null,
+    "subtype": "archive_member",
+    "tags": [
+     "static",
+     "archive"
+    ],
+    "type": "embedded_artifact",
+    "value": "a.txt"
+   },
+   {
+    "confidence": 0.72,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0003",
+    "normalized": "drop.example.test",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "url",
+      "normalized": "drop.example.test",
+      "value": "https://drop.example.test/x"
+     }
+    ],
+    "source": null,
+    "subtype": "url",
+    "tags": [
+     "static"
+    ],
+    "type": "c2",
+    "value": "https://drop.example.test/x"
+   },
+   {
+    "confidence": 0.7,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0004",
+    "normalized": "ops@example.test",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "email",
+      "normalized": "ops@example.test",
+      "value": "ops@example.test"
+     }
+    ],
+    "source": null,
+    "subtype": "email",
+    "tags": [
+     "static"
+    ],
+    "type": "credential_pattern",
+    "value": "ops@example.test"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": "bundle.zip",
+   "sha256": "4522659872ec1b1ea89bca91aa038370d60a162f16a0f4b697b11faa7f523221",
+   "size_bytes": 183,
+   "source_hint": "local file",
+   "type": "archive"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "scan_window_truncated": false,
+   "strings_truncated": false
+  },
+  "summary": {
+   "c2_count": 1,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": null,
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "cape_report": {
+  "analysis_id": "00000000-0000-4000-8000-000000000001",
+  "artifacts": [
+   {
+    "description": "Payload CAPE parsed for this config. Not fetched.",
+    "id": "art_cape_config_1",
+    "parent_artifact_id": null,
+    "produced_by": "cape@0.1.0",
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "size_bytes": null,
+    "type": "sandbox_payload"
+   },
+   {
+    "description": "CAPE payload. Not fetched.",
+    "id": "art_cape_payload_1",
+    "parent_artifact_id": null,
+    "produced_by": "cape@0.1.0",
+    "sha256": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+    "size_bytes": null,
+    "type": "sandbox_payload"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.45,
+    "confidence_method": "cape_report",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_host",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "93.184.216.34",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Taken from a sandbox report. Not statically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "ipv4",
+      "normalized": "93.184.216.34",
+      "value": "93.184.216.34"
+     }
+    ],
+    "source": null,
+    "subtype": "ipv4",
+    "tags": [
+     "sandbox",
+     "cape"
+    ],
+    "type": "c2",
+    "value": "93.184.216.34"
+   },
+   {
+    "confidence": 0.45,
+    "confidence_method": "cape_report",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_host",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": "c2.example.test",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Taken from a sandbox report. Not statically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "domain",
+      "normalized": "c2.example.test",
+      "value": "c2.example.test"
+     }
+    ],
+    "source": null,
+    "subtype": "domain",
+    "tags": [
+     "sandbox",
+     "cape"
+    ],
+    "type": "c2",
+    "value": "c2.example.test"
+   },
+   {
+    "confidence": 0.45,
+    "confidence_method": "cape_report",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_http",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0003",
+    "normalized": "https://panel.example.test/gate.php",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Taken from a sandbox report. Not statically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "url",
+      "normalized": "https://panel.example.test/gate.php",
+      "value": "https://panel.example.test/gate.php"
+     }
+    ],
+    "source": null,
+    "subtype": "url",
+    "tags": [
+     "sandbox",
+     "cape"
+    ],
+    "type": "c2",
+    "value": "https://panel.example.test/gate.php"
+   },
+   {
+    "confidence": 0.45,
+    "confidence_method": "cape_report",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_dns",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0004",
+    "normalized": "dns.example.test",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Taken from a sandbox report. Not statically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "domain",
+      "normalized": "dns.example.test",
+      "value": "dns.example.test"
+     }
+    ],
+    "source": null,
+    "subtype": "domain",
+    "tags": [
+     "sandbox",
+     "cape"
+    ],
+    "type": "c2",
+    "value": "dns.example.test"
+   },
+   {
+    "confidence": 0.4,
+    "confidence_method": "cape_signature_name",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_behavior",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0005",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Taken from a sandbox report. Not statically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": null,
+    "subtype": "cape_signature",
+    "tags": [
+     "sandbox",
+     "cape"
+    ],
+    "type": "behavior",
+    "value": "example_signature"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "cape_parser",
+    "context": {
+     "C2": "gate.example.test:443",
+     "Campaign": "synthetic-campaign",
+     "Key": "00112233445566778899aabbccddeeff",
+     "Mutex": "Global\\example-mutex"
+    },
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_config_parser",
+     "version": "0.1.0"
+    },
+    "family_data": {
+     "cape_name": "ExampleRAT"
+    },
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0006",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Decoded from a payload by a CAPE configuration parser. MaaSSpec has not confirmed it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "md5",
+      "normalized": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+     },
+     {
+      "kind": "sha256",
+      "normalized": "abababababababababababababababababababababababababababababababab",
+      "value": "abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_cape_config_1",
+     "method": "cape_config",
+     "offset": null,
+     "section": "ExampleRAT"
+    },
+    "subtype": "cape_parser_config",
+    "tags": [
+     "sandbox",
+     "cape",
+     "cape_config"
+    ],
+    "type": "config",
+    "value": "ExampleRAT"
+   },
+   {
+    "confidence": 0.35,
+    "confidence_method": "cape_parser",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_config_parser",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0007",
+    "normalized": "198.51.100.7:8443",
+    "proposed_grade": {
+     "information_credibility": "4",
+     "rationale": "Private or loopback address in a CAPE config. A C2 claim for it is doubtful.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "ipv4",
+      "normalized": "198.51.100.7",
+      "value": "198.51.100.7"
+     },
+     {
+      "kind": "ipv4_port",
+      "normalized": "198.51.100.7:8443",
+      "value": "198.51.100.7:8443"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_cape_config_1",
+     "method": "cape_config",
+     "offset": null,
+     "section": "ExampleRAT.C2[0]"
+    },
+    "subtype": "ip_port",
+    "tags": [
+     "sandbox",
+     "cape",
+     "cape_config",
+     "scope:private"
+    ],
+    "type": "c2",
+    "value": "198.51.100.7:8443"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "cape_parser",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_config_parser",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0008",
+    "normalized": "gate.example.test",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Decoded from a payload by a CAPE configuration parser. MaaSSpec has not confirmed it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "domain",
+      "normalized": "gate.example.test",
+      "value": "gate.example.test"
+     },
+     {
+      "kind": "domain_port",
+      "normalized": "gate.example.test:443",
+      "value": "gate.example.test:443"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_cape_config_1",
+     "method": "cape_config",
+     "offset": null,
+     "section": "ExampleRAT.C2[1]"
+    },
+    "subtype": "domain",
+    "tags": [
+     "sandbox",
+     "cape",
+     "cape_config"
+    ],
+    "type": "c2",
+    "value": "gate.example.test:443"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "cape_parser",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_config_parser",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0009",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Decoded from a payload by a CAPE configuration parser. MaaSSpec has not confirmed it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "campaign",
+      "normalized": "synthetic-campaign",
+      "value": "synthetic-campaign"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_cape_config_1",
+     "method": "cape_config",
+     "offset": null,
+     "section": "ExampleRAT.Campaign"
+    },
+    "subtype": "campaign",
+    "tags": [
+     "sandbox",
+     "cape",
+     "cape_config"
+    ],
+    "type": "config",
+    "value": "synthetic-campaign"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "cape_parser",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_config_parser",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0010",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Decoded from a payload by a CAPE configuration parser. MaaSSpec has not confirmed it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "mutex",
+      "normalized": "global\\example-mutex",
+      "value": "Global\\example-mutex"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_cape_config_1",
+     "method": "cape_config",
+     "offset": null,
+     "section": "ExampleRAT.Mutex"
+    },
+    "subtype": "mutex",
+    "tags": [
+     "sandbox",
+     "cape",
+     "cape_config"
+    ],
+    "type": "config",
+    "value": "Global\\example-mutex"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "cape_parser",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_config_parser",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0011",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Decoded from a payload by a CAPE configuration parser. MaaSSpec has not confirmed it.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_cape_config_1",
+     "method": "cape_config",
+     "offset": null,
+     "section": "ExampleRAT.Key"
+    },
+    "subtype": "key",
+    "tags": [
+     "sandbox",
+     "cape",
+     "cape_config"
+    ],
+    "type": "crypto_material",
+    "value": "00112233445566778899aabbccddeeff"
+   },
+   {
+    "confidence": 0.5,
+    "confidence_method": "cape_report",
+    "context": null,
+    "extracted_by": {
+     "module": "cape",
+     "technique": "cape_payloads",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0012",
+    "normalized": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Payload hash taken from a sandbox report. MaaSSpec has not seen the payload.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "md5",
+      "normalized": "12121212121212121212121212121212",
+      "value": "12121212121212121212121212121212"
+     },
+     {
+      "kind": "sha1",
+      "normalized": "3434343434343434343434343434343434343434",
+      "value": "3434343434343434343434343434343434343434"
+     },
+     {
+      "kind": "sha256",
+      "normalized": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "value": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_cape_payload_1",
+     "method": "cape_payloads",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "cape_payload",
+    "tags": [
+     "sandbox",
+     "cape"
+    ],
+    "type": "embedded_artifact",
+    "value": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": "report.json",
+   "sha256": "cc0aa2f9ce8107453b7dbde818bb5f38bd9438c26e392f145777d6c1a431307c",
+   "size_bytes": 802,
+   "source_hint": "local file",
+   "type": "cape_report"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "scan_window_truncated": false,
+   "strings_truncated": false
+  },
+  "summary": {
+   "c2_count": 6,
+   "config_extracted": true,
+   "encryption_observed": false,
+   "family": {
+    "confidence": 0.6,
+    "method": "cape_parser",
+    "name": "ExampleRAT"
+   },
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "malwarebazaar_api_0": {
+  "analysis_id": "e1b1a825-697e-5bb2-b70e-4de5771d3637",
+  "artifacts": [
+   {
+    "description": "malwarebazaar record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.malwarebazaar@0.1.0",
+    "sha256": "ad3df626022cbb2289e048fd6f5a8f711e55efed98171bb1d5b0f16ea7404db6",
+    "size_bytes": 884,
+    "type": "feed_record"
+   },
+   {
+    "description": "Sample named by MalwareBazaar. Not fetched. The hash is the feed's claim.",
+    "id": "art_sample_ref",
+    "parent_artifact_id": null,
+    "produced_by": "feed.malwarebazaar@0.1.0",
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "size_bytes": 12345,
+    "type": "sample_reference"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.9,
+    "confidence_method": "feed_record",
+    "context": {
+     "anonymous": "0",
+     "clamav": [
+      "Example.Gen"
+     ],
+     "file_name": "invoice.exe",
+     "file_size": 12345,
+     "file_type": "exe",
+     "file_type_mime": "application/x-dosexec",
+     "first_seen": "2026-11-15 10:00:00",
+     "origin_country": "CA",
+     "reporter": "example_reporter",
+     "vendors_with_intel": [
+      "CAPE",
+      "UnpacMe"
+     ]
+    },
+    "extracted_by": {
+     "module": "feed.malwarebazaar",
+     "technique": "malwarebazaar_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "abababababababababababababababababababababababababababababababab",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Stated by MalwareBazaar. MaaSSpec has not seen the sample.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "sha256",
+      "normalized": "abababababababababababababababababababababababababababababababab",
+      "value": "abababababababababababababababababababababababababababababababab"
+     },
+     {
+      "kind": "sha1",
+      "normalized": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+     },
+     {
+      "kind": "md5",
+      "normalized": "efefefefefefefefefefefefefefefef",
+      "value": "efefefefefefefefefefefefefefefef"
+     },
+     {
+      "kind": "imphash",
+      "normalized": "12121212121212121212121212121212",
+      "value": "12121212121212121212121212121212"
+     },
+     {
+      "kind": "tlsh",
+      "normalized": "t1abcdef0123",
+      "value": "T1ABCDEF0123"
+     },
+     {
+      "kind": "ssdeep",
+      "normalized": "96:abc/def:ghi",
+      "value": "96:abc/def:ghi"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "sample_hash",
+    "tags": [
+     "feed",
+     "feed:malwarebazaar",
+     "claimed",
+     "tag:exe",
+     "tag:stealer"
+    ],
+    "type": "embedded_artifact",
+    "value": "abababababababababababababababababababababababababababababababab"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.malwarebazaar",
+     "technique": "malwarebazaar_signature",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Family label assigned by MalwareBazaar.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "signature",
+    "tags": [
+     "feed",
+     "feed:malwarebazaar",
+     "claimed"
+    ],
+    "type": "family_indicator",
+    "value": "ExampleFamily"
+   },
+   {
+    "confidence": 0.5,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.malwarebazaar",
+     "technique": "malwarebazaar_delivery",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0003",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Stated by MalwareBazaar. MaaSSpec has not seen the sample.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "delivery_method",
+    "tags": [
+     "feed",
+     "feed:malwarebazaar",
+     "claimed"
+    ],
+    "type": "behavior",
+    "value": "web_download"
+   },
+   {
+    "confidence": 0.5,
+    "confidence_method": "feed_claim",
+    "context": {
+     "author": "someone"
+    },
+    "extracted_by": {
+     "module": "feed.malwarebazaar",
+     "technique": "malwarebazaar_yara",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0004",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Stated by MalwareBazaar. MaaSSpec has not seen the sample.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "yara_rule",
+    "tags": [
+     "feed",
+     "feed:malwarebazaar",
+     "claimed"
+    ],
+    "type": "family_indicator",
+    "value": "example_rule"
+   },
+   {
+    "confidence": 0.8,
+    "confidence_method": "feed_claim",
+    "context": {
+     "issuer_cn": "Example CA",
+     "subject_cn": "Example Ltd"
+    },
+    "extracted_by": {
+     "module": "feed.malwarebazaar",
+     "technique": "malwarebazaar_code_sign",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0005",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Stated by MalwareBazaar. MaaSSpec has not seen the sample.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "cert_serial",
+      "normalized": "00ff",
+      "value": "00ff"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "code_signing_certificate",
+    "tags": [
+     "feed",
+     "feed:malwarebazaar",
+     "claimed",
+     "risk:cscb_listed"
+    ],
+    "type": "crypto_material",
+    "value": "00ff"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "ad3df626022cbb2289e048fd6f5a8f711e55efed98171bb1d5b0f16ea7404db6",
+   "size_bytes": 884,
+   "source_hint": "malwarebazaar",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": "abababababababababababababababababababababababababababababababab",
+   "claims_not_verified": true,
+   "feed": "malwarebazaar",
+   "feed_record_id": "abababababababababababababababababababababababababababababababab"
+  },
+  "summary": {
+   "c2_count": 0,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": {
+    "confidence": 0.6,
+    "method": "malwarebazaar_signature",
+    "name": "ExampleFamily"
+   },
+   "primary_capabilities": [],
+   "risk_signals": [
+    "risk:cscb_listed"
+   ]
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "malwarebazaar_csv_0": {
+  "analysis_id": "163a05b0-17d3-56f2-9b67-cc595be00b37",
+  "artifacts": [
+   {
+    "description": "malwarebazaar record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.malwarebazaar@0.1.0",
+    "sha256": "b35d2b8505a28ac9834bb0c94106757701b03334a781574f0a3b5799ad3edee4",
+    "size_bytes": 424,
+    "type": "feed_record"
+   },
+   {
+    "description": "Sample named by MalwareBazaar. Not fetched. The hash is the feed's claim.",
+    "id": "art_sample_ref",
+    "parent_artifact_id": null,
+    "produced_by": "feed.malwarebazaar@0.1.0",
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "size_bytes": null,
+    "type": "sample_reference"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.9,
+    "confidence_method": "feed_record",
+    "context": {
+     "clamav": [
+      "Example.Gen"
+     ],
+     "file_name": "a.exe",
+     "file_type": "exe",
+     "file_type_mime": "application/x-dosexec",
+     "first_seen": "2026-11-15 10:00:00",
+     "reporter": "rep"
+    },
+    "extracted_by": {
+     "module": "feed.malwarebazaar",
+     "technique": "malwarebazaar_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "abababababababababababababababababababababababababababababababab",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Stated by MalwareBazaar. MaaSSpec has not seen the sample.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "sha256",
+      "normalized": "abababababababababababababababababababababababababababababababab",
+      "value": "abababababababababababababababababababababababababababababababab"
+     },
+     {
+      "kind": "sha1",
+      "normalized": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+     },
+     {
+      "kind": "md5",
+      "normalized": "efefefefefefefefefefefefefefefef",
+      "value": "efefefefefefefefefefefefefefefef"
+     },
+     {
+      "kind": "tlsh",
+      "normalized": "t1abcdef",
+      "value": "T1ABCDEF"
+     },
+     {
+      "kind": "ssdeep",
+      "normalized": "96:abc:def",
+      "value": "96:abc:def"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "sample_hash",
+    "tags": [
+     "feed",
+     "feed:malwarebazaar",
+     "claimed"
+    ],
+    "type": "embedded_artifact",
+    "value": "abababababababababababababababababababababababababababababababab"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.malwarebazaar",
+     "technique": "malwarebazaar_signature",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Family label assigned by MalwareBazaar.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "signature",
+    "tags": [
+     "feed",
+     "feed:malwarebazaar",
+     "claimed"
+    ],
+    "type": "family_indicator",
+    "value": "ExampleFamily"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "b35d2b8505a28ac9834bb0c94106757701b03334a781574f0a3b5799ad3edee4",
+   "size_bytes": 424,
+   "source_hint": "malwarebazaar",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": "abababababababababababababababababababababababababababababababab",
+   "claims_not_verified": true,
+   "feed": "malwarebazaar",
+   "feed_record_id": "abababababababababababababababababababababababababababababababab"
+  },
+  "summary": {
+   "c2_count": 0,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": {
+    "confidence": 0.6,
+    "method": "malwarebazaar_signature",
+    "name": "ExampleFamily"
+   },
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "sample": {
+  "analysis_id": "00000000-0000-4000-8000-000000000003",
+  "artifacts": [
+   {
+    "description": "Original input, hashed, not stored in the spectrum.",
+    "id": "art_input",
+    "parent_artifact_id": null,
+    "produced_by": "static@0.1.0",
+    "sha256": "b232a797901cdb268ebe91b3a1f247d436e7800703d147e243f7cb1c45495157",
+    "size_bytes": 351,
+    "type": "input"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.95,
+    "confidence_method": "magic_bytes",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "magic",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "pe",
+    "proposed_grade": null,
+    "selectors": [],
+    "source": {
+     "artifact_id": null,
+     "method": "static",
+     "offset": "0x0",
+     "section": null
+    },
+    "subtype": "file_magic",
+    "tags": [
+     "static"
+    ],
+    "type": "other",
+    "value": "PE (MZ)"
+   },
+   {
+    "confidence": 0.8,
+    "confidence_method": "shannon_on_scan_window",
+    "context": {
+     "note": "High entropy on the scanned window. Often a packer, not proof of one."
+    },
+    "extracted_by": {
+     "module": "static",
+     "technique": "entropy",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": null,
+    "proposed_grade": null,
+    "selectors": [],
+    "source": null,
+    "subtype": "entropy",
+    "tags": [
+     "static",
+     "high_entropy"
+    ],
+    "type": "other",
+    "value": 7.739
+   },
+   {
+    "confidence": 0.72,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0003",
+    "normalized": "198.51.100.9",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "url",
+      "normalized": "198.51.100.9",
+      "value": "http://198.51.100.9/g"
+     }
+    ],
+    "source": null,
+    "subtype": "url",
+    "tags": [
+     "static"
+    ],
+    "type": "c2",
+    "value": "http://198.51.100.9/g"
+   },
+   {
+    "confidence": 0.7,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0004",
+    "normalized": "ops@example.test",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "email",
+      "normalized": "ops@example.test",
+      "value": "ops@example.test"
+     }
+    ],
+    "source": null,
+    "subtype": "email",
+    "tags": [
+     "static"
+    ],
+    "type": "credential_pattern",
+    "value": "ops@example.test"
+   },
+   {
+    "confidence": 0.66,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0005",
+    "normalized": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "bitcoin",
+      "normalized": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+      "value": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+     }
+    ],
+    "source": null,
+    "subtype": "bitcoin",
+    "tags": [
+     "static",
+     "wallet"
+    ],
+    "type": "wallet",
+    "value": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+   },
+   {
+    "confidence": 0.35,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "static",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0006",
+    "normalized": "198.51.100.9",
+    "proposed_grade": {
+     "information_credibility": "4",
+     "rationale": "Private or loopback address found by a static scan. Not a routable C2 candidate.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "ipv4",
+      "normalized": "198.51.100.9",
+      "value": "198.51.100.9"
+     }
+    ],
+    "source": null,
+    "subtype": "ipv4",
+    "tags": [
+     "static",
+     "scope:private"
+    ],
+    "type": "c2",
+    "value": "198.51.100.9"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": "s.bin",
+   "sha256": "b232a797901cdb268ebe91b3a1f247d436e7800703d147e243f7cb1c45495157",
+   "size_bytes": 351,
+   "source_hint": "local file",
+   "type": "sample"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "scan_window_truncated": false,
+   "strings_truncated": false
+  },
+  "summary": {
+   "c2_count": 2,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": null,
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "threatfox_0": {
+  "analysis_id": "2c0c8792-b608-5f45-bf46-7644d7d4f7b2",
+  "artifacts": [
+   {
+    "description": "threatfox record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.threatfox@0.1.0",
+    "sha256": "9c645da8479fc41ea72db56f5be647c3768f010c495a8352e028205c6dde6db4",
+    "size_bytes": 423,
+    "type": "feed_record"
+   },
+   {
+    "description": "Sample linked to this IOC by ThreatFox. Not fetched.",
+    "id": "art_sample_ref_1",
+    "parent_artifact_id": null,
+    "produced_by": "feed.threatfox@0.1.0",
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "size_bytes": null,
+    "type": "sample_reference"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.7,
+    "confidence_method": "feed_claim",
+    "context": {
+     "confidence_level": 100,
+     "first_seen": "2026-11-15 10:00:00 UTC",
+     "reporter": "r"
+    },
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "93.184.216.34:443",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Confidence level stated by ThreatFox: 100. MaaSSpec has not checked it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "ipv4",
+      "normalized": "93.184.216.34",
+      "value": "93.184.216.34"
+     },
+     {
+      "kind": "ipv4_port",
+      "normalized": "93.184.216.34:443",
+      "value": "93.184.216.34:443"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_sample_ref_1",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "ip_port",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed",
+     "tag:rat",
+     "threat:botnet_cc",
+     "capability:botnet_cc"
+    ],
+    "type": "c2",
+    "value": "93.184.216.34:443"
+   },
+   {
+    "confidence": 0.7,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_malware",
+     "version": "0.1.0"
+    },
+    "family_data": {
+     "malware": "win.example"
+    },
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Confidence level stated by ThreatFox: 100. MaaSSpec has not checked it.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_sample_ref_1",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "malware_family",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed",
+     "tag:rat",
+     "threat:botnet_cc",
+     "capability:botnet_cc"
+    ],
+    "type": "family_indicator",
+    "value": "Example RAT"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "9c645da8479fc41ea72db56f5be647c3768f010c495a8352e028205c6dde6db4",
+   "size_bytes": 423,
+   "source_hint": "threatfox",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": "abababababababababababababababababababababababababababababababab",
+   "claims_not_verified": true,
+   "feed": "threatfox",
+   "feed_record_id": "1001"
+  },
+  "summary": {
+   "c2_count": 1,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": {
+    "confidence": 0.7,
+    "method": "threatfox_malware",
+    "name": "Example RAT"
+   },
+   "primary_capabilities": [
+    "botnet_cc"
+   ],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "threatfox_1": {
+  "analysis_id": "e90e196f-5b55-55d8-92b4-cad92ef8ab50",
+  "artifacts": [
+   {
+    "description": "threatfox record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.threatfox@0.1.0",
+    "sha256": "e43988e2fcb53cdcbb494c815b50bc5a09ea281231f2bcb6d6b22f2483c2fef6",
+    "size_bytes": 163,
+    "type": "feed_record"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.35,
+    "confidence_method": "feed_claim",
+    "context": {
+     "confidence_level": 50
+    },
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "panel.example.test",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Confidence level stated by ThreatFox: 50. MaaSSpec has not checked it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "url",
+      "normalized": "panel.example.test",
+      "value": "https://panel.example.test/gate.php"
+     },
+     {
+      "kind": "domain",
+      "normalized": "panel.example.test",
+      "value": "panel.example.test"
+     }
+    ],
+    "source": {
+     "artifact_id": null,
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "url",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed",
+     "threat:payload_delivery",
+     "capability:payload_delivery"
+    ],
+    "type": "c2",
+    "value": "https://panel.example.test/gate.php"
+   },
+   {
+    "confidence": 0.35,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_malware",
+     "version": "0.1.0"
+    },
+    "family_data": {},
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Confidence level stated by ThreatFox: 50. MaaSSpec has not checked it.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": null,
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "malware_family",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed",
+     "threat:payload_delivery",
+     "capability:payload_delivery"
+    ],
+    "type": "family_indicator",
+    "value": "Example RAT"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "e43988e2fcb53cdcbb494c815b50bc5a09ea281231f2bcb6d6b22f2483c2fef6",
+   "size_bytes": 163,
+   "source_hint": "threatfox",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": null,
+   "claims_not_verified": true,
+   "feed": "threatfox",
+   "feed_record_id": "1002"
+  },
+  "summary": {
+   "c2_count": 1,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": {
+    "confidence": 0.35,
+    "method": "threatfox_malware",
+    "name": "Example RAT"
+   },
+   "primary_capabilities": [
+    "payload_delivery"
+   ],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "threatfox_2": {
+  "analysis_id": "40253ad5-3c70-5f74-946f-0047dd568efd",
+  "artifacts": [
+   {
+    "description": "threatfox record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.threatfox@0.1.0",
+    "sha256": "779ab16d6fb58a1c75e7c5e490331032e53864a54cca94f863f5b00f814cf3af",
+    "size_bytes": 76,
+    "type": "feed_record"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.35,
+    "confidence_method": "feed_claim",
+    "context": {
+     "confidence_level": 90
+    },
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "10.0.0.5:80",
+    "proposed_grade": {
+     "information_credibility": "4",
+     "rationale": "Private or loopback address, not reachable from outside. A C2 claim for it is doubtful.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "ipv4",
+      "normalized": "10.0.0.5",
+      "value": "10.0.0.5"
+     },
+     {
+      "kind": "ipv4_port",
+      "normalized": "10.0.0.5:80",
+      "value": "10.0.0.5:80"
+     }
+    ],
+    "source": {
+     "artifact_id": null,
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "ip_port",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed",
+     "scope:private"
+    ],
+    "type": "c2",
+    "value": "10.0.0.5:80"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "779ab16d6fb58a1c75e7c5e490331032e53864a54cca94f863f5b00f814cf3af",
+   "size_bytes": 76,
+   "source_hint": "threatfox",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": null,
+   "claims_not_verified": true,
+   "feed": "threatfox",
+   "feed_record_id": "1003"
+  },
+  "summary": {
+   "c2_count": 1,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": null,
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "threatfox_3": {
+  "analysis_id": "a5068366-c35e-5dc9-9f38-4d301ff7ac4d",
+  "artifacts": [
+   {
+    "description": "threatfox record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.threatfox@0.1.0",
+    "sha256": "4ad2a8d9878b33ead6d986d6a4cc213cc733dd86e9ef9a37ddebaae2b10fe019",
+    "size_bytes": 79,
+    "type": "feed_record"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.53,
+    "confidence_method": "feed_claim",
+    "context": {
+     "confidence_level": 75
+    },
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "c2.example.test",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Confidence level stated by ThreatFox: 75. MaaSSpec has not checked it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "domain",
+      "normalized": "c2.example.test",
+      "value": "c2.example.test"
+     }
+    ],
+    "source": {
+     "artifact_id": null,
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "domain",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed"
+    ],
+    "type": "c2",
+    "value": "c2.example.test"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "4ad2a8d9878b33ead6d986d6a4cc213cc733dd86e9ef9a37ddebaae2b10fe019",
+   "size_bytes": 79,
+   "source_hint": "threatfox",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": null,
+   "claims_not_verified": true,
+   "feed": "threatfox",
+   "feed_record_id": "1004"
+  },
+  "summary": {
+   "c2_count": 1,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": null,
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "threatfox_4": {
+  "analysis_id": "ec83d186-c095-53c7-812f-1e2845d4b1c5",
+  "artifacts": [
+   {
+    "description": "threatfox record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.threatfox@0.1.0",
+    "sha256": "e7d835aaadac91e8656bf209bf2bb9627919c2fcf2c2a75ee4a6d9ab1cf36fa3",
+    "size_bytes": 111,
+    "type": "feed_record"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.35,
+    "confidence_method": "feed_claim",
+    "context": {},
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Confidence level stated by ThreatFox: not given. MaaSSpec has not checked it.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "sha256",
+      "normalized": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+     }
+    ],
+    "source": {
+     "artifact_id": null,
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "sample_hash",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed"
+    ],
+    "type": "embedded_artifact",
+    "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "e7d835aaadac91e8656bf209bf2bb9627919c2fcf2c2a75ee4a6d9ab1cf36fa3",
+   "size_bytes": 111,
+   "source_hint": "threatfox",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+   "claims_not_verified": true,
+   "feed": "threatfox",
+   "feed_record_id": "1005"
+  },
+  "summary": {
+   "c2_count": 0,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": null,
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "threatfox_5": {
+  "analysis_id": "77262dc1-9007-58a5-8bad-96fa7d268e80",
+  "artifacts": [
+   {
+    "description": "threatfox record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.threatfox@0.1.0",
+    "sha256": "47187747d92efbbc870900f90be973705f4d046c7de47fb87085a107a72d7b62",
+    "size_bytes": 74,
+    "type": "feed_record"
+   }
+  ],
+  "errors": [
+   {
+    "message": "IOC 'new_kind' is not a type this adapter maps. Kept as other.",
+    "module": "feed.threatfox",
+    "recoverable": true,
+    "severity": "info"
+   }
+  ],
+  "findings": [
+   {
+    "confidence": 0.3,
+    "confidence_method": "feed_claim",
+    "context": {
+     "confidence_level": 80
+    },
+    "extracted_by": {
+     "module": "feed.threatfox",
+     "technique": "threatfox_record",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Confidence level stated by ThreatFox: 80. MaaSSpec has not checked it.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": null,
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "new_kind",
+    "tags": [
+     "feed",
+     "feed:threatfox",
+     "claimed",
+     "unmapped_ioc_type"
+    ],
+    "type": "other",
+    "value": "whatever"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "47187747d92efbbc870900f90be973705f4d046c7de47fb87085a107a72d7b62",
+   "size_bytes": 74,
+   "source_hint": "threatfox",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": null,
+   "claims_not_verified": true,
+   "feed": "threatfox",
+   "feed_record_id": "1006"
+  },
+  "summary": {
+   "c2_count": 0,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": null,
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "unpacme_feed_0": {
+  "analysis_id": "e4ba7b42-275e-56bd-8932-26ff79feeafb",
+  "artifacts": [
+   {
+    "description": "unpacme record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.unpacme@0.1.0",
+    "sha256": "2f31cb4e3cff815878f85ecb7dd7132890ad094299fee253d65635e69027f018",
+    "size_bytes": 224,
+    "type": "feed_record"
+   },
+   {
+    "description": "Sample named in the UnpacMe public feed. Not fetched.",
+    "id": "art_sample_ref",
+    "parent_artifact_id": null,
+    "produced_by": "feed.unpacme@0.1.0",
+    "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+    "size_bytes": null,
+    "type": "sample_reference"
+   }
+  ],
+  "errors": [],
+  "findings": [
+   {
+    "confidence": 0.8,
+    "confidence_method": "feed_record",
+    "context": {
+     "children": 2,
+     "created": "1763290000.0",
+     "status": "complete"
+    },
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "unpacme_feed",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "7777777777777777777777777777777777777777777777777777777777777777",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Listed by UnpacMe. MaaSSpec has not seen the sample.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "sha256",
+      "normalized": "7777777777777777777777777777777777777777777777777777777777777777",
+      "value": "7777777777777777777777777777777777777777777777777777777777777777"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "sample_hash",
+    "tags": [
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "capability:downloader"
+    ],
+    "type": "embedded_artifact",
+    "value": "7777777777777777777777777777777777777777777777777777777777777777"
+   },
+   {
+    "confidence": 0.5,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "unpacme_malware_id",
+     "version": "0.1.0"
+    },
+    "family_data": {
+     "type": "yara"
+    },
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Detection reported by UnpacMe. Not confirmed by MaaSSpec.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_sample_ref",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "malware_id",
+    "tags": [
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "capability:downloader"
+    ],
+    "type": "family_indicator",
+    "value": "Example.Family"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "2f31cb4e3cff815878f85ecb7dd7132890ad094299fee253d65635e69027f018",
+   "size_bytes": 224,
+   "source_hint": "unpacme",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+   "claims_not_verified": true,
+   "feed": "unpacme",
+   "feed_record_id": "feed123456"
+  },
+  "summary": {
+   "c2_count": 0,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": {
+    "confidence": 0.5,
+    "method": "unpacme_malware_id",
+    "name": "Example.Family"
+   },
+   "primary_capabilities": [
+    "downloader"
+   ],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ },
+ "unpacme_submission_0": {
+  "analysis_id": "e69f2111-aca9-5cb2-a00b-d938632ebf1e",
+  "artifacts": [
+   {
+    "description": "unpacme record as received, canonical JSON, not stored here.",
+    "id": "art_record",
+    "parent_artifact_id": null,
+    "produced_by": "feed.unpacme@0.1.0",
+    "sha256": "9332a9d66e576b079be1eb35e0fa544a5b78b2a09b65acc43db26ea31e2771c6",
+    "size_bytes": 837,
+    "type": "feed_record"
+   },
+   {
+    "description": "As reported by UnpacMe. Not fetched.",
+    "id": "art_unpack_0",
+    "parent_artifact_id": null,
+    "produced_by": "feed.unpacme@0.1.0",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "size_bytes": null,
+    "type": "submitted_sample"
+   },
+   {
+    "description": "As reported by UnpacMe. Not fetched.",
+    "id": "art_unpack_1",
+    "parent_artifact_id": "art_unpack_0",
+    "produced_by": "feed.unpacme@0.1.0",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "size_bytes": null,
+    "type": "unpacked_layer"
+   }
+  ],
+  "errors": [
+   {
+    "message": "deepmatch and detectit entries are present and not normalized in 0.1.",
+    "module": "feed.unpacme",
+    "recoverable": true,
+    "severity": "info"
+   }
+  ],
+  "findings": [
+   {
+    "confidence": 0.8,
+    "confidence_method": "feed_record",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "unpacme_results",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0001",
+    "normalized": "1111111111111111111111111111111111111111111111111111111111111111",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Reported by UnpacMe. MaaSSpec has not seen the layer.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "sha256",
+      "normalized": "1111111111111111111111111111111111111111111111111111111111111111",
+      "value": "1111111111111111111111111111111111111111111111111111111111111111"
+     },
+     {
+      "kind": "sha1",
+      "normalized": "3333333333333333333333333333333333333333",
+      "value": "3333333333333333333333333333333333333333"
+     },
+     {
+      "kind": "md5",
+      "normalized": "22222222222222222222222222222222",
+      "value": "22222222222222222222222222222222"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_unpack_0",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "submitted_sample",
+    "tags": [
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "unpacked"
+    ],
+    "type": "embedded_artifact",
+    "value": "1111111111111111111111111111111111111111111111111111111111111111"
+   },
+   {
+    "confidence": 0.8,
+    "confidence_method": "feed_record",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "unpacme_results",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0002",
+    "normalized": "4444444444444444444444444444444444444444444444444444444444444444",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Reported by UnpacMe. MaaSSpec has not seen the layer.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "sha256",
+      "normalized": "4444444444444444444444444444444444444444444444444444444444444444",
+      "value": "4444444444444444444444444444444444444444444444444444444444444444"
+     },
+     {
+      "kind": "sha1",
+      "normalized": "6666666666666666666666666666666666666666",
+      "value": "6666666666666666666666666666666666666666"
+     },
+     {
+      "kind": "md5",
+      "normalized": "55555555555555555555555555555555",
+      "value": "55555555555555555555555555555555"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_unpack_1",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "unpacked_payload",
+    "tags": [
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "unpacked"
+    ],
+    "type": "embedded_artifact",
+    "value": "4444444444444444444444444444444444444444444444444444444444444444"
+   },
+   {
+    "confidence": 0.7,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "unpacme_malware_id",
+     "version": "0.1.0"
+    },
+    "family_data": {
+     "reference": "https://example.test/r",
+     "reported_confidence": "high",
+     "source": "yara"
+    },
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0003",
+    "normalized": null,
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "Detection reported by UnpacMe. Not confirmed by MaaSSpec.",
+     "source_reliability": "C"
+    },
+    "selectors": [],
+    "source": {
+     "artifact_id": "art_unpack_1",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "malware_id",
+    "tags": [
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "unpacked"
+    ],
+    "type": "family_indicator",
+    "value": "Example.Loader"
+   },
+   {
+    "confidence": 0.5,
+    "confidence_method": "feed_claim",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "unpacme_urls",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0004",
+    "normalized": "c2.example.test",
+    "proposed_grade": {
+     "information_credibility": "3",
+     "rationale": "URL listed by UnpacMe for an unpacked layer.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "url",
+      "normalized": "c2.example.test",
+      "value": "https://c2.example.test/gate"
+     },
+     {
+      "kind": "domain",
+      "normalized": "c2.example.test",
+      "value": "c2.example.test"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_unpack_1",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "url",
+    "tags": [
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "unpacked"
+    ],
+    "type": "c2",
+    "value": "https://c2.example.test/gate"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0005",
+    "normalized": "operator@example.test",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "email",
+      "normalized": "operator@example.test",
+      "value": "operator@example.test"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_unpack_1",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "email",
+    "tags": [
+     "static",
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "unpacked"
+    ],
+    "type": "credential_pattern",
+    "value": "operator@example.test"
+   },
+   {
+    "confidence": 0.6,
+    "confidence_method": "static_selector_scan",
+    "context": null,
+    "extracted_by": {
+     "module": "feed.unpacme",
+     "technique": "selector_scan",
+     "version": "0.1.0"
+    },
+    "family_data": null,
+    "first_seen_in_analysis": "2026-11-16T00:00:00Z",
+    "id": "fnd_0006",
+    "normalized": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+    "proposed_grade": {
+     "information_credibility": "2",
+     "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed.",
+     "source_reliability": "C"
+    },
+    "selectors": [
+     {
+      "kind": "bitcoin",
+      "normalized": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+      "value": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+     }
+    ],
+    "source": {
+     "artifact_id": "art_unpack_1",
+     "method": "feed",
+     "offset": null,
+     "section": null
+    },
+    "subtype": "bitcoin",
+    "tags": [
+     "static",
+     "wallet",
+     "feed",
+     "feed:unpacme",
+     "claimed",
+     "unpacked"
+    ],
+    "type": "wallet",
+    "value": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+   }
+  ],
+  "generated_at": "2026-11-16T00:00:00Z",
+  "input": {
+   "filename": null,
+   "sha256": "9332a9d66e576b079be1eb35e0fa544a5b78b2a09b65acc43db26ea31e2771c6",
+   "size_bytes": 837,
+   "source_hint": "unpacme",
+   "type": "feed_record"
+  },
+  "maasspec_version": "0.1.0",
+  "metadata": {
+   "claimed_sample_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+   "claims_not_verified": true,
+   "feed": "unpacme",
+   "feed_record_id": "abcDEF123456"
+  },
+  "summary": {
+   "c2_count": 1,
+   "config_extracted": false,
+   "encryption_observed": false,
+   "family": {
+    "confidence": 0.7,
+    "method": "unpacme_malware_id",
+    "name": "Example.Loader"
+   },
+   "primary_capabilities": [],
+   "risk_signals": []
+  },
+  "tool": {
+   "commit": null,
+   "name": "MaaSSpec",
+   "version": "0.1.0"
+  }
+ }
+}

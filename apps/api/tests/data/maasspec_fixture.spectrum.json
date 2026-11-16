@@ -1,0 +1,171 @@
+{
+  "maasspec_version": "0.1.0",
+  "analysis_id": "998f0003-3ae9-45b6-b8b2-9a8afdb801d1",
+  "generated_at": "2026-11-16T14:03:46.914438Z",
+  "tool": {
+    "name": "MaaSSpec",
+    "version": "0.1.0",
+    "commit": null
+  },
+  "input": {
+    "type": "sample",
+    "filename": "fixture.txt",
+    "sha256": "0bbc2808af834436bbdb41af8929ca519fe9c311ed8f1c67ce554cb3acee5880",
+    "size_bytes": 88,
+    "source_hint": "local file"
+  },
+  "summary": {
+    "family": {
+      "name": "example",
+      "confidence": 0.99,
+      "method": "fixture_marker"
+    },
+    "primary_capabilities": [
+      "example"
+    ],
+    "c2_count": 1,
+    "config_extracted": false,
+    "encryption_observed": false,
+    "risk_signals": []
+  },
+  "findings": [
+    {
+      "id": "fnd_0001",
+      "type": "other",
+      "subtype": "file_magic",
+      "value": "unrecognized",
+      "normalized": "unknown",
+      "confidence": 0.4,
+      "confidence_method": "magic_bytes",
+      "extracted_by": {
+        "module": "static",
+        "version": "0.1.0",
+        "technique": "magic"
+      },
+      "source": {
+        "artifact_id": null,
+        "offset": "0x0",
+        "section": null,
+        "method": "static"
+      },
+      "context": null,
+      "selectors": [],
+      "proposed_grade": null,
+      "tags": [
+        "static"
+      ],
+      "first_seen_in_analysis": "2026-11-16T14:03:46.914438Z",
+      "family_data": null
+    },
+    {
+      "id": "fnd_0002",
+      "type": "c2",
+      "subtype": "url",
+      "value": "https://panel.example.test/gate.php",
+      "normalized": "panel.example.test",
+      "confidence": 0.72,
+      "confidence_method": "static_selector_scan",
+      "extracted_by": {
+        "module": "static",
+        "version": "0.1.0",
+        "technique": "selector_scan"
+      },
+      "source": null,
+      "context": null,
+      "selectors": [
+        {
+          "kind": "url",
+          "value": "https://panel.example.test/gate.php",
+          "normalized": "panel.example.test"
+        }
+      ],
+      "proposed_grade": {
+        "source_reliability": "C",
+        "information_credibility": "2",
+        "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed."
+      },
+      "tags": [
+        "static"
+      ],
+      "first_seen_in_analysis": "2026-11-16T14:03:46.914438Z",
+      "family_data": null
+    },
+    {
+      "id": "fnd_0003",
+      "type": "credential_pattern",
+      "subtype": "email",
+      "value": "operator@example.test",
+      "normalized": "operator@example.test",
+      "confidence": 0.7,
+      "confidence_method": "static_selector_scan",
+      "extracted_by": {
+        "module": "static",
+        "version": "0.1.0",
+        "technique": "selector_scan"
+      },
+      "source": null,
+      "context": null,
+      "selectors": [
+        {
+          "kind": "email",
+          "value": "operator@example.test",
+          "normalized": "operator@example.test"
+        }
+      ],
+      "proposed_grade": {
+        "source_reliability": "C",
+        "information_credibility": "2",
+        "rationale": "Extracted from the sample by a static scan. Not dynamically confirmed."
+      },
+      "tags": [
+        "static"
+      ],
+      "first_seen_in_analysis": "2026-11-16T14:03:46.914438Z",
+      "family_data": null
+    },
+    {
+      "id": "fnd_0004",
+      "type": "family_indicator",
+      "subtype": "fixture_marker",
+      "value": "MAASSPEC_FAMILY_EXAMPLE",
+      "normalized": null,
+      "confidence": 0.99,
+      "confidence_method": "exact_marker",
+      "extracted_by": {
+        "module": "family.example",
+        "version": "0.1.0",
+        "technique": "fixture_match"
+      },
+      "source": null,
+      "context": {
+        "note": "Synthetic marker for the plugin contract. Not a malware family."
+      },
+      "selectors": [],
+      "proposed_grade": null,
+      "tags": [
+        "fixture",
+        "capability:example"
+      ],
+      "first_seen_in_analysis": "2026-11-16T14:03:46.914438Z",
+      "family_data": {
+        "replace_this_module": true
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "art_input",
+      "type": "input",
+      "sha256": "0bbc2808af834436bbdb41af8929ca519fe9c311ed8f1c67ce554cb3acee5880",
+      "size_bytes": 88,
+      "description": "Original input, hashed, not stored in the spectrum.",
+      "produced_by": "static@0.1.0",
+      "parent_artifact_id": null
+    }
+  ],
+  "errors": [],
+  "metadata": {
+    "scan_window_truncated": false,
+    "strings_truncated": false
+  }
+}
