@@ -399,8 +399,8 @@ def test_the_collectors_wait_needs_the_psycopg_the_project_asks_for():
 
 def test_the_docs_name_the_services_that_check_the_key_and_not_every_service():
     """Only the services that run the application's code, the egress proxy and the migration job refuse to
-    start holding the persona key; the database, the object store and Redis read secrets.env and check
-    nothing, and Caddy reads caddy.env alone. A document that says every other service refuses is wrong
+    start holding the persona key; the database, the object store and Redis check nothing and read env files
+    of their own (none reads secrets.env), and Caddy reads caddy.env alone. A document that says every other service refuses is wrong
     about the one place the key must never be put."""
     for path in ("infra/production/README.md", "infra/production/collector.env.example"):
         text = (ROOT / path).read_text(encoding="utf-8")
