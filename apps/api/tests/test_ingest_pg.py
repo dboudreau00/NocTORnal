@@ -269,6 +269,22 @@ def test_a_retried_request_is_deduped_not_double_stored(conn, svc):
     assert second.batch_id == first.batch_id
 
 
+def test_a_repeated_key_after_the_window_is_still_a_duplicate_not_a_database_error(conn, svc):
+    """The unique index on (api key, Idempotency-Key) never expires, so a repeat a day or a year
+    later must answer as the first batch rather than reach the insert."""
+    owner = _user(conn)
+    key = svc.authenticate(_key(svc, owner).secret)
+    first = svc.accept(key, b'{"a":1}', idempotency_key="old-key")
+    conn.execute("UPDATE ingest.batch SET received_at = now() - interval '400 days' "
+                 "WHERE id = %s", (first.batch_id,))
+    again = svc.accept(key, b'{"a":1}', idempotency_key="old-key")
+    assert again.duplicate is True
+    assert again.batch_id == first.batch_id
+    other = svc.accept(key, b'{"b":2}', idempotency_key="old-key")
+    assert other.duplicate is True and other.batch_id == first.batch_id, (
+        "the same key with another body stays the first batch")
+
+
 def test_an_oversized_payload_is_refused(conn, svc):
     from noctornal_api.ingest import IngestError
     owner = _user(conn)

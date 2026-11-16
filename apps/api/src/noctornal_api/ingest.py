@@ -733,6 +733,9 @@ class IngestService:
         already paid for buffering it. The route refuses at the cap while the body is still arriving
         (`http.limits.read_body_capped`), and this check is the second, cheaper line.
 
+        A repeated (key, Idempotency-Key) answers as a duplicate of the first batch whenever it
+        arrives, whatever the body: the index that enforces it never expires.
+
         The batch is created by `ingest.batch_accept` (0190), handed the HMAC `authenticate`
         matched: the batches are read-only to the request role, and the function creates one only
         for the holder of the key's secret, on a live key, within its size and at the content
@@ -752,14 +755,15 @@ class IngestService:
         if idempotency_key:
             existing = self._c.execute(
                 """SELECT id FROM ingest.batch
-                    WHERE api_key_id = %s AND idempotency_key = %s
-                      AND received_at > now() - interval '24 hours'""",
+                    WHERE api_key_id = %s AND idempotency_key = %s""",
                 (key["id"], idempotency_key)).fetchone()
             if existing:
-                # Retrying clients are the norm, not the exception.
+                # Retrying clients are the norm, not the exception. There is no time window: the unique
+                # index on (api_key_id, idempotency_key) is permanent, so a repeat after any interval
+                # must answer as a duplicate, never reach the insert and raise a database error.
                 return AcceptResult(batch_id=existing[0], accepted=True,
                                     duplicate=True,
-                                    detail="already received within 24h")
+                                    detail="already received")
 
         digest = hashlib.sha256(raw).digest()
         key_name = f"ingest/{digest.hex()[:2]}/{digest.hex()}"

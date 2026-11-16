@@ -332,15 +332,14 @@ def test_the_same_body_without_an_idempotency_key_is_a_second_batch_and_a_flagge
     assert original[6] is None
 
 
-def test_the_same_idempotency_key_after_24_hours_is_refused_by_the_unique_index(
+def test_the_same_idempotency_key_after_24_hours_is_still_a_duplicate(
         conn, svc, switch_on):
-    import psycopg
     key = _key(conn, svc)
     raw = compact(SPECTRUM)
     analysis = SPECTRUM["analysis_id"]
     first = svc.accept(key, raw, idempotency_key=analysis)
     conn.execute("UPDATE ingest.batch SET received_at = now() - interval '25 hours' "
                  "WHERE id = %s", (first.batch_id,))
-    with pytest.raises(psycopg.errors.UniqueViolation, match="batch_idempotency_idx"):
-        with conn.transaction():
-            svc.accept(key, raw, idempotency_key=analysis)
+    again = svc.accept(key, raw, idempotency_key=analysis)
+    assert again.duplicate is True
+    assert again.batch_id == first.batch_id

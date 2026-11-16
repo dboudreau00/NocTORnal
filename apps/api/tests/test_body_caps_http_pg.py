@@ -643,3 +643,29 @@ def test_an_email_exhibit_at_the_cap_is_accepted(conn, app, client, eml_cap):
     assert conn.execute(
         "SELECT count(*) FROM deception.email_message WHERE case_id = %s",
         (case_id,)).fetchone()[0] == 1
+
+
+def test_a_repeated_idempotency_key_after_the_window_is_a_202_duplicate(conn, client):
+    """Past the 24 hour mark the unique index still holds: the route answers 202 duplicate with the
+    first batch, not a 500 from the database."""
+    from noctornal_api.rawstore import RawBatchStorage
+    owner, _e, _s = _make_user(conn, global_roles=("SYS_ADMIN",))
+    key_row_id, secret = _issue_key(conn, owner, cap=INGEST_CAP)
+    body = b'{"note": "idempotent"}'
+    headers = {"authorization": f"Bearer {secret}", "content-type": "application/json",
+               "idempotency-key": "repeat-after-the-window"}
+    storage = RawBatchStorage()
+    storage.ensure_bucket()
+    digest = hashlib.sha256(body).hexdigest()
+    try:
+        first = client.post("/api/v1/ingest", content=body, headers=headers)
+        assert first.status_code == 202, first.text
+        assert first.json()["duplicate"] is False
+        conn.execute("UPDATE ingest.batch SET received_at = now() - interval '48 hours' "
+                     "WHERE api_key_id = %s", (key_row_id,))
+        again = client.post("/api/v1/ingest", content=body, headers=headers)
+        assert again.status_code == 202, again.text
+        assert again.json()["duplicate"] is True
+        assert again.json()["batch_id"] == first.json()["batch_id"]
+    finally:
+        storage.store.delete_key(storage.bucket, f"ingest/{digest[:2]}/{digest}")
