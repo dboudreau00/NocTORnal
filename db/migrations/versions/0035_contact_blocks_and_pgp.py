@@ -114,7 +114,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = comms, core, public;
+SET LOCAL search_path = comms, core, public;
 
 -- ------------------------------------------------------------------
 -- The stoplist. docs/10: "Maintain a stoplist of known escrow, guarantor
@@ -394,7 +394,7 @@ CREATE INDEX pgp_verification_claimed_idx ON pgp_verification (claimed_fingerpri
         f"('{k}', {str(s).lower()}, '{d}')" for k, s, d in _NEW_PERMISSIONS)
     grants = ",\n".join(f"('{r}', '{p}')" for r, p in _ROLE_GRANTS)
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 INSERT INTO permission (key, requires_step_up, description) VALUES
 {perms}
 ON CONFLICT (key) DO NOTHING;

@@ -94,7 +94,7 @@ _SET_ONCE_CHECKS = "\n".join(
     f"  END IF;" for c in SET_ONCE)
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 ALTER TABLE detonation
   ADD COLUMN mode text NOT NULL DEFAULT 'RECORD_ONLY',
@@ -281,7 +281,7 @@ def downgrade() -> None:
         raise RuntimeError(downgrade_refusal(n))
     run(GRANT_BACK_SQL)
     run(f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 DROP TRIGGER detonation_no_truncate ON detonation;
 DROP TRIGGER detonation_guard ON detonation;
 DROP FUNCTION lab.guard_detonation();

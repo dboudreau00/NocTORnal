@@ -756,9 +756,12 @@ def set_policy(
     (seven days unless declared) when they signed; the database refuses the change without one.
     Turning it on takes one signature, and a deployment that requires two on every merge cannot be
     relaxed per case. The consume is the transaction's first write (approvals.py, the out-of-band
-    rule), and every setting commits with its CASE_POLICY_CHANGED row.
+    rule), and every setting commits with its CASE_POLICY_CHANGED row, all on one system
+    connection (`SystemPurpose.CASE_RECORD`) after the gate.
     """
     from psycopg.types.json import Json
+
+    from noctornal_api.db import SystemPurpose, system_connection
 
     row = conn.execute(
         'SELECT dual_control_merge, withheld_disclosure, '
@@ -816,16 +819,20 @@ def set_policy(
         "withheld_disclosure":
             'UPDATE core."case" SET withheld_disclosure = %s WHERE id = %s',
     }
+    # The switches are written as the system role after every refusal above. The consume, the
+    # UPDATEs and their rows share one transaction on that one connection: the database's guard
+    # (0076) accepts the switch going off only beside an approval consumed at the same now().
     try:
-        with conn.transaction():
+        with system_connection(SystemPurpose.CASE_RECORD, reuse=conn) as sconn, \
+                sconn.transaction():
             if approval is not None:
-                svc.consume(approval.id, actor_id=user.user_id,
-                            operation="case.policy.relax", case_id=case_id,
-                            payload=approval.payload)
+                ApprovalService(sconn).consume(
+                    approval.id, actor_id=user.user_id, operation="case.policy.relax",
+                    case_id=case_id, payload=approval.payload)
             for setting, value in wanted.items():
                 if value == current[setting]:
                     continue
-                conn.execute(_UPDATES[setting], (value, case_id))
+                sconn.execute(_UPDATES[setting], (value, case_id))
                 detail = {"setting": setting, "from": current[setting],
                           "to": value}
                 if setting == "dual_control_merge":
@@ -833,7 +840,7 @@ def set_policy(
                     if approval is not None:
                         detail["approval_request_id"] = str(approval.id)
                         detail["approved_by"] = str(approval.decided_by)
-                conn.execute(
+                sconn.execute(
                     """INSERT INTO audit.event
                            (actor_id, actor_kind, action, object_type,
                             object_id, case_id, detail)

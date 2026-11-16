@@ -44,7 +44,7 @@ depends_on = None
 MAX_PATH_CHARS = 512
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 ALTER TABLE sample
   ADD COLUMN parent_sample_id uuid REFERENCES lab.sample(id),
@@ -105,7 +105,7 @@ CREATE TRIGGER sample_member_never_below_its_archive
 """
 
 DOWNGRADE_SQL = """
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 DROP TRIGGER sample_member_never_below_its_archive ON sample;
 DROP FUNCTION lab.guard_member_labels();
 DROP INDEX sample_parent_idx;

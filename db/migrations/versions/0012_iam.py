@@ -14,7 +14,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 CREATE TABLE app_user (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),

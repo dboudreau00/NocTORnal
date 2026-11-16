@@ -164,6 +164,9 @@ class SystemPurpose(StrEnum):
     AUTH = "auth"                        # sign-in, sessions, second factors
     IAM_ADMIN = "iam_admin"              # accounts, roles, compartments, policy
     CASE_MEMBERSHIP = "case_membership"  # case creation and its assignments
+    # A case's governance record, its status and its policy switches, which the request role may only
+    # read: written after the route's own gate, for the caller it authenticated.
+    CASE_RECORD = "case_record"
     BREAK_GLASS = "break_glass"          # invoke, revoke, review
     TICKETS = "tickets"                  # download and production ticket mint
     GRAPH_GUARD = "graph_guard"          # retirement refused over hidden ties

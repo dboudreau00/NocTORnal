@@ -27,9 +27,12 @@ The name is kept, so every comment and refusal that names it stays true.
 ## Downgrade
 
 Restores the 0006 key. On a database that holds two live ties of a type
-between one pair at different labels, the downgrade fails on the unique
-build, which is the honest answer (reversible on an empty database is
-the contract, CONVENTIONS.md).
+between one pair at different labels the key cannot be rebuilt, and the
+downgrade refuses first, naming how many keys collide and printing none
+of them: Postgres's own refusal, a unique violation, prints the
+duplicated key (two entity ids, the type and the start of validity).
+Nothing is retired or merged to make it pass (reversible on an empty
+database is the contract, CONVENTIONS.md).
 """
 from alembic import op
 
@@ -57,8 +60,34 @@ CREATE UNIQUE INDEX edge_uniq_active ON core.edge
 """
 
 
+#: The keys the 0006 index would refuse, over its own columns and predicate,
+#: so the count is the index build's verdict.
+COUNT_SQL = """
+SELECT count(*) FROM (
+  SELECT 1 FROM core.edge
+   WHERE deleted_at IS NULL
+   GROUP BY src_node_id, dst_node_id, edge_type,
+            coalesce(valid_from, '-infinity'::timestamptz)
+  HAVING count(*) > 1) AS held_at_different_labels
+"""
+
+
+def downgrade_refusal(n: int) -> str:
+    held = "key is" if n == 1 else "keys are"
+    return (f"refusing to downgrade 0133: {n} live tie {held} held at different "
+            "labels, and the 0006 index allows one live tie per pair of entities, "
+            "type and start of validity. This revision's downgrade changed nothing, "
+            "so the database is now at 0133 and the revisions above it are already "
+            "undone. Run alembic upgrade head to return, or restore a backup taken "
+            "before 0133 was applied.")
+
+
 def run(sql: str) -> None:
     op.get_bind().connection.driver_connection.execute(sql)
+
+
+def query(sql: str) -> list:
+    return op.get_bind().connection.driver_connection.execute(sql).fetchall()
 
 
 def upgrade() -> None:
@@ -66,4 +95,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    n = query(COUNT_SQL)[0][0]
+    if n:
+        raise RuntimeError(downgrade_refusal(n))
     run(DOWNGRADE_SQL)

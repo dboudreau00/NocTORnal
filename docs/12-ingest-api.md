@@ -96,7 +96,11 @@ Nothing alerts on them; an `ingest.manage` holder looks.
   asynchronously. Never block the client on processing. The raw bytes are
   stored first (content-addressed, in the raw bucket `noctornal-raw`, with
   no object lock and a short category clock, because it is somebody else's
-  unvetted bytes); nothing is parsed in the request.
+  unvetted bytes); nothing is parsed in the request. The batch row is
+  created by `ingest.batch_accept` (0190), handed the HMAC the key's check
+  matched: the batches are read-only to the request role, so only a caller
+  holding a live key's secret creates one, and only at the content address
+  of the bytes it declares.
 - Parsing is a separate step: `POST /ingest/batches/{id}/parse`, by an
   `ingest.manage` holder, so a malformed 50MB dump is a background problem
   rather than a request timeout. It parses into the unattached queue and

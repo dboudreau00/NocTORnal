@@ -47,7 +47,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = ingest, core, public;
+SET LOCAL search_path = ingest, core, public;
 
 -- 1, not 2: every row already here was fingerprinted by the old
 -- tokeniser, and defaulting them to the current version would assert
@@ -73,7 +73,7 @@ ALTER TABLE record ADD CONSTRAINT record_category_source_known
 
 def downgrade() -> None:
     run("""
-SET search_path = ingest, core, public;
+SET LOCAL search_path = ingest, core, public;
 
 -- A nested structural match is still a structural match, so the value
 -- collapses rather than being lost. The confidence already records that

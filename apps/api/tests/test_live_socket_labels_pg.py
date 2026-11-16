@@ -6,6 +6,9 @@ and the hint's existence and time are a channel even without content. 0146 puts 
 need into the NOTIFY payload; the socket asks the access gate per delivery and drops what the subscriber
 may not read. The labels never reach the client.
 
+Each delivery's check runs on a connection bound to the subscriber's session, as a request's does, and
+a session that no longer binds ends the socket with the session's own close.
+
 The first frame is untrusted input that arrives before any credential is checked; a list, a number or an
 object where a case id belongs must not raise AttributeError out of the handshake, a traceback per
 connection for a peer with no session.
@@ -195,12 +198,24 @@ def test_a_tie_is_announced_under_the_join_even_when_the_writer_cannot_see_an_en
 # The per-delivery decision
 # ---------------------------------------------------------------------------
 
+def _tokens(owner):
+    """A session token per subscriber, minted the first time each is asked for."""
+    minted = {}
+
+    def token(user):
+        if user not in minted:
+            minted[user] = s.session(owner, user)[1]
+        return minted[user]
+    return token
+
+
 def test_change_visible_asks_the_gate_per_pair(owner, world):
     from noctornal_api.http.routers.live import _change_visible
     case_id, analyst, cleared = world["case"], world["analyst"], world["cleared"]
+    token = _tokens(owner)
 
     def seen(user, labels):
-        return _change_visible(user, case_id, None, labels)
+        return _change_visible(user, case_id, None, labels, token=token(user))
 
     # The AMBER analyst, in an AMBER case.
     assert seen(analyst, [["AMBER", []]]) is True
@@ -566,12 +581,13 @@ def test_accepting_and_rejecting_a_proposal_announce_its_labels_too(owner, world
 def test_the_delivery_verdict_drops_a_proposal_hint_above_the_subscriber(owner, world):
     from noctornal_api.http.routers.live import _delivery_verdict
     case_id, analyst, cleared = world["case"], world["analyst"], world["cleared"]
+    token = _tokens(owner)
 
     def verdict(user, labels, *, present=True):
         payload = {"case_id": str(case_id), "kind": "proposal", "op": "CHANGE"}
         if present:
             payload["labels"] = labels
-        return _delivery_verdict(user, case_id, None, payload)
+        return _delivery_verdict(user, case_id, None, payload, token=token(user))
 
     assert verdict(analyst, [["AMBER", []]]) == "send"
     assert verdict(analyst, [["RED", []]]) == "drop"
@@ -582,7 +598,57 @@ def test_the_delivery_verdict_drops_a_proposal_hint_above_the_subscriber(owner, 
     assert verdict(analyst, []) == "drop"
     # The kinds that carry no labels are still delivered on the case alone.
     assert _delivery_verdict(analyst, case_id, None,
-                             {"case_id": str(case_id), "kind": "notification"}) == "send"
+                             {"case_id": str(case_id), "kind": "notification"},
+                             token=token(analyst)) == "send"
+
+
+def test_a_live_delivery_check_runs_on_a_connection_bound_to_its_subscriber(
+        owner, world, monkeypatch):
+    """As the request role. The per-delivery check binds its connection to the subscriber's
+    session before the gate reads, as a request's is bound before its route runs: a connection
+    bound to nobody reads as nobody. A session that no longer binds to the subscriber, revoked
+    after the stream last asked or another account's, is the session's end and never reaches the
+    gate."""
+    from noctornal_api.db import ASSUME_ROLE_ENV
+    from noctornal_api.http.routers import live
+    monkeypatch.setenv(ASSUME_ROLE_ENV, "1")
+    case_id, analyst, cleared = world["case"], world["analyst"], world["cleared"]
+    session_id, token = s.session(owner, analyst)
+    _other, theirs = s.session(owner, cleared)
+    payload = {"case_id": str(case_id), "kind": "proposal", "op": "CHANGE",
+               "labels": [["AMBER", []]]}
+    seen = []
+    bind, may_read = live.bind_session, live._may_read
+
+    def binding(conn, raw):
+        out = bind(conn, raw)
+        seen.append(("bound", out.actor, out.exempt))
+        return out
+
+    def gate(conn, *args, **kwargs):
+        seen.append(("gate", conn.execute("SELECT iam.rls_actor()").fetchone()[0]))
+        return may_read(conn, *args, **kwargs)
+
+    monkeypatch.setattr(live, "bind_session", binding)
+    monkeypatch.setattr(live, "_may_read", gate)
+
+    assert live._delivery_verdict(analyst, case_id, None, payload, token=token) == "send"
+    assert seen == [("bound", analyst, False), ("gate", analyst)]
+    assert live._recheck(analyst, case_id, None, token=token) is True
+    assert live._change_visible(analyst, case_id, None, [["AMBER", []]], token=token) is True
+
+    seen.clear()
+    assert live._delivery_verdict(analyst, case_id, None, payload, token=theirs) == "ended"
+    assert seen == [("bound", cleared, False)], "another account's session reached the gate"
+
+    owner.execute("UPDATE iam.session SET revoked_at = now(), revoke_reason = 'logout' "
+                  "WHERE id = %s", (session_id,))
+    seen.clear()
+    assert live._delivery_verdict(analyst, case_id, None, payload, token=token) == "ended"
+    assert seen == [("bound", None, False)], "a revoked session reached the gate"
+    assert live._recheck(analyst, case_id, None, token=token) is False
+    assert live._change_visible(analyst, case_id, None, [["AMBER", []]],
+                                token=token) is False
 
 
 def test_the_socket_wakes_a_reader_for_a_proposal_they_may_read_and_not_above(owner, world, live):
@@ -603,3 +669,32 @@ def test_the_socket_wakes_a_reader_for_a_proposal_they_may_read_and_not_above(ow
             change = _until_change(ws)
             assert change == {"type": "change", "kind": "proposal", "op": "CHANGE"}
             assert "labels" not in change
+
+
+def test_a_session_that_ends_before_a_delivery_closes_the_socket_as_ended(
+        owner, world, live, monkeypatch):
+    """As the request role. The stream asks whether the session stands before each delivery, and
+    the delivery's own connection is bound to it, so a session that ends between the two closes
+    the socket with the session's reason, which the console answers by asking whether it is still
+    signed in, and never with the access close that tells it to stop."""
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from noctornal_api.db import ASSUME_ROLE_ENV
+    monkeypatch.setenv(ASSUME_ROLE_ENV, "1")
+    case_id, analyst = world["case"], world["analyst"]
+    session_id, token = s.session(owner, analyst)
+    with TestClient(_app(), client=(PEER, 41013)) as client:
+        with client.websocket_connect("/api/v1/live") as ws:
+            ws.send_json({"token": token, "case_id": str(case_id)})
+            assert ws.receive_json()["type"] == "ready"
+            # The stream's question answered while the session stood; the revocation lands after.
+            monkeypatch.setattr(live, "_session_alive", lambda _token: True)
+            owner.execute("UPDATE iam.session SET revoked_at = now(), "
+                          "revoke_reason = 'logout' WHERE id = %s", (session_id,))
+            _propose(owner, case_id, "AMBER")
+            with pytest.raises(WebSocketDisconnect) as closed:
+                for _ in range(100):
+                    assert ws.receive_json()["type"] == "ping", "a hint reached an ended session"
+    assert closed.value.code == 1008
+    assert closed.value.reason == live.SESSION_ENDED_REASON

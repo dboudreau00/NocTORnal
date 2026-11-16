@@ -17,7 +17,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 CREATE TABLE node (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),

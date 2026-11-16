@@ -95,7 +95,7 @@ def upgrade() -> None:
         f"('{k}', {str(s).lower()}, '{d}')" for k, s, d in _NEW_PERMISSIONS)
     grants = ",\n".join(f"('{r}', '{p}')" for r, p in _ROLE_GRANTS)
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 INSERT INTO permission (key, requires_step_up, description) VALUES
 {perms}
 ON CONFLICT (key) DO NOTHING;

@@ -10,6 +10,7 @@ depends_on = ${repr(depends_on)}
 def run(sql: str) -> None:
     # Raw psycopg connection: no bind-parameter or %-placeholder parsing
     # (RAISE format strings contain both), multi-statement blocks allowed.
+    # Use SET LOCAL search_path, never SET: a session-wide SET carries into the next revision of the same run.
     op.get_bind().connection.driver_connection.execute(sql)
 
 

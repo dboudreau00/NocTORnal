@@ -18,7 +18,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = analytics, core, public;
+SET LOCAL search_path = analytics, core, public;
 
 -- A named, reproducible view of the graph. Metrics are always computed
 -- against a projection, never "the graph" in the abstract, because

@@ -48,7 +48,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = ingest, core, public;
+SET LOCAL search_path = ingest, core, public;
 
 ALTER TABLE dead_letter
   ADD COLUMN classification core.tlp NOT NULL DEFAULT 'AMBER',

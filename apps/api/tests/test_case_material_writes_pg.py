@@ -117,16 +117,17 @@ def test_case_material_is_never_deleted_by_the_request_role(owner, name):
 
 
 def test_what_a_request_writes_still_writes(owner):
+    """An upload's version stamp, and the row lock that one column allows. A case keeps no column
+    since 0186: its record is written on a system connection (test_case_record_system_writes_pg.py)."""
     lead, case_id, exhibit, raw = _lead_with_exhibit(owner)
     app = s.app_conn(raw)
     try:
         assert app.execute("UPDATE core.evidence SET storage_version_id = 'v1' WHERE id = %s",
                            (exhibit,)).rowcount == 1
-        assert app.execute('UPDATE core."case" SET title = %s, review_due = %s WHERE id = %s',
-                           ("Renamed", "2028-06-01", case_id)).rowcount == 1
-        # A row lock needs UPDATE on one column, which each table keeps.
-        assert app.execute('SELECT id FROM core."case" WHERE id = %s FOR UPDATE',
-                           (case_id,)).fetchone() is not None
+        assert app.execute("SELECT id FROM core.evidence WHERE id = %s FOR UPDATE",
+                           (exhibit,)).fetchone() is not None
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            app.execute('UPDATE core."case" SET title = %s WHERE id = %s', ("Renamed", case_id))
     finally:
         app.close()
 

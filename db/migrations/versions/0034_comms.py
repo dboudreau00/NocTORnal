@@ -116,7 +116,7 @@ def run(sql: str) -> None:
 def upgrade() -> None:
     run("""
 CREATE SCHEMA IF NOT EXISTS comms;
-SET search_path = comms, core, public;
+SET LOCAL search_path = comms, core, public;
 
 CREATE TABLE platform (
   key             text PRIMARY KEY,

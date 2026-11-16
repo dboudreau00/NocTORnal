@@ -86,7 +86,7 @@ LEGACY_PENDING = ("recorded before static triage existed; run it from the "
                   "sample card, or scripts/lab_triage.py --backfill")
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 CREATE TABLE static_run (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -228,7 +228,7 @@ def downgrade() -> None:
     if started or machine:
         raise RuntimeError(downgrade_refusal(started, machine))
     run("""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 DROP INDEX sample_rich_header_idx;
 DROP INDEX sample_tlsh_lvalue_idx;
 DROP INDEX sample_ssdeep_tokens_idx;

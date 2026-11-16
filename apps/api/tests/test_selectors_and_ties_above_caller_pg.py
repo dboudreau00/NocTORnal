@@ -16,7 +16,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import psycopg
 import pytest
 
 import graph_visibility_support as g
@@ -522,9 +521,10 @@ def test_the_key_names_the_labels_and_0133_round_trips(owner):
     w.edge(a, b, "RED")
     w.edge(a, b, "AMBER")
     with pytest.raises(_RollBack), owner.transaction():
-        # Two live ties at different labels cannot go back under the 0006 key:
-        # the honest answer of a downgrade over data the old key forbade.
-        with pytest.raises(psycopg.errors.UniqueViolation), owner.transaction():
+        # Two live ties at different labels cannot go back under the 0006 key,
+        # and the downgrade says so with a count, before it changes anything
+        # and printing neither tie.
+        with pytest.raises(RuntimeError, match="refusing to downgrade 0133"):
             m.downgrade()
         owner.execute("UPDATE core.edge SET deleted_at = now() "
                       "WHERE case_id = %s AND classification = 'RED'", (w.case_id,))
@@ -549,6 +549,7 @@ def _migration(conn, name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.run = lambda sql: conn.execute(sql)
+    module.query = lambda sql: conn.execute(sql).fetchall()
     return module
 
 

@@ -391,7 +391,7 @@ $noc$;
 """)
 
     run("""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 INSERT INTO permission (key, description, requires_step_up) VALUES
   ('egress.manage',

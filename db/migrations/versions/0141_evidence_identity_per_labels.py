@@ -37,8 +37,10 @@ The service sorts compartments before it writes, so one set has one spelling.
 
 Drops both indexes and restores `UNIQUE (case_id, sha256)`. On a database
 that holds two exhibits of the same bytes in one case (the point of this
-revision) the constraint cannot be restored and the downgrade stops, which is
-the designed refusal: merging or deleting exhibits to make a rollback succeed
+revision) the constraint cannot be restored, and the downgrade refuses first,
+naming how many sets of bytes collide and printing none of them: Postgres's
+own refusal, a unique violation, prints the case and the SHA-256. That is the
+designed refusal: merging or deleting exhibits to make a rollback succeed
 would destroy evidence.
 """
 from alembic import op
@@ -51,6 +53,10 @@ depends_on = None
 
 def run(sql: str) -> None:
     op.get_bind().connection.driver_connection.execute(sql)
+
+
+def query(sql: str) -> list:
+    return op.get_bind().connection.driver_connection.execute(sql).fetchall()
 
 
 #: Frozen text: a later revision that changes it restates it.
@@ -80,9 +86,32 @@ ALTER TABLE core.evidence
 """
 
 
+#: The keys the 0008 constraint would refuse. It spans every row, purged ones
+#: included, so the count does too.
+COUNT_SQL = """
+SELECT count(*) FROM (
+  SELECT 1 FROM core.evidence
+   GROUP BY case_id, sha256
+  HAVING count(*) > 1) AS held_as_more_than_one_exhibit
+"""
+
+
+def downgrade_refusal(n: int) -> str:
+    held = "set of identical bytes is" if n == 1 else "sets of identical bytes are"
+    return (f"refusing to downgrade 0141: {n} {held} held as more than one exhibit "
+            "in one case, and the 0008 key allows one. This revision's downgrade "
+            "changed nothing, so the database is now at 0141 and the revisions "
+            "above it are already undone. Run alembic upgrade head to return, or "
+            "restore a backup taken before 0141 was applied. An exhibit is never "
+            "merged or deleted to make a downgrade pass.")
+
+
 def upgrade() -> None:
     run(UPGRADE_SQL)
 
 
 def downgrade() -> None:
+    n = query(COUNT_SQL)[0][0]
+    if n:
+        raise RuntimeError(downgrade_refusal(n))
     run(DOWNGRADE_SQL)

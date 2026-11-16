@@ -105,6 +105,9 @@ _MUST_BE_SYSTEM = {
     ("http/routers/merges.py", "merge"): "MERGE",
     ("http/routers/merges.py", "reverse"): "MERGE",
     ("http/routers/cases.py", "create_case"): "CASE_MEMBERSHIP",
+    ("http/routers/cases.py", "update_case"): "CASE_RECORD",
+    ("http/routers/cases.py", "transition"): "CASE_RECORD",
+    ("http/routers/approvals.py", "set_policy"): "CASE_RECORD",
     ("http/routers/cases.py", "_extend_exhibit_locks"): "EVIDENCE_LOCKS",
     ("http/routers/auth.py", "login"): "AUTH",
     ("http/routers/compartments.py", "retire_compartment"): "COMPARTMENTS",
@@ -120,6 +123,8 @@ _MUST_BE_SYSTEM = {
     ("http/routers/embeddings.py", "retire_embedding_space"): "EMBEDDINGS",
     ("http/routers/embeddings.py", "recheck_embedding_space"): "EMBEDDINGS",
     ("http/routers/embeddings.py", "run_embedding_pass"): "EMBEDDINGS",
+    # One item embedded on demand, after the route proved it readable: the queue is the system's.
+    ("http/routers/similarity.py", "_stored_or_now"): "EMBEDDINGS",
     ("readiness.py", "_probe_connections"): "READINESS",
     # The Lab under policy (0121). A submission's duplicate check, the officer's label-free screening
     # record and its passes, and the lookup refusal for the hash of never-screened material.

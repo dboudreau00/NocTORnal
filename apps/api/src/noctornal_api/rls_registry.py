@@ -7,9 +7,9 @@ Every table in the ten product schemas is in exactly one of three maps:
   facts (`iam.case_facts`, `iam.element_facts`, `iam.lookup_result_facts`), work that must see every row runs
   on a system connection (`db.SystemPurpose`).
 - `EXEMPT`: never under a policy, with the reason. The IAM plane is the policies' own input and is read-only to
-  the request role instead (0109); the collection plane is read by the egress proxy's role, which is subject to
-  row security and must not be given a bypass; the rest is reference vocabulary or deployment configuration
-  with no case and no label.
+  the request role instead (0109), all but the case assignments, which carry a policy of their own (0192); the
+  collection plane is read by the egress proxy's role, which is subject to row security and must not be given
+  a bypass; the rest is reference vocabulary or deployment configuration with no case and no label.
 - `DEFERRED`: will carry a policy, and does not yet, because its readers have not all been converted. The
   reason names the reader work still owed. A table is either fully enforced or not enforced at all: never
   half.
@@ -122,6 +122,12 @@ CEIL = `(SELECT iam.rls_ceilings())`, HELD = `(SELECT iam.rls_compartments())`:
   SELECT policy and an INSERT policy that adds `actor_id = (SELECT
   iam.rls_actor())` to the child test, so a custody row names the user who
   wrote it. The column is NOT NULL, so there is no unattributed row to allow.
+- CUSTOM_ASSIGNMENT (case membership, 0192, read only): the reader's own
+  assignments (`user_id = (SELECT iam.rls_actor())`), whatever the case's
+  labels, and every assignment on a case in CASES, which is the team the
+  roster shows the case's members. The Lab reads a case's leads through the
+  definer `iam.case_leads` (0191), and `test_case_assignment_readers.py`
+  holds every other reader to one of the two terms.
 
 A table the request role writes only by UPDATE carries its template as a SELECT and an UPDATE policy and
 nothing else, so no INSERT of the request role reaches its keys and no DELETE reaches a row: `ingest.record`
@@ -134,7 +140,7 @@ trigger holds what those columns may become, as 0109 and 0112 do for the session
 A table the request role never writes carries its template as a SELECT policy alone (`rls_read`), so no INSERT
 of the request role reaches its unique keys and no UPDATE or DELETE reaches a row: `notify.delivery`,
 `notify.jira_link` and `notify.jira_event` (0126), which only `notify.enqueue` and the NOTIFY and NOTIFY_ADMIN
-system purposes write.
+system purposes write, and `iam.case_assignment` (0192), on which the request role holds no write at all (0109).
 
 A trigger function that reads a policied table must be SECURITY DEFINER with `SET search_path = pg_catalog,
 <its schemas>, pg_temp` (0113), or it reads only the writer's view and an invariant fails open.
@@ -263,6 +269,10 @@ POLICY: dict[str, str] = {
     # 0168: the audit log. The countersign rule reads it as the definer (0166), the Lab's last screening pass is
     # a fact (0167), and every other reader is classified by function in test_rls_audit_paths.py.
     "audit.event": "CUSTOM_AUDIT",
+    # 0192: case membership. The live socket and the production ticket bind before the gate reads, the Lab reads
+    # a case's leads through iam.case_leads (0191), and every other reader is classified by function in
+    # test_case_assignment_readers.py.
+    "iam.case_assignment": "CUSTOM_ASSIGNMENT",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -274,8 +284,8 @@ LABEL_COLUMNS = ("case_id", "classification", "compartments", "read_compartments
                  "visibility_clearance", "visibility_compartments")
 
 _IAM = ("the IAM plane: the policies' own input (who is bound, their clearance, "
-        "compartments, roles, assignments and grants). Read-only to the request "
-        "role instead of filtered (0109); written only on a system connection")
+        "compartments, roles and grants). Read-only to the request role instead "
+        "of filtered (0109); written only on a system connection")
 _EGRESS = ("the collection plane the egress proxy reads as noctornal_egress, which "
            "is subject to row security and must not be given a bypass; holds "
            "configuration and ceilings, no case content")
@@ -300,7 +310,6 @@ EXEMPT: dict[str, str] = {
                           "iam.session_by_token (0177)",
     "iam.webauthn_credential": _IAM,
     "iam.user_role": _IAM,
-    "iam.case_assignment": _IAM,
     "iam.break_glass": _IAM + "; uses are counted through "
                               "iam.rls_record_break_glass_use, and the "
                               "request role reads a justification only "
@@ -327,13 +336,17 @@ EXEMPT: dict[str, str] = {
     "core.retention_rule": _CONFIG + _READ_ONLY,
     "core.embedding_space": _CONFIG + _READ_ONLY,
     "core.embedding_pending": _CONFIG + " (a queue of item ids for the embedding "
-                                       "pass, which runs as the system role)",
+                                       "pass, which runs as the system role); read-only "
+                                       "to the request role, whose writes queue an item "
+                                       "through definer triggers (0188)",
     "ingest.api_key": _CONFIG + " (partner keys, read by the unauthenticated "
                                 "ingest route before any user exists)" + _READ_ONLY
                       + "; a key's use is stamped by ingest.api_key_used" + _SEALED,
     "ingest.category_rule": _CONFIG,
-    "ingest.batch": _CONFIG + " (a raw upload's envelope, written by the "
-                              "unauthenticated ingest route)",
+    "ingest.batch": _CONFIG + " (a raw upload's envelope, created by the "
+                              "unauthenticated ingest route); read-only to the request "
+                              "role, which creates a batch only through "
+                              "ingest.batch_accept, handed the key's proof (0190)",
     "ingest.provider": _CONFIG + _READ_ONLY + _SEALED,
     "ingest.provider_exposure_change": _CONFIG + _READ_ONLY,
     "notify.preference": _CONFIG + " (per person, no case); read-only to the request "
@@ -342,11 +355,15 @@ EXEMPT: dict[str, str] = {
     "notify.jira_destination": _CONFIG + _READ_ONLY,
     "lab.screening_list": _CONFIG + " (the officer's label-free view, F13)" + _READ_ONLY,
     "lab.screening_hash": _CONFIG + " (read only by the screening worker)" + _READ_ONLY,
-    "lab.yara_compile_job": _CONFIG + " (a queue the triage worker drains)",
+    "lab.yara_compile_job": _CONFIG + " (a queue the triage worker drains); read-only "
+                                     "to the request role, which queues a compile only "
+                                     "through lab.yara_compile_enqueue (0189)",
     # 0157: when each collector was last seen and whether its persona key ring opened what it sampled; key ids
     # and counts, never key material, a person or a source.
     "collect.collector_heartbeat": _CONFIG + " (the collector's heartbeat, "
-                                             "read by the readiness register)",
+                                             "read by the readiness register); read-only "
+                                             "to the request role, written by the collector "
+                                             "as the system role (0187)",
     "collect.source": _EGRESS + _READ_ONLY,
     "collect.collection_account": _EGRESS + _READ_ONLY + _SEALED,
     "collect.collection_authority": _EGRESS + _READ_ONLY,

@@ -303,12 +303,15 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
                       "authority_ref, review_due, retention_until, or a "
                       "classification different from the current one")
 
-    svc.update_metadata(
-        case_id, updated_by=user.user_id,
-        title=body.title, summary=body.summary,
-        authority_ref=body.authority_ref, review_due=body.review_due,
-        retention_until=body.retention_until, classification=classification,
-    )
+    # The record is written on a system connection after every refusal above, which ran on the
+    # request's own (a system connection sees the case whatever the caller's labels).
+    with system_connection(SystemPurpose.CASE_RECORD, reuse=conn) as sconn:
+        CaseService(sconn).update_metadata(
+            case_id, updated_by=user.user_id,
+            title=body.title, summary=body.summary,
+            authority_ref=body.authority_ref, review_due=body.review_due,
+            retention_until=body.retention_until, classification=classification,
+        )
     # The exhibits' storage locks follow the date, after it has committed: each is locked for a
     # fixed period at lodging, which a case kept longer would outlive. Run whenever the date is
     # supplied, so saving the same date again retries a lock that could not be lengthened
@@ -755,5 +758,7 @@ def transition(case_id: UUID, body: TransitionBody,
     if body.status == "PURGED":
         authorize_object(conn, user, case_id=case_id,
                          permission_key="case.delete", after_case_gate=True)
-    svc.transition_status(case_id, body.status, actor_id=user.user_id)
+    # Written as the system role after the gate (and the PURGED move's second one), as an edit is.
+    with system_connection(SystemPurpose.CASE_RECORD, reuse=conn) as sconn:
+        CaseService(sconn).transition_status(case_id, body.status, actor_id=user.user_id)
     return _with_caller(conn, [svc.get(case_id)], user.user_id)[0]

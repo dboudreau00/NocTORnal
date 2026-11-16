@@ -6,7 +6,8 @@ the caller's own sighting collided with. The route-level behaviour is held in
 
 - a row carries its owner's labels whoever writes it, an unowned one the floor, and the key is value plus
   labels;
-- 0134 is reversible on an empty database and says so, honestly, on one that holds a value at two labels;
+- 0134 is reversible on an empty database, and on one that holds a value at two labels its downgrade refuses
+  with a count and prints no value;
 - a compartmented holder is held back exactly as a RED one is;
 - a lookup of a value that two entities hold at different labels is held to the stricter one.
 """
@@ -110,6 +111,7 @@ def _migration(conn):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.run = lambda sql: conn.execute(sql)
+    module.query = lambda sql: conn.execute(sql).fetchall()
     return module
 
 
@@ -153,9 +155,10 @@ def test_0134_round_trips_and_names_a_value_held_at_two_labels(owner):
         # triggers name, so the triggers go first.
         for trigger in ("compartments_registered", "compartments_kept", "classification_kept"):
             owner.execute(f"DROP TRIGGER {trigger} ON core.selector")
-        # One value at two labels cannot go back under the 0005 key: the
-        # honest answer of a downgrade over data the old key forbade.
-        with pytest.raises(psycopg.errors.UniqueViolation), owner.transaction():
+        # One value at two labels cannot go back under the 0005 key, and the
+        # downgrade says so with a count, before it changes anything and
+        # printing no value.
+        with pytest.raises(RuntimeError, match="refusing to downgrade 0134"):
             m.downgrade()
         owner.execute("DELETE FROM core.selector WHERE case_id = %s "
                       "AND node_id IS NULL", (w.case_id,))

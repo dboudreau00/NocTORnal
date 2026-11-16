@@ -42,9 +42,11 @@ the upsert's two arms are both rows the caller may read.
 ## Downgrade
 
 Restores the 0005 key and drops the columns. On a database that holds two
-rows for one value at different labels the downgrade fails on the unique
-build, which is the honest answer (reversible on an empty database is the
-contract, CONVENTIONS.md).
+rows for one value at different labels the key cannot be rebuilt, and the
+downgrade refuses first, naming how many values collide and printing none
+of them: Postgres's own refusal, a unique violation, prints the duplicated
+key, the selector value with it. Nothing is merged or deleted to make it
+pass (reversible on an empty database is the contract, CONVENTIONS.md).
 """
 from alembic import op
 
@@ -111,8 +113,31 @@ ALTER TABLE core.selector
 """
 
 
+#: The keys the 0005 constraint would refuse, over its own columns, so the
+#: count is the constraint build's verdict.
+COUNT_SQL = """
+SELECT count(*) FROM (
+  SELECT 1 FROM core.selector
+   GROUP BY case_id, selector_type, norm_value
+  HAVING count(*) > 1) AS held_at_different_labels
+"""
+
+
+def downgrade_refusal(n: int) -> str:
+    held = "value is" if n == 1 else "values are"
+    return (f"refusing to downgrade 0134: {n} selector {held} held at different "
+            "labels, and the 0005 key allows one row per case, type and value. This "
+            "revision's downgrade changed nothing, so the database is now at 0134 "
+            "and the revisions above it are already undone. Run alembic upgrade "
+            "head to return, or restore a backup taken before 0134 was applied.")
+
+
 def run(sql: str) -> None:
     op.get_bind().connection.driver_connection.execute(sql)
+
+
+def query(sql: str) -> list:
+    return op.get_bind().connection.driver_connection.execute(sql).fetchall()
 
 
 def upgrade() -> None:
@@ -120,4 +145,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    n = query(COUNT_SQL)[0][0]
+    if n:
+        raise RuntimeError(downgrade_refusal(n))
     run(DOWNGRADE_SQL)

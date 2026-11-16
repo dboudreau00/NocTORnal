@@ -26,7 +26,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 UPDATE edge_type
    SET dst_node_types = '{SELECTOR,WALLET,INFRA,SERVICE,CHANNEL,DATASET,CREDENTIAL_SET}'
@@ -42,7 +42,7 @@ ON CONFLICT (key) DO NOTHING;
 
 def downgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 DELETE FROM edge_type WHERE key IN ('TX_INPUT','TX_OUTPUT','EXFILTRATED_FROM');
 UPDATE edge_type

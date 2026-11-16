@@ -156,7 +156,7 @@ def upgrade() -> None:
     pairs = ",\n  ".join(f"({_q(a)}, {_q(b)}, {_q(why)})"
                          for a, b, why in SEPARATED_DUTIES)
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 UPDATE iam.role
    SET display_name = {_q(_LEAD_NAME)}, description = {_q(_LEAD_DESCRIPTION)}
@@ -327,7 +327,7 @@ def downgrade() -> None:
     # else below is already idempotent, so on such a database the downgrade
     # is correctly a no-op.
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 DROP TRIGGER IF EXISTS role_permission_separated_duty ON iam.role_permission;
 DROP TABLE IF EXISTS iam.separated_duty;

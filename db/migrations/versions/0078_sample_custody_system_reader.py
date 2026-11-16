@@ -60,7 +60,7 @@ def _in(values: tuple[str, ...]) -> str:
 
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 ALTER TABLE sample_access
   ADD COLUMN actor_kind text NOT NULL DEFAULT 'USER',
@@ -117,7 +117,7 @@ def downgrade() -> None:
     if system or scanned:
         raise RuntimeError(downgrade_refusal(system, scanned))
     run(f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 ALTER TABLE sample_access
   DROP CONSTRAINT sample_access_system_actions,
   DROP CONSTRAINT sample_access_system_names_nobody,

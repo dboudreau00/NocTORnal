@@ -810,21 +810,11 @@ class RulesetService:
             self._queue(version_id, key)
 
     def _queue(self, version_id, key: BuildKey) -> None:
-        self._c.execute(
-            """INSERT INTO lab.yara_compile_job
-                   (version_id, engine, platform, fingerprint)
-               VALUES (%s, %s, %s, %s)
-               ON CONFLICT (version_id, engine, platform, fingerprint)
-               DO UPDATE SET status = CASE WHEN lab.yara_compile_job.status
-                                               = 'RUNNING'
-                                          THEN 'RUNNING' ELSE 'QUEUED' END,
-                             attempts = CASE WHEN lab.yara_compile_job.status
-                                                 = 'FAILED'
-                                            THEN 0
-                                            ELSE lab.yara_compile_job.attempts
-                                       END,
-                             updated_at = now()""",
-            (version_id, key.engine, key.platform, key.fingerprint))
+        """The job for this version and key, queued, or set back to QUEUED (a RUNNING job stays
+        RUNNING, a FAILED one starts its attempts again). Through the definer: the compile queue
+        is read-only to the request role (0189)."""
+        self._c.execute("SELECT lab.yara_compile_enqueue(%s, %s, %s, %s)",
+                        (version_id, key.engine, key.platform, key.fingerprint))
 
     def listing(self, *, clearance: str, compartments,
                 key: BuildKey | None) -> list[dict]:

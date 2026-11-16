@@ -18,7 +18,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = audit, core, public;
+SET LOCAL search_path = audit, core, public;
 
 CREATE TABLE event (
   seq          bigserial PRIMARY KEY,

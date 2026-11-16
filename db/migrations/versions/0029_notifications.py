@@ -59,7 +59,7 @@ def run(sql: str) -> None:
 def upgrade() -> None:
     run("""
 CREATE SCHEMA IF NOT EXISTS notify;
-SET search_path = notify, core, public;
+SET LOCAL search_path = notify, core, public;
 
 CREATE TABLE notification (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),

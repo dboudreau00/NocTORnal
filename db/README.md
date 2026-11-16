@@ -34,6 +34,73 @@
     role, from `NOCTORNAL_EGRESS_DB_PASSWORD`, on the same terms.
 - **`requirements.txt`**, what CI installs before `alembic upgrade head`.
 
+## Downgrades that refuse
+
+A downgrade that cannot go back over the data a database holds stops before
+its own revision changes anything and says `refusing to downgrade NNNN: ...`,
+with a count and never a stored value. Each revision commits on its own, so
+a downgrade across several revisions has already undone the ones above NNNN:
+the database is at NNNN and the readiness check `migrations_at_head` fails
+until `alembic upgrade head` brings it back. The remedy is that upgrade, or
+a backup taken before NNNN was applied; never to delete or merge rows so
+that the downgrade passes (CONVENTIONS.md, Migrations).
+
+Some revisions key a row by its labels as well as its value, and their
+downgrade rebuilds the older, narrower key, which cannot hold two rows that
+differ only by labels. Each counts the keys that would collide first.
+Postgres's own refusal is a unique violation whose DETAIL prints the
+duplicated key, so pasting a revision's `DOWNGRADE_SQL` into psql skips the
+count and prints the key. To find the rows, the queries below select ids and
+counts, never the stored value.
+
+- **0133**, live ties. The 0006 index allows one live tie per pair of
+  entities, type and start of validity. An analyst who judges one of the
+  colliding ties wrong can retire it through the product (a soft delete with
+  its audit row), which clears the collision too; nothing is retired only to
+  make a downgrade pass.
+
+  ```sql
+  SELECT src_node_id, dst_node_id, edge_type, count(*), array_agg(id)
+    FROM core.edge WHERE deleted_at IS NULL
+   GROUP BY src_node_id, dst_node_id, edge_type,
+            coalesce(valid_from, '-infinity'::timestamptz)
+  HAVING count(*) > 1;
+  ```
+
+- **0134**, selectors. The 0005 key allows one row per case, type and value.
+  A selector is never merged or deleted to make a downgrade pass.
+
+  ```sql
+  SELECT case_id, selector_type, count(*), array_agg(id)
+    FROM core.selector
+   GROUP BY case_id, selector_type, norm_value
+  HAVING count(*) > 1;
+  ```
+
+- **0141**, exhibits. The 0008 key allows one exhibit per case and set of
+  bytes, destroyed exhibits included. So this one also refuses where nothing
+  differs by labels: a destroyed exhibit beside a live re-ingest of the same
+  bytes at the same labels. An exhibit is never merged or deleted to make a
+  downgrade pass: that would destroy evidence.
+
+  ```sql
+  SELECT case_id, count(*), array_agg(id)
+    FROM core.evidence
+   GROUP BY case_id, sha256
+  HAVING count(*) > 1;
+  ```
+
+- **0147**, conversations. The 0034 index allows one capture per case,
+  platform and external reference. A capture is never merged or deleted to
+  make a downgrade pass.
+
+  ```sql
+  SELECT case_id, platform_key, count(*), array_agg(id)
+    FROM comms.conversation WHERE external_ref IS NOT NULL
+   GROUP BY case_id, platform_key, external_ref
+  HAVING count(*) > 1;
+  ```
+
 ## The roles
 
 A production deployment has four Postgres roles (docs/00 decision 138), and

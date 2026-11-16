@@ -53,7 +53,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = analytics, core, public;
+SET LOCAL search_path = analytics, core, public;
 
 -- 4. Reusable, fully-parameterised projections ---------------------------
 ALTER TABLE projection ADD COLUMN preset text;
@@ -126,7 +126,7 @@ CREATE INDEX metric_run_cache_idx
 
 def downgrade() -> None:
     run("""
-SET search_path = analytics, core, public;
+SET LOCAL search_path = analytics, core, public;
 
 DROP INDEX IF EXISTS analytics.metric_run_cache_idx;
 ALTER TABLE metric_run DROP COLUMN visibility_compartments;

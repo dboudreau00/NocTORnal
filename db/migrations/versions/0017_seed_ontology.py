@@ -67,7 +67,7 @@ PERMISSION_KEYS = (
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 INSERT INTO node_type (key, display_name, category, colour_token, sort_order) VALUES
 -- ACTOR layer. The critical split: IDENTITY is what you observe, PERSON is
@@ -218,7 +218,7 @@ INSERT INTO selector_type (key, display_name, is_strong, is_pii, normaliser) VAL
 ('USER_AGENT',    'User agent string',       false, false, 'trim')
 ON CONFLICT (key) DO NOTHING;
 
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 -- Note SECURITY_OFFICER: can read the audit trail but NOT case content.
 INSERT INTO role (key, display_name, description, is_system) VALUES

@@ -93,7 +93,7 @@ def run(sql: str) -> None:
 def upgrade() -> None:
     run("""
 CREATE SCHEMA IF NOT EXISTS lab;
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 CREATE TYPE sample_state AS ENUM
   ('SUBMITTED','QUARANTINED','TRIAGED','ASSIGNED','IN_ANALYSIS','REPORTED','REJECTED');
@@ -248,7 +248,7 @@ CREATE TRIGGER sample_access_append_only
         f"('{k}', '{label}', {str(step_up).lower()})"
         for k, step_up, label in _NEW_PERMISSIONS)
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 INSERT INTO permission (key, description, requires_step_up) VALUES
 {perms}
@@ -272,7 +272,7 @@ ON CONFLICT (key) DO NOTHING;
         for role in ("CASE_OWNER", "ANALYST", "REVIEWER")
         for perm in ("sample.read", "sample.submit"))
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 INSERT INTO role_permission (role_key, permission_key) VALUES
 {pairs}
 ON CONFLICT (role_key, permission_key) DO NOTHING;

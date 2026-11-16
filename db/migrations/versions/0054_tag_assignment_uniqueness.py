@@ -71,7 +71,7 @@ DELETE FROM core.tag_assignment WHERE ctid IN (SELECT ctid FROM dupes);"""
         for col in TARGETS)
 
     run(f"""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 {dedupe}
 {indexes}
 """)

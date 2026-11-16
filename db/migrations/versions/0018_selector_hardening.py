@@ -28,7 +28,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 UPDATE selector_type SET normaliser = 'telegram_id_norm' WHERE key = 'TELEGRAM_ID';
 UPDATE selector_type SET normaliser = 'jid_norm'          WHERE key = 'JABBER';
@@ -96,7 +96,7 @@ END $$ LANGUAGE plpgsql;
 
 def downgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 UPDATE selector_type SET normaliser = 'digits'        WHERE key = 'TELEGRAM_ID';
 UPDATE selector_type SET normaliser = 'lower_trim'    WHERE key = 'JABBER';

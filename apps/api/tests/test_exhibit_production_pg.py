@@ -389,6 +389,55 @@ def test_authority_withdrawn_inside_the_minute_bites(conn, client, store, monkey
     assert not [c for c in _custody(conn, ev) if c[0] == "EXPORTED"]
 
 
+def test_a_production_ticket_is_decided_on_a_bound_connection(conn, client, store, monkeypatch):
+    """As the request role. The sample origin runs no session, so its connection is bound to nobody
+    until the ticket is spent; spent, it is bound to the holder, and only then does the export gate
+    read the holder's assignment, so the decision is the holder's own. A holder deactivated inside
+    the minute binds to nobody and is refused as inactive, and the refusal names them as the holder
+    of the ticket the connection spent (0150)."""
+    from noctornal_api import db, stores
+    from noctornal_api.db import ASSUME_ROLE_ENV
+    monkeypatch.setenv(ASSUME_ROLE_ENV, "1")
+    seen = []
+    bind, resolve = db.bind_ticket, stores.PgAccessResolver.resolve
+
+    def binding(c, raw):
+        out = bind(c, raw)
+        seen.append(("bound", out.actor))
+        return out
+
+    def gate(self, **kwargs):
+        seen.append(("gate", self._c.execute("SELECT iam.rls_actor()").fetchone()[0]))
+        return resolve(self, **kwargs)
+
+    uid, token, case_id, ev = _world(conn, store)
+    ticket = _mint(client, token, case_id, ev).json()["ticket"]
+    later = _mint(client, token, case_id, ev).json()["ticket"]
+    monkeypatch.setattr(db, "bind_ticket", binding)
+    monkeypatch.setattr(stores.PgAccessResolver, "resolve", gate)
+    monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", SAMPLES)
+
+    r = _redeem(client, case_id, ev, ticket)
+    assert r.status_code == 200, r.text
+    assert seen == [("bound", uid), ("gate", uid)], seen
+    assert conn.execute(
+        """SELECT actor_id FROM audit.event
+            WHERE object_id = %s AND action = 'EVIDENCE_PRODUCTION_TICKET_REDEEMED'""",
+        (ev,)).fetchone() == (uid,)
+
+    seen.clear()
+    conn.execute("UPDATE iam.app_user SET is_active = false WHERE id = %s", (uid,))
+    assert _redeem(client, case_id, ev, later).status_code == 401
+    assert seen == [("bound", None), ("gate", None)], seen
+    actor, detail = conn.execute(
+        """SELECT actor_id, detail FROM audit.event
+            WHERE object_id = %s AND action = 'EVIDENCE_PRODUCTION_TICKET_REFUSED'
+            ORDER BY seq DESC LIMIT 1""", (ev,)).fetchone()
+    assert detail["reason"] == "authority_withdrawn" and detail["spent"] is True
+    assert detail["failed_checks"] == ["account_inactive"]
+    assert actor == uid and "unverified_actor_id" not in detail
+
+
 def test_a_case_raised_to_red_inside_the_minute_is_kept_in(
         conn, client, store, monkeypatch):
     """The egress gate is asked again on the sample origin, at the labels

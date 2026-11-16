@@ -533,9 +533,10 @@ def test_the_live_recheck_and_the_ingest_probe_are_questions(conn, client):
     gid = _grant(client, auth, case_id=case_id, classification="AMBER")
     case = UUID(case_id)
     me = CurrentUser(user_id=uid, session_id=uuid4(), session_mfa_at=None)
+    token = auth["Authorization"].removeprefix("Bearer ")
 
-    assert _recheck(uid, case, None)
-    assert _recheck(uid, case, None)
+    assert _recheck(uid, case, None, token=token)
+    assert _recheck(uid, case, None, token=token)
     assert _case_allows(conn, me, case, "ingest.read")
     assert _case_allows(conn, me, case, "ingest.read", classification="AMBER")
     assert _count(conn, gid) == 0, "questions are not uses"

@@ -123,7 +123,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 ALTER TABLE sample
   ADD COLUMN preserved_bucket     text,
@@ -234,7 +234,7 @@ $noc$;
 """)
 
     run("""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 INSERT INTO permission (key, description, requires_step_up) VALUES
   ('sample.preserved.authorise',

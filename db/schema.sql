@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0184.
+-- GENERATED MIRROR of the schema at Alembic revision 0192.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0184
+-- Alembic revision: 0192
 -- =====================================================================
 
 --
@@ -496,7 +496,8 @@ END $$;
 --
 
 CREATE FUNCTION collect.document_embedding_queued() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
     AS $$
 BEGIN
   PERFORM core.embedding_enqueue('document', NEW.id);
@@ -1610,7 +1611,8 @@ END $$;
 --
 
 CREATE FUNCTION core.assertion_embedding_queued() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
     AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
@@ -2074,7 +2076,8 @@ END $$;
 --
 
 CREATE FUNCTION core.evidence_embedding_queued() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
     AS $$
 BEGIN
   PERFORM core.embedding_enqueue('evidence', NEW.id);
@@ -2637,6 +2640,31 @@ CREATE FUNCTION iam.case_facts(p_case uuid) RETURNS TABLE(id uuid, code text, st
     FROM core."case" c
    WHERE c.id = p_case
 $$;
+
+--
+-- Name: case_leads(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.case_leads(p_case uuid) RETURNS SETOF uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT a.user_id
+    FROM iam.case_assignment a
+   WHERE a.case_id = p_case
+     AND a.role_key = 'CASE_OWNER'
+     AND (a.expires_at IS NULL OR a.expires_at > pg_catalog.now())
+     AND (iam.rls_caller_exempt()
+          OR p_case = ANY (iam.rls_cases())
+          OR (iam.rls_holds_global('sample.read')
+              AND iam.rls_cases_in_reach() OPERATOR(pg_catalog.?) p_case::text))
+$$;
+
+--
+-- Name: FUNCTION case_leads(p_case uuid); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.case_leads(p_case uuid) IS 'The lead investigators (live CASE_OWNER assignments) of a case, for the Lab''s detonation sign-off (rls-6, 0191): to an exempt caller, to one who may read the case''s team (iam.rls_cases), and to a holder of sample.read for a case within their reach; nothing to anyone else.';
 
 --
 -- Name: check_dual_control_change(); Type: FUNCTION; Schema: iam; Owner: -
@@ -3780,6 +3808,38 @@ $$;
 COMMENT ON FUNCTION ingest.api_key_used(p_key uuid, p_hmac bytea) IS 'Stamps an ingest key''s last use, for a caller that presents its secret''s HMAC, and answers whether it matched (0179): the keys are read-only to the request role.';
 
 --
+-- Name: batch_accept(uuid, bytea, text, text, bigint, bytea, text, text); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.batch_accept(p_key uuid, p_hmac bytea, p_idempotency text, p_raw_key text, p_raw_bytes bigint, p_raw_sha256 bytea, p_content_type text, p_detected_format text) RETURNS uuid
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  INSERT INTO ingest.batch (api_key_id, idempotency_key, raw_key, raw_bytes, raw_sha256,
+                            content_type, detected_format)
+  SELECT k.id, p_idempotency, p_raw_key, p_raw_bytes, p_raw_sha256, p_content_type,
+         p_detected_format
+    FROM ingest.api_key k
+   WHERE k.id = p_key
+     AND p_hmac IS NOT NULL
+     AND pg_catalog.sha256(k.secret_hmac) = pg_catalog.sha256(p_hmac)
+     AND k.revoked_at IS NULL
+     AND k.expires_at > pg_catalog.now()
+     AND p_raw_bytes BETWEEN 1 AND k.max_bytes_per_request
+     AND pg_catalog.length(p_raw_sha256) = 32
+     AND p_raw_key = 'ingest/'
+                     || pg_catalog.substr(pg_catalog.encode(p_raw_sha256, 'hex'), 1, 2)
+                     || '/' || pg_catalog.encode(p_raw_sha256, 'hex')
+  RETURNING id
+$$;
+
+--
+-- Name: FUNCTION batch_accept(p_key uuid, p_hmac bytea, p_idempotency text, p_raw_key text, p_raw_bytes bigint, p_raw_sha256 bytea, p_content_type text, p_detected_format text); Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON FUNCTION ingest.batch_accept(p_key uuid, p_hmac bytea, p_idempotency text, p_raw_key text, p_raw_bytes bigint, p_raw_sha256 bytea, p_content_type text, p_detected_format text) IS 'Creates an ingest batch for a caller that presents its key''s secret''s HMAC, on a live key, within the key''s size and at the content address of its digest, and answers its id or NULL (0190): the batches are read-only to the request role.';
+
+--
 -- Name: exposure_rank(text); Type: FUNCTION; Schema: ingest; Owner: -
 --
 
@@ -4685,6 +4745,33 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+
+--
+-- Name: yara_compile_enqueue(uuid, text, text, text); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.yara_compile_enqueue(p_version uuid, p_engine text, p_platform text, p_fingerprint text) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  INSERT INTO lab.yara_compile_job AS j (version_id, engine, platform, fingerprint)
+  SELECT v.id, p_engine, p_platform, p_fingerprint
+    FROM lab.yara_ruleset_version v
+   WHERE v.id = p_version
+     AND pg_catalog.length(p_engine) BETWEEN 1 AND 200
+     AND pg_catalog.length(p_platform) BETWEEN 1 AND 200
+     AND pg_catalog.length(p_fingerprint) BETWEEN 1 AND 200
+  ON CONFLICT (version_id, engine, platform, fingerprint)
+  DO UPDATE SET status = CASE WHEN j.status = 'RUNNING' THEN 'RUNNING' ELSE 'QUEUED' END,
+                attempts = CASE WHEN j.status = 'FAILED' THEN 0 ELSE j.attempts END,
+                updated_at = pg_catalog.now()
+$$;
+
+--
+-- Name: FUNCTION yara_compile_enqueue(p_version uuid, p_engine text, p_platform text, p_fingerprint text); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.yara_compile_enqueue(p_version uuid, p_engine text, p_platform text, p_fingerprint text) IS 'Queues a compile of an existing YARA rule set version for one build key, or sets its job back to QUEUED (0189): the compile queue is read-only to the request role.';
 
 --
 -- Name: yara_label_set(text[]); Type: FUNCTION; Schema: lab; Owner: -
@@ -6933,7 +7020,7 @@ CREATE TABLE core.node_merge_edge (
 -- Name: COLUMN node_merge_edge.deleted_by_merge; Type: COMMENT; Schema: core; Owner: -
 --
 
-COMMENT ON COLUMN core.node_merge_edge.deleted_by_merge IS 'True when THIS merge soft-deleted the edge because repointing it would have produced a self-loop. Only these may have deleted_at cleared on reversal -- an edge retired later, for its own reasons, must stay retired.';
+COMMENT ON COLUMN core.node_merge_edge.deleted_by_merge IS 'True when THIS merge soft-deleted the edge, for one of two reasons. Between: the tie ran between the two entities merged, so repointing it would have produced a self-loop, which core.edge forbids. Set aside: the tie duplicated a live tie the surviving entity already holds, of the same type, other end, start of validity and labels, and the person merging could not read it, so it was retired instead of refusing the merge (decision 176). While the merge is live a set-aside tie counts toward nothing and the tie the surviving entity holds stands alone. This one flag covers both; the NODE_MERGED audit detail tells them apart (edges_self_loop_deleted counts the ties between the two, edges_duplicate_folded the ones set aside). Only an edge with this flag has deleted_at cleared on reversal, which restores it whole; an edge retired later, for its own reasons, must stay retired.';
 
 --
 -- Name: node_set; Type: TABLE; Schema: core; Owner: -
@@ -16241,6 +16328,18 @@ CREATE POLICY rls_gate ON deception.email_hop USING ((EXISTS ( SELECT 1
 --
 
 CREATE POLICY rls_gate ON deception.email_message USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: case_assignment; Type: ROW SECURITY; Schema: iam; Owner: -
+--
+
+ALTER TABLE iam.case_assignment ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: case_assignment rls_read; Type: POLICY; Schema: iam; Owner: -
+--
+
+CREATE POLICY rls_read ON iam.case_assignment FOR SELECT USING (((user_id = ( SELECT iam.rls_actor() AS rls_actor)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))));
 
 --
 -- Name: dead_letter; Type: ROW SECURITY; Schema: ingest; Owner: -

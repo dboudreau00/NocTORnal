@@ -73,7 +73,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 ALTER TABLE download_ticket
   ADD COLUMN evidence_id uuid REFERENCES core.evidence(id),
@@ -106,7 +106,7 @@ COMMENT ON TABLE download_ticket IS
 
 def downgrade() -> None:
     run("""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 DELETE FROM download_ticket WHERE evidence_id IS NOT NULL;
 

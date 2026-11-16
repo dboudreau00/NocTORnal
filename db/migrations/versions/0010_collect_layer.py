@@ -20,7 +20,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = collect, core, public;
+SET LOCAL search_path = collect, core, public;
 
 CREATE TYPE source_kind AS ENUM ('RSS','XENFORO','MYBB','PHPBB','TELEGRAM','DISCORD','PASTE','WEB','MANUAL','VENDOR_API');
 CREATE TYPE run_status  AS ENUM ('QUEUED','RUNNING','OK','PARTIAL','FAILED','BLOCKED','RATE_LIMITED');

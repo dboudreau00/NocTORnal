@@ -30,7 +30,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 ALTER TABLE core.evidence_custody
   ADD CONSTRAINT evidence_custody_actor_fk
@@ -72,7 +72,7 @@ ALTER TABLE core.evidence_custody ALTER COLUMN row_hash SET NOT NULL;
 
 def downgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 DROP TRIGGER IF EXISTS custody_chain ON core.evidence_custody;
 DROP FUNCTION IF EXISTS core.custody_chain_hash();
 ALTER TABLE core.evidence_custody DROP COLUMN IF EXISTS row_hash;

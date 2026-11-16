@@ -68,7 +68,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = comms, core, public;
+SET LOCAL search_path = comms, core, public;
 
 -- 1. EXPIRED_SIGNATURE ------------------------------------------------
 ALTER TABLE pgp_verification DROP CONSTRAINT pgp_verification_outcome_known;

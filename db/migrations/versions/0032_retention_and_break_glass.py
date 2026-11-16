@@ -82,7 +82,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 -- Per-category retention. May only SHORTEN the case default, never extend
 -- it: a rule that could extend would let an ingest category quietly
@@ -177,7 +177,7 @@ CREATE INDEX evidence_purgeable_idx ON evidence (case_id)
 """)
 
     run("""
-SET search_path = collect, core, public;
+SET LOCAL search_path = collect, core, public;
 
 -- Documents carry their own category and their own clock, because a
 -- stealer log inside a two-year case must not inherit that case's.
@@ -192,7 +192,7 @@ CREATE INDEX document_category_idx ON document (category);
 """)
 
     run("""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 -- Break-glass: what was actually granted, whether it was used, and what it
 -- touched. Without these the "mandatory post-hoc review" docs/05 requires

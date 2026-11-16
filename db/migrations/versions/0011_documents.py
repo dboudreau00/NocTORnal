@@ -18,7 +18,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = collect, core, public;
+SET LOCAL search_path = collect, core, public;
 
 -- THE AGGREGATION BUCKET. One row per captured item.
 CREATE TABLE document (

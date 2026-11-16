@@ -435,6 +435,18 @@ class IssuedKey:
         return self.secret
 
 
+class AuthenticatedKey(dict):
+    """An authenticated key's settings, as `IngestService.authenticate` answers them.
+
+    The HMAC of the secret it was presented with rides as the `proof`
+    attribute and never as an item, so no serialisation, `dict()` or repr
+    of the settings carries it. It is credential-equivalent for the key:
+    `accept` hands it to `ingest.batch_accept` (0190), which creates a batch
+    only for a caller that holds it, and nothing else reads it."""
+
+    __slots__ = ("proof",)
+
+
 @dataclass
 class AcceptResult:
     batch_id: UUID
@@ -630,7 +642,8 @@ class IngestService:
         and stamps the key's use when it matches. It is asked on every
         presentation of a known key, with no HMAC when another refusal
         applies, so a refused key costs what a live one does and only a
-        usable key's use is stamped.
+        usable key's use is stamped. The HMAC it matched is kept on the
+        answer as its `proof` (`AuthenticatedKey`), for `accept`.
         """
         match = KEY_PATTERN.fullmatch((token or "").strip())
         if match is None:
@@ -656,7 +669,7 @@ class IngestService:
             (row[0], digest if usable else None)).fetchone()[0]
         if not (usable and matched):
             return None
-        return {
+        key = AuthenticatedKey({
             "id": row[0], "scopes": list(row[2] or []), "source_id": row[3],
             "declared_category": row[4], "default_reliability": row[5],
             "classification_ceiling": row[6], "forced_compartment": row[7],
@@ -665,7 +678,9 @@ class IngestService:
             "ip_allowlist": allowlist or None,
             "max_records_per_hour": row[11],
             "max_bytes_per_request": row[12],
-        }
+        })
+        key.proof = digest
+        return key
 
     def revoke_key(self, key_row_id: UUID, *, actor_id: UUID,
                    reason: str) -> None:
@@ -716,6 +731,11 @@ class IngestService:
         holds. It is not how the HTTP route bounds an upload: `raw` is a complete `bytes`, so the caller has
         already paid for buffering it. The route refuses at the cap while the body is still arriving
         (`http.limits.read_body_capped`), and this check is the second, cheaper line.
+
+        The batch is created by `ingest.batch_accept` (0190), handed the HMAC `authenticate`
+        matched: the batches are read-only to the request role, and the function creates one only
+        for the holder of the key's secret, on a live key, within its size and at the content
+        address of its digest.
         """
         if not raw:
             raise IngestError("empty body")
@@ -723,6 +743,10 @@ class IngestService:
             raise IngestError(
                 f"payload exceeds this key's limit of "
                 f"{key['max_bytes_per_request']} bytes")
+        proof = getattr(key, "proof", None)
+        if proof is None:
+            raise IngestError("this key was not authenticated here, so it can create no "
+                              "batch")
 
         if idempotency_key:
             existing = self._c.execute(
@@ -750,14 +774,14 @@ class IngestService:
                 "partner to resend three months of feed.")
         self._storage.put(key_name, raw)
 
-        row = self._c.execute(
-            """INSERT INTO ingest.batch
-                   (api_key_id, idempotency_key, raw_key, raw_bytes,
-                    raw_sha256, content_type, detected_format)
-               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-            (key["id"], idempotency_key, key_name, len(raw), digest,
-             content_type, detect_format(raw))).fetchone()
-        return AcceptResult(batch_id=row[0], accepted=True)
+        batch_id = self._c.execute(
+            "SELECT ingest.batch_accept(%s, %s, %s, %s, %s, %s, %s, %s)",
+            (key["id"], proof, idempotency_key, key_name, len(raw), digest,
+             content_type, detect_format(raw))).fetchone()[0]
+        if batch_id is None:
+            # Only a key revoked or expired since it authenticated reaches this.
+            raise IngestError("the batch was refused: this key is no longer live")
+        return AcceptResult(batch_id=batch_id, accepted=True)
 
     def raw_for(self, batch_id: UUID) -> bytes:
         """The bytes as they arrived, for a re-parse.

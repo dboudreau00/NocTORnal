@@ -138,7 +138,7 @@ $noc$;
 
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 CREATE TABLE yara_ruleset (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -513,7 +513,7 @@ DELETE FROM iam.role_permission
         f"WHERE permission_a = '{a}' AND permission_b = '{b}'"))
     run(f"""
 DELETE FROM iam.permission WHERE key IN ('{a}', '{b}');
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 DROP INDEX sample_analysis_machine_yara_hits_idx;
 DROP INDEX sample_analysis_yara_version_idx;
 ALTER TABLE sample_analysis

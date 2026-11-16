@@ -50,7 +50,7 @@ use**. That means:
   signed-out colleague in as its author. `deps.session_token` accepts
   `Authorization: Bearer`, for clients that are not browsers.
 - **How the database backs the invariants, so a report starts from the
-  right model.** Row-level security stands on 82 tables, enabled and not
+  right model.** Row-level security stands on 83 tables, enabled and not
   forced, so the schema owner is not bound and a production start refuses a
   request role that is the owner. A claim is never rewritten or deleted by
   a runtime role (0135), is inserted live, as the bound user, at the
@@ -61,11 +61,15 @@ use**. That means:
   the newest rows being cut off, which an anchor held by the operator
   catches. The request role reads no account's credential columns (0143), no
   session's token hash, binding, address or client and no break-glass
-  justification (0177), and no sealed column outside the accounts table
-  (0180); it cannot write step-up freshness (0144), the ontology (0172) or
-  the configuration tables (0179, 0182), and it updates only the exhibit and
-  case columns its routes write (0178). What the request role can still
-  reach is listed in the register.
+  justification (0177), no sealed column outside the accounts table (0180),
+  and of the case assignments only its own and the teams of the cases it may
+  open (0192); it cannot write step-up freshness (0144), the ontology (0172),
+  the configuration tables (0179, 0182), the collector's heartbeat (0187),
+  the embedding queue (0188), the YARA compile queue (0189) or an ingest
+  batch, which it creates only holding the key's secret (0190), and it
+  updates only the exhibit column an upload writes (0178) and no column of a
+  case (0186). What the request role can still reach is listed in the
+  register.
 - **Known and already documented:** everything in
   [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md), above
   all its Known residuals at Beta 1.1. Please read it before reporting.

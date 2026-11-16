@@ -13,7 +13,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 -- FIRST v2.0 traffic light protocol. Drives every export, email and
 -- Jira sync decision. AMBER_STRICT must never leave the boundary.

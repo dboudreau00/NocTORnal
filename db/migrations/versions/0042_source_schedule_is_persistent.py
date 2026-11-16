@@ -45,7 +45,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = collect, core, public;
+SET LOCAL search_path = collect, core, public;
 
 -- Rolled ONCE, when a run finishes, and read as-is thereafter.
 ALTER TABLE source ADD COLUMN next_due_at timestamptz;

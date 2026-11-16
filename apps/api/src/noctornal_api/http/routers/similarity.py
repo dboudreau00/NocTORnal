@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 
 from noctornal_api import embedders as E
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.embeddings import (
     MIN_MEANING_QUERY,
     MIN_WORDING_QUERY,
@@ -140,9 +141,15 @@ def _not_in_index(role: str, status: str, reason: str | None) -> Problem:
 
 
 def _stored_or_now(svc: EmbeddingService, kind: str, item_id: UUID, role: str, space,
-                   *, user: CurrentUser, spend, told=None) -> tuple[str, bool]:
+                   *, conn: psycopg.Connection, user: CurrentUser, spend,
+                   told=None) -> tuple[str, bool]:
     """The item's stored vector, embedding it first when it has none (and
     for similar meaning, gating, metering and auditing that send).
+
+    Called only once the route has proved the item readable. The embedding
+    is written as the EMBEDDINGS purpose, as the pass writes it: the queue
+    is not the request role's to write, and a system connection embeds
+    whatever id it is handed, so the readability check stays in the route.
 
     `told`, for a claim, gives (status, reason) as this reader may be told
     them (EmbeddingService.claim_reader_view): a claim's stored reason can
@@ -159,8 +166,10 @@ def _stored_or_now(svc: EmbeddingService, kind: str, item_id: UUID, role: str, s
     if stored is not None and stored[0] in ("EMPTY", "EXCLUDED", "WITHHELD"):
         raise refusal(*stored)
     try:
-        status, reason = svc.embed_now(kind, item_id, role, actor_id=user.user_id,
-                                       before_send=spend if role == E.ROLE_MEANING else None)
+        with system_connection(SystemPurpose.EMBEDDINGS, reuse=conn) as sconn:
+            status, reason = svc.on(sconn).embed_now(
+                kind, item_id, role, actor_id=user.user_id,
+                before_send=spend if role == E.ROLE_MEANING else None)
     except EmbedBusy as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from None
     except EmbedRefused as exc:
@@ -222,8 +231,8 @@ def similar_documents(
         raise Problem(404, "Not found", "no such document, or it is above your clearance")
     role = _role(body.space)
     space = _usable(svc, role, free_text=False)
-    vector, now = _stored_or_now(svc, "document", document_id, role, space, user=user,
-                                 spend=_meter(request, response, user, conn))
+    vector, now = _stored_or_now(svc, "document", document_id, role, space, conn=conn,
+                                 user=user, spend=_meter(request, response, user, conn))
     versions = svc.document_versions(doc, clearance=clearance.name, held=held)
     exclude = [document_id] + ([] if body.include_versions else versions)
     rows = svc.document_candidates(
@@ -361,8 +370,8 @@ def similar_evidence(
         raise Problem(404, "Not found", "no such exhibit in this case")
     role = _role(body.space)
     space = _usable(svc, role, free_text=False)
-    vector, now = _stored_or_now(svc, "evidence", evidence_id, role, space, user=user,
-                                 spend=_meter(request, response, user, conn))
+    vector, now = _stored_or_now(svc, "evidence", evidence_id, role, space, conn=conn,
+                                 user=user, spend=_meter(request, response, user, conn))
     rows = svc.evidence_similar(case_id=case_id, slot=space.slot, query=vector,
                                 clearance=clearance.name, held=held,
                                 limit=body.limit, exclude=[evidence_id])
@@ -397,8 +406,9 @@ def similar_assertions(
                                      clearance=clearance.name, held=held, reader=reader,
                                      ids=[assertion_id])
         return view.get(assertion_id, ("NOT_COMPARED", "not_compared"))
-    vector, now = _stored_or_now(svc, "assertion", assertion_id, role, space, user=user,
-                                 spend=_meter(request, response, user, conn), told=told)
+    vector, now = _stored_or_now(svc, "assertion", assertion_id, role, space, conn=conn,
+                                 user=user, spend=_meter(request, response, user, conn),
+                                 told=told)
     rows = svc.assertion_similar(
         case_id=case_id, slot=space.slot, query=vector, clearance=clearance.name,
         held=held, limit=body.limit, exclude=[assertion_id],

@@ -127,14 +127,20 @@ def grant(conn) -> None:
         conn.execute(sequences.REVOKE_SQL)
     # What else 0108's blanket grant hands back: the reference vocabulary's writes, the Lab custody
     # ledger's sequence, the session, break-glass and other sealed columns, the case material's
-    # UPDATE and DELETE and the configuration tables' writes. Each found by name.
+    # UPDATE and DELETE, the configuration tables' writes, the case record's columns, which 0178's
+    # grant hands back, and the collector's heartbeat and the queues. Each found by name.
     for stem, attribute in (("vocabulary_read_only", "PRIVILEGES_SQL"),
                             ("sample_access_sequence_trigger_drawn", "REVOKE_SQL"),
                             ("iam_session_break_glass_columns_sealed", "PRIVILEGES_SQL"),
                             ("case_material_request_writes", "GRANTS_SQL"),
                             ("configuration_read_only", "PRIVILEGES_SQL"),
                             ("sealed_columns_outside_accounts", "PRIVILEGES_SQL"),
-                            ("notify_preference_read_only", "PRIVILEGES_SQL")):
+                            ("notify_preference_read_only", "PRIVILEGES_SQL"),
+                            ("case_record_system_writes", "PRIVILEGES_SQL"),
+                            ("collector_heartbeat_read_only", "PRIVILEGES_SQL"),
+                            ("embedding_queue_read_only", "PRIVILEGES_SQL"),
+                            ("yara_compile_queue_definer", "PRIVILEGES_SQL"),
+                            ("ingest_batch_definer", "PRIVILEGES_SQL")):
         later = _migration_named(stem)
         if _at_or_past(conn, later.revision):
             conn.execute(getattr(later, attribute))

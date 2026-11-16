@@ -71,7 +71,7 @@ def _values() -> str:
 
 def upgrade() -> None:
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 INSERT INTO role_permission (role_key, permission_key) VALUES
 {_values()}
 ON CONFLICT (role_key, permission_key) DO NOTHING;

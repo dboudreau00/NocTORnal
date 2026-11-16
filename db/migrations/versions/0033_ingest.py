@@ -98,7 +98,7 @@ def upgrade() -> None:
     categories = ", ".join(f"'{c}'" for c in _CATEGORIES)
     run(f"""
 CREATE SCHEMA IF NOT EXISTS ingest;
-SET search_path = ingest, core, public;
+SET LOCAL search_path = ingest, core, public;
 
 CREATE TABLE api_key (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -374,7 +374,7 @@ CREATE INDEX category_rule_active_idx ON category_rule (category)
 """)
 
     run("""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 INSERT INTO permission (key, description, requires_step_up) VALUES
   ('ingest.manage', 'Issue, rotate and revoke ingest keys', true),

@@ -123,8 +123,8 @@ firehose into a half-built model produces a landfill.
 
 `ARCHITECTURE.md` holds the reasoning. What is in the tree:
 
-- Postgres 16 + pgvector as the system of record; 184 Alembic revisions
-  (`0001`-`0184`), `db/schema.sql` regenerated from them
+- Postgres 16 + pgvector as the system of record; 192 Alembic revisions
+  (`0001`-`0192`), `db/schema.sql` regenerated from them
 - Python 3.12+ / FastAPI, serving the REST API under `/api/v1`, the
   analyst console under `/ui` and the `/api/v1/live` WebSocket, and
   running the analytics, the notification drain and the Poll now of a feed
@@ -149,7 +149,7 @@ firehose into a half-built model produces a landfill.
 - Authorisation is the five-part gate in `security/access.py`, answered
   from `iam.*` in Postgres, no external authorisation engine. Row-level
   security stands behind it on every table that carries a case or a label
-  (82 tables, none deferred): requests run as `noctornal_app`, bound to
+  (83 tables, none deferred): requests run as `noctornal_app`, bound to
   their session, and work that must see every row runs as a named system
   purpose on `noctornal_worker`
 - The 2026-07 sketch's Next.js, sigma.js/WebGL, OpenFGA/SpiceDB, NATS and Arq/Celery are not in the tree; they were superseded (decisions 8, 9, 30, 37; compose R13 removed OpenFGA and NATS)
@@ -171,6 +171,9 @@ firehose into a half-built model produces a landfill.
   rollback's name, and it would drive straight through the soft-delete-only
   invariant. If you need to go back past 0017 on a live database, restore a
   backup. Do not make the downgrade "work".
+  A revision that needs a schema on its path says `SET LOCAL search_path = ...`,
+  never `SET`: a session-wide `SET` carries into the next revision of the same
+  run (`test_no_migration_sets_search_path_for_the_whole_session.py`).
 - IDs: v4 UUIDs, `uuid4()` app-side, `gen_random_uuid()` as the column
   default in the database. Nothing sorts on an id. UUIDv7 was the 2026-07 sketch's convention and is superseded; `pg_uuidv7` is not installed.
 - Times: `timestamptz`, UTC in the database, rendered in the user's zone.

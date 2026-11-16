@@ -107,7 +107,7 @@ def upgrade() -> None:
         f"('{key}','{desc}', false, false)" for key, desc in NEW_PERMISSIONS)
     grants = ",\n".join(f"('{role}','{perm}')" for role, perm in NEW_GRANTS)
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 
 ALTER TABLE core.edge ADD COLUMN IF NOT EXISTS deleted_by uuid;
 
@@ -126,7 +126,7 @@ def downgrade() -> None:
     # Grants first: role_permission references permission.
     keys = ",".join(f"'{k}'" for k, _ in NEW_PERMISSIONS)
     run(f"""
-SET search_path = iam, core, public;
+SET LOCAL search_path = iam, core, public;
 DELETE FROM role_permission WHERE permission_key IN ({keys});
 DELETE FROM permission WHERE key IN ({keys});
 ALTER TABLE core.edge DROP COLUMN IF EXISTS deleted_by;

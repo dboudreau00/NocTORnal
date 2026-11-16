@@ -43,7 +43,7 @@ def _in(values: tuple[str, ...]) -> str:
 
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 ALTER TABLE sample_analysis
   DROP CONSTRAINT sample_analysis_kind_known,
   ADD CONSTRAINT sample_analysis_kind_known
@@ -51,7 +51,7 @@ ALTER TABLE sample_analysis
 """
 
 DOWNGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 ALTER TABLE sample_analysis
   DROP CONSTRAINT sample_analysis_kind_known,
   ADD CONSTRAINT sample_analysis_kind_known

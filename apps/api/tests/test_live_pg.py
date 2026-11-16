@@ -246,8 +246,8 @@ def test_the_gate_needs_a_real_classification(conn):
     from noctornal_api.http.routers import live
     body = inspect.getsource(live._may_read)
     assert "object_classification=None" not in body
-    # The case's labels as lock facts (row-level security): the re-check runs unbound, and a plain read of
-    # core."case" would find no row there.
+    # The case's labels as lock facts (row-level security): the gate decides as if no case row could be
+    # hidden from the subscriber, as every gate input does (test_rls_gate_facts).
     assert "iam.case_facts" in body
 
 

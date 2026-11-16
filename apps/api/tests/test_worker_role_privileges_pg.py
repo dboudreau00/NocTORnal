@@ -83,7 +83,11 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
               **_migration("0180").RUNTIME_COLUMN_SELECTS}
     vocabulary = (_migration("0172").RUNTIME_READ_ONLY_TABLES
                   + _migration("0179").RUNTIME_READ_ONLY_TABLES
-                  + _migration("0182").RUNTIME_READ_ONLY_TABLES)
+                  + _migration("0182").RUNTIME_READ_ONLY_TABLES
+                  + _migration("0187").RUNTIME_READ_ONLY_TABLES
+                  + _migration("0188").RUNTIME_READ_ONLY_TABLES
+                  + _migration("0189").RUNTIME_READ_ONLY_TABLES
+                  + _migration("0190").RUNTIME_READ_ONLY_TABLES)
     # 0178: the request role writes only what a request writes on exhibits and cases, and deletes no
     # case material it never deletes; the system role keeps both, for the purge, a hold and the sweeps.
     case_material = _migration("0178")
@@ -97,9 +101,9 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
     assert len(tables) >= 100
     differ = {}
     for table in tables:
-        # 0172 closed the reference vocabulary to the request role only, and 0179 and 0182 the
-        # deployment configuration and a person's delivery settings; the system role keeps what it
-        # held.
+        # 0172 closed the reference vocabulary to the request role only, 0179 and 0182 the
+        # deployment configuration and a person's delivery settings, and 0187 onwards the
+        # collector's heartbeat and the queues; the system role keeps what it held.
         read_only = (table.split(".", 1)[0] in lockdown.RUNTIME_READ_ONLY_SCHEMAS
                      or table in lockdown.RUNTIME_READ_ONLY_TABLES
                      or table in vocabulary)

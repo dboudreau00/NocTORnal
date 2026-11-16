@@ -1125,8 +1125,9 @@ def produce(
         # 401: a spent or expired ticket is an expired credential, and one
         # answer for every reason (the Lab's rule).
         raise Problem(401, "Unauthenticated", safe_detail(exc)) from exc
-    # Bound to the spent ticket's holder before the exhibit is read or its custody appended; the
-    # redemption above runs unbound on purpose.
+    # Bound to the spent ticket's holder before the exhibit is read or its custody appended. The
+    # redemption above spends the ticket unbound, as it must, and binds it before its own gate;
+    # this read does not lean on that.
     bind_ticket(conn, ticket)
     try:
         blob, digest = _svc(conn).produce(

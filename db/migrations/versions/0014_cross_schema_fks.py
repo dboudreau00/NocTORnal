@@ -18,7 +18,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 ALTER TABLE core.assertion
   ADD CONSTRAINT assertion_source_fk   FOREIGN KEY (source_id)   REFERENCES collect.source(id),

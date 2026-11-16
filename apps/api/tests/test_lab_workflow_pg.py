@@ -7,7 +7,8 @@
   the case already holds (no existence oracle).
 - Assign, analysis, detonation and the people lists refuse a sample the caller cannot see, with the 404
   `detail` gives.
-- The detonation sign-off is another lead investigator on the sample's case, never the requester.
+- The detonation sign-off is another lead investigator on the sample's case, never the requester, and a
+  Lab analyst on no case is still told who leads it.
 - The queue carries the labels a sample is handled at.
 - The policy says the notice once and carries the caller's own labels.
 
@@ -20,6 +21,8 @@ from datetime import date
 from uuid import uuid4
 
 import pytest
+
+import rls_support as rls
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -409,6 +412,27 @@ def test_a_detonation_is_signed_off_by_another_lead_on_the_case(conn, store):
     [row] = svc.detonations(sample.id)
     assert row["authorised_by"] == conn.execute(
         "SELECT email FROM iam.app_user WHERE id = %s", (lead,)).fetchone()[0]
+
+
+@rls.GATED
+def test_detonation_authorisers_name_a_lead_to_a_lab_analyst_on_no_case(conn, store):
+    """As the request role, bound to the analyst who asks. The Lab is global under `sample.read` and
+    its analyst is on no case, so the case's leads are read through `iam.case_leads` (0191), never
+    the assignments, which are not the analyst's to read: the sign-off still names the lead, and
+    the lead's own re-check (`only`) still finds them."""
+    from noctornal_api.samples import SampleService
+    lead = _user(conn, roles=("CASE_OWNER",), name="Lena Lead")
+    case_id = _case(conn, lead)
+    analyst = _user(conn, roles=("MALWARE_ANALYST",), clearance="AMBER")
+    sample = _sample(conn, store, lead, case_id=case_id)
+    app = rls.app_conn(_token(conn, analyst))
+    try:
+        svc = SampleService(app, store)
+        named = svc.detonation_authorisers(sample.id, exclude=analyst)
+        assert [x["id"] for x in named] == [str(lead)], named
+        assert svc.detonation_authorisers(sample.id, only=lead) == named
+    finally:
+        app.close()
 
 
 # --- handling labels -------------------------------------------------------------

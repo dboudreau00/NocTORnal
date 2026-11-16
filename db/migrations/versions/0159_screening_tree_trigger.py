@@ -41,7 +41,7 @@ def _in(values: tuple[str, ...]) -> str:
 
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 ALTER TABLE screening_result
   DROP CONSTRAINT screening_result_trigger_check,
   ADD CONSTRAINT screening_result_trigger_check
@@ -53,7 +53,7 @@ COMMENT ON COLUMN screening_result.trigger IS
 """
 
 DOWNGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 COMMENT ON COLUMN screening_result.trigger IS NULL;
 ALTER TABLE screening_result
   DROP CONSTRAINT screening_result_trigger_check,

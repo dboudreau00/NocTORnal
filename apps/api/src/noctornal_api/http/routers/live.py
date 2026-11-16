@@ -25,8 +25,8 @@ from uuid import UUID
 import psycopg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-# The request role's connections, as HTTP's are.
-from noctornal_api.db import connect_request, connect_timeout_seconds
+# The request role's connections, as HTTP's are, each bound to its subscriber's session.
+from noctornal_api.db import bind_session, connect_request, connect_timeout_seconds
 from noctornal_api.http.deps import (
     SESSION_COOKIE,
     refuse_unbindable_session,
@@ -663,8 +663,8 @@ def _may_read(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
     `resolve()` raises on a None classification. A case that does not exist returns False, the same
     "no such case" an unassigned one gets, so the socket is no existence oracle.
     """
-    # The case's labels as lock facts (`iam.case_facts`): the re-check runs on an unbound
-    # connection, which row-level security would show no case row at all.
+    # The case's labels as lock facts (`iam.case_facts`), as every gate input reads them: the gate
+    # decides as if no case row could be hidden from the subscriber (test_rls_gate_facts).
     row = conn.execute(
         "SELECT classification, compartments FROM iam.case_facts(%s)",
         (case_id,)).fetchone()
@@ -678,12 +678,39 @@ def _may_read(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
     return evaluate(ctx).allowed
 
 
-def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
-    """Borrow a connection, re-run the gate, give it back.
+def _bound_request_connection(user_id: UUID,
+                              token: str | None) -> psycopg.Connection | None:
+    """A request connection bound to the subscriber's session, or None when it no longer binds.
+
+    Row-level security answers for the user a connection is bound to, and a connection bound to
+    nobody reads as nobody, so every per-delivery check runs on one bound as `deps.current_user`
+    binds a request's. None when the session no longer binds to this subscriber (it ended after the
+    stream last asked, or it is another account's), which the caller treats as the session's end.
+    `token` None leaves the connection unbound, for a test that hands in an owner connection, which
+    row security does not filter; on the request role an unbound connection reads as nobody."""
+    conn = connect_request()
+    if token is None:
+        return conn
+    try:
+        binding = bind_session(conn, token)
+    except BaseException:
+        conn.close()
+        raise
+    if binding.exempt or binding.actor == user_id:
+        return conn
+    conn.close()
+    return None
+
+
+def _recheck(user_id: UUID, case_id: UUID, mfa_at, *, token: str | None) -> bool:
+    """Borrow a connection bound to the subscriber, re-run the gate, give it back. False when the
+    session no longer binds.
 
     Asked without counting a break-glass use: the socket's opening counted once at its gate, and
     this re-asks before each delivery only so a revoked assignment stops the stream."""
-    conn = connect_request()
+    conn = _bound_request_connection(user_id, token)
+    if conn is None:
+        return False
     try:
         return _may_read(conn, user_id, case_id, mfa_at, count_use=False)
     finally:
@@ -740,9 +767,13 @@ def _labels_readable(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
         return False
 
 
-def _change_visible(user_id: UUID, case_id: UUID, mfa_at, labels) -> bool:
-    """`_labels_readable` on a connection of its own."""
-    conn = connect_request()
+def _change_visible(user_id: UUID, case_id: UUID, mfa_at, labels, *,
+                    token: str | None) -> bool:
+    """`_labels_readable` on a connection of its own, bound to the subscriber. False when the
+    session no longer binds."""
+    conn = _bound_request_connection(user_id, token)
+    if conn is None:
+        return False
     try:
         return _labels_readable(conn, user_id, case_id, mfa_at, labels)
     finally:
@@ -750,14 +781,17 @@ def _change_visible(user_id: UUID, case_id: UUID, mfa_at, labels) -> bool:
 
 
 def _delivery_verdict(user_id: UUID, case_id: UUID | None, mfa_at,
-                      payload: dict) -> str:
-    """What to do with one hint, on ONE borrowed connection: `"close"` when
+                      payload: dict, *, token: str | None) -> str:
+    """What to do with one hint, on ONE borrowed connection bound to the
+    subscriber: `"ended"` when the session no longer binds, `"close"` when
     the subscriber may no longer read the case at all (the per-delivery
     re-check, `_recheck`), `"drop"` when the hint stands for elements the
     subscriber may not read, `"send"` otherwise."""
     if case_id is None:
         return "send"
-    conn = connect_request()
+    conn = _bound_request_connection(user_id, token)
+    if conn is None:
+        return "ended"
     try:
         if not _may_read(conn, user_id, case_id, mfa_at, count_use=False):
             return "close"
@@ -791,18 +825,22 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
     Waits on the queue and the socket together, so a disconnect frees its subscriber slot at once
     rather than at the next idle ping. The session is asked about on every idle ping and before
     every delivery, and a dead one ends the socket with the policy close and
-    `SESSION_ENDED_REASON`.
+    `SESSION_ENDED_REASON`. A delivery's own connection is bound to the session too, so one that
+    ends between the two closes the same way.
     """
     receiver = asyncio.create_task(ws.receive())
     getter: asyncio.Task | None = None
 
-    async def session_gone() -> bool:
-        if token is None or await asyncio.to_thread(_session_alive, token):
-            return False
+    async def close_ended() -> None:
         # A peer that left meanwhile makes the close raise; it is gone
         # either way.
         with contextlib.suppress(Exception):
             await ws.close(code=_CLOSE_POLICY, reason=SESSION_ENDED_REASON)
+
+    async def session_gone() -> bool:
+        if token is None or await asyncio.to_thread(_session_alive, token):
+            return False
+        await close_ended()
         return True
 
     try:
@@ -837,7 +875,11 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
                 # connection decides whether the hint is about anything this subscriber may read, so
                 # nothing is pushed about an element above them.
                 verdict = await asyncio.to_thread(
-                    _delivery_verdict, user_id, case_id, mfa_at, payload)
+                    _delivery_verdict, user_id, case_id, mfa_at, payload,
+                    token=token)
+                if verdict == "ended":
+                    await close_ended()
+                    return
                 if verdict == "close":
                     await ws.close(code=_CLOSE_UNAUTHENTICATED,
                                    reason="access changed")

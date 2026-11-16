@@ -1332,10 +1332,17 @@ class EvidenceService:
                         outcome="DENIED", ip_hash=ip_hash)
             raise ProductionRefused(_PRODUCTION_REFUSED)
         ticket_id, holder, session_id, issued_at = row[0], row[1], row[2], row[4]
+        # The ticket is spent, so this connection is bound to its holder before anything below reads: row-level
+        # security answers for the user a connection is bound to, a connection bound to nobody reads as nobody, and
+        # the database attributes a request-role row only to that user or to the holder of a ticket the connection
+        # spent (0150). A holder whose account is no longer active binds to nobody: the resolver refuses them below,
+        # and the refusal still names them, as the holder of the spent ticket.
+        from noctornal_api.db import bind_ticket
+        bind_ticket(self._c, presented)
         failed: list[str]
         # The effective labels, composed as `deps.effective_labels` does (stricter classification, union of
-        # compartments), read live. As lock facts (`iam.element_facts`, `iam.case_facts`), because this connection
-        # is not bound yet and must still decide.
+        # compartments), read live. As lock facts (`iam.element_facts`, `iam.case_facts`), as every gate input
+        # reads them: the gate decides as if no row could be hidden from the holder.
         labels = self._c.execute(
             """SELECT e.classification, e.compartments,
                       c.classification, c.compartments
@@ -1353,12 +1360,6 @@ class EvidenceService:
             failed = list(decision.failed_checks)
         except AccessResolutionError:
             failed = ["account_inactive"]
-        # The decision is made on a connection that is not bound yet, as above. The ticket is spent, so bind it to
-        # its holder now and the rows below keep the holder as their actor: the database attributes a request-role
-        # row only to the user its connection is bound to (0150). A holder whose account is no longer active binds
-        # to nobody, and that row is demoted to an unverified claim in its detail.
-        from noctornal_api.db import bind_ticket
-        bind_ticket(self._c, presented)
         if failed:
             self._audit("EVIDENCE_PRODUCTION_TICKET_REFUSED", holder,
                         evidence_id, case_id,

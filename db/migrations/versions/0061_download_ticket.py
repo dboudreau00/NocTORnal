@@ -154,7 +154,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 CREATE TABLE download_ticket (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),

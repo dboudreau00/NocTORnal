@@ -3640,6 +3640,9 @@ class SampleService:
 
         `only` narrows the list to one person, so "is this person eligible now" is the same SQL as the
         list: the sandbox sign-off, its listing and the worker's re-check all ask it.
+
+        The case's leads are read through `iam.case_leads` (0191), once per statement: the analyst who
+        asks is seldom on the case, and the assignments are not theirs to read.
         """
         rows = self._c.execute(
             self._EFFECTIVE + """
@@ -3650,11 +3653,9 @@ class SampleService:
                AND (%(only)s::uuid IS NULL OR u.id = %(only)s::uuid)
                AND u.tlp_clearance >= s.tlp
                AND s.comps <@ coalesce(u.compartments, '{}')
-               AND CASE WHEN s.case_id IS NOT NULL THEN EXISTS (
-                         SELECT 1 FROM iam.case_assignment a
-                          WHERE a.case_id = s.case_id AND a.user_id = u.id
-                            AND a.role_key = 'CASE_OWNER'
-                            AND (a.expires_at IS NULL OR a.expires_at > now()))
+               AND CASE WHEN s.case_id IS NOT NULL THEN u.id IN (
+                         SELECT l.user_id
+                           FROM s AS here, iam.case_leads(here.case_id) AS l(user_id))
                         ELSE EXISTS (
                          SELECT 1 FROM iam.user_role ur
                           WHERE ur.user_id = u.id AND ur.role_key = 'CASE_OWNER')

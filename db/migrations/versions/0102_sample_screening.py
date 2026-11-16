@@ -79,7 +79,7 @@ def _in(values: tuple[str, ...]) -> str:
 
 
 UPGRADE_SQL = f"""
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 
 ALTER TABLE sample
   ADD COLUMN screening_outcome text NOT NULL DEFAULT 'NOT_SCREENED',
@@ -392,7 +392,7 @@ DELETE FROM iam.role_permission
  WHERE permission_key IN ('sample.screening.manage', 'sample.screening.review');
 DELETE FROM iam.permission
  WHERE key IN ('sample.screening.manage', 'sample.screening.review');
-SET search_path = lab, core, public;
+SET LOCAL search_path = lab, core, public;
 DROP TABLE screening_review;
 DROP TABLE screening_result;
 DROP TABLE screening_hash;

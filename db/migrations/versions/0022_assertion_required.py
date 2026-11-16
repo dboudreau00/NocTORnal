@@ -44,7 +44,7 @@ def run(sql: str) -> None:
 
 def upgrade() -> None:
     run("""
-SET search_path = core, public;
+SET LOCAL search_path = core, public;
 
 -- Trigger 1: an inserted node/edge must have a supporting assertion.
 CREATE OR REPLACE FUNCTION core.require_node_assertion() RETURNS trigger AS $$

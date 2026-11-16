@@ -37,6 +37,7 @@ labels.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -516,6 +517,15 @@ class EmbeddingService:
             from noctornal_api.readiness import blocking_failures as _bf
             blocking_failures = _bf
         self._blocking_failures = blocking_failures
+
+    def on(self, conn: psycopg.Connection) -> EmbeddingService:
+        """This service on `conn`, with the same embedders, cache and clock: the half of a request
+        that writes as the EMBEDDINGS purpose. On an exempt connection that is `self`."""
+        if conn is self._c:
+            return self
+        twin = copy.copy(self)
+        twin._c = conn
+        return twin
 
     @property
     def configuration(self) -> E.Configured:

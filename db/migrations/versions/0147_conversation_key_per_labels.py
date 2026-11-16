@@ -27,9 +27,12 @@ same columns (`comms.py`).
 ## Downgrade
 
 Restores the narrower index. On a database that by then holds two
-captures of one room at different labels the downgrade stops on the
-duplicate, which is the designed refusal (CONVENTIONS.md: reversible on
-an empty database).
+captures of one room at different labels the index cannot be rebuilt, and
+the downgrade refuses first, naming how many references collide and
+printing none of them: Postgres's own refusal, a unique violation, prints
+the duplicated key, the room's external id with it. That is the designed
+refusal (CONVENTIONS.md: reversible on an empty database); a capture is
+never merged or deleted to make it pass.
 """
 from alembic import op
 
@@ -53,8 +56,33 @@ CREATE UNIQUE INDEX conversation_external_idx
 """
 
 
+#: The keys the 0034 index would refuse, over its own columns and predicate,
+#: so the count is the index build's verdict.
+COUNT_SQL = """
+SELECT count(*) FROM (
+  SELECT 1 FROM comms.conversation
+   WHERE external_ref IS NOT NULL
+   GROUP BY case_id, platform_key, external_ref
+  HAVING count(*) > 1) AS held_at_different_labels
+"""
+
+
+def downgrade_refusal(n: int) -> str:
+    held = "reference is" if n == 1 else "references are"
+    return (f"refusing to downgrade 0147: {n} conversation {held} held at different "
+            "labels, and the 0034 index allows one capture per case, platform and "
+            "external reference. This revision's downgrade changed nothing, so the "
+            "database is now at 0147 and the revisions above it are already undone. "
+            "Run alembic upgrade head to return, or restore a backup taken before "
+            "0147 was applied.")
+
+
 def run(sql: str) -> None:
     op.get_bind().connection.driver_connection.execute(sql)
+
+
+def query(sql: str) -> list:
+    return op.get_bind().connection.driver_connection.execute(sql).fetchall()
 
 
 def upgrade() -> None:
@@ -62,4 +90,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    n = query(COUNT_SQL)[0][0]
+    if n:
+        raise RuntimeError(downgrade_refusal(n))
     run(DOWNGRADE_SQL)

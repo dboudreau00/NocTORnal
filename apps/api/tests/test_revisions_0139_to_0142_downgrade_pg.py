@@ -4,8 +4,9 @@ catalogue.
 The frozen SQL of each revision is run inside ONE transaction that is rolled back, so the suite's own
 database is never left half way and a round trip does not depend on the data other suites left behind.
 Where a downgrade stops by design (0141 restores a UNIQUE key over exhibits that the revision exists to
-allow two of, and a database holding two exhibits of one file in one case cannot take it back), that
-refusal is asserted and the round trip carries on without it.
+allow two of, and a database holding two exhibits of one file in one case cannot take it back), the
+downgrade refuses with a count before it changes anything, Postgres's own refusal behind it is a unique
+violation, both are asserted, and the round trip carries on without it.
 
 A real `alembic downgrade` to below 0139 then `upgrade head` is the job of `test_exhibit_production_pg.py`'s
 round trips and of CI's head, base, head step; this file covers what is specific to these four.
@@ -41,6 +42,14 @@ MODULES = [_load(n) for n in NAMES]
 
 class _Undo(Exception):
     """Rolls the whole round trip back."""
+
+
+def _patch(conn, module) -> list:
+    """`module.downgrade()` counts on `conn` and records what it would have run."""
+    ran: list = []
+    module.query = lambda sql: conn.execute(sql).fetchall()
+    module.run = ran.append
+    return ran
 
 
 def _catalogue(conn) -> dict:
@@ -85,22 +94,26 @@ def test_downgrade_then_upgrade_restores_the_same_catalogue(conn):
     assert {"storage_version_id"} <= {c[0] for c in before["columns"]}
     names = {t[0] for t in before["triggers"]}
     assert {"evidence_anchors_fixed", "evidence_hold_purge_exclusive"} <= names
-    duplicates = conn.execute(
-        """SELECT count(*) FROM (SELECT 1 FROM core.evidence
-                                  GROUP BY case_id, sha256 HAVING count(*) > 1) d"""
-    ).fetchone()[0]
+    duplicates = conn.execute(MODULES[2].COUNT_SQL).fetchone()[0]
     with pytest.raises(_Undo):
         with conn.transaction():
             conn.execute(MODULES[3].DOWNGRADE_SQL)
             skipped = False
+            ran = _patch(conn, MODULES[2])
             if duplicates:
                 # The designed refusal: nothing is merged or deleted to make
-                # a rollback succeed.
+                # a rollback succeed. The downgrade counts first and changes
+                # nothing, and the database's own refusal stands behind it.
+                with pytest.raises(RuntimeError, match="refusing to downgrade 0141"):
+                    MODULES[2].downgrade()
+                assert ran == []
                 with pytest.raises(psycopg.errors.UniqueViolation):
                     with conn.transaction():
                         conn.execute(MODULES[2].DOWNGRADE_SQL)
                 skipped = True
             else:
+                MODULES[2].downgrade()
+                assert ran == [MODULES[2].DOWNGRADE_SQL]
                 conn.execute(MODULES[2].DOWNGRADE_SQL)
             conn.execute(MODULES[1].DOWNGRADE_SQL)
             conn.execute(MODULES[0].DOWNGRADE_SQL)
@@ -131,6 +144,10 @@ def test_0141_refuses_to_restore_the_old_key_over_two_exhibits_of_one_file(conn)
     first, data = g.lodge(conn, store, case_id, boss, classification="RED")
     g.lodge(conn, store, case_id, boss, data=data, classification="AMBER",
             reader_ceiling=("AMBER", frozenset()))
+    ran = _patch(conn, MODULES[2])
+    with pytest.raises(RuntimeError, match="refusing to downgrade 0141: [1-9]"):
+        MODULES[2].downgrade()
+    assert ran == []
     with pytest.raises(_Undo):
         with conn.transaction():
             with pytest.raises(psycopg.errors.UniqueViolation):
