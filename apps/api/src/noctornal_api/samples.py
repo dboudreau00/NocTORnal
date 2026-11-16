@@ -514,15 +514,17 @@ def public_origin() -> str:
             or app_origin())
 
 
-#: A URL's userinfo, up to the LAST "@" of its authority. `https://user:secret@host` is the usual way a
-#: credential ends up in an origin setting, and a password may hold an "@" of its own.
-_USERINFO = re.compile(r"(?<=//)[^/?#\s]*@")
+#: A URL's userinfo: everything before the LAST "@" ahead of any query or fragment, with the scheme kept when
+#: there is one. `https://user:secret@host` is the usual way a credential ends up in an origin setting; a
+#: password may hold an "@" or a "/" of its own, and a value with no scheme may carry userinfo too. A query
+#: stays as it was, so the log still shows the operator what they set.
+_USERINFO = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)?[^?#]*@")
 
 
 def masked_origin(raw: str) -> str:
     """`raw` as an origin setting with its userinfo masked, for a log line or the readiness register: a
     credential in the value is the operator's mistake and must not travel on."""
-    return _USERINFO.sub("***@", raw)
+    return _USERINFO.sub(lambda m: (m.group("scheme") or "") + "***@", raw)
 
 #: What `origin_split` says when `NOCTORNAL_SAMPLE_ORIGIN` is set and is not an origin. The same sentence for
 #: every such value, because the refusal reaches a caller with no session (the download routes ask the split
