@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from noctornal_api import __version__
 from noctornal_api.config import enforce_environment
@@ -178,6 +181,15 @@ def _preflight(request: Request) -> Response | None:
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Nothing at startup: the request pool opens on the first request, so building the application
+    needs no database. At shutdown the pools close, and a connection still out closes on return."""
+    yield
+    from noctornal_api.db_pool import close_pools
+    await run_in_threadpool(close_pools)
+
+
 def create_app() -> FastAPI:
     # First, before anything reads a KEK, a DSN or a bucket credential or binds a port: a
     # production deployment with a missing or development secret is told the whole list here
@@ -203,6 +215,7 @@ def create_app() -> FastAPI:
         docs_url=f"{API_PREFIX}/docs" if docs_enabled else None,
         redoc_url=f"{API_PREFIX}/redoc" if docs_enabled else None,
         openapi_url=f"{API_PREFIX}/openapi.json" if docs_enabled else None,
+        lifespan=_lifespan,
     )
 
     install_error_handlers(app)

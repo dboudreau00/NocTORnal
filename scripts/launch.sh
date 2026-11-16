@@ -79,10 +79,10 @@ if [ ! -x "$PYTHON" ]; then
     '  .venv/bin/python -m pip install -c constraints.txt -e packages/ontology -e apps/api'
 fi
 
-# Probe what the API needs, numpy, selectolax and pefile included, so a stale venv is told to
-# reinstall here rather than at the first CONCOR run or forum poll. The optional extras (telegram,
-# yara) are not probed: their absence is a readiness gap.
-if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile' 2>&1)"; then
+# Probe what the API needs, numpy, selectolax, pefile and psycopg_pool included, so a stale venv is
+# told to reinstall here rather than at the first CONCOR run, forum poll or pooled request. The
+# optional extras (telegram, yara) are not probed: their absence is a readiness gap.
+if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile, psycopg_pool' 2>&1)"; then
   printf '%s\n' "$probe" | indent
   fail 'the virtual environment is missing packages the API needs' \
     'Install them, from the repo root:' \

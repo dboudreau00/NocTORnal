@@ -425,7 +425,7 @@ def test_the_extras_are_exactly_dev_telegram_and_yara():
 def test_the_hard_dependencies_name_every_new_pin():
     project = _pyproject()
     hard = _requirements(project["dependencies"])
-    for name in ("numpy", "selectolax", "pefile", "urllib3", "certifi", "idna"):
+    for name in ("numpy", "selectolax", "pefile", "urllib3", "certifi", "idna", "psycopg-pool"):
         assert name in hard, f"{name} is imported by the API and not declared"
     for name in ("telethon", "python-socks", "yara-x"):
         assert name not in hard, f"{name} is an optional extra, not a hard dependency"
@@ -442,7 +442,7 @@ def test_the_hard_dependencies_name_every_new_pin():
     assert "python-socks" in extras["dev"], "the wire-contract cases need it"
     pins = _pins()
     for name in ("numpy", "selectolax", "pefile", "telethon", "python-socks",
-                 "pyaes", "rsa", "pyasn1", "yara-x"):
+                 "pyaes", "rsa", "pyasn1", "yara-x", "psycopg-pool"):
         assert name in pins, f"{name} is not pinned"
 
 
@@ -674,11 +674,12 @@ def _launcher_probe(rel: str) -> str:
 
 @pytest.mark.parametrize("rel", ["scripts/launch.sh", "scripts/launch.ps1"])
 def test_the_launchers_probe_every_new_hard_dependency(rel):
-    """A venv built before the roadmap build is told to reinstall at
-    launch, not at the first CONCOR run or forum poll. The extras are not
-    probed: their absence is a readiness gap, not a broken venv."""
+    """A venv built before the roadmap build, or before the request pool,
+    is told to reinstall at launch, not at the first CONCOR run, forum poll
+    or pooled request. The extras are not probed: their absence is a
+    readiness gap, not a broken venv."""
     probe = _launcher_probe(rel)
-    for module in ("numpy", "selectolax", "pefile"):
+    for module in ("numpy", "selectolax", "pefile", "psycopg_pool"):
         assert re.search(rf"\b{module}\b", probe), (rel, module)
     for module in ("telethon", "yara_x", "python_socks"):
         assert module not in probe, (rel, module)
@@ -792,6 +793,9 @@ def test_notice_names_every_new_dependency_and_its_licence():
     # The old claim that everything else is permissive is corrected.
     assert "Everything else in the tree is permissive (MIT, BSD-3-Clause, Apache-2.0,\nPSF, ISC) and imposes only attribution. The two" not in text.replace("\r\n", "\n")
     assert "MPL-2.0" in text[:text.index("## Dependencies added")]
+    # The driver and its pool, which holds the request connections, are LGPL.
+    other = text[text.index("## Other dependencies"):].replace("\r\n", "\n")
+    assert "`psycopg-pool`" in other and "LGPL-3.0-only" in other
 
 
 @pytest.mark.extras_absent

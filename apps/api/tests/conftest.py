@@ -74,6 +74,16 @@ def pytest_collection_modifyitems(config, items):
         items[:] = first + [item for item in items if item.name not in _RUN_FIRST]
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _close_request_pools():
+    """The request pool (`db_pool`) outlives a test, and a TestClient used without `with` never
+    runs the application's shutdown: close every pool once the run ends, so a pooled run
+    (NOCTORNAL_DB_POOL=on) leaves no connection open behind it."""
+    yield
+    from noctornal_api import db_pool
+    db_pool.close_pools()
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     """After a run with failures, say so when the database's clock and this host's disagree by
     seconds.

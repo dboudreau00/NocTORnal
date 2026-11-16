@@ -87,9 +87,12 @@ provenance the operator cannot verify.
 
 Everything else in the tree is permissive (MIT, BSD-2-Clause,
 BSD-3-Clause, Apache-2.0, PSF, ISC) and imposes only attribution, apart
-from the two copyleft SNA libraries above and four weak-copyleft pieces,
+from the two copyleft SNA libraries above and seven weak-copyleft pieces,
 none of which constrains the project's own licence:
 
+- `psycopg`, `psycopg-binary` (the PostgreSQL driver) and `psycopg-pool`
+  (its pool, which holds the request connections) are **LGPL-3.0-only**,
+  installed as libraries and used unmodified.
 - `certifi` is **MPL-2.0**, a file-level copyleft that names the GNU
   licences as Secondary Licenses, so it combines with AGPL-3.0; its CA
   bundle is used unmodified.

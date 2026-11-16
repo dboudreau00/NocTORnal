@@ -104,6 +104,14 @@ STATEMENT_TIMEOUT_DETAIL = (
     "page or a tighter filter) or try again when the system is quieter.")
 
 
+#: What a request is told when the request pool (`db_pool`) had no connection for it: none came free
+#: within `NOCTORNAL_DB_POOL_TIMEOUT`, too many requests were already waiting, or the process is
+#: shutting down. 503 with `Retry-After`, because the next attempt is likely to find one free.
+POOL_UNAVAILABLE_DETAIL = (
+    "The service is at its limit of concurrent database connections, so the "
+    "request was not started. Try again in a moment.")
+
+
 def is_statement_timeout(exc: BaseException) -> bool:
     """True when the database cancelled a statement of this request, whether
     `exc` is the cancellation or a service error that wraps it."""
@@ -289,6 +297,21 @@ def install_error_handlers(app) -> None:
     async def _no_system_connection(_: Request, exc: Exception):
         log.error("system connection unavailable: %s", exc)
         return problem_response(503, "Service unavailable", SYSTEM_UNAVAILABLE_DETAIL)
+
+    # The request pool. Each is a psycopg OperationalError, which nothing else here answers, so
+    # without these a full pool would be a 500 and a logged traceback.
+    from psycopg_pool import PoolClosed, PoolTimeout, TooManyRequests
+
+    @app.exception_handler(PoolTimeout)
+    @app.exception_handler(TooManyRequests)
+    @app.exception_handler(PoolClosed)
+    async def _no_request_connection(request: Request, exc: Exception):
+        cid = uuid.uuid4().hex[:12]
+        log.warning("no request connection %s on %s %s: %s", cid, request.method,
+                    request.url.path, type(exc).__name__)
+        return problem_response(503, "Service unavailable",
+                                f"{POOL_UNAVAILABLE_DETAIL} (ref {cid})",
+                                headers={"Retry-After": "1"})
 
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception):

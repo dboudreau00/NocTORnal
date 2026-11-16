@@ -665,11 +665,13 @@ services:
   # connect-src, the other to recognise itself.
   #
   # Four workers, because the igraph analytics are CPU-bound and one worker would hold every
-  # request behind a betweenness run. Connections are opened per request, so the ceiling is
-  # concurrent requests, well inside max_connections=200. Process memory is held four times over:
-  # without REDIS_URL each worker meters alone and every limit is four times looser, which is why
-  # readiness fails an unset REDIS_URL. NOCTORNAL_LIVE_MAX_SOCKETS (200) and the live channel's
-  # pending-message caps are also per worker.
+  # request behind a betweenness run. Each worker takes a request's connection from a pool of at
+  # most NOCTORNAL_DB_POOL_MAX (10), so four workers here and two in sample-origin hold at most 60
+  # of max_connections=200, beside the system, live-channel and side connections still opened per
+  # use (docs/00 decision 233; infra/production/README.md, Day-to-day). Process memory is held
+  # four times over: without REDIS_URL each worker meters alone and every limit is four times
+  # looser, which is why readiness fails an unset REDIS_URL. NOCTORNAL_LIVE_MAX_SOCKETS (200) and
+  # the live channel's pending-message caps are also per worker.
   #
   # --forwarded-allow-ips takes Caddy's address from NOCTORNAL_TRUSTED_PROXY_IP (see x-caddy-ip).
   #

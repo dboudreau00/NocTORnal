@@ -74,6 +74,7 @@ pefile==2024.8.26
 pluggy==1.6.0
 psycopg==3.3.5
 psycopg-binary==3.3.5
+psycopg-pool==3.3.3
 pyaes==1.6.1
 pyasn1==0.6.4
 pycparser==3.0

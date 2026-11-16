@@ -486,6 +486,25 @@ jobs:
           set -o pipefail
           pytest apps/api/tests packages/ontology/tests -q -rs -m "${{ matrix.select }}" 2>&1 | tee /tmp/tests.out
 
+      # The request pool (docs/00 decision 233) is on in production and off everywhere else, so the
+      # run above opened a connection for every request. The row-security, binding, hidden-item,
+      # authorisation, sample-origin, download-ticket, break-glass and pool suites run again with it
+      # on, on the same database: a binding, role or setting one request left on its connection that
+      # reached the next would fail them here. First leg only; a skip fails it, as below.
+      - name: Security suites on the request pool
+        if: ${{ matrix.full }}
+        env:
+          NOCTORNAL_DB_POOL: "on"
+        run: |
+          set -o pipefail
+          pytest apps/api/tests -q -rs -m "${{ matrix.select }}" \
+            -k "(rls or session_binding or hidden or authz or sample_origin or download_ticket or break_glass or db_pool) and not downgrade" \
+            2>&1 | tee /tmp/pooled.out
+          if grep -qE "^[0-9]+ passed, [0-9]+ skipped" /tmp/pooled.out; then
+            echo "::error::Tests were SKIPPED on the request pool."
+            exit 1
+          fi
+
       # The audit chain verification job (docs/09): a chain that is never recomputed makes
       # tamper-evidence a claim rather than a control. After the suite, so the chain has real
       # traffic in it; an empty chain would pass and prove nothing, so the step fails if nothing

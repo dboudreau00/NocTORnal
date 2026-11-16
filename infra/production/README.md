@@ -1423,6 +1423,24 @@ not a reason to stop draining), so a persistent non-zero every five minutes
 is the thing to look at. The failed deliveries are in the ledger with their
 reasons at `GET /api/v1/notifications/deliveries?refused_only=true`.
 
+**Database connections.** Each `api` and `sample-origin` worker keeps a pool
+of the request role's connections open between requests (`NOCTORNAL_DB_POOL`,
+on in production) and resets and checks each one before the next request has
+it, so nothing one request was bound to reaches the next (docs/00 decision
+233). A worker holds at most `NOCTORNAL_DB_POOL_MAX` (10), so the four API
+workers and two sample-origin workers hold at most 60 of the 200 connections
+`postgres` allows, beside the ones still opened for each use: the system
+role's, the live channel's and its sockets', the migration job, cron, the
+collector and the other jobs. A request that waits `NOCTORNAL_DB_POOL_TIMEOUT`
+(10 seconds) for a free one is answered 503 with `Retry-After: 1`, and the log
+says `no request connection`; raise the maximum and `max_connections` in
+`compose.yml` together. A pooled connection is replaced after 30 minutes, so
+after the `noctornal_app` password is changed, connections signed in with the
+old one can stay open that long: restarting `api` and `sample-origin` with the
+new `DATABASE_URL` closes them at once. Behind
+PgBouncer, use session pooling: the row-security binding is a session
+setting, and transaction pooling would hand one request's binding to another.
+
 **Updating.** Pull the code, bring the secrets files to the new release,
 then rebuild and restart. The migration job runs again on every `up`, so a
 release carrying migrations applies them before the API starts:

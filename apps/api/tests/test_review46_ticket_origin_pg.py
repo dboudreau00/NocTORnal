@@ -148,6 +148,6 @@ def test_the_application_refuses_before_it_opens_a_connection(client, monkeypatc
     def no_db(*a, **k):
         raise AssertionError("a connection was opened")
 
-    monkeypatch.setattr(deps, "connect_request", no_db)
+    monkeypatch.setattr(deps, "request_connection", no_db)
     r = client.post(f"{API}/samples/{uuid4()}/download")
     assert r.status_code == 409 and SAMPLES in r.json()["detail"]

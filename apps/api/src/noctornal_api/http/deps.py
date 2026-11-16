@@ -29,9 +29,9 @@ from noctornal_api.db import (
     SystemContextUnavailable,
     SystemPurpose,
     bind_session,
-    connect_request,
     system_connection,
 )
+from noctornal_api.db_pool import request_connection
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import client_ip
 from noctornal_api.security.access import (
@@ -66,11 +66,11 @@ COOKIE_ATTRS: dict = {"path": "/", "secure": True, "samesite": "strict"}
 
 def get_conn() -> Iterator[psycopg.Connection]:
     # The request role in production, bound to the request's user by `current_user`; autocommit.
-    conn = connect_request()
-    try:
+    # From the request pool in production (`db_pool`, decision 233), reset and verified before the
+    # next request has it; elsewhere `db.connect_request`, closed after the request. A route never
+    # closes it.
+    with request_connection() as conn:
         yield conn
-    finally:
-        conn.close()
 
 
 def system_conn(purpose: SystemPurpose):

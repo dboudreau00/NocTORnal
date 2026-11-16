@@ -85,11 +85,17 @@ def test_no_script_connects_as_anything_but_the_system_role():
 def test_the_request_path_opens_request_connections():
     """The HTTP request's own connection, the websocket's and the
     out-of-band audit connection are the request role's, never a plain
-    `connect()` that a development switch could not reach."""
-    for rel in ("http/deps.py", "http/routers/live.py"):
+    `connect()` that a development switch could not reach. The request's own comes through the
+    request pool, whose connections are opened as `connect_request` opens one and which is
+    `connect_request` itself when off."""
+    for rel in ("http/deps.py", "http/routers/live.py", "db_pool.py"):
         text = (SRC / rel).read_text(encoding="utf-8")
-        assert "connect_request" in text, rel
         assert not re.search(r"(?<![\w.])connect\(\)", text), rel
+    assert "connect_request" in (SRC / "http/routers/live.py").read_text(encoding="utf-8")
+    assert "request_connection()" in (SRC / "http/deps.py").read_text(encoding="utf-8")
+    pool = (SRC / "db_pool.py").read_text(encoding="utf-8")
+    assert "db.connect_request()" in pool
+    assert "db.session_options(url, for_request=True)" in pool
 
 
 #: (module, function) pairs that must run their work on a system
