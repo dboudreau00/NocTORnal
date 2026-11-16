@@ -1,0 +1,25 @@
+# Hashed pins for the telegram extra (telethon, python-socks, and what they
+# need that the base lock does not already install). The Dockerfile installs
+# this file with --require-hashes when NOCTORNAL_EXTRAS names telegram, after
+# the base lock and before the editable install. constraints.txt pins the
+# same versions.
+#
+# Every file PyPI published for each pin is listed. Hashes were read from
+# each file's digests.sha256 on the PyPI JSON API.
+#
+# To regenerate: walk the telegram extra against constraints.txt, drop names
+# already in requirements-lock.txt, and take every unyanked file's sha256.
+pyaes==1.6.1 \
+    --hash=sha256:02c1b1405c38d3c370b085fb952dd8bea3fadcee6411ad99f312cc129c536d8f
+pyasn1==0.6.5 \
+    --hash=sha256:4017b0fce125096b8573b39c989fdb1a4b19cf761e683398184550fea0e66587 \
+    --hash=sha256:6b11616a6bcf3a40e635f082bb232fa57b5e0dd7f517bd7ddd69ec3794508a47
+python-socks==3.1.1 \
+    --hash=sha256:327e0d6378702c73a7790bf732e9f01392f17b48c7348a50b5bd1f710c2df1be \
+    --hash=sha256:8d3e817cdbe858dc0bb8c8fdc8e79b6ce37acce110d33374c6f57a675cc9029e
+rsa==4.9.1 \
+    --hash=sha256:68635866661c6836b8d39430f97a996acbd61bfa49406748ea243539fe239762 \
+    --hash=sha256:e7bdbfdb5497da4c07dfd35530e1a902659db6ff241e39d9953cad06ebd0ae75
+telethon==1.45.0 \
+    --hash=sha256:339e24c83aedc9f12cbe389264627edc49779e4289c535aa90aafc4ce62f7972 \
+    --hash=sha256:4cb7ae269b8ab9dad9fc490b859f0bc2f885121e990f5b20407b1faa0db2a1d9

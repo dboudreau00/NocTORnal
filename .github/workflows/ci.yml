@@ -150,11 +150,15 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       # The requirement files pinned by hash, downloaded with the hashes required, so a pin naming a
       # file PyPI does not serve fails here, by name, and not on an operator's host. yara-x once per
-      # Linux architecture the image builds on, since each wheel has a hash of its own.
+      # Linux architecture the image builds on, since each wheel has a hash of its own. The
+      # application lock and the telegram extra are the current runner's files; every hash they
+      # name is still required.
       - name: Every hash-pinned requirement resolves on PyPI
         run: |
           set -euo pipefail
           python -m pip download --quiet --no-deps --require-hashes -r requirements-pip.txt -d /tmp/pins
+          python -m pip download --quiet --no-deps --require-hashes -r requirements-lock.txt -d /tmp/pins/lock
+          python -m pip download --quiet --no-deps --require-hashes -r requirements-telegram.txt -d /tmp/pins/telegram
           for platform in manylinux_2_28_x86_64 manylinux_2_28_aarch64; do
             python -m pip download --quiet --no-deps --only-binary=:all: --require-hashes \
               --python-version "$PYTHON_VERSION" --platform "$platform" \
