@@ -2179,8 +2179,8 @@ one.
 It destroys collected documents, dead letters and ingest records attached to no
 case that are past their clock and that nothing holds, by the same purge the
 other families use. A hold on the document or on any version of it, a case
-under legal hold that cites any version, and an unretracted assertion that
-rests on it each keep a document, and a hold placed while a sweep runs wins.
+under legal hold that cites any version, and a live assertion (neither retracted nor
+replaced by a dated copy) that rests on it each keep a document, and a hold placed while a sweep runs wins.
 Exhibits, lookups and every ingest record attached to a case are not touched:
 they keep the case-scoped route in the console, with the case's clock and its
 hold.

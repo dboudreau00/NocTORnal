@@ -438,6 +438,36 @@ Fifteen revisions, all on the way to head 0199, each with a downgrade:
   see the answer could open the raw bytes. The exhibit now carries every compartment
   the answer took to read, and the file route asks the caller for them as it asks for
   the classification.
+- **A tie to an entity above the reader is the missing tie on every route that names
+  it.** A tie labelled as its case is, joining an AMBER entity to a RED one, is drawn
+  for no AMBER reader, but six routes gated it at its own label only: its claims, its
+  exhibits, its review, retracting a claim on it, dating a claim on it, and accepting
+  a proposed tie that named such an entity. A tie, and a claim on one, is now gated at
+  the tie's labels joined with its two entities', read in one statement whatever the
+  id names, and an accept gates both entities before anything is written. Scoring a
+  claim on such a tie in ACH and linking an exhibit to it are refused the same way.
+  The routes that already checked a tie's entities now send the same statements for a
+  hidden end as for a missing id (decision 230).
+- **A claim a dated copy replaced is history in every read.** Nine reads asked only
+  whether a claim was retracted, so when the copy was withdrawn the replaced claim
+  counted as live again: its exhibit backed the element, it could be retracted
+  although dating refuses it as history, it pinned its collected document, and a
+  stance on it scored in ACH. Each read asks both questions, retracting a replaced
+  claim answers 409, and a test keeps the class closed. In the ACH matrix and the
+  report a stance on a replaced claim is kept and shown as a stale row that scores
+  nothing. That rule, and that a replaced claim no longer pins its document, are
+  judgements recorded in docs/17 for the owner to confirm.
+- **A conversation's collection account is checked.** An id that named nothing was the
+  foreign key's violation and a 500, and any real persona was taken whatever the
+  caller could see of it. A persona that does not exist and one the caller may not see
+  answer the same 404; a persona on another platform than the conversation's, or on
+  none, is a 400. A persona can be named only on its own platform, which docs/17
+  records for the owner.
+- **A layout position and a decay half-life must be finite numbers.** A saved canvas
+  stored a NaN or infinite position and the read then drew it at the origin; the
+  half-life's check (at most zero) let a NaN through. Both are refused, a stored
+  non-finite row is left out of the read, and the other float inputs were checked and
+  already refuse them.
 
 ### What the round did not do
 
@@ -457,11 +487,13 @@ Fifteen revisions, all on the way to head 0199, each with a downgrade:
   application image end to end, or run a pooled load test. Its limits are in docs/17.
 - It leaves the owner's judgements in docs/17's Open section, and the Known
   residuals marked as decisions, as they were.
+- It did not guard the database against a retraction stamp on a replaced claim (a migration), and the console
+  cannot read or clear the note of a stale ACH row (docs/17).
 - It did not build the shared `api_client` test fixture, which touches about a hundred
   test files and waits for a round of its own (docs/17, the shared `client` fixture).
   Nothing a user sees depends on it.
 
-9324 tests (`def test_` functions). The whole suite runs in CI on every push, on a database built from nothing with every migration and with both runtime database roles present; its totals for this release are in the release notes.
+9380 tests (`def test_` functions). The whole suite runs in CI on every push, on a database built from nothing with every migration and with both runtime database roles present; its totals for this release are in the release notes.
 
 ### Upgrading from Beta 1.5c
 

@@ -303,3 +303,11 @@ def test_a_conversation_that_names_no_account_needs_no_ceiling(conn):
         owner_user_id=uid, created_by=uid)
     assert CommsService(conn).open_conversation(
         case_id=case_id, platform_key="MATRIX", provenance_class=OPEN_GROUP) is not None
+
+
+def test_the_platform_map_has_an_entry_for_every_persona_kind_the_database_allows():
+    """A persona kind the database accepts and this map lacks is refused as 'no platform a conversation can
+    be recorded for' (fail closed), so adding a kind without an entry here is found by this test, not by a
+    caller."""
+    from noctornal_api import collection, comms
+    assert set(comms.PERSONA_KIND_PLATFORM) == set(collection.PERSONA_PLATFORMS)

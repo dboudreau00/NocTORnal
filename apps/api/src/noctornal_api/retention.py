@@ -493,7 +493,7 @@ def _held_sql(alias: str = "d") -> str:
     """The hold reason of the document `alias`, or NULL: over EVERY version
     of it (the same source and external id; the document itself when it
     has none), a document-level hold, then a citing case under hold, then an
-    unretracted assertion's pin. The case is never named or counted."""
+    live assertion's pin (not retracted, not replaced). The case is never named or counted."""
     versions = _versions_sql(alias)
     cited = _citations_sql()
     return (

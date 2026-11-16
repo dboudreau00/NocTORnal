@@ -337,7 +337,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **9379 tests** (`def test_`
+With the containers up, expect **no failures** across **9380 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -701,7 +701,7 @@ enforces it.
 
 ### Testing
 
-**9379 tests** (`def test_` functions across two pytest roots, maintained by
+**9380 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
