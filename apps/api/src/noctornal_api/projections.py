@@ -214,6 +214,10 @@ NEIGHBOURHOOD_MAX_NODES = 5000
 #: and the answer says the search was.
 _STEP_ROWS_PER_NODE = 20
 
+#: What cut an ego network (`Subgraph.cut_by`): the entity bound, or the ties one step reads.
+CUT_BY_NODE_CAP = "node_cap"
+CUT_BY_ROW_CAP = "row_cap"
+
 
 # Which ties a projection computes over by review state: "all" keeps everything; "accepted" keeps
 # only the ties a reviewer has accepted and counts every tie it left out, by state.
@@ -411,6 +415,11 @@ class Subgraph:
     #: egress gate unmarked. It is not a key on any row, and a Subgraph built from another one's
     #: rows (`ego`) carries the whole's, which is the safe direction.
     compartments: frozenset[str] = field(default_factory=frozenset)
+    #: Which cap cut an ego network, when `truncated`: `CUT_BY_NODE_CAP` (more entities within reach
+    #: than one view draws, the nearer and then the older kept) and `CUT_BY_ROW_CAP` (one step
+    #: reached more ties than it reads, so the entities kept at that step are the oldest first).
+    #: Empty for every other Subgraph. Data only: no cache key reads it.
+    cut_by: list[str] = field(default_factory=list)
 
     def node_ids(self) -> set[UUID]:
         return {n["id"] for n in self.nodes}
@@ -732,7 +741,12 @@ class GraphService:
         """One step outward: every tie the projection draws from an entity in
         `frontier` to an entity it draws, as `(near, far, far's creation
         time)`, either way round (a path is undirected). At most `rows_max`
-        rows, and whether more were left."""
+        rows, and whether more were left.
+
+        The rows are taken in the order of the far entity's creation time and then its id, so a
+        step that is cut keeps the oldest entities and leaves out the newest, the same order the
+        entity bound keeps them in. A limit with no order keeps whichever rows the plan meets
+        first, and the answer would call that arbitrary subset the nearest entities."""
         rows = self._c.execute(
             f"""SELECT t.near, t.far, o.created_at
                   FROM (SELECT e.src_node_id AS near, e.dst_node_id AS far
@@ -745,6 +759,7 @@ class GraphService:
                          WHERE e.dst_node_id = ANY(%(frontier)s)
                            AND {_visible_tie_sql('e', 'et')}) t
                   JOIN core.node o ON o.id = t.far AND {_visible_node_sql('o')}
+                 ORDER BY o.created_at, o.id
                  LIMIT %(rows)s""",
             {**self._scope(p), "frontier": list(frontier), "rows": rows_max + 1}).fetchall()
         return rows[:rows_max], len(rows) > rows_max
@@ -756,7 +771,9 @@ class GraphService:
         Built OUTWARD from the centre, a step at a time, so an entity anywhere in the case has
         one. It holds at most `NEIGHBOURHOOD_MAX_NODES` entities, the nearer before the
         farther (the older before the newer among the same distance), and `truncated` says
-        when it was cut."""
+        when it was cut and `cut_by` says by which bound: the entity bound, or the ties one step
+        reads (`_STEP_ROWS_PER_NODE` of them for each entity of the bound), where the entities
+        kept at that step are the oldest first and the newer ones at that distance are left out."""
         validate_projection(p)
         if p.one_mode.enabled():
             return self._ego_of_whole(p, centre, depth)
@@ -765,19 +782,21 @@ class GraphService:
         bound = NEIGHBOURHOOD_MAX_NODES
         seen = {centre}
         frontier = [centre]
-        truncated = False
+        cut_by: list[str] = []
         for _ in range(max(0, depth)):
             rows, more = self._reach(p, frontier, _STEP_ROWS_PER_NODE * bound)
             found: dict[UUID, datetime] = {}
             for _near, far, created in rows:
                 if far not in seen:
                     found.setdefault(far, created)
-            truncated = truncated or more
+            if more and CUT_BY_ROW_CAP not in cut_by:
+                cut_by.append(CUT_BY_ROW_CAP)
             if not found:
                 break
             room = bound - len(seen)
             if len(found) > room:
-                truncated = True
+                if CUT_BY_NODE_CAP not in cut_by:
+                    cut_by.append(CUT_BY_NODE_CAP)
                 keep = sorted(found, key=lambda n: (found[n], n))[:max(0, room)]
                 found = {n: found[n] for n in keep}
             seen |= found.keys()
@@ -788,8 +807,9 @@ class GraphService:
         return Subgraph(
             whole.nodes, whole.edges,
             {**whole.projection, "ego": str(centre), "depth": depth},
-            truncated,
+            bool(cut_by),
             compartments=whole.compartments,
+            cut_by=cut_by,
         )
 
     def shortest_path(self, p: Projection, src: UUID, dst: UUID) -> list[UUID]:
@@ -868,6 +888,7 @@ class GraphService:
             {**full.projection, "ego": str(centre), "depth": depth},
             full.truncated,
             compartments=full.compartments,
+            cut_by=[CUT_BY_NODE_CAP] if full.truncated else [],
         )
 
     def _path_of_whole(self, p: Projection, src: UUID, dst: UUID) -> list[UUID]:

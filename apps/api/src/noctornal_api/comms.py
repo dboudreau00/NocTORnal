@@ -454,22 +454,26 @@ class CommsService:
             raise CommsError(f"unknown platform {platform_key!r}")
 
         result = normalise(platform_key, observed)
-        row = self._c.execute(
-            """INSERT INTO comms.channel_binding
-                   (case_id, platform_key, identity_node_id, observed_value,
-                    durable_value, verification, verification_note,
-                    co_declaration_ref, classification, compartments,
-                    created_by, first_seen, last_seen)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-               RETURNING id""",
-            (case_id, platform_key, identity_node_id, observed.strip(),
-             result.durable, verification, verification_note,
-             co_declaration_ref, classification, sorted(compartments),
-             created_by)).fetchone()
-        self._audit(case_id, created_by, "CHANNEL_BOUND", row[0], {
-            "platform": platform_key, "verification": verification,
-            "durable": bool(result.durable), "note": result.note,
-        })
+        # The binding and its audit row stand or fall together: the connection commits each
+        # statement as it runs, so a failed audit insert would leave a binding the chain never
+        # recorded, and the analyst's retry would store the identifier a second time.
+        with self._c.transaction():
+            row = self._c.execute(
+                """INSERT INTO comms.channel_binding
+                       (case_id, platform_key, identity_node_id, observed_value,
+                        durable_value, verification, verification_note,
+                        co_declaration_ref, classification, compartments,
+                        created_by, first_seen, last_seen)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                   RETURNING id""",
+                (case_id, platform_key, identity_node_id, observed.strip(),
+                 result.durable, verification, verification_note,
+                 co_declaration_ref, classification, sorted(compartments),
+                 created_by)).fetchone()
+            self._audit(case_id, created_by, "CHANNEL_BOUND", row[0], {
+                "platform": platform_key, "verification": verification,
+                "durable": bool(result.durable), "note": result.note,
+            })
         return {"id": row[0], "durable_value": result.durable,
                 "note": result.note}
 
@@ -720,32 +724,113 @@ class CommsService:
         maintained as a side effect, because the graph of who talks to whom
         is the part with lasting value and rebuilding it later from bodies
         that may have been minimised is not possible.
+
+        The message, its sender's participant row and the counts are written in one transaction,
+        so none of them can be left without the others. A message that is already held is not
+        taken as having its side rows: the participant and the counts are settled from what is
+        stored (`_settle_held_message`), so storing it again leaves the state a first complete
+        store would have.
         """
         digest = hashlib.sha256(
             f"{sender_handle}\x1f{sent_at}\x1f{body or ''}".encode()).digest()
-        row = self._c.execute(
-            """INSERT INTO comms.message
-                   (conversation_id, external_ref, sender_handle, sent_at,
-                    body, content_sha256, has_attachment, classification,
-                    compartments)
-               SELECT %s, %s, %s, %s, %s, %s, %s, c.classification,
-                      c.compartments
-                 FROM comms.conversation c WHERE c.id = %s
-               ON CONFLICT (conversation_id, content_sha256) DO NOTHING
-               RETURNING id""",
-            (conversation_id, external_ref, sender_handle, sent_at, body,
-             digest, has_attachment, conversation_id)).fetchone()
-        if row is None:
-            return None
-        self._touch_participant(conversation_id, sender_handle, sent_at)
-        self._c.execute(
-            """UPDATE comms.conversation
-                  SET message_count = message_count + 1,
-                      last_message_at = greatest(
-                          coalesce(last_message_at, to_timestamp(0)),
-                          coalesce(%s, now()))
-                WHERE id = %s""", (sent_at, conversation_id))
+        with self._c.transaction():
+            row = self._c.execute(
+                """INSERT INTO comms.message
+                       (conversation_id, external_ref, sender_handle, sent_at,
+                        body, content_sha256, has_attachment, classification,
+                        compartments)
+                   SELECT %s, %s, %s, %s, %s, %s, %s, c.classification,
+                          c.compartments
+                     FROM comms.conversation c WHERE c.id = %s
+                   ON CONFLICT (conversation_id, content_sha256) DO NOTHING
+                   RETURNING id""",
+                (conversation_id, external_ref, sender_handle, sent_at, body,
+                 digest, has_attachment, conversation_id)).fetchone()
+            if row is None:
+                self._settle_held_message(conversation_id, sender_handle, digest)
+                return None
+            self._touch_participant(conversation_id, sender_handle, sent_at)
+            self._c.execute(
+                """UPDATE comms.conversation
+                      SET message_count = message_count + 1,
+                          last_message_at = greatest(
+                              coalesce(last_message_at, to_timestamp(0)),
+                              coalesce(%s, now()))
+                    WHERE id = %s""", (sent_at, conversation_id))
         return row[0]
+
+    def _settle_held_message(self, conversation_id: UUID, handle: str,
+                             digest: bytes) -> None:
+        """Make the sender's participant row and the conversation's counts account for a message
+        that is already stored.
+
+        Earlier builds wrote the message and then its side rows as separate statements, so a
+        message could be stored with no participant, or a count that never took it in, and the
+        second store of it, finding the message there, returned without writing either. The counts
+        are taken from the stored messages and only ever raised, never lowered: a participant can
+        carry a count the stored messages do not show, and a repeated store of a complete message
+        must change nothing. A participant row that is not there is made from the messages; one that
+        is keeps its first sighting, its incidental flag and its identity. The rows are taken in
+        the order a first store takes them, the participant and then the conversation, so two
+        stores of one message cannot wait on each other.
+
+        What is stored is read first, in one statement, and a row is written only when it falls
+        short of it: a repeated store of a complete message takes no row lock and writes no tuple,
+        so a re-poll of a room does not serialise on it, and costs the two counts and nothing more.
+
+        The message is the one this sender stored: a content key that another sender's message
+        shares (the key joins its fields with a separator a handle or body may hold) is not this
+        message, and settles nothing. Does nothing when the message is not visible to the caller,
+        which is also how a hidden conversation answers: it was never stored for them.
+        """
+        held = self._c.execute(
+            """SELECT coalesce(m.sent_at, m.captured_at),
+                      (SELECT count(*) FROM comms.message x
+                        WHERE x.conversation_id = m.conversation_id),
+                      (SELECT count(*) FROM comms.message x
+                        WHERE x.conversation_id = m.conversation_id
+                          AND x.sender_handle = m.sender_handle),
+                      (SELECT max(x.sent_at) FROM comms.message x
+                        WHERE x.conversation_id = m.conversation_id
+                          AND x.sender_handle = m.sender_handle),
+                      p.message_count, p.last_seen,
+                      c.message_count, c.last_message_at
+                 FROM comms.message m
+                 LEFT JOIN comms.participant p
+                        ON p.conversation_id = m.conversation_id
+                       AND p.observed_handle = m.sender_handle
+                 LEFT JOIN comms.conversation c ON c.id = m.conversation_id
+                WHERE m.conversation_id = %s AND m.content_sha256 = %s
+                  AND m.sender_handle = %s""",
+            (conversation_id, digest, handle)).fetchone()
+        if held is None:
+            return
+        (when, total, by_sender, sender_latest,
+         p_count, p_last_seen, c_count, c_last) = held
+        if (p_count is None or p_count < by_sender
+                or (sender_latest is not None
+                    and (p_last_seen is None or p_last_seen < sender_latest))):
+            self._c.execute(
+                """INSERT INTO comms.participant
+                       (conversation_id, observed_handle, first_seen, last_seen,
+                        message_count)
+                   SELECT %(conversation)s, %(handle)s, min(m.sent_at), max(m.sent_at), count(*)
+                     FROM comms.message m
+                    WHERE m.conversation_id = %(conversation)s AND m.sender_handle = %(handle)s
+                   HAVING count(*) > 0
+                   ON CONFLICT (conversation_id, observed_handle) DO UPDATE SET
+                       last_seen = greatest(comms.participant.last_seen, EXCLUDED.last_seen),
+                       message_count = greatest(comms.participant.message_count,
+                                                EXCLUDED.message_count)""",
+                {"conversation": conversation_id, "handle": handle})
+        if c_count is not None and (c_count < total or c_last is None or c_last < when):
+            self._c.execute(
+                """UPDATE comms.conversation
+                      SET message_count = greatest(message_count, %(total)s),
+                          last_message_at = greatest(
+                              coalesce(last_message_at, to_timestamp(0)), %(when)s)
+                    WHERE id = %(conversation)s""",
+                {"conversation": conversation_id, "total": total, "when": when})
 
     def _touch_participant(self, conversation_id: UUID, handle: str,
                            when: datetime | None) -> None:
@@ -790,17 +875,22 @@ class CommsService:
         graph of who talks to whom -- all of which survive this. So
         minimisation is not deletion: the conversation, the participants
         and the timing remain, and the words go.
+
+        The bodies are dropped and the drop is audited in one transaction. It cannot be undone, and
+        a drop whose audit row failed would leave bodies gone with no record of who dropped them
+        or on what authority, and the retry would find nothing to drop and audit none.
         """
         if not (authority or "").strip():
             raise CommsError("minimisation has to record its authority")
-        rows = self._c.execute(
-            """UPDATE comms.message
-                  SET body = NULL, body_minimised_at = now()
-                WHERE conversation_id = %s AND body IS NOT NULL
-            RETURNING id""", (conversation_id,)).fetchall()
-        self._audit(None, actor_id, "CONVERSATION_MINIMISED",
-                    conversation_id, {"messages": len(rows),
-                                      "authority": authority.strip()})
+        with self._c.transaction():
+            rows = self._c.execute(
+                """UPDATE comms.message
+                      SET body = NULL, body_minimised_at = now()
+                    WHERE conversation_id = %s AND body IS NOT NULL
+                RETURNING id""", (conversation_id,)).fetchall()
+            self._audit(None, actor_id, "CONVERSATION_MINIMISED",
+                        conversation_id, {"messages": len(rows),
+                                          "authority": authority.strip()})
         return len(rows)
 
     # -- the minimisation gap (decision 231) -------------------------------

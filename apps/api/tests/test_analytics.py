@@ -7,6 +7,8 @@ it printed.
 """
 from __future__ import annotations
 
+import math
+import sys
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -17,6 +19,7 @@ from noctornal_api.analytics import (
     AnalyticsParams,
     balance,
     burt,
+    centrality,
     cohesion,
     fragmentation,
     graph_hash,
@@ -280,6 +283,212 @@ def test_decay_is_off_by_default():
     m = materialise(sub)
     assert m.strength[0] == 2.0
     assert run_suite(sub, proj())["decay"]["note"] == "decay is off"
+
+
+# --- a tie that decayed to nothing is no path (review INTEGRITY, AREA-03) --
+
+_NOW = datetime(2026, 7, 24, tzinfo=timezone.utc)
+#: About two thousand years before `_NOW`: at any half-life of a year or less, 0.5 to the power of
+#: the age underflows to 0.0 for a tie of any weight.
+_ANCIENT = datetime(1, 6, 1, tzinfo=timezone.utc)
+_DECAY = AnalyticsParams(decay_half_life_months=12, decay_reference=_NOW)
+
+
+def _aged(target: float, *, weight: float = 1.0, half_life_months: float = 1.0) -> datetime:
+    """The world-time anchor at which a tie of `weight` has decayed to about `target`."""
+    days = -math.log2(target / weight) * half_life_months * (365.2425 / 12.0)
+    return _NOW - timedelta(days=days)
+
+
+def _triangle_with_an_ancient_shortcut():
+    """a - b - c, undated and so undecayed, and an a - c tie so old that its decay is 0.0. If that
+    tie cost 1 it would be the cheapest way from a to c and b would broker nothing."""
+    return build(["a", "b", "c"],
+                 [("a", "b"), ("b", "c"), ("a", "c", 1, 4.0, None, _ANCIENT)])
+
+
+def test_a_tie_that_decayed_to_nothing_is_not_a_unit_cost_shortcut():
+    """The cost expression gave a strength of zero the cost of a tie of weight one, written for a
+    tie whose stored weight is zero. Underflow makes a zero out of a positive weight, so the oldest
+    tie in the case became its cheapest path and every entity it bridged lost its brokerage."""
+    sub, ids = _triangle_with_an_ancient_shortcut()
+    m = materialise(sub, _DECAY)
+    assert m.strength[1] == 0.0, "the fixture must underflow: the a - c tie decays to 0.0"
+    out = centrality(m, _DECAY)
+    b, a = m.node_ids.index(ids["b"]), m.node_ids.index(ids["a"])
+    assert out["betweenness"][b] == 1.0, "a to c runs through b: the tie that decayed is no path"
+    # a reaches b at distance 1 and c at distance 2 through b: (1 + 1/2) / 2.
+    assert out["harmonic_closeness"][a] == pytest.approx(0.75)
+
+
+def test_the_broker_ranking_follows_the_paths_a_decayed_tie_does_not_make():
+    sub, _ = _triangle_with_an_ancient_shortcut()
+    out = run_suite(sub, proj(), _DECAY)
+    by_label = {n["label"]: n for n in out["nodes"]}
+    assert by_label["b"]["betweenness"] == 1.0 and by_label["b"]["betweenness_rank"] == 1
+    assert by_label["a"]["betweenness"] == 0.0 and by_label["c"]["betweenness"] == 0.0
+
+
+def test_the_notes_count_the_pairs_that_decayed_to_nothing_and_say_where_they_are_left_out():
+    sub, _ = build(["a", "b", "c"],
+                   [("a", "b", 1, 1.0, None, _NOW), ("b", "c", 1, 1.0, None, _NOW),
+                    ("a", "c", 1, 4.0, None, _ANCIENT)])
+    out = run_suite(sub, proj(), _DECAY)
+    assert out["decay"]["faded_dyads"] == 1
+    note = out["decay"]["note"]
+    assert note == ("1 connected pair decayed to nothing and was left out of betweenness, "
+                    "closeness and the broker ranking, while the cohesion measures and the "
+                    "removal set still count it")
+    # The pair is still a tie where nothing reads its strength as a cost: the graph is simple and
+    # counts three ties in one component.
+    assert out["dyad_count"] == 3 and out["cohesion"]["components"] == 1
+
+
+def test_the_notes_agree_in_number_and_say_both_things_a_decay_can_leave_out():
+    sub, _ = build(["a", "b", "c", "d", "e"],
+                   [("a", "b", 1, 1.0, None, _ANCIENT), ("b", "c", 1, 1.0, None, _ANCIENT),
+                    ("c", "d"), ("d", "e", 1, 1.0, None, _NOW)])
+    out = run_suite(sub, proj(), _DECAY)
+    assert out["decay"]["faded_dyads"] == 2
+    assert out["decay"]["note"] == (
+        "1 of 4 ties carry no valid_from/valid_to and were NOT decayed; "
+        "2 connected pairs decayed to nothing and were left out of betweenness, closeness and "
+        "the broker ranking, while the cohesion measures and the removal set still count them")
+
+
+def test_a_run_with_no_decayed_pair_is_told_as_before():
+    sub, _ = _triangle_with_an_ancient_shortcut()
+    off = run_suite(sub, proj())
+    assert off["decay"]["faded_dyads"] == 0 and off["decay"]["note"] == "decay is off"
+    fresh, _ = build(["a", "b"], [("a", "b", 1, 1.0, None, _NOW)])
+    on = run_suite(fresh, proj(), _DECAY)
+    assert on["decay"]["faded_dyads"] == 0 and on["decay"]["note"] == "applied"
+
+
+def test_a_tie_of_stored_weight_zero_keeps_the_cost_a_tie_of_no_strength_always_had():
+    """What the fallback was written for. A weight of zero is a tie that says nothing about its
+    strength, and it is no more decayed than an undecayed one: only a weight that WAS positive and
+    has gone to nothing is dropped."""
+    sub, ids = build(["a", "b", "c"], [("a", "b"), ("b", "c"), ("a", "c", 1, 0.0, None, _ANCIENT)])
+    for params in (_DECAY, AnalyticsParams()):
+        m = materialise(sub, params)
+        assert m.faded == []
+        out = centrality(m, params)
+        assert out["betweenness"][m.node_ids.index(ids["b"])] == 0.0, \
+            "a stored zero costs 1, as it did, so a to c is direct"
+
+
+def test_a_tie_is_dropped_where_its_cost_could_no_longer_be_added_up():
+    """The line is the strength whose reciprocal still sums along any path the projection can
+    hold, and not 0.0 itself. A tie one day inside it is a conduit of last resort, with a cost
+    that is large and finite; one a day outside it is no conduit. Neither is a unit-cost link,
+    and a subnormal strength's reciprocal (infinite as a float) is never handed to igraph."""
+    from noctornal_api.analytics import MIN_CONDUIT_STRENGTH, path_view
+
+    assert 5000 / MIN_CONDUIT_STRENGTH < sys.float_info.max
+    inside, outside = _aged(1e-290), _aged(1e-310)
+    sub, _ = build(["a", "b", "c", "d"],
+                     [("a", "b", 1, 1.0, None, inside), ("b", "c", 1, 1.0, None, outside),
+                      ("c", "d")])
+    m = materialise(sub, AnalyticsParams(decay_half_life_months=1, decay_reference=_NOW))
+    assert m.strength[0] == pytest.approx(1e-290, rel=0.05)
+    assert 0 < m.strength[1] < 5e-308, "the fixture must reach the subnormal range"
+    assert math.isinf(1.0 / m.strength[1]), "its reciprocal does not fit a float"
+    assert m.faded == [1], "only the b - c pair"
+    g, cost = path_view(m)
+    assert cost == [1.0 / m.strength[0], 1.0] and all(math.isfinite(c) for c in cost)
+    assert g.ecount() == 2
+    out = centrality(m, AnalyticsParams(decay_half_life_months=1, decay_reference=_NOW))
+    assert all(math.isfinite(x) for x in out["betweenness"])
+    assert all(x is None or math.isfinite(x) for x in out["harmonic_closeness"])
+
+
+def test_a_pair_holding_a_stored_zero_tie_and_a_decayed_one_keeps_the_cost_of_the_zero():
+    """A stored zero says nothing about its strength and keeps cost 1; a decayed positive tie in
+    the same pair does not take that away. The pair is a conduit, so b brokers nothing between a
+    and c, and its cost is the finite 1, not the reciprocal of a sum that is no weight."""
+    from noctornal_api.analytics import MIN_CONDUIT_STRENGTH, path_view
+
+    sub, ids = build(["a", "b", "c"],
+                     [("a", "b"), ("b", "c"), ("a", "c", 1, 0.0, None, _ANCIENT),
+                      ("a", "c", 1, 1.0, None, _ANCIENT)])
+    m = materialise(sub, _DECAY)
+    assert m.strength[1] < MIN_CONDUIT_STRENGTH, "the pair's decayed sum is below the floor"
+    assert m.faded == [], "a pair is faded only when every tie in it was positive and decayed"
+    g, cost = path_view(m)
+    assert g.ecount() == 3 and cost == [1.0, 1.0, 1.0]
+    out = centrality(m, _DECAY)
+    assert out["betweenness"][m.node_ids.index(ids["b"])] == 0.0
+    assert run_suite(sub, proj(), _DECAY)["decay"]["faded_dyads"] == 0
+
+
+def test_a_pair_is_dropped_only_when_every_tie_between_the_two_has_decayed():
+    sub, _ = build(["a", "b", "c"],
+                     [("a", "b", 1, 1.0, None, _ANCIENT), ("a", "b", 1, 2.0, None, _NOW),
+                      ("b", "c", 1, 1.0, None, _ANCIENT), ("b", "c", -1, 1.0, None, _ANCIENT)])
+    m = materialise(sub, _DECAY)
+    assert m.strength[0] == pytest.approx(2.0), "the live tie of the pair a - b carries it"
+    assert m.faded == [1], "both ties of the pair b - c are gone, whichever their sign"
+
+
+def test_what_is_left_out_of_the_paths_does_not_shift_the_numbers_of_the_rest():
+    """The graph the path metrics read keeps every entity and drops the pair's edge, so the
+    per-entity lists stay aligned. It must give what the graph never having had the tie gives."""
+    nodes = ["a", "b", "c", "d", "e", "f"]
+    ties = [("a", "b", 1, 3.0), ("c", "d", 1, 1.0), ("b", "c", 1, 2.0), ("d", "e", 1, 0.5),
+            ("e", "f", 1, 1.0), ("c", "e", 1, 1.0)]
+    with_it, _ = build(nodes, [t if t[:2] != ("c", "d") else (*t, None, _ANCIENT) for t in ties])
+    without, _ = build(nodes, [t for t in ties if t[:2] != ("c", "d")])
+    params = AnalyticsParams(decay_half_life_months=12, decay_reference=_NOW)
+    m_with = materialise(with_it, params)
+    assert len(m_with.faded) == 1
+    got = centrality(m_with, params)
+    want = centrality(materialise(without, params), params)
+    assert got["betweenness"] == pytest.approx(want["betweenness"])
+    assert got["harmonic_closeness"] == pytest.approx(want["harmonic_closeness"])
+    assert m_with.g.ecount() == 6, "the materialised graph keeps the pair for everything else"
+
+
+def test_the_decay_block_is_one_shape_for_the_suite_and_the_key_player_result():
+    from noctornal_api.analytics import decay_block
+
+    sub, _ = _triangle_with_an_ancient_shortcut()
+    m = materialise(sub, _DECAY)
+    block = decay_block(_DECAY, m)
+    assert block == run_suite(sub, proj(), _DECAY)["decay"]
+    assert block["faded_dyads"] == 1 and block["half_life_months"] == 12
+    assert "left out of betweenness" in block["note"]
+
+
+def test_the_removal_sets_comparison_ranks_by_the_same_paths():
+    """`top_betweenness_set` is the answer to "who would you arrest by centrality", so it must
+    agree with the suite's betweenness: with the ancient tie as a unit-cost shortcut nobody
+    brokers anything and the first entity in the list was named."""
+    sub, _ = _triangle_with_an_ancient_shortcut()
+    m = materialise(sub, _DECAY)
+    out = key_player(m, 1)
+    assert [n["label"] for n in out["top_betweenness_set"]] == ["b"]
+
+
+def test_a_run_stored_with_decay_on_before_decayed_ties_left_the_paths_reads_as_not_current():
+    """A run's numbers may have counted a tie that decayed to nothing as a unit-cost link, so the
+    cache key of a decay-on view is not the one the earlier build stored it under. A decay-off view
+    has no such tie and keeps its key (`test_review_scope.py` pins that digest)."""
+    from uuid import UUID
+
+    a, b = UUID(int=11), UUID(int=12)
+    sub = Subgraph(
+        [{"id": a, "label": "a", "node_type": "IDENTITY"},
+         {"id": b, "label": "b", "node_type": "IDENTITY"}],
+        [{"src_node_id": a, "dst_node_id": b, "sign": 1, "weight": 1.0, "valid_from": None,
+          "valid_to": None, "review": "ACCEPTED", "has_evidence": False}])
+    p = Projection(case_id=UUID(int=1))
+    earlier = "038c5603cc7cc65f2c04db59b2c47f8ccf54185a95e687fa1fd19b00d44ebc0e"
+    now = graph_hash(sub, p, AnalyticsParams(decay_half_life_months=12)).hex()
+    assert now != earlier
+    assert now == "9d45c65d35f3bbd6180ffb6081c41677da3c0abbbf7ae0ae8140b7ac3759a120"
+    assert graph_hash(sub, p, AnalyticsParams()).hex() == \
+        "347b71bba403fc4369bed50e28fb8e7696d7ff0c9927a07d13b215017c749cb5"
 
 
 # --- honesty about approximation and meaning (docs/03) --------------------

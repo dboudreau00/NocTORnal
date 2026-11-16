@@ -166,7 +166,12 @@ readable.
 
 - **Left-drag** pan, **scroll** zoom. (Right-drag marquee select is
   designed, not built.)
-- **Click** node → inspector; **double-click** → focus ego network at depth 1
+- **Click** node → inspector; **double-click** → focus ego network at depth 1.
+  The ego network is cut at 5,000 entities, the nearer and then the older
+  kept, and one step reads at most 20 ties for each of those entities: past
+  that the step keeps the oldest recorded entities at that distance and leaves
+  the newer ones out. The banner says which, and the answer says it too
+  (`cut_by`: `node_cap`, `row_cap`, or both).
 - **Click** a tie → its inspector. Two ties on one pair bow apart, so each
   can be seen and each can be clicked; the nearest one under the pointer
   answers. A selected tie with a twin on its pair says so on the canvas

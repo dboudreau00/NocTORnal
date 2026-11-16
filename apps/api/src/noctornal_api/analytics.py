@@ -32,7 +32,7 @@ import math
 import random
 import statistics
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -40,6 +40,7 @@ import igraph
 
 from noctornal_api import affiliation
 from noctornal_api.projections import REVIEW_SCOPE_ALL, Projection, Subgraph
+from noctornal_api.wording import agree, count_of
 
 # docs/03 performance bands: "< 5k nodes: exact, everything, synchronous".
 # The ceiling here is deliberately below that, because this runs inside a
@@ -62,6 +63,12 @@ MAX_UNBALANCED_TRIADS_RETURNED = 200
 # months, configurable per case. Never mutate the stored weight."
 DEFAULT_HALF_LIFE_MONTHS = 12.0
 _DAYS_PER_MONTH = 365.2425 / 12.0
+
+#: The least decayed strength at which a tie still carries a path. The path metrics cost a tie
+#: 1 / strength and add the costs along a path, so this is the point past which that reciprocal,
+#: added over the longest path a projection holds (5,000 entities), no longer fits a float. A tie
+#: whose decayed strength is below it has decayed to nothing for path purposes (`path_view`).
+MIN_CONDUIT_STRENGTH = 1e-300
 
 
 class AnalyticsError(Exception):
@@ -117,6 +124,10 @@ class Materialised:
     dyad_count: int = 0                     # after collapse
     undated_edges: int = 0                  # no valid_from/valid_to: undecayable
     self_loops_dropped: int = 0
+    # The igraph edge indices of dyads whose every tie had a positive stored weight and was decayed,
+    # and whose decayed strength fell below `MIN_CONDUIT_STRENGTH`: no conduit, so the path metrics
+    # leave them out (`path_view`).
+    faded: list[int] = field(default_factory=list)
 
     def index_of(self) -> dict[UUID, int]:
         return {n: i for i, n in enumerate(self.node_ids)}
@@ -179,6 +190,9 @@ def materialise(sub: Subgraph, params: AnalyticsParams | None = None) -> Materia
     pos: dict[tuple[int, int], float] = {}
     neg: dict[tuple[int, int], float] = {}
     unsigned: dict[tuple[int, int], float] = {}
+    # Pairs holding a tie that kept its strength through the decay: a stored weight of zero (it
+    # says nothing about its strength) or one with no interval recorded (it was not decayed).
+    keeps_cost: set[tuple[int, int]] = set()
     undated = 0
     self_loops = 0
 
@@ -197,7 +211,10 @@ def materialise(sub: Subgraph, params: AnalyticsParams | None = None) -> Materia
             age = _edge_age_days(e, reference)
             if age is None:
                 undated += 1
+                keeps_cost.add(key)
             else:
+                if not w > 0:
+                    keeps_cost.add(key)
                 w *= _decay_factor(age, half_life)
 
         sign = int(e["sign"])
@@ -216,10 +233,18 @@ def materialise(sub: Subgraph, params: AnalyticsParams | None = None) -> Materia
     strength: list[float] = []
     signs: list[int] = []
     contested: list[bool] = []
+    faded: list[int] = []
     for key in pairs:
         p, ng, un = pos.get(key, 0.0), neg.get(key, 0.0), unsigned.get(key, 0.0)
         edges.append(key)
-        strength.append(p + ng + un)
+        total = p + ng + un
+        strength.append(total)
+        # A weight that was positive and has decayed away is not a weight of zero: a stored zero is
+        # a tie that says nothing about its strength, and keeps the cost the path metrics give it.
+        # A pair is faded only when every tie in it was positive and decayed, so a pair that also
+        # holds a stored zero, or an undated tie, is still a conduit at that cost.
+        if half_life is not None and key not in keeps_cost and total < MIN_CONDUIT_STRENGTH:
+            faded.append(len(edges) - 1)
         net = p - ng
         signs.append(1 if net > 0 else (-1 if net < 0 else 0))
         contested.append(p > 0 and ng > 0)
@@ -237,7 +262,31 @@ def materialise(sub: Subgraph, params: AnalyticsParams | None = None) -> Materia
         dyad_count=len(edges),
         undated_edges=undated,
         self_loops_dropped=self_loops,
+        faded=faded,
     )
+
+
+def path_view(m: Materialised) -> tuple[igraph.Graph, list[float] | None]:
+    """The graph the path metrics run over, and the cost of each of its ties.
+
+    The stored weight is an affinity and a shortest-path routine needs a cost, so a tie costs
+    1 / strength. A dyad that decayed to nothing (`Materialised.faded`) has no strength to take the
+    reciprocal of, and it must not be given the unit cost a tie of stored weight zero has: that
+    makes the oldest tie in the case the cheapest path in it. It is left out of the graph the
+    betweenness, closeness and the broker ranking read, which keeps every entity, so the
+    per-entity lists still line up with `Materialised.node_ids`. Every other measure keeps the
+    dyad as a tie.
+    """
+    dropped = set(m.faded)
+    # A pair below the floor that is not dropped holds a tie that keeps its cost (a stored zero), so
+    # it costs 1, as a tie of weight zero does, and not the reciprocal of a sum that is not a weight.
+    cost = [1.0 / s if s >= MIN_CONDUIT_STRENGTH else 1.0
+            for i, s in enumerate(m.strength) if i not in dropped]
+    if not dropped:
+        return m.g, cost or None
+    g = m.g.copy()
+    g.delete_edges(m.faded)
+    return g, cost or None
 
 
 # --------------------------------------------------------------------------
@@ -265,6 +314,11 @@ def graph_hash(sub: Subgraph, p: Projection, params: AnalyticsParams) -> bytes:
         h.update(f"{key}={value}\x00".encode())
     for key, value in sorted(params.describe().items()):
         h.update(f"{key}={value}\x00".encode())
+    # A tie that decayed to nothing is left out of the path metrics (`path_view`), where a run
+    # stored with decay on before that may hold numbers that counted it as a unit-cost link. Only
+    # those runs read as not current: with decay off no tie decays, and the digest is as it was.
+    if params.decay_half_life_months is not None:
+        h.update(b"decayed-ties-leave-the-paths\x00")
     h.update(b"nodes\x00")
     # A label is anybody's text and may hold any separator, so each row is
     # written unambiguously (JSON quotes and escapes it): no label can be
@@ -484,7 +538,8 @@ def centrality(m: Materialised, params: AnalyticsParams) -> dict:
     to igraph is 1/strength. Closeness is reported as harmonic closeness, defined on a disconnected
     graph (criminal networks routinely are), where classical closeness computed per component would
     make scores incomparable. Eigenvector runs over the positive subgraph only: it presumes a tie
-    confers standing, and being accused by a well-connected actor does not.
+    confers standing, and being accused by a well-connected actor does not. Both path metrics leave
+    out a tie that decayed to nothing (`path_view`).
     """
     g, n = m.g, m.n
     out: dict = {}
@@ -494,7 +549,7 @@ def centrality(m: Materialised, params: AnalyticsParams) -> dict:
         return {"betweenness": [], "harmonic_closeness": [], "eigenvector": [],
                 "is_approximate": False, "sample_size": None}
 
-    cost = [1.0 / s if s > 0 else 1.0 for s in strength] or None
+    paths, cost = path_view(m)
 
     approximate = n > EXACT_BETWEENNESS_MAX_NODES and params.betweenness_pivots > 0
     if approximate:
@@ -503,12 +558,12 @@ def centrality(m: Materialised, params: AnalyticsParams) -> dict:
         # estimate_betweenness, but `sources` gives exactly the pivot set.
         rng = random.Random(params.seed)
         pivots = rng.sample(range(n), min(params.betweenness_pivots, n))
-        raw = g.betweenness(weights=cost, sources=pivots)
+        raw = paths.betweenness(weights=cost, sources=pivots)
         scale = n / len(pivots)
         btw = [x * scale for x in raw]
         sample_size = len(pivots)
     else:
-        btw = g.betweenness(weights=cost)
+        btw = paths.betweenness(weights=cost)
         sample_size = None
 
     out["betweenness"] = [round(float(x), 6) for x in btw]
@@ -516,7 +571,7 @@ def centrality(m: Materialised, params: AnalyticsParams) -> dict:
     out["sample_size"] = sample_size
 
     out["harmonic_closeness"] = [
-        _clean(x) for x in g.harmonic_centrality(weights=cost, normalized=True)
+        _clean(x) for x in paths.harmonic_centrality(weights=cost, normalized=True)
     ]
 
     positive = [i for i, s in enumerate(m.sign) if s > 0]
@@ -771,7 +826,8 @@ def key_player(m: Materialised, n_remove: int) -> dict:
                     chosen, current, improved = trial, f, True
 
     # The comparison that makes the point: top-n by betweenness.
-    btw = g.betweenness(weights=[1.0 / s if s > 0 else 1.0 for s in m.strength] or None)
+    paths, cost = path_view(m)
+    btw = paths.betweenness(weights=cost)
     top_btw = sorted(range(m.n), key=lambda v: -btw[v])[:n_remove]
     top_btw_f = fragmentation(g, frozenset(top_btw))
 
@@ -940,22 +996,46 @@ def run_suite(sub: Subgraph, p: Projection,
             m.node_types, degree,
             projectable=tuple(f for f in affiliation.FAMILIES
                               if f not in p.one_mode.families)),
-        "decay": {
-            "half_life_months": params.decay_half_life_months,
-            "undated_edges": m.undated_edges,
-            # Decay cannot bite on ties with no interval recorded. Saying so
-            # stops "decay is on" being read as "decay was applied".
-            "note": (
-                "decay is off" if params.decay_half_life_months is None
-                else ("applied" if m.undated_edges == 0 else
-                      "{} of {} ties carry no valid_from/valid_to and were "
-                      "NOT decayed".format(m.undated_edges, m.edge_count))
-            ),
-        },
+        "decay": decay_block(params, m),
         "cohesion": {k: v for k, v in coh.items() if k != "membership"},
         "balance": bal,
         "nodes": nodes,
     }
+
+
+def decay_block(params: AnalyticsParams, m: Materialised) -> dict:
+    """What the decay did, as the suite and the key-player result both carry it."""
+    return {
+        "half_life_months": params.decay_half_life_months,
+        "undated_edges": m.undated_edges,
+        "faded_dyads": len(m.faded),
+        # Decay cannot bite on ties with no interval recorded. Saying so
+        # stops "decay is on" being read as "decay was applied".
+        "note": _decay_note(params, m),
+    }
+
+
+def _decay_note(params: AnalyticsParams, m: Materialised) -> str:
+    """What the decay did, in a sentence: off, applied, or applied with what it left alone.
+
+    Two things it can leave out. A tie with no interval was not decayed. A pair whose ties decayed
+    to nothing is left out of betweenness, closeness and the broker ranking (`path_view`), and the
+    components, bridges and removal set still count it as a tie.
+    """
+    if params.decay_half_life_months is None:
+        return "decay is off"
+    parts = []
+    if m.undated_edges:
+        parts.append("{} of {} ties carry no valid_from/valid_to and were "
+                     "NOT decayed".format(m.undated_edges, m.edge_count))
+    if m.faded:
+        n = len(m.faded)
+        parts.append(
+            "{} decayed to nothing and {} left out of betweenness, closeness and the broker "
+            "ranking, while the cohesion measures and the removal set still count {}".format(
+                count_of(n, "connected pair", "connected pairs"),
+                agree(n, "was", "were"), agree(n, "it", "them")))
+    return "; ".join(parts) or "applied"
 
 
 def _mode_warning(node_types: list[str], degrees: list[int],

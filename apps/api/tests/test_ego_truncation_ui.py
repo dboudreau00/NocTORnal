@@ -26,6 +26,19 @@ def test_enter_ego_says_when_the_neighbourhood_was_cut():
     assert ego.index("if (sub.truncated)") > ego.index("setRendered(")
 
 
+def test_a_network_cut_by_the_row_cap_says_the_oldest_were_kept_and_not_the_nearest():
+    """`cut_by` names the bound. The entity bound keeps the nearer entities and a smaller depth shows
+    all of them; the row cap keeps the oldest at the last distance reached, and a smaller depth may
+    not help, so the banner says that instead of the first."""
+    ego = _function((STATIC / "app.js").read_text(encoding="utf-8"), "enterEgo")
+    assert "(sub.cut_by || []).indexOf('row_cap') >= 0" in ego
+    banner = ego[ego.index("banner('Neighbourhood cut'"):]
+    assert banner.index("byRows") < banner.index("the oldest recorded") < banner.index(
+        "the nearest are shown"), "the row cap's sentence is chosen by the branch, not appended"
+    assert "A narrower projection shows others." in ego
+    assert "A smaller depth shows all of them." in ego, "the entity bound's sentence is still there"
+
+
 def test_a_path_the_search_could_not_finish_is_not_reported_as_unconnected():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     path = _function(js, "enterPath")

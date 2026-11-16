@@ -132,6 +132,20 @@ route says nothing about which personas exist. A persona on another platform,
 or placed on none, is a 400 that says so. A burnt or locked persona can still
 be named, because it may have been a party before it was stopped.
 
+A binding and its audit row are written in one transaction, and so are a
+message, its sender's participant row and the conversation's counts, because
+the request connection commits each statement as it runs and a failure
+between two of them would leave the contact graph or the audit chain short of
+a row that is stored. A message already held (its content key meets the stored
+one, and the sender's own) is not taken as complete: storing it again settles
+the sender's participant row and the counts from the stored messages, raising
+a count and never lowering one, so a message an earlier build stored without
+them is put right by the next store of it. What is stored is read first and a
+row is written only where it falls short, so storing a complete message again
+writes and locks nothing; the read counts the room's messages, which a
+re-import of a very large room pays for once per message. Minimising a
+conversation drops its bodies and audits the drop in one transaction as well.
+
 **XenForo conversation specifics:** stable `conversation_id`, an explicit
 participant list (excellent graph data, a multi-party conversation is a
 direct affiliation signal), and title/starter metadata. Participants can

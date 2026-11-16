@@ -101,7 +101,17 @@ Because trust edges carry `sign`:
   respected actor vouching for a newcomer is a strong signal of a real
   relationship
 - **Trust decay**: apply a half-life at projection time. Default 12 months,
-  configurable per case. Never mutate the stored weight.
+  configurable per case. Never mutate the stored weight. A tie dated so long
+  ago that its weight decays to nothing (below `analytics.MIN_CONDUIT_STRENGTH`,
+  the strength whose reciprocal can no longer be added up along a path) is not
+  a path: betweenness, closeness and the broker ranking leave it out, as a tie
+  of cost one it would be the cheapest route in the case. The answer counts
+  these pairs (`decay.faded_dyads`) and says so in `decay.note`, on the suite
+  and on the key-player result, whose betweenness comparison leaves them out
+  too. The cohesion measures and the removal set still count the pair as a
+  tie. A tie whose stored weight is zero is no more decayed than before and
+  keeps the cost it had, and so does a pair that holds one beside a decayed
+  tie: a pair is left out only when every tie in it was positive and decayed.
 
 ### Two-mode (affiliation)
 
