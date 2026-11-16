@@ -51,7 +51,7 @@ anyio==4.15.1
 argon2-cffi==25.1.0
 argon2-cffi-bindings==26.1.0
 blake3==1.0.9
-certifi==2026.7.22
+certifi==2026.10.19
 cffi==2.1.1
 click==8.5.0
 colorama==0.4.6
