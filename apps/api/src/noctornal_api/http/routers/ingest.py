@@ -36,6 +36,7 @@ from noctornal_api.http.element_gate import ElementFacts, phantom
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.body_ceiling import own_body_cap
 from noctornal_api.http.limits import authorised_client_ip, rate_limit, read_body_capped
+from noctornal_api import maasspec
 from noctornal_api.ingest import (
     CATEGORIES,
     HIGH_RISK_CATEGORIES,
@@ -1038,6 +1039,28 @@ def _facets(conn: psycopg.Connection, scope: list, clearance,
             "known": list(CATEGORIES)}
 
 
+@router.get("/maasspec", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
+def maasspec_status(
+    user: CurrentUser = Depends(require_global("ingest.read")),
+) -> dict:
+    """Whether this host checks MaaSSpec spectra at parse time. Host facts only, no record value."""
+    on = maasspec.enabled()
+    return {
+        "enabled": on,
+        "switch": maasspec.SWITCH_ENV,
+        "contract_versions": list(maasspec.CONTRACT_VERSIONS),
+        "max_spectrum_bytes": maasspec.MAX_SPECTRUM_BYTES,
+        "category": "IOC_FEED",
+        "notice": (
+            "A JSON body carrying maasspec_version is checked against the Spectrum contract "
+            "when its batch is parsed and lands in quarantine as an IOC_FEED record."
+            if on else
+            f"{maasspec.SWITCH_ENV} is off on this host, so a spectrum is stored and "
+            "categorised like any other JSON body."),
+    }
+
+
 @router.get("/records", response_model=dict,
             dependencies=[Depends(rate_limit("search"))])
 def records(
@@ -1175,6 +1198,13 @@ def record_detail(
         "key_environment": batch[9], "key_declared_category": batch[10],
     }
     out["payload_shape"] = redact_structure(batch[11])
+    if maasspec.enabled() and maasspec.looks_like_spectrum(batch[11]):
+        try:
+            maasspec.validate(batch[11])
+        except maasspec.SpectrumRefused:
+            pass
+        else:
+            out["maasspec"] = maasspec.summary(batch[11])
     copies = conn.execute(
         _COPIES_SQL,
         (record_id, clearance.name, list(compartments),
