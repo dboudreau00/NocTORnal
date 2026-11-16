@@ -56,6 +56,7 @@ cffi==2.1.1
 click==8.5.0
 colorama==0.4.6
 cryptography==50.0.1
+defusedxml==0.7.1
 fastapi==0.141.1
 greenlet==3.5.5
 h11==0.16.0

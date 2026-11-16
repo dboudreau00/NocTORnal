@@ -425,7 +425,7 @@ def test_the_extras_are_exactly_dev_telegram_and_yara():
 def test_the_hard_dependencies_name_every_new_pin():
     project = _pyproject()
     hard = _requirements(project["dependencies"])
-    for name in ("numpy", "selectolax", "pefile", "urllib3", "certifi", "idna", "psycopg-pool"):
+    for name in ("numpy", "selectolax", "pefile", "urllib3", "certifi", "idna", "psycopg-pool", "defusedxml"):
         assert name in hard, f"{name} is imported by the API and not declared"
     for name in ("telethon", "python-socks", "yara-x"):
         assert name not in hard, f"{name} is an optional extra, not a hard dependency"
@@ -679,7 +679,7 @@ def test_the_launchers_probe_every_new_hard_dependency(rel):
     or pooled request. The extras are not probed: their absence is a
     readiness gap, not a broken venv."""
     probe = _launcher_probe(rel)
-    for module in ("numpy", "selectolax", "pefile", "psycopg_pool"):
+    for module in ("numpy", "selectolax", "pefile", "psycopg_pool", "defusedxml"):
         assert re.search(rf"\b{module}\b", probe), (rel, module)
     for module in ("telethon", "yara_x", "python_socks"):
         assert module not in probe, (rel, module)
@@ -778,6 +778,7 @@ _NOTICE_LICENCES = {
     "pefile": "MIT", "python-socks": "Apache-2.0",
     "telethon": "MIT", "pyaes": "MIT", "rsa": "Apache-2.0", "pyasn1": "BSD-2-Clause",
     "yara-x": "BSD-3-Clause", "urllib3": "MIT", "certifi": "MPL-2.0",
+    "defusedxml": "PSFL", "idna": "BSD-3-Clause",
 }
 
 

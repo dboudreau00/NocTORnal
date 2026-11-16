@@ -135,6 +135,7 @@ metadata. The exact versions are in `constraints.txt`.
 | `urllib3` | MIT | | Imported directly by the sample stores; now declared rather than inherited through minio. |
 | `certifi` | MPL-2.0 | | Imported directly by the readiness probe; now declared. |
 | `idna` | BSD-3-Clause | | UTS-46 host normalisation in the egress policy; now declared by the API as well. |
+| `defusedxml` | PSFL | | Second layer on collected feed XML, after the prolog scanner. Installed with the API. |
 | `telethon` | MIT | | Telegram collection. Optional: the `telegram` extra. |
 | `python-socks` | Apache-2.0 | | Telethon's SOCKS5 client to the egress proxy (the `telegram` extra), and the egress wire-contract tests (the `dev` extra). |
 | `pyaes` | MIT | | Needed by Telethon (the `telegram` extra). Published only as a pure-Python sdist, built without a compiler. |

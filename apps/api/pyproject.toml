@@ -94,6 +94,8 @@ dependencies = [
     "urllib3>=2.2",
     "certifi>=2024.2",
     "idna>=3.6",           # egress_policy's UTS-46 host normalisation
+    # Second layer on feed XML, after the prolog scanner in collection.read_feed.
+    "defusedxml>=0.7.1",
     # noctornal-ontology is a sibling package in this monorepo (the ONE
     # source of selector normalisers). Install it editable alongside:
     #   pip install -e packages/ontology -e apps/api

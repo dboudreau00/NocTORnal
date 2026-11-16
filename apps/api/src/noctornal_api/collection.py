@@ -1662,13 +1662,13 @@ def _refuse_prolog_declarations(text: str) -> None:
 def parse_rss(body: bytes) -> list[Item]:
     """Minimal RSS/Atom parsing that refuses a DOCTYPE.
 
-    `defusedxml` would be the right dependency and is not one. Without it, the defence is to refuse
-    the construct rather than to neuter it: a feed has no legitimate need for a DOCTYPE or an
-    internal entity, and refusing both closes XXE and billion-laughs outright instead of relying on
-    a parser flag whose name and effect change between Python versions.
-
-    An XXE in a feed you did not write is a file-read primitive on the collector, which is the host
-    holding every persona credential.
+    A feed has no legitimate need for a DOCTYPE or an internal entity. The
+    prolog is walked first and any declaration is refused, and the tree is
+    then built with `defusedxml` (`forbid_dtd` and `forbid_entities`), so a
+    construct the walk missed is still not expanded. The two layers together
+    close XXE and billion-laughs on a feed you did not write, which would
+    otherwise be a file-read primitive on the collector, the host holding
+    every persona credential.
     """
     return read_feed(body)[0]
 
@@ -1682,15 +1682,16 @@ MAX_FEED_ITEMS = 500
 def read_feed(body: bytes) -> tuple[list[Item], int, int]:
     """`parse_rss`, with what it did not keep counted, so the run can say so (invariant 12):
     `(items, items with nothing to tell them apart, items past MAX_FEED_ITEMS)`."""
-    from xml.etree import ElementTree
+    from defusedxml.ElementTree import fromstring as _fromstring
 
     # The prolog is the only place a DTD may legally appear, so it is what is walked, over the
-    # decoded text the parser is then given.
+    # decoded text the parser is then given. defusedxml is the second layer:
+    # a declaration the walk missed still does not expand.
     text = _feed_text(body)
     _refuse_prolog_declarations(text)
 
     try:
-        root = ElementTree.fromstring(text)
+        root = _fromstring(text, forbid_dtd=True, forbid_entities=True)
     except Exception as exc:  # noqa: BLE001 - a broken feed is not a crash
         raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
 
