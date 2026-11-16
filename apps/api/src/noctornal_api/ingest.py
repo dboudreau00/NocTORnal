@@ -36,6 +36,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api import maasspec
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.retention import UNRULED_RETAIN_DAYS
 from noctornal_api.security import envelope
@@ -956,8 +957,13 @@ class IngestService:
 
     def _store_record(self, batch_id: UUID, key, payload: dict, *,
                       case_id: UUID | None) -> dict:
-        category, confidence, source = categorise(
-            payload, declared=key[1])
+        if maasspec.enabled() and maasspec.looks_like_spectrum(payload):
+            maasspec.validate(payload, raw_size=len(json.dumps(
+                payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")))
+            category, confidence, source = "IOC_FEED", 1.0, "STRUCTURE"
+        else:
+            category, confidence, source = categorise(
+                payload, declared=key[1])
         compartments = [key[3]] if key[3] else []
         if category in HIGH_RISK_CATEGORIES and not compartments:
             # Belt to the CHECK constraint's braces, and a better message:

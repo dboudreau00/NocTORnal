@@ -1,0 +1,722 @@
+{
+  "$defs": {
+    "AnalysisError": {
+      "additionalProperties": false,
+      "properties": {
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "module": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Module"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "recoverable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recoverable"
+        }
+      },
+      "required": [
+        "severity",
+        "message"
+      ],
+      "title": "AnalysisError",
+      "type": "object"
+    },
+    "Artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "produced_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Produced By"
+        },
+        "parent_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Artifact Id"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "Artifact",
+      "type": "object"
+    },
+    "ExtractedBy": {
+      "additionalProperties": false,
+      "properties": {
+        "module": {
+          "title": "Module",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "technique": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Technique"
+        }
+      },
+      "required": [
+        "module"
+      ],
+      "title": "ExtractedBy",
+      "type": "object"
+    },
+    "FamilySummary": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Method"
+        }
+      },
+      "required": [
+        "name",
+        "confidence"
+      ],
+      "title": "FamilySummary",
+      "type": "object"
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "c2",
+            "config",
+            "credential_pattern",
+            "crypto_material",
+            "embedded_artifact",
+            "family_indicator",
+            "behavior",
+            "wallet",
+            "panel",
+            "other"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "subtype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtype"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "normalized": {
+          "default": null,
+          "title": "Normalized"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "confidence_method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence Method"
+        },
+        "extracted_by": {
+          "$ref": "#/$defs/ExtractedBy"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "context": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context"
+        },
+        "selectors": {
+          "items": {
+            "$ref": "#/$defs/Selector"
+          },
+          "title": "Selectors",
+          "type": "array"
+        },
+        "proposed_grade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposedGrade"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "first_seen_in_analysis": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Seen In Analysis"
+        },
+        "family_data": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family Data"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "confidence",
+        "extracted_by"
+      ],
+      "title": "Finding",
+      "type": "object"
+    },
+    "InputInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "sample",
+            "cape_report",
+            "memory_dump",
+            "config_dump",
+            "archive",
+            "feed_record"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "filename": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Filename"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        },
+        "source_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Hint"
+        }
+      },
+      "required": [
+        "type",
+        "sha256"
+      ],
+      "title": "InputInfo",
+      "type": "object"
+    },
+    "ProposedGrade": {
+      "additionalProperties": false,
+      "properties": {
+        "source_reliability": {
+          "anyOf": [
+            {
+              "enum": [
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "F"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Reliability"
+        },
+        "information_credibility": {
+          "anyOf": [
+            {
+              "enum": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Information Credibility"
+        },
+        "rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rationale"
+        }
+      },
+      "title": "ProposedGrade",
+      "type": "object"
+    },
+    "Selector": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        },
+        "normalized": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Normalized"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "Selector",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Id"
+        },
+        "offset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Offset"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Method"
+        }
+      },
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "Summary": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FamilySummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "primary_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Primary Capabilities",
+          "type": "array"
+        },
+        "c2_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "C2 Count",
+          "type": "integer"
+        },
+        "config_extracted": {
+          "default": false,
+          "title": "Config Extracted",
+          "type": "boolean"
+        },
+        "encryption_observed": {
+          "default": false,
+          "title": "Encryption Observed",
+          "type": "boolean"
+        },
+        "risk_signals": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Risk Signals",
+          "type": "array"
+        }
+      },
+      "title": "Summary",
+      "type": "object"
+    },
+    "ToolInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "ToolInfo",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "maasspec_version": {
+      "const": "0.1.0",
+      "default": "0.1.0",
+      "title": "Maasspec Version",
+      "type": "string"
+    },
+    "analysis_id": {
+      "format": "uuid",
+      "title": "Analysis Id",
+      "type": "string"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "tool": {
+      "$ref": "#/$defs/ToolInfo"
+    },
+    "input": {
+      "$ref": "#/$defs/InputInfo"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Summary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/Finding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/Artifact"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/AnalysisError"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "metadata": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Metadata"
+    }
+  },
+  "required": [
+    "analysis_id",
+    "generated_at",
+    "tool",
+    "input",
+    "findings"
+  ],
+  "title": "Spectrum",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "maasspec/spectrum.schema.json"
+}
