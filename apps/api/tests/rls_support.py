@@ -114,6 +114,26 @@ def exhibit(conn, case_id: UUID, actor: UUID, classification: str = "AMBER") -> 
          actor, classification)).fetchone()[0]
 
 
+def release_hold(conn, table: str, trigger: str, row_id: UUID) -> None:
+    """A teardown's reset of a row's legal hold. A lift takes two people and the database refuses one
+    without them (decision 229) for every role, so the reset passes the guard disabled by name for this
+    one statement, as an operator correcting a row would. `table` and `trigger` are literals of the
+    caller's."""
+    with conn.transaction():
+        conn.execute(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}")
+        conn.execute(f"UPDATE {table} SET legal_hold = false, legal_hold_reason = NULL "
+                     "WHERE id = %s", (row_id,))
+        conn.execute(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}")
+
+
+def release_exhibit_hold(conn, evidence_id: UUID) -> None:
+    release_hold(conn, "core.evidence", "evidence_hold_lift_guarded", evidence_id)
+
+
+def release_case_hold(conn, case_id: UUID) -> None:
+    release_hold(conn, 'core."case"', "case_hold_lift_guarded", case_id)
+
+
 def session(conn, uid: UUID, *, mfa: bool = True) -> tuple[UUID, str]:
     """(session id, raw token), minted the way login mints one."""
     from noctornal_api.security.sessions import SessionService
@@ -154,6 +174,14 @@ def cleanup(conn, prefix: str = PREFIX) -> None:
     audit trail and any break-glass rows (reviewed history)."""
     users = f"(SELECT id FROM iam.app_user WHERE email LIKE '{prefix}%@noctornal.test')"
     cases = f'(SELECT id FROM core."case" WHERE owner_user_id IN {users})'
+    # The approvals a test raised (a hold lift's, decision 229), so its cases and accounts can go. In a
+    # savepoint of its own: a ledger that names one keeps it.
+    try:
+        with conn.transaction():
+            conn.execute(f"DELETE FROM core.approval_request WHERE case_id IN {cases} "
+                         f"OR requested_by IN {users} OR decided_by IN {users}")
+    except Exception:  # noqa: BLE001
+        pass
     with conn.transaction():
         conn.execute(f"DELETE FROM core.hypothesis_evidence WHERE hypothesis_id IN "
                      f"(SELECT id FROM core.hypothesis WHERE case_id IN {cases})")

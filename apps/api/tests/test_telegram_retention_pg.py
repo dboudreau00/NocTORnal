@@ -36,8 +36,12 @@ def conn(monkeypatch):
     yield c
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{P}%')"
     with c.transaction():
+        # A lift takes two people and the database refuses one without them (decision 229), so the
+        # reset passes the guard disabled by name for this transaction.
+        c.execute('ALTER TABLE core."case" DISABLE TRIGGER case_hold_lift_guarded')
         c.execute(f"""UPDATE core."case" SET legal_hold = false, legal_hold_reason = NULL
                        WHERE owner_user_id IN {sub}""")
+        c.execute('ALTER TABLE core."case" ENABLE TRIGGER case_hold_lift_guarded')
     tp.teardown(c, P)
     h.retire_users(c, P)
     c.close()

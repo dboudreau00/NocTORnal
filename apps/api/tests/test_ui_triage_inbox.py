@@ -90,6 +90,8 @@ function asSentence(t) { t = String(t || '').trim(); if (!t) return '';
 const TLP = ['CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED'];
 const MERGE_OPERATION = 'node.merge';
 const RELAX_OPERATION = 'case.policy.relax';   // F9b
+const LIFT_EXHIBIT_OPERATION = 'legal_hold.lift_exhibit';   // decision 229
+const LIFT_CASE_OPERATION = 'legal_hold.lift_case';
 """
 
 

@@ -245,6 +245,9 @@ def teardown(conn, prefix: str) -> None:
     _try(conn, f"DELETE FROM lab.sample WHERE submitted_by IN {users}")
     _try(conn, f"DELETE FROM iam.session WHERE user_id IN {users}")
     _try(conn, f"DELETE FROM iam.user_role WHERE user_id IN {users}")
+    # The approvals a test raised (a hold lift's, decision 229), so its cases and people can go.
+    _try(conn, f"DELETE FROM core.approval_request WHERE case_id IN {cases} "
+               f"OR requested_by IN {users} OR decided_by IN {users}")
     # Cases and people last, one at a time: whatever a ledger still names
     # stays, as intended (test_notification_and_sample_edge_cases_pg.py).
     for (case_id,) in conn.execute(f"SELECT id FROM core.\"case\" WHERE owner_user_id IN "

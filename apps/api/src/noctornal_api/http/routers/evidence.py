@@ -488,6 +488,10 @@ class ExhibitOut(BaseModel):
     #: (`RegisterOut.may_hold`): a hold's text is for the people who place and lift it, as the due
     #: list's is.
     legal_hold_reason: str | None = None
+    #: The open request to lift this exhibit's hold as it stands (decision 229), for a reader who
+    #: may hold (`RegisterOut.may_hold`): its id and state, whether it is the reader's, who asked and
+    #: who approved, and when it expires (`approvals.open_lift_requests`). None otherwise.
+    lift_request: dict | None = None
     is_hostile_markup: bool = False
     purged_at: datetime | None = None
     backs_nodes: int = 0
@@ -763,6 +767,24 @@ def exhibit_register(conn: psycopg.Connection, *, case_id: UUID, clearance: str,
             "lock_target": target if locks_short else None}
 
 
+def _attach_lift_requests(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                          items: list[ExhibitOut]) -> None:
+    """The open lift request of each held exhibit on the page (decision 229), for a reader who may
+    hold: the exhibit is on their page, so they are cleared for it, as a signer of its lift must be."""
+    from noctornal_api.approvals import LIFT_EXHIBIT, lift_exhibit_payload, open_lift_requests
+
+    held = [i.id for i in items if i.legal_hold and not i.purged_at]
+    if not held:
+        return
+    payloads = {str(r[0]): lift_exhibit_payload(r[0], r[1]) for r in conn.execute(
+        "SELECT id, legal_hold_epoch FROM core.evidence WHERE id = ANY(%s::uuid[])",
+        (held,)).fetchall()}
+    found = open_lift_requests(conn, viewer_id=user.user_id, operation=LIFT_EXHIBIT,
+                               case_id=case_id, payloads=payloads)
+    for item in items:
+        item.lift_request = found.get(item.id)
+
+
 @router.get("", response_model=RegisterOut)
 def register(
     case_id: UUID,
@@ -790,6 +812,8 @@ def register(
         compartments=list(compartments), offset=offset, limit=limit,
         q=(q or "").strip() or None, backs_nothing=backs_nothing,
         evidence_id=evidence_id, reveal_hold_reason=may_hold)
+    if may_hold:
+        _attach_lift_requests(conn, user, case_id, page["items"])
     return RegisterOut(**page,
                        may_export=_asks(conn, user, case_id, "evidence.export",
                                         fresh=True),

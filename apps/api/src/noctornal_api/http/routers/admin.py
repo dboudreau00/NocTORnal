@@ -1,20 +1,24 @@
 """Analyst account administration over HTTP (`user.manage`, step-up).
 
 Every route is gated on `user.manage`, which the seed grants to SYS_ADMIN alone and marks
-step-up, so a stale session cannot mint accounts. The exception is `GET /access`, which says
+step-up, so a stale session cannot mint accounts. The exceptions are `GET /access`, which says
 which verbs the caller holds, so the console knows whether to offer the way in, and, for an
-administrator, which blocking checks are failing. Credentials appear once, in the response that
-generated them, and no route returns an existing secret; the response says so.
+administrator, which blocking checks are failing; and `GET /minimisation-gaps`, the Security
+officer's list under `comms.minimise.oversee` (decision 231). Credentials appear once, in the
+response that generated them, and no route returns an existing secret; the response says so.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import timezone
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
+from noctornal_api.cases import CONTENT_READ_ONLY_STATES
+from noctornal_api.comms import CommsService
 from noctornal_api.http.deps import (
     CurrentUser,
     current_user,
@@ -116,7 +120,9 @@ def access(
                                         'integration.manage',
                                         -- F13, 2026-09-24.
                                         'sample.screening.review',
-                                        'sample.screening.manage')""",
+                                        'sample.screening.manage',
+                                        -- Decision 231.
+                                        'comms.minimise.oversee')""",
         (user.user_id,)).fetchall()}
     manage = "user.manage" in held
     # The failing blocking checks, for an account that administers the deployment, so the
@@ -167,6 +173,8 @@ def access(
     # retire lists there.
     answer["sample_screening_review"] = "sample.screening.review" in held
     answer["sample_screening_manage"] = "sample.screening.manage" in held
+    # The officer's way in to Oversight, Minimisation gaps.
+    answer["comms_minimise_oversee"] = "comms.minimise.oversee" in held
     return answer
 
 
@@ -355,6 +363,54 @@ def readiness(
     the error as evidence, and this still answers 200.
     """
     return readiness_register.report(conn)
+
+
+@router.get("/minimisation-gaps", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view"))])
+def minimisation_gaps(
+    limit: int = Query(200, ge=1, le=1000),
+    user: CurrentUser = Depends(require_global("comms.minimise.oversee")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The cases whose conversations nobody assigned can minimise, for the Security officer
+    (decision 231), shut cases first and the longest closed first.
+
+    Each row is the case's code, status and closing time, the whole days since it closed, how many
+    conversations, the highest TLP their labels need, how many Lead investigators are assigned, and
+    how many active accounts whose global role carries `comms.minimise` are cleared for at least one
+    of them and for the case. No conversation id, platform, compartment, handle or name: the officer
+    holds no case content, and the case's Lead investigator is the one who assigns. Counted on a
+    system connection, because the conversations are above whoever reads them; live, so a gap
+    closed by an assignment or a minimisation is gone on the next read."""
+    with system_connection(SystemPurpose.MINIMISATION, reuse=conn) as sconn:
+        gaps = CommsService(sconn).minimisation_gaps()
+        # The days on the database's clock, which stamped `closed_at`.
+        facts = {r[0]: r[1:] for r in sconn.execute(
+            """SELECT id, code, status, closed_at,
+                      floor(extract(epoch FROM now() - closed_at) / 86400)::int
+                 FROM core."case" WHERE id = ANY(%s)""",
+            ([g.case_id for g in gaps],)).fetchall()} if gaps else {}
+    rows = []
+    for gap in gaps:
+        code, status, closed_at, days = facts[gap.case_id]
+        shut = status in CONTENT_READ_ONLY_STATES and closed_at is not None
+        rows.append({
+            "case_code": code,
+            "status": status,
+            "closed_at": closed_at.astimezone(timezone.utc).isoformat() if shut else None,
+            "days_since_closed": days if shut else None,
+            "conversations": gap.count,
+            "highest_tlp": gap.highest_tlp,
+            "leads_assigned": gap.leads_assigned,
+            "eligible_elsewhere": gap.eligible_elsewhere,
+        })
+    # Shut first, by status: a draft archived without being closed has no closing time, and goes
+    # after the closed cases but before every open one.
+    rows.sort(key=lambda r: (r["status"] not in CONTENT_READ_ONLY_STATES,
+                             r["closed_at"] is None, r["closed_at"] or "",
+                             r["case_code"]))
+    return {"cases": rows[:limit], "count": len(rows),
+            "truncated": len(rows) > limit}
 
 
 @router.get("/roles", response_model=dict)

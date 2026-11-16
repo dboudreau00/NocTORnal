@@ -88,6 +88,8 @@ EXPECTED_CHECKS = (
     # A usable gpg at the floor, and Web Key Directory lookups off, on, or half configured.
     "pgp_verifier",
     "pgp_key_directory",
+    # Every closed case's conversations can be minimised by somebody assigned (decision 231).
+    "conversations_minimisable",
     # The similarity indexes.
     "embedding_wording_current",
     "embedding_meaning_endpoint",

@@ -390,8 +390,10 @@ def test_a_case_request_cannot_be_decided_or_withdrawn_through_the_global_routes
     assert _decide(client, officer, req.id).status_code == 404
     assert client.post(f"{API}/approvals/{req.id}/withdraw",
                        headers=admin).status_code == 404
+    # The lead holds retention.manage, one side of a collected document's lift (decision 229), so
+    # the global gate lets them in, and their own case request is the missing deployment-wide one.
     assert client.post(f"{API}/approvals/{req.id}/withdraw",
-                       headers=session(conn, lead_id)).status_code == 403
+                       headers=session(conn, lead_id)).status_code == 404
     assert ApprovalService(conn).get(req.id).state == "PENDING"
 
 

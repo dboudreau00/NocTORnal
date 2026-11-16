@@ -178,5 +178,10 @@ def test_a_case_under_legal_hold_keeps_its_lookups(conn):
         assert conn.execute("SELECT query_value FROM ingest.lookup WHERE id = %s",
                             (got["lookup_id"],)).fetchone()[0] == "example.org"
     finally:
-        conn.execute('UPDATE core."case" SET legal_hold = false, legal_hold_reason = NULL '
-                     'WHERE id = %s', (w.case_id,))
+        # The reset is the test's, not a lift: it passes the two-person guard (decision 229)
+        # disabled by name for its own transaction.
+        with conn.transaction():
+            conn.execute('ALTER TABLE core."case" DISABLE TRIGGER case_hold_lift_guarded')
+            conn.execute('UPDATE core."case" SET legal_hold = false, legal_hold_reason = NULL '
+                         'WHERE id = %s', (w.case_id,))
+            conn.execute('ALTER TABLE core."case" ENABLE TRIGGER case_hold_lift_guarded')

@@ -6830,41 +6830,115 @@ function exhibitCard(ev, page) {
   return item;
 }
 
-/** Place or lift a legal hold on an exhibit, with a reason either way, behind the step-up gate,
- *  built as the collected document's is (`documentHoldActions`). `POST /retention/legal-hold`
- *  decides for itself; this only offers the control to a reader whose register said `may_hold`.
- *  A lift needs the lifter cleared for the exhibit, which a reader of the register is. Holds are
- *  governance, so the control stays on a CLOSED case. */
+/** Place a legal hold on an exhibit, or take a lift's steps (decision 229): ask for a second
+ *  signature, wait for it, and lift with it once a colleague has approved. Each step with a reason
+ *  behind the step-up gate, built as the collected document's is (`documentHoldActions`). The
+ *  routes decide for themselves; this only offers the control to a reader whose register said
+ *  `may_hold`, and draws the open request the register sent (`lift_request`). A reader of the
+ *  register is cleared for the exhibit, as both people must be. Holds are governance, so the
+ *  control stays on a CLOSED case. */
 function exhibitHoldButton(ev, card) {
-  const verb = ev.legal_hold ? 'Lift the legal hold' : 'Place a legal hold';
+  const after = 'Once lifted, this exhibit follows the case\'s retention date again, unless '
+    + 'the case itself is held.';
+  if (!ev.legal_hold) {
+    return exhibitHoldForm(ev, card, 'Place a legal hold',
+      'A hold stops every deletion of this exhibit, whatever the case\'s retention date says, '
+      + 'until it is lifted. It needs a written reason and a sign-in from the last 15 minutes, '
+      + 'and the reason is kept in the audit log.',
+      (why) => api('/retention/legal-hold', { method: 'POST', json: {
+        evidence_id: ev.id, on: true, reason: why } }));
+  }
+  const lr = ev.lift_request;
+  if (!lr) {
+    return exhibitHoldForm(ev, card, 'Ask for a second signature to lift',
+      after + ' ' + LIFT_TAKES + ' Say why: it is what your colleague decides on.',
+      (why) => api('/retention/legal-hold/lift-requests', { method: 'POST', json: {
+        evidence_id: ev.id, justification: why } }));
+  }
+  if (lr.state === 'APPROVED' && lr.mine) {
+    return exhibitHoldForm(ev, card, 'Lift the legal hold (approved by '
+      + liftApprover(lr) + ')',
+      after + ' The approval is spent once, and the reason is kept in the audit log.',
+      (why) => api('/retention/legal-hold', { method: 'POST', json: {
+        evidence_id: ev.id, on: false, reason: why, approval_request_id: lr.id } }));
+  }
+  return liftWaiting(lr, {
+    withdraw: () => api(cpath('/approvals/' + lr.id + '/withdraw'), { method: 'POST' }),
+    reload: () => loadEvidence({ pageOnly: true, focus: ev.id }),
+    review: () => { state.approvalTarget = lr.id; selectTab('triage'); },
+  });
+}
+
+/** One step of an exhibit's hold: a written reason, the step-up gate, then the register again. */
+function exhibitHoldForm(ev, card, verb, help, send) {
   const btn = el('button', 'btn small ghost', verb);
   btn.type = 'button';
   btn.setAttribute('aria-label', verb + ' on ' + visibleText(ev.title));
   btn.addEventListener('click', () => rowForm(card, {
-    kind: 'hold', submit: verb,
-    help: ev.legal_hold
-      ? 'Once lifted, this exhibit follows the case\'s retention date again, '
-        + 'unless the case itself is held. A written reason and a sign-in '
-        + 'from the last 15 minutes are needed either way, and the reason '
-        + 'is kept in the audit log.'
-      : 'A hold stops every deletion of this exhibit, whatever the case\'s '
-        + 'retention date says, until somebody lifts it. It needs a written '
-        + 'reason and a sign-in from the last 15 minutes, and the reason is '
-        + 'kept in the audit log.',
+    kind: 'hold', submit: verb, help: help,
     fields: [{ label: 'Why', grow: true }],
     check: ([why]) => (why.trim().length < 5
       ? 'Say why, in at least 5 characters.' : null),
     submitFn: async ([why]) => {
       const token = caseToken();
       const out = await withStepUp('A legal hold needs a recent sign-in.',
-        () => api('/retention/legal-hold', { method: 'POST', json: {
-          evidence_id: ev.id, on: !ev.legal_hold, reason: why.trim() } }));
+        () => send(why.trim()));
       if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
       if (caseChanged(token)) return;
       loadEvidence({ pageOnly: true, focus: ev.id });
     },
   }));
   return btn;
+}
+
+/** Who approved a lift, for the words that name them. */
+function liftApprover(lr) {
+  return visibleText(lr.decided_by_name || 'a colleague');
+}
+
+/** An open lift the reader takes no step on with a reason: their own, waiting for a second person
+ *  (with Withdraw); a colleague's they are asked to sign (`how.review`, or the Approve and Refuse
+ *  `how.decide` draws); or one approved for the colleague who asked, who lifts it. */
+function liftWaiting(lr, how) {
+  const box = el('span', 'lift-state');
+  if (lr.state === 'PENDING' && lr.mine) {
+    box.appendChild(el('span', 'muted small', 'Waiting for a second person until '
+      + fmtTime(lr.expires_at) + '.'));
+    const w = el('button', 'btn ghost small', 'Withdraw the request');
+    w.type = 'button';
+    w.addEventListener('click', async () => {
+      if (!window.confirm('Withdraw the request to lift this hold?\n\nThe hold stays, and '
+          + 'lifting it would need a new request.')) return;
+      w.disabled = true;
+      try {
+        await how.withdraw();
+        how.reload();
+      } catch (err) {
+        w.disabled = false;
+        fail(err);
+      }
+    });
+    box.appendChild(w);
+    return box;
+  }
+  if (lr.state === 'PENDING') {
+    box.appendChild(el('span', 'muted small', visibleText(lr.requested_by_name
+      || 'A colleague') + ' asks for your second signature to lift this hold, until '
+      + fmtTime(lr.expires_at) + ': ' + visibleText(lr.justification)));
+    if (how.decide) {
+      how.decide(box);
+    } else {
+      const r = el('button', 'btn small ghost', 'Review the request to lift this hold');
+      r.type = 'button';
+      r.addEventListener('click', how.review);
+      box.appendChild(r);
+    }
+    return box;
+  }
+  box.appendChild(el('span', 'muted small', 'Approved by ' + liftApprover(lr) + '. '
+    + visibleText(lr.requested_by_name || 'The colleague who asked')
+    + ' lifts it, until ' + fmtTime(lr.expires_at) + '.'));
+  return box;
 }
 
 /** An exhibit's card with its Similar control: exhibits like this one, by title and
@@ -9157,6 +9231,22 @@ function closeCaseRecord() {
   }
 }
 
+/** The case record's `minimisation_gap` in words (decision 231): some of the case's conversations
+ *  are above everyone assigned to it. The server sends it only to a holder of case.grant, who can
+ *  add a cleared colleague, and only as the case's withheld-disclosure setting allows: whether
+ *  under PRESENCE, how many under COUNT, never which. Empty when there is nothing to say. */
+function minimisationGapWords(gap) {
+  if (!gap || !gap.incomplete) return '';
+  const n = Number(gap.conversations);
+  const counted = gap.mode === 'COUNT' && n > 0;
+  const them = counted ? agree(n, 'it', 'them') : 'them';
+  return (counted ? countOf(n, 'conversation here is', 'conversations here are')
+    : 'Some conversations here are')
+    + ' above everyone assigned to this case, so nobody on the team can minimise '
+    + them + '. Ask a Lead investigator cleared for ' + them
+    + ' to be assigned to this case: Share adds a colleague.';
+}
+
 function renderCaseRecord(rec) {
   $('case-sheet-title').textContent = 'Case record: ' + rec.code;
   const dl = $('case-facts');
@@ -9175,6 +9265,8 @@ function renderCaseRecord(rec) {
   if (rec.closed_at && CASE_STATES_SHUT.has(rec.status)) {
     add('Closed', fmtTime(rec.closed_at));
   }
+  const gap = minimisationGapWords(rec.minimisation_gap);
+  if (gap) add('Minimisation', gap, 'overdue');
   add('Classification', tlpChip(rec.classification));
   add('Owner', rec.owner_name ? visibleText(rec.owner_name)
     : 'account ' + shortId(rec.owner_user_id));
@@ -9500,12 +9592,20 @@ async function submitStatus(e, confirmed) {
     /* Unsaved hand placements, stored while the case still takes them (saveLayoutBeforeShut). */
     await saveLayoutBeforeShut(to);
     if (caseChanged(token)) return;
-    await api('/cases/' + state.caseId + '/status',
-              { method: 'POST', json: { status: to } });
+    const moved = await api('/cases/' + state.caseId + '/status',
+                            { method: 'POST', json: { status: to } });
     if (caseChanged(token)) return;
     closeStatus();
     await openCase(state.caseId);
     banner('Status changed', rec.code + ' is now ' + to + '.', 'warn', 8000);
+    /* The reply carries the record's minimisation gap (decision 231), so whoever closes the case
+       is told at once, and until they dismiss it, because it names a step still to take. */
+    const gap = CASE_STATES_SHUT.has(to)
+      ? minimisationGapWords(moved && moved.minimisation_gap) : '';
+    if (gap) {
+      banner(rec.code + ': conversations nobody on the team can minimise', gap,
+        'warn', { sticky: true });
+    }
   } catch (err) {
     if (caseChanged(token) || (err && err.handled)) return;
     if (!confirmed && err instanceof ApiError && err.status === 403
@@ -9553,11 +9653,12 @@ onCaseSwitch(() => {
  *
  * A case-level hold freezes everything the case governs against every deletion path: its
  * exhibits, those lodged later too, its ingest records, lookups and samples, and the collected
- * documents it cites. Placing one is open to whoever holds retention.manage on the case,
- * lifting one to somebody cleared for everything the case holds, and both take a written reason
- * and a sign-in from the last 15 minutes. `POST /retention/cases/{id}/legal-hold` decides all
- * of it; the case record's `may_hold` only says whether to offer the control. It is
- * governance, so it works on a CLOSED case too.
+ * documents it cites. Placing one is open to whoever holds retention.manage on the case. Lifting
+ * one takes two people cleared for everything the case holds (decision 229): the dialog asks for
+ * the second signature, says who it waits for, sends a colleague to Triage, Dual control, to sign
+ * one, and lifts with an approved one. Each step takes a written reason and a sign-in from the
+ * last 15 minutes. The routes decide all of it; the case record's `may_hold` and `lift_request`
+ * only say which step to offer. It is governance, so it works on a CLOSED case too.
  */
 
 /** The header's LEGAL HOLD chip, for every reader of a held case, and the
@@ -9580,34 +9681,71 @@ function renderCaseHold(rec) {
 
 let holdReturn = null;
 
+/** Which step of a case's hold the dialog offers: place it; ask for a lift's second signature;
+ *  wait for one asked (`waiting`); review a colleague's (`review`); lift with an approved one of
+ *  the reader's own (`lift`); or watch one approved for the colleague who asked (`approved`). */
+function caseHoldStep(rec) {
+  if (!rec.legal_hold) return 'place';
+  const lr = rec.lift_request;
+  if (!lr) return 'ask';
+  if (lr.state === 'APPROVED') return lr.mine ? 'lift' : 'approved';
+  return lr.mine ? 'waiting' : 'review';
+}
+
+/** The words on the dialog's submit button, by step; the steps without one take none. */
+const HOLD_SAVE = {
+  place: 'Place the hold', ask: 'Ask for a second signature',
+  lift: 'Lift the hold', review: 'Review the request',
+};
+
 function openCaseHold() {
   const rec = state.caseRec;
   if (!rec || !state.caseId || !rec.may_hold) return;
   holdReturn = document.activeElement;
-  const held = !!rec.legal_hold;
-  $('hold-title').textContent = (held ? 'Lift the legal hold on '
-    : 'Place a legal hold on ') + rec.code;
-  $('hold-now').textContent = held
-    ? rec.code + ' is under a legal hold'
+  const step = caseHoldStep(rec);
+  const lr = rec.lift_request;
+  $('hold-title').textContent = (step === 'place' ? 'Place a legal hold on '
+    : 'Lift the legal hold on ') + rec.code;
+  let now = step === 'place' ? rec.code + ' is not under a legal hold.'
+    : rec.code + ' is under a legal hold'
       + (rec.legal_hold_reason
-        ? ', placed for: ' + visibleText(rec.legal_hold_reason) : '') + '.'
-    : rec.code + ' is not under a legal hold.';
-  $('hold-help').textContent = held
-    ? 'Lifting the hold lets the case\'s retention dates and rules govern '
-      + 'again, so a purge can destroy what is past its date. Only somebody '
-      + 'cleared for everything the case holds can lift it. A written '
-      + 'reason and a sign-in from the last 15 minutes are needed either way.'
-    : 'A hold stops every deletion of what the case governs: its exhibits, '
+        ? ', placed for: ' + visibleText(rec.legal_hold_reason) : '') + '.';
+  if (step === 'waiting') {
+    now += ' You asked for a second signature to lift it, which waits until '
+      + fmtTime(lr.expires_at) + '.';
+  } else if (step === 'review') {
+    now += ' ' + visibleText(lr.requested_by_name || 'A colleague')
+      + ' asks for your second signature to lift it, until ' + fmtTime(lr.expires_at)
+      + ': ' + visibleText(lr.justification);
+  } else if (step === 'lift') {
+    now += ' Your request to lift it was approved by ' + liftApprover(lr)
+      + ' and can be spent until ' + fmtTime(lr.expires_at) + '.';
+  } else if (step === 'approved') {
+    now += ' A request to lift it from '
+      + visibleText(lr.requested_by_name || 'a colleague') + ' was approved by '
+      + liftApprover(lr) + '; the one who asked lifts it.';
+  }
+  $('hold-now').textContent = now;
+  $('hold-help').textContent = step === 'place'
+    ? 'A hold stops every deletion of what the case governs: its exhibits, '
       + 'including any lodged later, its ingest records, lookups and samples, '
       + 'and the collected documents it cites. A purge already running '
       + 'finishes the exhibit it is destroying and keeps everything after '
       + 'it. A written reason and a sign-in from the last 15 minutes are '
-      + 'needed either way.';
+      + 'needed.'
+    : 'Lifting the hold lets the case\'s retention dates and rules govern '
+      + 'again, so a purge can destroy what is past its date. ' + LIFT_TAKES
+      + (step === 'ask' ? ' Say why: it is what your colleague decides on.' : '');
+  const needsWhy = step === 'place' || step === 'ask' || step === 'lift';
+  show($('hold-why-field'), needsWhy);
   $('hold-why').value = '';
   setMsg($('hold-msg'), '');
-  $('hold-save').textContent = held ? 'Lift the hold' : 'Place the hold';
+  const save = HOLD_SAVE[step];
+  show($('hold-save'), !!save);
+  if (save) $('hold-save').textContent = save;
+  show($('hold-withdraw'), step === 'waiting');
   show($('hold-scrim'), true);
-  $('hold-why').focus();
+  (needsWhy ? $('hold-why') : save ? $('hold-save') : $('hold-cancel')).focus();
 }
 
 function closeCaseHold() {
@@ -9628,6 +9766,16 @@ async function submitCaseHold(e) {
   const msg = $('hold-msg');
   setMsg(msg, '');
   if (!rec || !state.caseId || !rec.may_hold) return;
+  const step = caseHoldStep(rec);
+  const lr = rec.lift_request;
+  if (step === 'review') {
+    /* A colleague's request is decided where every request is, with its parameters. */
+    closeCaseHold();
+    state.approvalTarget = lr.id;
+    selectTab('triage');
+    return;
+  }
+  if (step !== 'place' && step !== 'ask' && step !== 'lift') return;
   const why = $('hold-why').value.trim();
   if (why.length < 5) {
     setMsg(msg, 'Say why, in at least 5 characters.');
@@ -9636,12 +9784,16 @@ async function submitCaseHold(e) {
   const btn = $('hold-save');
   btn.disabled = true;
   const token = caseToken();
-  const place = !rec.legal_hold;
+  const place = step === 'place';
   let changed = false;
   try {
     const out = await withStepUp('A legal hold needs a recent sign-in.',
-      () => api('/retention/cases/' + rec.id + '/legal-hold',
-        { method: 'POST', json: { on: place, reason: why } }));
+      () => (step === 'ask'
+        ? api('/retention/cases/' + rec.id + '/legal-hold/lift-requests',
+          { method: 'POST', json: { justification: why } })
+        : api('/retention/cases/' + rec.id + '/legal-hold',
+          { method: 'POST', json: place ? { on: true, reason: why }
+            : { on: false, reason: why, approval_request_id: lr.id } })));
     if (caseChanged(token)) return;
     if (!out) {
       setMsg(msg, 'Not changed: the sign-in was cancelled.');
@@ -9652,12 +9804,17 @@ async function submitCaseHold(e) {
     /* Said first, with what a purge that was destroying material when the
        hold arrived had destroyed (the hold response reports it): the hold
        stands whatever the re-read below does. */
-    banner(place ? 'Legal hold placed' : 'Legal hold lifted',
-      place ? rec.code + ' is now under a legal hold.'
-        + (out.notice ? ' ' + out.notice : '')
-        : 'The legal hold on ' + rec.code + ' is lifted.',
-      out.notice ? 'warn' : 'info',
-      out.notice ? { sticky: true } : 8000);
+    if (step === 'ask') {
+      banner('Second signature asked for', approvalRaisedText(out),
+        (out.warnings || []).length ? 'warn' : 'info', 8000);
+    } else {
+      banner(place ? 'Legal hold placed' : 'Legal hold lifted',
+        place ? rec.code + ' is now under a legal hold.'
+          + (out.notice ? ' ' + out.notice : '')
+          : 'The legal hold on ' + rec.code + ' is lifted.',
+        out.notice ? 'warn' : 'info',
+        out.notice ? { sticky: true } : 8000);
+    }
     /* The record again, so the chip and the control follow what the server
        now holds; the register and the Records pane read the case's hold on
        their next load. */
@@ -9679,12 +9836,39 @@ async function submitCaseHold(e) {
   }
 }
 
+/** The reader's own waiting request to lift the case's hold, taken back. The hold stays. */
+async function withdrawCaseLift() {
+  const rec = state.caseRec;
+  const lr = rec && rec.lift_request;
+  if (!rec || !state.caseId || !lr || !lr.mine) return;
+  const btn = $('hold-withdraw');
+  btn.disabled = true;
+  const token = caseToken();
+  try {
+    await api(cpath('/approvals/' + lr.id + '/withdraw'), { method: 'POST' });
+    if (caseChanged(token)) return;
+    closeCaseHold();
+    banner('Request withdrawn', 'The legal hold on ' + rec.code + ' stays. Lifting it '
+      + 'would need a new request.', 'info', 8000);
+    const fresh = await api('/cases/' + rec.id);
+    if (caseChanged(token)) return;
+    applyCaseRecord(fresh);
+  } catch (err) {
+    if (caseChanged(token) || (err && err.handled)) return;
+    setMsg($('hold-msg'), 'Not withdrawn: ' + (err instanceof ApiError
+      ? (err.detail || err.title) : String(err)));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function wireCaseHold() {
   const btn = $('btn-case-hold');
   if (!btn) return;
   btn.addEventListener('click', openCaseHold);
   $('hold-form').addEventListener('submit', submitCaseHold);
   $('hold-cancel').addEventListener('click', closeCaseHold);
+  $('hold-withdraw').addEventListener('click', withdrawCaseLift);
   holdDialogKeys('hold-scrim', closeCaseHold);
 }
 
@@ -13448,6 +13632,12 @@ const PRIORITY_LABEL = { 1: 'urgent', 2: 'normal', 3: 'low' };
  *  opens when that is not the one on screen. */
 function notificationRoute(n) {
   const t = n.object_type;
+  /* A collected document's hold lift has no case either, and is signed on the document's card
+     (decision 229): its subject names the operation, in the server's own template. */
+  if (t === 'approval_request' && !n.case_id
+      && String(n.subject || '').endsWith(': ' + LIFT_DOCUMENT_OPERATION)) {
+    return { label: 'Open Collected', documentLift: n.object_id };
+  }
   /* A deployment-wide request has no case, and is read under Administration or Oversight,
      Two-person controls. */
   if (t === 'approval_request' && !n.case_id) {
@@ -13474,6 +13664,10 @@ function notificationRoute(n) {
       ? { label: 'Open Break-glass', tab: 'governance', sub: 'glass' }
       : { label: 'Open Oversight', oversight: true };
   }
+  /* The Security officer's minimisation notice names no case; Oversight, Minimisation gaps does. */
+  if (n.kind === 'COMMS_MINIMISATION_GAP' && !n.case_id) {
+    return { label: 'Open Oversight', oversight: true, section: 'mgap-review' };
+  }
   if (n.case_id) return { label: 'Open the case', tab: 'graph' };
   return null;
 }
@@ -13489,6 +13683,10 @@ function notificationRouteLabel(n, route, openCaseId) {
 async function openNotificationTarget(n) {
   const route = notificationRoute(n);
   if (!route) return;
+  if (route.documentLift) {
+    await openDocumentLift(route.documentLift);
+    return;
+  }
   if (route.oversight) {
     /* The officer's case-less alerts are read in the case-less Inbox, which showAdmin knows
        nothing of, so the Inbox is left once Oversight is up, not before, and the screen is never
@@ -13502,6 +13700,9 @@ async function openNotificationTarget(n) {
     if (route.dual && canAdmin && selectAdminSub) {
       selectAdminSub('dual');
     }
+    /* A section Oversight mounts below the others, brought into view when it is shown. */
+    const section = route.section ? $(route.section) : null;
+    if (section && !section.hidden) section.scrollIntoView({ block: 'start' });
     return;
   }
   if (n.case_id && n.case_id !== state.caseId) {
@@ -13515,6 +13716,49 @@ async function openNotificationTarget(n) {
   if (route.sub && route.tab === 'governance' && selectGovSub) selectGovSub(route.sub);
   if (route.evidence) focusExhibit(route.evidence);
   if (route.merge) await focusMerge(route.merge);
+}
+
+/** The card of the collected document a lift request names, brought into view under Feeds,
+ *  Collected. Which document is read from the deployment-wide list, which shows the request only to
+ *  a reader cleared for every version of it; a document past the first page loaded is said, not
+ *  hunted for. */
+async function openDocumentLift(requestId) {
+  let documentId = null;
+  try {
+    /* The deployment-wide list asks a holder of retention.manage alone for a recent sign-in. */
+    const body = await withStepUp('Opening the request needs a recent sign-in.',
+      () => api('/approvals?state=OPEN&operation='
+        + encodeURIComponent(LIFT_DOCUMENT_OPERATION)));
+    if (!body) return;
+    const a = (body.approvals || []).find((x) => x.id === requestId);
+    documentId = a && a.payload ? a.payload.document_id : null;
+  } catch (err) {
+    if (!(err instanceof ApiError)) throw err;
+  }
+  if (!documentId) {
+    banner('That request is not open', 'It may have been decided, withdrawn or expired '
+      + 'since the notification.', 'warn');
+    return;
+  }
+  if (!state.caseId) {
+    banner('Open a case to review it', 'The request is about collected document '
+      + shortId(documentId) + '. Open a case you work on, then Feeds, Collected, and load '
+      + 'the documents: its card shows the request.', 'info', { sticky: true });
+    return;
+  }
+  selectTab('feeds');
+  if (selectFeedsSub) selectFeedsSub('collected');
+  await loadCollectedDocuments();
+  const card = $('cdoc-' + documentId);
+  if (!card) {
+    banner('That document is not in the list', 'Collected document ' + shortId(documentId)
+      + ' is not among the documents loaded. Narrow the list to find it: its card shows '
+      + 'the request.', 'warn');
+    return;
+  }
+  card.classList.add('is-highlighted');
+  card.scrollIntoView({ block: 'center' });
+  card.focus({ preventScroll: true });
 }
 
 /** Bring an exhibit into view, mark it, and open its custody log. */
@@ -14875,6 +15119,15 @@ const MERGE_OPERATION = 'node.merge';
  */
 const RELAX_OPERATION = 'case.policy.relax';
 
+/** The catalogue's keys for a hold's lift (decision 229), a contract with `approvals.py` named once
+ *  for the approvals pane and the hold controls; `test_hold_controls_ui.py` holds them to it. */
+const LIFT_EXHIBIT_OPERATION = 'legal_hold.lift_exhibit';
+const LIFT_CASE_OPERATION = 'legal_hold.lift_case';
+const LIFT_DOCUMENT_OPERATION = 'legal_hold.lift_document';
+
+/** What a lift takes, said wherever one is offered. One line, as the console's tests read it. */
+const LIFT_TAKES = 'Lifting needs a written reason, a sign-in from the last 15 minutes and a second person cleared for the same material.';
+
 /** The last policy read, for the relax request's epoch. */
 let casePolicy = null;
 
@@ -15127,12 +15380,25 @@ function approvalTitle(a) {
   if (a.operation === RELAX_OPERATION) {
     return 'Stop requiring a second signature on merges in this case';
   }
+  // A hold's lift names what it releases: the exhibit by its title, which the server sends to a
+  // reader cleared for it, the only one shown the request.
+  if (a.operation === LIFT_EXHIBIT_OPERATION) {
+    const exhibit = (a.subjects || {}).exhibit;
+    return 'Lift the legal hold on exhibit ' + (exhibit && exhibit.title
+      ? '"' + visibleText(exhibit.title) + '"' : shortId(p.evidence_id));
+  }
+  if (a.operation === LIFT_CASE_OPERATION) return 'Lift the legal hold on this case';
   return visibleText(a.operation_description || a.operation);
 }
 
-/** The consequence, for a merge: which entity leaves the live graph. */
+/** The consequence: for a merge, which entity leaves the live graph; for a hold's lift, what a
+ *  purge may then do. */
 function approvalConsequence(a) {
   const p = a.payload || {};
+  if (a.operation === LIFT_EXHIBIT_OPERATION || a.operation === LIFT_CASE_OPERATION) {
+    return 'Once lifted, what it governs follows the case\'s retention date again and a purge '
+      + 'may destroy what is past it.';
+  }
   if (a.operation !== MERGE_OPERATION || !p.source_node_id) return '';
   const s = (a.subjects || {}).source;
   const who = s && s.label ? '"' + visibleText(s.label) + '"'
@@ -15237,6 +15503,16 @@ function approvalRow(a) {
       }
     });
     card.appendChild(run);
+  }
+  /* An approved lift is spent from the hold itself, with the written reason the lift asks for:
+     the exhibit's card or the case header's Hold button. */
+  if (a.state === 'APPROVED' && !a.consumed_at && !a.is_expired && mine
+      && (a.operation === LIFT_EXHIBIT_OPERATION || a.operation === LIFT_CASE_OPERATION)) {
+    card.appendChild(el('p', 'help', a.operation === LIFT_EXHIBIT_OPERATION
+      ? 'Approved. Lift the hold from the exhibit\'s card under Evidence, with a written '
+        + 'reason; the approval is spent once.'
+      : 'Approved. Lift the hold with the Hold button in the case header, with a written '
+        + 'reason; the approval is spent once.'));
   }
   /* An approved relax is spent from its own row by the one who asked, like Execute merge. It
      is governance, so it carries no `case-write` and works on a closed case. */
@@ -29859,6 +30135,9 @@ async function loadCollectedDocuments() {
 
 function collectedDocRow(d, canHold) {
   const card = el('div', 'card row-card compact');
+  /* So a notice about the document's hold can bring its card into view. */
+  card.id = 'cdoc-' + d.id;
+  card.tabIndex = -1;
   const head = el('div', 'row-head');
   const tgm = d.telegram || null;   // a Telegram message's capture record
   head.appendChild(el('span', 'row-title', visibleText(d.title
@@ -29994,33 +30273,86 @@ function forumDetailFacts(f) {
   return facts;
 }
 
-/** Place or lift a hold on a collected document, with a reason either way,
- *  behind the step-up gate (docs/00 decision 74). */
+/** Place a hold on a collected document, or take a lift's steps (decision 229), each with a
+ *  reason behind the step-up gate (docs/00 decision 74). A document belongs to no case, so a
+ *  colleague's request to lift its hold is approved or refused here, on its card, through the
+ *  deployment-wide decide route; the listing sends `lift_request` only to a reader cleared for
+ *  every version, as both people must be. */
 function documentHoldActions(card, d) {
   const actions = el('div', 'row-actions');
-  const verb = d.legal_hold ? 'Lift the legal hold' : 'Place a legal hold';
+  const after = 'Once lifted, this document and its earlier versions follow their '
+    + 'retention rule again, unless a case that cites them is held.';
+  const lr = d.legal_hold ? d.lift_request : null;
+  if (!d.legal_hold) {
+    actions.appendChild(documentHoldForm(card, 'Place a legal hold',
+      'A hold stops every deletion of this document and its earlier versions until it is '
+      + 'lifted.',
+      (why) => api('/retention/documents/' + d.id + '/legal-hold',
+        { method: 'POST', json: { on: true, reason: why } })));
+  } else if (!lr) {
+    actions.appendChild(documentHoldForm(card, 'Ask for a second signature to lift',
+      after + ' ' + LIFT_TAKES + ' Say why: it is what your colleague decides on.',
+      (why) => api('/retention/documents/' + d.id + '/legal-hold/lift-requests',
+        { method: 'POST', json: { justification: why } })));
+  } else if (lr.state === 'APPROVED' && lr.mine) {
+    actions.appendChild(documentHoldForm(card, 'Lift the legal hold (approved by '
+      + liftApprover(lr) + ')',
+      after + ' The approval is spent once, and the reason is kept in the audit log.',
+      (why) => api('/retention/documents/' + d.id + '/legal-hold', { method: 'POST',
+        json: { on: false, reason: why, approval_request_id: lr.id } })));
+  } else {
+    actions.appendChild(liftWaiting(lr, {
+      withdraw: () => api('/approvals/' + lr.id + '/withdraw', { method: 'POST' }),
+      reload: loadCollectedDocuments,
+      decide: (box) => documentLiftDecision(box, lr),
+    }));
+  }
+  return actions;
+}
+
+/** One step of a document's hold: a written reason, the step-up gate, the list again. */
+function documentHoldForm(card, verb, help, send) {
   const btn = el('button', 'btn small ghost', verb);
   btn.type = 'button';
   btn.addEventListener('click', () => rowForm(card, {
-    kind: 'hold', submit: verb,
-    help: d.legal_hold
-      ? 'Once lifted, this document and its earlier versions follow their '
-        + 'retention rule again, unless a case that cites them is held.'
-      : 'A hold stops every deletion of this document and its earlier '
-        + 'versions until somebody lifts it.',
+    kind: 'hold', submit: verb, help: help,
     fields: [{ label: 'Why', grow: true }],
     check: ([why]) => (why.trim().length < 5
       ? 'Say why, in at least 5 characters.' : null),
     submitFn: async ([why]) => {
       const out = await withStepUp('A legal hold needs a recent sign-in.',
-        () => api('/retention/documents/' + d.id + '/legal-hold',
-          { method: 'POST', json: { on: !d.legal_hold, reason: why.trim() } }));
+        () => send(why.trim()));
       if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
       loadCollectedDocuments();
     },
   }));
-  actions.appendChild(btn);
-  return actions;
+  return btn;
+}
+
+/** Approve and Refuse on a colleague's request to lift a document's hold, each with a note and a
+ *  recent sign-in, as every second signature takes. */
+function documentLiftDecision(box, lr) {
+  for (const [label, approve] of [['Approve the lift', true], ['Refuse the lift', false]]) {
+    const b = el('button', 'btn small ghost', label);
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      const note = window.prompt(label + '?\n\n' + visibleText(lr.justification)
+        + '\n\nA note is recorded with the decision.');
+      if (note === null) return;
+      b.disabled = true;
+      try {
+        const out = await withStepUp('A second signature needs a recent sign-in.',
+          () => api('/approvals/' + lr.id + '/decide', { method: 'POST',
+            json: { approve: approve, note: note || null } }));
+        if (!out) { b.disabled = false; return; }
+        loadCollectedDocuments();
+      } catch (err) {
+        b.disabled = false;
+        fail(err);
+      }
+    });
+    box.appendChild(b);
+  }
 }
 
 /** A collected document's row with its Similar control: documents like this one, opened
@@ -31104,6 +31436,8 @@ let canEmbeddings = false;  // embedding.manage: the similarity indexes
 // sample.screening.review: the prohibited-content screening record.
 let canScreenReview = false;
 let canScreenManage = false;
+// comms.minimise.oversee: the cases whose conversations nobody assigned can minimise.
+let canOverseeMinimisation = false;
 let adminView = false;
 let adminHome = null;
 let reviewHome = null;
@@ -31132,8 +31466,9 @@ function adminViewTitle() {
   return (canReview || canCountersign || canConfirmAuthority) && !canAdmin
     ? 'The break-glass review queue, the preserved-sample authorisations, '
       + 'the collection authorities that wait for a second person, '
-      + 'the two-person changes waiting for a countersignature and the '
-      + 'prohibited-content screening record. They cover the whole '
+      + 'the two-person changes waiting for a countersignature, the '
+      + 'prohibited-content screening record and the cases with conversations '
+      + 'nobody on their team can minimise. They cover the whole '
       + 'deployment, so no case is needed.'
     : 'Accounts and the readiness register. They cover the whole '
       + 'deployment, so no case is needed.';
@@ -31154,6 +31489,7 @@ async function loadAdminAccess() {
   canYaraReview = !!access.sample_yara_activate;
   canScreenReview = !!access.sample_screening_review;
   canScreenManage = !!access.sample_screening_manage;
+  canOverseeMinimisation = !!access.comms_minimise_oversee;
   /* The failing blocking checks, for an administrator: the badges on the way in, and the
      section the pane opens on. */
   ADM.blocking = canAdmin && Array.isArray(access.blocking_failures)
@@ -31203,6 +31539,8 @@ async function refreshAdminEntry() {
   if (canYaraReview && !state.caseId && !adminView) show(btn, true);
   // So does an officer who reviews screening matches.
   if (canScreenReview && !state.caseId && !adminView) show(btn, true);
+  // And one who oversees minimisation.
+  if (canOverseeMinimisation && !state.caseId && !adminView) show(btn, true);
 }
 
 async function showAdmin() {
@@ -31241,6 +31579,8 @@ async function showAdmin() {
   showScreeningReview(canScreenReview);
   // The YARA rule sets awaiting activation, also the Lab's.
   showYaraReview(canYaraReview);
+  // The cases whose conversations nobody assigned can minimise, last.
+  showMinimisationGaps(canOverseeMinimisation);
   show($('view-cases'), false);
   show($('view-admin'), true);
   show($('btn-admin'), false);
@@ -38401,6 +38741,109 @@ async function downloadSample(s, msg, mint = '/download-ticket') {
     + '….zip, password "infected". It is a live sample.'
     + (retrieval ? ' The legal hold on the preserved copy is unchanged.' : ''));
   msg.className = 'msg warn';
+}
+
+/* --- Oversight: minimisation gaps (decision 231) ------------------------
+ *
+ * The cases whose conversations nobody assigned can minimise, for a holder of
+ * comms.minimise.oversee, the Security officer, who holds no case content. A row is the case's
+ * code, its status, the highest TLP the conversations need and counts: never a conversation, a
+ * platform, a compartment or a name. The case's Lead investigator assigns a cleared colleague, so
+ * nothing here acts. Mounted by `showAdmin` after the other Oversight sections.
+ */
+let minimisationGaps = null;
+let minimisationGapsGen = 0;
+
+/** Called by `showAdmin`. Appended on every visit, as the two-person changes are, so it stays
+ *  last; hidden and emptied for an account that may not see it, so a later sign-in on the same
+ *  page never inherits the last officer's list. */
+function showMinimisationGaps(canSee) {
+  if (!minimisationGaps) minimisationGaps = buildMinimisationGaps();
+  $('view-admin').appendChild(minimisationGaps);
+  show(minimisationGaps, canSee);
+  if (canSee) {
+    loadMinimisationGaps();
+  } else {
+    minimisationGapsGen += 1;
+    clear($('mgap-list'));
+    $('mgap-counts').textContent = '';
+  }
+}
+
+function buildMinimisationGaps() {
+  const box = el('section', 'pane mgap-review');
+  box.id = 'mgap-review';
+  box.setAttribute('aria-label', 'Minimisation gaps');
+  box.hidden = true;
+  box.appendChild(el('h2', 'h-sm', 'Minimisation gaps'));
+  const head = el('div', 'pane-head');
+  const refresh = el('button', 'btn', 'Refresh');
+  refresh.type = 'button';
+  refresh.id = 'mgap-refresh';
+  refresh.addEventListener('click', () => loadMinimisationGaps());
+  head.appendChild(refresh);
+  const counts = el('span', 'muted small');
+  counts.id = 'mgap-counts';
+  head.appendChild(counts);
+  box.appendChild(head);
+  const list = el('div', 'rows');
+  list.id = 'mgap-list';
+  box.appendChild(list);
+  const empty = el('p', 'empty', MGAP_NONE);
+  empty.id = 'mgap-empty';
+  empty.hidden = true;
+  box.appendChild(empty);
+  return box;
+}
+
+const MGAP_NONE = 'No case has a conversation that nobody assigned can minimise.';
+
+async function loadMinimisationGaps() {
+  const gen = ++minimisationGapsGen;
+  const list = $('mgap-list');
+  const empty = $('mgap-empty');
+  let body;
+  try {
+    body = await api('/admin/minimisation-gaps');
+  } catch (err) {
+    if (gen !== minimisationGapsGen) return;
+    clear(list);
+    $('mgap-counts').textContent = '';
+    empty.textContent = err instanceof ApiError
+      ? refusalText(err, 'The list needs comms.minimise.oversee.')
+      : 'The minimisation gaps could not be read. The list is not known to be empty.';
+    show(empty, true);
+    return;
+  }
+  if (gen !== minimisationGapsGen) return;
+  clear(list);
+  const cases = body.cases || [];
+  for (const c of cases) list.appendChild(minimisationGapRow(c));
+  const total = Number(body.count) || cases.length;
+  $('mgap-counts').textContent = countOf(total, 'case', 'cases')
+    + (body.truncated ? ', the first ' + cases.length + ' shown' : '');
+  empty.textContent = MGAP_NONE;
+  show(empty, !cases.length);
+}
+
+function minimisationGapRow(c) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title mono', visibleText(c.case_code)));
+  head.appendChild(caseStatusChip(c.status));
+  head.appendChild(tlpChip(c.highest_tlp));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('conversations', c.conversations));
+  if (c.closed_at) {
+    facts.appendChild(fact('closed', fmtTime(c.closed_at)));
+    facts.appendChild(fact('days since closed', c.days_since_closed));
+  }
+  facts.appendChild(fact('Lead investigators assigned', c.leads_assigned));
+  facts.appendChild(fact('cleared Lead investigators elsewhere',
+    c.eligible_elsewhere));
+  card.appendChild(facts);
+  return card;
 }
 
 /* ── the Lab's legal banner ──────────────────────────────────────────────

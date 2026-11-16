@@ -3576,6 +3576,45 @@ def _row_level_security_enforced(conn: psycopg.Connection) -> Check:
         f"{system_role}, which owns nothing.")
 
 
+_MINIMISABLE_ACTION = (
+    "The Security officer's Oversight, Minimisation gaps, names each case. Ask its Lead "
+    "investigator to assign a Lead investigator who is cleared for its conversations, who can "
+    "then minimise them. Nothing is refused meanwhile.")
+
+
+def _conversations_minimisable(conn: psycopg.Connection) -> Check:
+    """Whether every closed case's conversations can be minimised by somebody assigned to it
+    (decision 231).
+
+    Fails while a closed case (CLOSED, ARCHIVED or PURGED) still holds a conversation nobody
+    assigned to it is cleared to minimise: the minimisation its closure calls for (docs/16 L4)
+    cannot be done by its team. A case not yet closed with one is a caveat on a passing row, since
+    its team may still assign somebody. Not blocking, and no console target: nothing is refused
+    while it fails, and the cases are on the Security officer's Oversight list, not in
+    Administration. The evidence says whether, never how many and never which case: this row is read
+    by every holder of user.manage, and the conversations span every compartment."""
+    from noctornal_api.cases import CONTENT_READ_ONLY_STATES
+    from noctornal_api.comms import CommsService
+
+    name = "conversations_minimisable"
+    states = CommsService(conn).minimisation_gap_states()
+    if states & CONTENT_READ_ONLY_STATES:
+        return Check(
+            name, False,
+            "At least one closed case still holds conversations that nobody assigned to it is "
+            "cleared to minimise, so the minimisation its closure calls for cannot be done by "
+            "its team.", _MINIMISABLE_ACTION)
+    if states:
+        return Check(
+            name, True,
+            "No closed case holds a conversation that nobody assigned to it can minimise.",
+            caveat=("At least one case that is not closed holds conversations that nobody "
+                    "assigned to it is cleared to minimise; closed as it is, they would stay "
+                    "unminimised. " + _MINIMISABLE_ACTION))
+    return Check(name, True,
+                 "No case holds a conversation that nobody assigned to it can minimise.")
+
+
 # ---------------------------------------------------------------------------
 # The register
 # ---------------------------------------------------------------------------
@@ -3685,6 +3724,9 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("pgp_key_directory", _pgp_key_directory,
      "the key lookup settings could not be read; check NOCTORNAL_WKD_CEILING "
      "and the integration route wkd"),
+    # Decision 231. Not blocking, no console target.
+    ("conversations_minimisable", _conversations_minimisable,
+     "the comms tables could not be read; run alembic upgrade head"),
     ("embedding_wording_current", _embedding_wording_current,
      "the similarity tables could not be read; run alembic upgrade head"),
     ("embedding_meaning_endpoint", _embedding_meaning_endpoint,

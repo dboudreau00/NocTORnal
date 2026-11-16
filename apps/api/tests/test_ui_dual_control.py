@@ -292,7 +292,8 @@ console.log(JSON.stringify({
 
 @needs_node
 def test_a_caseless_approval_request_opens_the_change(tmp_path):
-    got = _run([_fn("notificationRoute")], r"""
+    # The route reads the document lift's key to send that one notice elsewhere (decision 229).
+    got = _run([_const("LIFT_DOCUMENT_OPERATION"), _fn("notificationRoute")], r"""
 console.log(JSON.stringify({
   global: notificationRoute({ object_type: 'approval_request', object_id: 'r1',
                               case_id: null }),

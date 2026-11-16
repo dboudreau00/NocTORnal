@@ -185,6 +185,8 @@ def test_every_request_role_producer_is_still_written(owner, store):
     s.grant_global(owner, officer, "SECURITY_OFFICER")
     s.grant_global(owner, me, "MALWARE_ANALYST")
     s.grant_global(owner, lead, "MALWARE_ANALYST")
+    keeper = s.user(owner, "AMBER", prefix=P)
+    s.grant_global(owner, keeper, "CASE_OWNER")
     case_id = s.case(owner, lead)
     s.assign(owner, case_id, me)
     exhibit = s.exhibit(owner, case_id, lead)
@@ -207,6 +209,14 @@ def test_every_request_role_producer_is_still_written(owner, store):
         "global_approval_decided": lambda c: ev.global_approval_decided(
             c, request_id=uuid4(), description="Change a role definition",
             requested_by=lead, approved=True, actor_id=me) is not None,
+        # A collected document's hold lift (decision 229), named by its key in the deployment-wide
+        # templates and told to a colleague who holds retention.manage and collection.read.
+        "document_lift_requested": lambda c: ev.document_lift_requested(
+            c, request_id=uuid4(), document_id=uuid4(), justification="order discharged",
+            actor_id=me, element_classification="AMBER") >= 1,
+        "document_lift_decided": lambda c: ev.document_lift_decided(
+            c, request_id=uuid4(), document_id=uuid4(), requested_by=keeper,
+            approved=True, actor_id=me, element_classification="AMBER") is not None,
         "proposals_queued": lambda c: ev.proposals_queued(
             c, case_id=case_id, count=3, actor_id=me) is True,
         "proposals_queued_one": lambda c: ev.proposals_queued(
@@ -243,6 +253,10 @@ def test_the_templates_follow_the_catalogues():
     m = _migration()
     for kind, priority in m.REQUEST_KINDS.items():
         assert KINDS[kind].default_priority == priority, kind
-    globals_ = {op.description for op in OPERATIONS.values() if op.scope == "global"}
+    from noctornal_api.notify_events import DOCUMENT_LIFT
+    # A collected document's hold lift is named by its key in its notices, which `{global}` admits,
+    # so its description needs no template (`test_every_request_role_producer_is_still_written`).
+    globals_ = {op.description for op in OPERATIONS.values()
+                if op.scope == "global" and op.key != DOCUMENT_LIFT}
     assert globals_ == set(m.GLOBAL_DESCRIPTIONS), globals_ ^ set(m.GLOBAL_DESCRIPTIONS)
     assert {kind for kind, _s, _m in m.TEMPLATES} == set(m.REQUEST_KINDS)

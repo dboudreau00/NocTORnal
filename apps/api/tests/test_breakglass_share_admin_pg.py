@@ -850,7 +850,9 @@ def test_the_way_in_is_answered_for_the_caller_alone(conn, client):
                                    "integration_manage": False,
                                    # Prohibited-content screening.
                                    "sample_screening_review": False,
-                                   "sample_screening_manage": False}
+                                   "sample_screening_manage": False,
+                                   # The minimisation gaps (decision 231).
+                                   "comms_minimise_oversee": False}
     assert client.get("/api/v1/admin/access", headers=_session(conn, admin)
                       ).json()["user_manage"] is True
     assert client.get("/api/v1/admin/access", headers=_session(conn, officer)
@@ -875,7 +877,9 @@ def test_the_way_in_is_answered_for_the_caller_alone(conn, client):
                                    "integration_manage": False,
                                    # The officer screens.
                                    "sample_screening_review": True,
-                                   "sample_screening_manage": True}
+                                   "sample_screening_manage": True,
+                                   # And oversees minimisation.
+                                   "comms_minimise_oversee": True}
     # ...and it opens nothing: the list still wants user.manage.
     assert client.get("/api/v1/admin/users",
                       headers=_session(conn, analyst)).status_code == 403

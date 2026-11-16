@@ -111,6 +111,10 @@ This is the gate. Nothing below runs on real material until it is closed.
   named Lead investigator. Break-glass is invoked by a `CASE_OWNER` or
   `SYS_ADMIN` and reviewed by a `SECURITY_OFFICER`, and no role may hold both
   (docs/16 D7). Dual control on merge ships off (docs/16 D1).
+  Lifting a legal hold, on an exhibit, a case or a collected document, takes
+  the one who lifts and a second holder of `retention.manage` cleared for what
+  it releases, whose approval lasts 72 hours (decision 229): write down who may
+  be the second person.
 * TLP handling and egress: every outbound path asks one `can_egress`, and in
   production the egress proxy is the only way out
   ([docs/20](20-outbound-connections.md)). Write down who approves a

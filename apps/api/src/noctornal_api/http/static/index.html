@@ -4818,13 +4818,14 @@
     <h2 id="hold-title" class="h-sm">Legal hold on the case</h2>
     <p id="hold-now"></p>
     <p id="hold-help" class="help"></p>
-    <label class="field">
+    <label id="hold-why-field" class="field">
       <span class="label">Why</span>
       <input id="hold-why" type="text" autocomplete="off" maxlength="1000">
     </label>
     <p id="hold-msg" class="msg" role="status" hidden></p>
     <div class="stance-actions">
       <button id="hold-cancel" type="button" class="btn">Cancel</button>
+      <button id="hold-withdraw" type="button" class="btn" hidden>Withdraw the request</button>
       <button id="hold-save" type="submit" class="btn primary">Place the hold</button>
     </div>
   </form>

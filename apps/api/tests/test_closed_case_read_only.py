@@ -185,6 +185,9 @@ NOT_CONTENT = {
     ("POST", "/retention/cases/{case_id}/legal-hold"):
         "a hold on everything a case governs: preservation does not wait for "
         "a reopening, and is wanted most on a closed case",
+    ("POST", "/retention/cases/{case_id}/legal-hold/lift-requests"):
+        "asking for the second signature a case hold's lift takes (decision "
+        "229): governance, like the lift it is for, which works on a closed case",
 }
 
 #: Gated on the REQUESTED operation's own verb (`approvals.OPERATIONS`): a
@@ -699,6 +702,10 @@ CONSOLE_GOVERNANCE = {
                        "on a closed case",
     "lookupRow": "cancelling a waiting or queued lookup sends nothing",
     "batchRow": "cancelling a batch's queued sends sends nothing",
+    # A hold's lift is governance and works on a closed case (decision 229); taking back one's own
+    # request for its second signature is too.
+    "exhibitHoldButton": "withdrawing a request to lift an exhibit's hold",
+    "withdrawCaseLift": "withdrawing a request to lift the case's hold",
 }
 
 

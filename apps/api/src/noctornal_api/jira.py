@@ -98,6 +98,8 @@ JIRA_NEVER_KINDS = frozenset({
     # The outbound credential vault's own.
     "PROVIDER_CHANGE_REQUESTED", "LOOKUP_SIGNOFF_REQUESTED",
     "LOOKUP_SIGNOFF_DECIDED",
+    # The Security officer's oversight of minimisation (decision 231).
+    "COMMS_MINIMISATION_GAP",
 })
 
 JIRA_MAX_PER_DRAIN = 50

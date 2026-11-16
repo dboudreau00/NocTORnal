@@ -3,7 +3,7 @@ lookup above the reader.
 
 `test_lookup_ledger_pg.py` holds the lookup purge to the case's hold with a raw UPDATE. This places it with
 `RetentionService.set_case_legal_hold`, the call behind `POST /retention/cases/{id}/legal-hold`, and lifts
-it the same way.
+it the same way, with a second person's approval (decision 229).
 
 The fetcher is a fake; nothing reaches a provider. **The email prefix is `g44lk-`.** Env-gated on
 DATABASE_URL.
@@ -60,9 +60,24 @@ def test_a_case_hold_keeps_the_lookups_and_lifting_it_lets_retention_empty_them(
     assert conn.execute("SELECT query_value FROM ingest.lookup WHERE id = %s",
                         (got["lookup_id"],)).fetchone()[0] == "example.org"
 
+    # Lifted with a second person's approval, as every lift is (decision 229): the analyst on the case
+    # signs it, judged here as still signing and cleared for all of it.
+    from noctornal_api.approvals import LIFT_CASE, ApprovalService, lift_case_payload
+    from noctornal_api.retention import LiftApprover
+    epoch = conn.execute('SELECT legal_hold_epoch FROM core."case" WHERE id = %s',
+                         (w.case_id,)).fetchone()[0]
+    approvals = ApprovalService(conn)
+    rid = approvals.request(operation=LIFT_CASE, case_id=w.case_id,
+                            payload=lift_case_payload(epoch),
+                            justification="order discharged, g44 test",
+                            requested_by=w.owner).id
+    approvals.decide(rid, decided_by=w.analyst, approve=True)
     svc.set_case_legal_hold(w.case_id, actor_id=w.owner, on=False,
                             reason="order discharged, g44 test",
-                            lifter_ceiling=("RED", []))
+                            lifter_ceiling=("RED", []), approval_request_id=rid,
+                            approver=LiftApprover(user_id=w.analyst, permitted=True,
+                                                  ceiling=("RED", []),
+                                                  document_ceiling=("RED", [])))
     freed = svc.purge_due(actor_id=w.owner, authority="schedule", case_id=w.case_id)
     assert freed.lookups_purged == 1 and freed.lookup_results_purged == 1
     assert conn.execute("SELECT query_value FROM ingest.lookup WHERE id = %s",

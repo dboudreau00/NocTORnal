@@ -170,7 +170,7 @@ use the key, and a rename moves only the name (migration 0062 renamed
 | Key | Shown as | Holds, among others | Deliberately does not hold |
 |---|---|---|---|
 | `CASE_OWNER` | **Lead investigator** | Full control of their cases: `case.grant`, `case.close`, `case.delete`, `evidence.export`, `evidence.purge`, `retention.manage`, `proposal.review`, `break_glass.invoke`, `victim_pii.reveal`, `sample.preserved.retrieve`, `lookup.request`, `lookup.authorise` (step-up: signs off a colleague's lookup to a vendor or the public), `comms.key.lookup` and `comms.key.lookup.approve` (step-up: ask for, or approve and send, a Web Key Directory lookup) | `victim_pii.authorise`, `sample.preserved.authorise`, `break_glass.review`: the other half of every two-person control below |
-| `SECURITY_OFFICER` | Security officer | `audit.read`, `break_glass.review`, `victim_pii.authorise`, `sample.preserved.authorise`, `dual_control.countersign`, `egress.log.read`, `collection.authority.confirm`, `sample.yara.activate`, `sample.screening.manage`, `sample.screening.review` (step-up on all but `audit.read` and `egress.log.read`) | **Any case content**, and every permission it authorises or reviews |
+| `SECURITY_OFFICER` | Security officer | `audit.read`, `break_glass.review`, `victim_pii.authorise`, `sample.preserved.authorise`, `dual_control.countersign`, `egress.log.read`, `collection.authority.confirm`, `sample.yara.activate`, `sample.screening.manage`, `sample.screening.review`, `comms.minimise.oversee` (the cases whose conversations nobody assigned can minimise, decision 231) (step-up on all but `audit.read`, `egress.log.read` and `comms.minimise.oversee`) | **Any case content**, and every permission it authorises or reviews, `comms.minimise` included |
 | `SYS_ADMIN` | System administrator | `user.manage`, `role.manage`, `integration.manage` (SMTP, Jira, webhooks and outbound lookup providers), `ingest.manage`, `retention.manage`, `retention.purge`, `break_glass.invoke`, `dual_control.manage`, `egress.manage`, `egress.log.read`, `embedding.manage` | Case content by default |
 | `ANALYST` | Analyst | Graph, assertion and evidence work on assigned cases, `analytics.run`, `report.generate`, `sample.read`, `sample.submit`, `lookup.request` | Grants, export, purge, break-glass, any reveal, signing off a lookup |
 | `REVIEWER` | Reviewer | `proposal.review`, `graph.merge`, `graph.unmerge`, `case.read`, `comms.key.lookup.approve` | Originating graph content |
@@ -361,6 +361,52 @@ the rule does not stop is an administrator who resets the credentials of a
 colleague who is already seasoned and signs in as them: the deployment-wide
 policy's seven-day countersigner rule covers that for policy changes, and
 this switch has no equivalent.
+
+**Lifting a legal hold takes two people** (decision 229). An exhibit's hold
+is lifted by one holder of `retention.manage` who asks
+(`legal_hold.lift_exhibit`) and a second who approves: another account
+holding `retention.manage` through a global role and on the case, cleared
+for the exhibit, signing with a fresh second factor. The request is raised
+from the hold itself and never through the generic approvals route, so a
+request from somebody who could not lift is never put to a signer. It is
+bound to the exhibit and to the hold as it stands (an epoch the database
+moves with every change of the hold, so an approval cannot be kept across a
+lift and a new hold), lasts 72 hours and is spent once, by the one who
+asked. The colleague is judged again when it is spent: one whose clearance
+fell below the exhibit, who no longer holds the permission on the case or
+whose account was deactivated approves nothing, and the approval stays
+unspent. A request is shown, counted and notified only to readers cleared
+for the exhibit, and the decide route answers anyone below it as it answers
+a missing request. The database refuses the lift without an approval
+consumed in the same transaction, whoever writes the row, the schema owner
+and the system role included. Like `evidence.purge` the operation is
+`ALWAYS`, the second person is not seasoned and the person who placed the
+hold may be either half.
+
+A case's hold is lifted the same way (`legal_hold.lift_case`), and both
+people must be cleared for everything the case's hold governs: every live
+exhibit, record, sample, lookup and answer, and every collected document the
+case cites, judged on their own ceiling outside the case. A lead below any of
+it is refused when they ask, and a colleague below it never sees the
+request; the material is judged again when the approval is spent, so what
+the case gained after the approval counts.
+
+A collected document's hold covers every version of it and belongs to no
+case, so its lift (`legal_hold.lift_document`) is a deployment-wide request:
+raised from the document, decided through `POST /approvals/{id}/decide`, and
+spent on the document's hold. Both people hold `retention.manage` and
+`collection.read` through a global role, as the hold's route asks, and are
+cleared for every version and the source on their own ceiling. The approval
+names every version it releases at its epoch, so a version held, lifted or
+held again afterwards voids it. The deployment-wide gate therefore admits a
+holder of `retention.manage`, and the deployment-wide list and decide route
+show a document's lift only to a reader cleared for all of it; the
+Two-person changes count leaves it out, because it is signed on the
+document's card.
+
+What no check here can stop is the ceiling every approval shares: one human
+with two accounts is two people, and a compromised API process can forge a
+request and a decision in two names.
 
 ### Telegram collection (F5.2, F5.3)
 

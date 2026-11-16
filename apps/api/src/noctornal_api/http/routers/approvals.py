@@ -17,6 +17,10 @@ from pydantic import BaseModel, Field
 
 from noctornal_api.approvals import (
     GLOBAL_GATE_PERMISSIONS,
+    LIFT_CASE,
+    LIFT_DOCUMENT,
+    LIFT_EXHIBIT,
+    LIFT_OPERATIONS,
     OPERATIONS,
     PENDING,
     ApprovalError,
@@ -30,7 +34,9 @@ from noctornal_api.http.deps import (
     CurrentUser,
     authorize_global,
     authorize_object,
+    element_labels,
     get_conn,
+    holds_global,
     require,
     require_global_any,
     require_step_up,
@@ -38,6 +44,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.element_gate import (
     BASIS_SELECTOR_REFUSAL,
+    authorize_element,
     check_basis_selector,
     disclosure_mode,
     gate_element,
@@ -79,22 +86,80 @@ def _hidden_merge_requests(conn: psycopg.Connection, user: CurrentUser,
             if p is None or not (p[0] in seen and p[1] in seen)}
 
 
-def _merge_request_visible(conn: psycopg.Connection, user: CurrentUser,
-                           case_id: UUID, record: ApprovalRequest) -> bool:
-    return not _hidden_merge_requests(
+def _payload_uuid(payload, key: str) -> UUID | None:
+    try:
+        return UUID(str((payload or {})[key]))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _hidden_lift_requests(conn: psycopg.Connection, user: CurrentUser,
+                          case_id: UUID, items) -> set[UUID]:
+    """The hold lifts among `items` over material above the viewer (decision 229): a lift request says
+    that something is held and that somebody wants it released, and its justification describes it. An
+    exhibit's lift is shown to a viewer whose ceiling on this case dominates the exhibit's own labels, read
+    through `iam.element_facts` whatever row security shows. A request that names no exhibit of this case
+    counts as hidden, failing closed. A case's lift is shown to a viewer whose ceilings cover everything
+    the case's hold governs, the test the lift itself applies, asked on a system connection because row
+    security would hide exactly the material above them."""
+    lifts = {rid: _payload_uuid(payload, "evidence_id")
+             for rid, operation, payload in items if operation == LIFT_EXHIBIT}
+    case_lifts = {rid for rid, operation, _payload in items if operation == LIFT_CASE}
+    if not lifts and not case_lifts:
+        return set()
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    hidden: set[UUID] = set()
+    if case_lifts:
+        from noctornal_api.db import SystemPurpose, system_connection
+        from noctornal_api.retention import RetentionService
+
+        outside, outside_held = user_ceiling(conn, user.user_id)
+        with system_connection(SystemPurpose.RETENTION, reuse=conn) as sconn:
+            if not RetentionService(sconn).ceiling_covers(
+                    case_id, (clearance.name, sorted(held)),
+                    (outside.name, sorted(outside_held))):
+                hidden |= case_lifts
+    wanted = sorted({e for e in lifts.values() if e is not None})
+    seen = {r[0] for r in conn.execute(
+        """SELECT x.id, f.case_id, f.classification, f.compartments
+             FROM unnest(%s::uuid[]) AS x(id)
+            CROSS JOIN LATERAL iam.element_facts('evidence', x.id) f""",
+        (wanted,)).fetchall()
+            if r[1] == case_id and tlp_from_name(r[2]) <= clearance
+            and frozenset(r[3] or []) <= held} if wanted else set()
+    return hidden | {rid for rid, e in lifts.items() if e is None or e not in seen}
+
+
+def _hidden_requests(conn: psycopg.Connection, user: CurrentUser,
+                     case_id: UUID, items) -> set[UUID]:
+    """The requests among `items` ((id, operation, payload) triples) the viewer is not shown: a merge whose
+    two entities they may not both see, and a hold lift over material above them. Each is absent from the
+    list, counted under `withheld` only as the case allows, and the missing request's 404 to decide and
+    withdraw."""
+    return (_hidden_merge_requests(conn, user, case_id, items)
+            | _hidden_lift_requests(conn, user, case_id, items))
+
+
+def _request_visible(conn: psycopg.Connection, user: CurrentUser,
+                     case_id: UUID, record: ApprovalRequest) -> bool:
+    return not _hidden_requests(
         conn, user, case_id, [(record.id, record.operation, record.payload)])
 
 
-def _hidden_merge_request_count(conn: psycopg.Connection, user: CurrentUser,
-                                case_id: UUID, state: str | None) -> int:
-    """How many node.merge requests of the case, under the listing's state
-    filter, the viewer is not shown: over the case, not one page."""
+#: The operations whose requests can be hidden from a reader of the case.
+_LABELLED_OPERATIONS = (MERGE_OPERATION, *sorted(LIFT_OPERATIONS))
+
+
+def _hidden_request_count(conn: psycopg.Connection, user: CurrentUser,
+                          case_id: UUID, state: str | None) -> int:
+    """How many requests of the case, under the listing's state filter, the
+    viewer is not shown: over the case, not one page."""
     items = conn.execute(
         """SELECT id, operation, payload FROM core.approval_request
-            WHERE case_id = %s AND operation = %s
+            WHERE case_id = %s AND operation = ANY(%s)
               AND (%s::text IS NULL OR state = %s)""",
-        (case_id, MERGE_OPERATION, state, state)).fetchall()
-    return len(_hidden_merge_requests(conn, user, case_id, items))
+        (case_id, list(_LABELLED_OPERATIONS), state, state)).fetchall()
+    return len(_hidden_requests(conn, user, case_id, items))
 
 _STATES = frozenset({"PENDING", "APPROVED", "REJECTED", "WITHDRAWN", "CONSUMED"})
 
@@ -164,6 +229,11 @@ def _request_reach(r: ApprovalRequest) -> dict:
         warnings.append(
             "the request is recorded but the notification failed; no "
             "approver has been told, so ask one directly")
+    elif r.approvers_notified == 0 and r.operation == LIFT_DOCUMENT:
+        warnings.append(
+            "the request is recorded but nobody was notified: no other active "
+            "account holds retention.manage and collection.read and is cleared "
+            "for every version of the document, so ask one directly")
     elif r.approvers_notified == 0 and r.case_id is None:
         # A deployment-wide request has no case, so "nobody on this case" would be the wrong fact.
         op = OPERATIONS.get(r.operation)
@@ -227,6 +297,22 @@ def _merge_subjects(conn: psycopg.Connection, user: CurrentUser,
             for rid, (src, dst) in wanted.items()}
 
 
+def _lift_subjects(conn: psycopg.Connection, case_id: UUID,
+                   rows: list[ApprovalRequest]) -> dict:
+    """The exhibit each listed exhibit lift names, by title (decision 229): the reader was shown the
+    request, so they are cleared for the exhibit (`_hidden_lift_requests`)."""
+    wanted = {r.id: _payload_uuid(r.payload, "evidence_id") for r in rows
+              if r.operation == LIFT_EXHIBIT}
+    ids = sorted({e for e in wanted.values() if e is not None})
+    if not ids:
+        return {}
+    titles = {row[0]: row[1] for row in conn.execute(
+        "SELECT id, title FROM core.evidence WHERE id = ANY(%s) AND case_id = %s",
+        (ids, case_id)).fetchall()}
+    return {rid: {"exhibit": {"title": titles[e]}} for rid, e in wanted.items()
+            if e in titles}
+
+
 def _approvers_reached(conn: psycopg.Connection,
                        rows: list[ApprovalRequest]) -> dict:
     """How many APPROVAL_REQUESTED notifications each request raised.
@@ -269,24 +355,25 @@ def list_approvals(
     if state is not None and state not in _STATES:
         raise Problem(400, "Invalid request",
                       f"unknown state {state!r}; one of {', '.join(sorted(_STATES))}")
-    # A node.merge request is listed only to a viewer who may see both its entities; the rest are
-    # reported under `withheld` as the case allows, counted over the whole case (state filter
-    # included), not this page. The page is cut after the filter, so hidden requests do not push
-    # visible ones off it.
+    # A node.merge request is listed only to a viewer who may see both its entities, and a hold lift
+    # only to one cleared for what it releases; the rest are reported under `withheld` as the case
+    # allows, counted over the whole case (state filter included), not this page. The page is cut
+    # after the filter, so hidden requests do not push visible ones off it.
     rows = ApprovalService(conn).list_for_case(case_id, state=state, limit=500)
-    hidden = _hidden_merge_requests(
+    hidden = _hidden_requests(
         conn, user, case_id, [(r.id, r.operation, r.payload) for r in rows])
     rows = [r for r in rows if r.id not in hidden][:limit]
     mode = disclosure_mode(conn, case_id)
     withheld = withheld_notice(
         mode, 0 if mode == DISCLOSURE_NONE
-        else _hidden_merge_request_count(conn, user, case_id, state),
+        else _hidden_request_count(conn, user, case_id, state),
         noun="requests")
     out = [_out(r).model_dump(mode="json") for r in rows]
     # Who asked and who decided, by name: the ids stay as the durable record, the names are for the
     # person deciding.
     names = _names(conn, rows)
-    subjects = _merge_subjects(conn, user, case_id, rows)
+    subjects = {**_merge_subjects(conn, user, case_id, rows),
+                **_lift_subjects(conn, case_id, rows)}
     reached = _approvers_reached(conn, rows)
     svc = ApprovalService(conn)
     for item, r in zip(out, rows, strict=True):
@@ -389,6 +476,31 @@ _DEPLOYMENT_REQUIRES = (
     "Every merge on this deployment needs a second signature (Administration, "
     "Two-person controls), so a case cannot turn it off.")
 
+_LIFT_ASKED_AT_THE_HOLD = (
+    "a legal hold's lift is asked for from the hold itself, which checks that "
+    "you are cleared for what the lift releases, and not through this route")
+
+
+def _refuse_unless_lift_signer(conn: psycopg.Connection, user: CurrentUser,
+                               case_id: UUID, record: ApprovalRequest) -> None:
+    """What a hold lift asks of its second person beyond the case role (decision 229): the global
+    retention.manage the lift route itself demands, with the fresh second factor `decide` already
+    asked for, and for an exhibit the gate at its labels, a label refusal answered as the missing
+    request. The visibility check before this has hidden the request from a reader below what it
+    releases (for a case's lift that is the whole of the cover test); this is the gate's own
+    decision, with its AUTHZ_DENIED row."""
+    authorize_global(conn, user, "retention.manage")
+    if record.operation == LIFT_EXHIBIT:
+        evidence_id = _payload_uuid(record.payload, "evidence_id")
+        facts = (element_labels(conn, "evidence", evidence_id)
+                 if evidence_id is not None else None)
+        if facts is None or facts[0] != case_id:
+            raise Problem(404, "Not found", "no such approval request in this case")
+        authorize_element(conn, user, case_id=case_id,
+                          permission_key="retention.manage",
+                          classification=facts[1], compartments=facts[2],
+                          missing_detail="no such approval request in this case")
+
 
 @router.post("", response_model=ApprovalOut, status_code=201)
 def raise_request(
@@ -411,6 +523,11 @@ def raise_request(
         raise Problem(400, "Invalid request",
                       f"{operation.description} is deployment-wide: it is "
                       f"raised from Administration, Two-person controls")
+    if body.operation in LIFT_OPERATIONS:
+        # Asked for from the hold itself, which checks the requester is cleared for what the lift
+        # releases and builds the payload from the hold as it stands; nothing reaches a signer that
+        # way unchecked.
+        raise Problem(400, "Invalid request", _LIFT_ASKED_AT_THE_HOLD)
     authorize_object(conn, user, case_id=case_id,
                      permission_key=operation.permission, after_case_gate=True)
     check = _CASE_PAYLOAD_CHECKS.get(body.operation)
@@ -450,8 +567,9 @@ def decide(
     # 404 whether or not the request is real (deps.py rule 2).
     if (record is None or record.case_id != case_id
             # Before the signer permission check, so a merge request naming entities above the
-            # caller gets the listing's 404, not a 403 that says the request exists.
-            or not _merge_request_visible(conn, user, case_id, record)):
+            # caller, or a hold lift over material above them, gets the listing's 404, not a 403
+            # that says the request exists.
+            or not _request_visible(conn, user, case_id, record)):
         raise Problem(404, "Not found", "no such approval request in this case")
     operation = OPERATIONS.get(record.operation)
     if operation is None:
@@ -464,6 +582,10 @@ def decide(
     authorize_object(conn, user, case_id=case_id,
                      permission_key=operation.signer_permission,
                      after_case_gate=True)
+    if record.operation in LIFT_OPERATIONS and body.approve:
+        # Approving only, as every person-level refusal of a second signature is: refusing is the
+        # safe direction and is never blocked.
+        _refuse_unless_lift_signer(conn, user, case_id, record)
     try:
         record = svc.decide(request_id, decided_by=user.user_id,
                             approve=body.approve, note=body.note)
@@ -486,8 +608,8 @@ def withdraw(
     record = svc.get(request_id)
     if (record is None or record.case_id != case_id
             # The payload comes back in the response, so a merge request whose entities the
-            # caller cannot both see gets the listing's 404.
-            or not _merge_request_visible(conn, user, case_id, record)):
+            # caller cannot both see, or a lift over material above them, gets the listing's 404.
+            or not _request_visible(conn, user, case_id, record)):
         raise Problem(404, "Not found", "no such approval request in this case")
     try:
         return _out(svc.withdraw(request_id, actor_id=user.user_id,
@@ -514,6 +636,32 @@ def _held_globally(conn: psycopg.Connection, user_id: UUID,
             WHERE ur.user_id = %s AND u.is_active
               AND rp.permission_key = ANY(%s)""",
         (user_id, keys)).fetchall()}
+
+
+def _hidden_global_requests(conn: psycopg.Connection, user: CurrentUser,
+                            rows: list[ApprovalRequest]) -> set[UUID]:
+    """The deployment-wide requests among `rows` the viewer is not shown: a collected document's lift
+    (decision 229) unless they hold collection.read through a global role and their own ceiling admits
+    every version of the document and its source, judged on a system connection because row security
+    would hide exactly the version above them. A request that names no document counts as hidden."""
+    lifts = [r for r in rows if r.operation == LIFT_DOCUMENT]
+    if not lifts:
+        return set()
+    if not holds_global(conn, user.user_id, "collection.read"):
+        return {r.id for r in lifts}
+    from noctornal_api.db import SystemPurpose, system_connection
+    from noctornal_api.retention import RetentionService
+
+    clearance, held = user_ceiling(conn, user.user_id)
+    ceiling = (clearance.name, sorted(held))
+    hidden: set[UUID] = set()
+    with system_connection(SystemPurpose.RETENTION, reuse=conn) as sconn:
+        judge = RetentionService(sconn)
+        for r in lifts:
+            document_id = _payload_uuid(r.payload, "document_id")
+            if document_id is None or not judge.document_chain_within(document_id, ceiling):
+                hidden.add(r.id)
+    return hidden
 
 
 def _global_operations(conn: psycopg.Connection, user: CurrentUser) -> list[str]:
@@ -555,7 +703,11 @@ def list_global_approvals(
             raise Problem(400, "Invalid request",
                           f"unknown deployment-wide operation {operation!r}")
         ops = [o for o in ops if o == operation]
-    rows = ApprovalService(conn).list_global(ops, state=state, limit=limit)
+    # A document's lift the viewer may not read is left out before the page is cut, so it does not
+    # push a visible request off the page.
+    rows = ApprovalService(conn).list_global(ops, state=state, limit=500)
+    hidden = _hidden_global_requests(conn, user, rows)
+    rows = [r for r in rows if r.id not in hidden][:limit]
     out = [_out(r).model_dump(mode="json") for r in rows]
     names = _names(conn, rows)
     reached = _approvers_reached(conn, rows)
@@ -604,13 +756,20 @@ def decide_global(
     for the sign-in (not `require_step_up`, whose words differ)."""
     svc = ApprovalService(conn)
     record = svc.get(request_id)
-    if record is None or record.case_id is not None:
+    if (record is None or record.case_id is not None
+            # A document's lift over a version above the caller is the missing request, as the
+            # listing leaves it out.
+            or _hidden_global_requests(conn, user, [record])):
         raise Problem(404, "Not found", "no such deployment-wide approval request")
     operation = OPERATIONS.get(record.operation)
     if operation is None:
         raise Problem(409, "Conflict",
                       f"operation {record.operation!r} is no longer registered")
     authorize_global(conn, user, operation.signer_permission, force_step_up=True)
+    if record.operation == LIFT_DOCUMENT and body.approve:
+        # The hold's own route asks collection.read of whoever lifts, so its second person holds it
+        # too (decision 229). Approving only: refusing is never blocked.
+        authorize_global(conn, user, "collection.read")
     try:
         record = svc.decide(request_id, decided_by=user.user_id,
                             approve=body.approve, note=body.note)

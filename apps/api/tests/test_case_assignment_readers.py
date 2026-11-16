@@ -53,10 +53,15 @@ _NAMES = re.compile(r"(?is)\b(?:from|join|into|update)\s+iam\.case_assignment\b"
 _READERS: dict[tuple[str, str], str] = {
     ("approvals.py", "assignment_block"): "TEAM",
     ("approvals.py", "ApprovalService.awaiting_signature"): "OWN",
+    ("approvals.py", "ApprovalService._case_lifts_covered"): "OWN",
     ("cases.py", "CaseService.revoke_user"): "SYSTEM:CASE_MEMBERSHIP",
     ("cases.py", "CaseService.list_for_user"): "OWN",
     ("cases.py", "CaseService._grant"): "SYSTEM:CASE_MEMBERSHIP",
     ("cases.py", "CaseService._refuse_second_live"): "SYSTEM:CASE_MEMBERSHIP",
+    # Counted on a MINIMISATION system connection (the case record, the closing task, Oversight), or
+    # on READINESS for the readiness row: the conversations are above whoever asks.
+    ("comms.py", "_UNMINIMISABLE_SQL"): "SYSTEM:MINIMISATION",
+    ("comms.py", "CommsService.minimisation_gaps"): "SYSTEM:MINIMISATION",
     ("dual_control.py", "DualControlPolicyService._cases_requiring"): "OWN",
     ("http/routers/approvals.py", "_relax_signers"): "TEAM",
     ("http/routers/cases.py", "_with_caller"): "OWN",
@@ -76,6 +81,7 @@ _READERS: dict[tuple[str, str], str] = {
     ("lookups.py", "LookupService.lookup_authorisers"): "TEAM",
     ("notifications.py", "readable_predicate"): "OWN",
     ("notify_events.py", "approval_requested"): "TEAM",
+    ("notify_events.py", "minimisation_gap"): "SYSTEM:MINIMISATION",
     ("pgp_keys.py", "PgpLookupService._can_approve"): "OWN",
     ("proposals.py", "ProposalStore.waiting_by_case"): "OWN",
     ("stores.py", "PgAccessResolver.resolve"): "OWN",

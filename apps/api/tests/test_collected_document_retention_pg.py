@@ -68,8 +68,16 @@ def _case(conn, owner, *, hold=False):
 
 
 def _hold_case(conn, case, on):
-    conn.execute('UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s '
-                 'WHERE id = %s', (on, "court order 2026-77" if on else None, case))
+    """The case's hold, by hand. What is under test is what the purge does once the hold lifts, not
+    who lifted it, so a lift passes the two-person guard (decision 229) disabled by name for its own
+    transaction."""
+    with conn.transaction():
+        if not on:
+            conn.execute('ALTER TABLE core."case" DISABLE TRIGGER case_hold_lift_guarded')
+        conn.execute('UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s '
+                     'WHERE id = %s', (on, "court order 2026-77" if on else None, case))
+        if not on:
+            conn.execute('ALTER TABLE core."case" ENABLE TRIGGER case_hold_lift_guarded')
 
 
 def _source(conn):

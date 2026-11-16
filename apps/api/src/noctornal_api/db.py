@@ -208,7 +208,8 @@ class SystemPurpose(StrEnum):
     # runner's; the request role may only enqueue and read its own acts.
     PERSONA_ACTS = "persona_acts"
     # Comms minimisation (docs/16 L4) and the incidental-party flag it relies on: an obligation done
-    # in full, never to the minimiser's labels.
+    # in full, never to the minimiser's labels. And the count of the conversations nobody assigned
+    # can minimise (decision 231), which are the ones above whoever reads it.
     MINIMISATION = "minimisation"
     # Ingest scoring's watch list: a quarantined record scores against every watch in the
     # deployment. And, since ingest.record is policied (0154), a batch's parse, a dead letter's

@@ -99,8 +99,7 @@ def test_a_legal_hold_reaches_an_exhibit_above_the_officer(owner, client):
         assert held is True
     finally:
         if held:
-            owner.execute("UPDATE core.evidence SET legal_hold = false, "
-                          "legal_hold_reason = NULL WHERE id = %s", (exhibit,))
+            s.release_exhibit_hold(owner, exhibit)
 
 
 def test_a_session_that_cannot_be_bound_is_refused_and_audited(owner, client):

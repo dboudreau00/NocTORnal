@@ -204,7 +204,8 @@ def test_the_new_copy_has_no_lazy_plural_and_no_dash():
     names = ("heldRow", "sourceRow", "openBindForm", "addSource", "createPersona",
              "paintAuthoritySources", "authorityFormProblem", "recordAuthority",
              "authorityRow", "openAddTargets", "authorityPollText", "paintHeld",
-             "documentHoldActions", "authorityChip", "personaRow", "runRow")
+             "documentHoldActions", "documentLiftDecision", "authorityChip", "personaRow",
+             "runRow")
     for name in names:
         literals, _ = js_tokens(_fn(name))
         assert literals, name
@@ -467,9 +468,16 @@ console.log(JSON.stringify({ offered, platforms, ua: $('sp-ua-field').hidden,
         "with no persona parser the form hides and the section says so")
 
 
+#: The document card's hold control and the lift steps it draws (decision 229).
+DOCUMENT_HOLD = ["collectedDocRow", "documentHoldActions", "documentHoldForm",
+                 "liftWaiting", "liftApprover", "documentLiftDecision"]
+
+
 @needs_node
 def test_a_held_document_says_so_and_only_a_holder_gets_the_verb(tmp_path):
-    got = _run(["collectedDocRow", "documentHoldActions"], r"""
+    """A holder of a held document asks for a second signature (decision 229): one person never
+    lifts it from here."""
+    got = _run(DOCUMENT_HOLD, r"""
 const d = { id: 'D1', title: 't', triage_state: 'NEW', classification: 'AMBER',
   source_name: 's', author_handle: 'a', posted_at: null, version: 1,
   legal_hold: true, legal_hold_reason: 'Preservation order 12' };
@@ -479,20 +487,57 @@ const free = collectedDocRow({ ...d, legal_hold: false, legal_hold_reason: null 
 find(holder, (x) => x.tag === 'button').listeners.click();
 await holder.lastSpec.submitFn(['Order discharged']);
 console.log(JSON.stringify({ reader: [text(reader), buttons(reader), chips(reader)],
-  holder: buttons(holder), free: buttons(free), calls }));
-""", tmp_path)
+  holder: buttons(holder), free: buttons(free), calls, id: holder.id }));
+""", tmp_path, consts=["LIFT_TAKES"])
     text, verbs, chip_list = got["reader"]
     assert "chip warn:on legal hold" in chip_list
     assert "A legal hold stops every deletion of this document" in text
     assert "Held: Preservation order 12" in text
     assert verbs == []
-    assert got["holder"] == ["Lift the legal hold"]
+    assert got["holder"] == ["Ask for a second signature to lift"]
     assert got["free"] == ["Place a legal hold"]
+    assert got["id"] == "cdoc-D1", "a notice about the hold cannot find the card"
     sent = [c for c in got["calls"] if c.get("path")]
-    assert sent == [{"path": "/retention/documents/D1/legal-hold",
+    assert sent == [{"path": "/retention/documents/D1/legal-hold/lift-requests",
                      "opts": {"method": "POST",
-                              "json": {"on": False, "reason": "Order discharged"}}}]
+                              "json": {"justification": "Order discharged"}}}]
     assert got["calls"][0] == {"stepup": "A legal hold needs a recent sign-in."}
+
+
+@needs_node
+def test_a_document_lift_is_approved_on_its_card_and_spent_by_the_one_who_asked(tmp_path):
+    got = _run(DOCUMENT_HOLD, r"""
+globalThis.window = { prompt: () => 'checked the order', confirm: () => true };
+const base = { id: 'D1', title: 't', triage_state: 'NEW', classification: 'AMBER',
+  source_name: 's', author_handle: 'a', posted_at: null, version: 1, legal_hold: true };
+const asked = { id: 'R1', state: 'PENDING', mine: false, requested_by_name: 'Sam Roe',
+  decided_by_name: null, expires_at: 'X', justification: 'order 7 discharged' };
+const signer = collectedDocRow({ ...base, lift_request: asked }, true);
+const approve = find(signer, (x) => x.tag === 'button' && x.textContent === 'Approve the lift');
+await approve.listeners.click();
+const decided = calls.filter((c) => c.path).slice();
+calls.length = 0;
+const mine = collectedDocRow({ ...base, lift_request: { ...asked, state: 'APPROVED',
+  mine: true, decided_by_name: 'Dana Lee' } }, true);
+find(mine, (x) => x.tag === 'button').listeners.click();
+await mine.lastSpec.submitFn(['  the order was discharged  ']);
+const waiting = collectedDocRow({ ...base, lift_request: { ...asked, mine: true } }, true);
+console.log(JSON.stringify({ signer: [buttons(signer), text(signer)], decided,
+  mine: buttons(mine), spent: calls.filter((c) => c.path),
+  waiting: [buttons(waiting), text(waiting)] }));
+""", tmp_path, consts=["LIFT_TAKES"])
+    buttons_seen, said = got["signer"]
+    assert buttons_seen == ["Approve the lift", "Refuse the lift"]
+    assert "Sam Roe asks for your second signature" in said and "order 7 discharged" in said
+    assert got["decided"] == [{"path": "/approvals/R1/decide", "opts": {
+        "method": "POST", "json": {"approve": True, "note": "checked the order"}}}]
+    assert got["mine"] == ["Lift the legal hold (approved by Dana Lee)"]
+    assert got["spent"] == [{"path": "/retention/documents/D1/legal-hold", "opts": {
+        "method": "POST", "json": {"on": False, "reason": "the order was discharged",
+                                   "approval_request_id": "R1"}}}]
+    waiting_buttons, waiting_said = got["waiting"]
+    assert waiting_buttons == ["Withdraw the request"]
+    assert "Waiting for a second person until T(X)." in waiting_said
 
 
 def test_the_document_listing_carries_whether_the_caller_may_hold():

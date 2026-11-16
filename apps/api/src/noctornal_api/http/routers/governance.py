@@ -29,6 +29,7 @@ from noctornal_api.http.deps import (
     effective_labels,
     element_labels,
     get_conn,
+    holds_global,
     require_global,
     system_conn,
     user_ceiling,
@@ -39,12 +40,20 @@ from noctornal_api.evidence import EvidenceError, EvidenceStorage
 from noctornal_api.retention import (
     MAX_OUT_OF_SCHEDULE,
     UNRULED_RETAIN_DAYS,
+    LiftApprover,
     PurgeResult,
+    RetentionConflict,
     RetentionError,
     RetentionService,
 )
+from noctornal_api.http.routers.approvals import (
+    ApprovalOut,
+    _out as _approval_out,
+    _request_reach,
+)
 from noctornal_api.http.routers.search import _allowed_on_case
 from noctornal_api.security.access import (
+    CHECK_STEP_UP,
     AccessResolutionError,
     evaluate,
     tlp_from_name,
@@ -98,6 +107,57 @@ def _gate_allows(conn: psycopg.Connection, user: CurrentUser,
     except (AccessResolutionError, Problem):
         return False
     return evaluate(ctx).allowed
+
+
+def _still_signs(sconn: psycopg.Connection, user_id: UUID, case_id: UUID) -> bool:
+    """Whether the colleague who approved a hold lift could still approve it: an active account holding
+    retention.manage through a global role, and the five-part gate on the case asked as a question for
+    them. Not counted as a break-glass use (it is not their access), and the second factor is taken as
+    the one their approval asked for: they are not here to give another. On the system connection, the
+    one that may read another account's roles and grants."""
+    if not holds_global(sconn, user_id, "retention.manage"):
+        return False
+    try:
+        cls, comps = effective_labels(sconn, case_id)
+        ctx = PgAccessResolver(sconn).resolve(
+            user_id=user_id, case_id=case_id, permission_key="retention.manage",
+            object_classification=cls, object_compartments=comps,
+            mfa_satisfied_at=None, count_use=False)
+    except (AccessResolutionError, Problem):
+        return False
+    return set(evaluate(ctx).failed_checks) <= {CHECK_STEP_UP}
+
+
+def _lift_approver(sconn: psycopg.Connection, approval_request_id: UUID | None,
+                   case_id: UUID | None) -> LiftApprover | None:
+    """The colleague who approved a lift, judged at the spend (`retention.LiftApprover`): their ceilings
+    on the case and outside it, by `user_ceiling` as the requester's are read, and whether they still sign.
+    None when the request names no approval, or one nobody has approved; the service then refuses.
+
+    A collected document's lift has no case (`case_id` None): the colleague still signs when they hold
+    retention.manage and collection.read through a global role, the hold route's own gate, and both
+    ceilings are their own, the one a document is read under."""
+    if approval_request_id is None:
+        return None
+    from noctornal_api.approvals import ApprovalService
+
+    approval = ApprovalService(sconn).get(approval_request_id)
+    if approval is None or approval.decided_by is None:
+        return None
+    who = approval.decided_by
+    doc_clearance, doc_held = user_ceiling(sconn, who)
+    if case_id is None:
+        own = (doc_clearance.name, sorted(doc_held))
+        return LiftApprover(
+            user_id=who,
+            permitted=(holds_global(sconn, who, "retention.manage")
+                       and holds_global(sconn, who, "collection.read")),
+            ceiling=own, document_ceiling=own)
+    clearance, held = user_ceiling(sconn, who, case_id=case_id)
+    return LiftApprover(
+        user_id=who, permitted=_still_signs(sconn, who, case_id),
+        ceiling=(clearance.name, sorted(held)),
+        document_ceiling=(doc_clearance.name, sorted(doc_held)))
 
 
 def _own_evidence(conn: psycopg.Connection, evidence_id: UUID) -> UUID:
@@ -917,6 +977,16 @@ class LegalHoldBody(BaseModel):
     #: Required both ways (the service refuses under five characters), and bounded as the document
     #: and case holds' are.
     reason: str | None = Field(default=None, max_length=1000)
+    #: The approved `legal_hold.lift_exhibit` request a lift spends (decision 229): lifting takes two
+    #: people. Ignored when placing, which is one person's act.
+    approval_request_id: UUID | None = None
+
+
+class LiftRequestBody(BaseModel):
+    evidence_id: UUID
+    #: What the second person decides on: the order that discharged the hold, or why it no longer
+    #: stands. Bounded as a hold's reason is.
+    justification: str = Field(min_length=5, max_length=1000)
 
 
 def _meter_lift(request: Request, response: Response, conn: psycopg.Connection,
@@ -945,35 +1015,89 @@ def legal_hold(
     """Freeze something against every deletion path, or release it.
 
     docs/08: a hold overrides all deletion, everywhere. Lifting one is as
-    consequential as applying one -- it is what makes a later purge lawful
-    -- so both are audited, and applying one requires a reason the service
-    enforces.
+    consequential as applying one, since it is what makes a later purge
+    lawful, so both are audited, and both require a reason the service
+    enforces. Placing is one person's act. Lifting takes two (decision 229):
+    the lifter asks first (`POST /retention/legal-hold/lift-requests`), a
+    colleague cleared for the exhibit approves, and the lifter sends that
+    approval here; the service judges the colleague again, as they stand
+    now, and spends the approval in the lift's own transaction.
     """
     _meter_lift(request, response, conn, user, body.on)
     # The exhibit's own case, resolved from the row rather than taken on trust: without it a global
     # role could lift a court-ordered hold on any exhibit in the deployment and then purge it.
     case_id = _own_evidence(conn, body.evidence_id)
     _case_scoped(conn, user, case_id, "retention.manage")
+    approver = None
     if not body.on:
         _lift_within_reach(conn, user, case_id, body.evidence_id)
+        approver = _lift_approver(sconn, body.approval_request_id, case_id)
     try:
         RetentionService(sconn).set_legal_hold(
             body.evidence_id, actor_id=user.user_id, on=body.on,
-            reason=body.reason)
+            reason=body.reason, approval_request_id=body.approval_request_id,
+            approver=approver)
+    except RetentionConflict as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except RetentionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"evidence_id": str(body.evidence_id),
             "case_id": str(case_id), "legal_hold": body.on}
 
 
+@router.post("/legal-hold/lift-requests", response_model=ApprovalOut,
+             status_code=201, dependencies=[Depends(rate_limit("request"))])
+def request_exhibit_lift(
+    body: LiftRequestBody,
+    user: CurrentUser = Depends(require_global("retention.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    # The hold's epoch is read as the lift will read it, whatever the requester's row security shows.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
+) -> ApprovalOut:
+    """Ask a colleague for the second signature an exhibit's lift takes (decision 229).
+
+    Only somebody who could lift the hold may ask: the same gates as the lift, in the same order
+    (the global verb with a fresh second factor, the case, the exhibit's own labels, with the
+    missing exhibit's 404 for one above them), so a request from someone who could not lift is
+    never put in front of a signer. The request is bound to the exhibit and its hold as it stands,
+    lasts 72 hours, and is told only to colleagues cleared for the exhibit. It spends the ordinary
+    request meter; the lift meter is spent by the lift itself."""
+    from noctornal_api.approvals import (
+        LIFT_EXHIBIT,
+        ApprovalError,
+        ApprovalService,
+        lift_exhibit_payload,
+    )
+
+    case_id = _own_evidence(conn, body.evidence_id)
+    _case_scoped(conn, user, case_id, "retention.manage")
+    facts = _lift_within_reach(conn, user, case_id, body.evidence_id)
+    held = sconn.execute(
+        """SELECT legal_hold, legal_hold_epoch FROM core.evidence
+            WHERE id = %s AND purged_at IS NULL""", (body.evidence_id,)).fetchone()
+    if held is None or not held[0]:
+        raise Problem(409, "Conflict", "this exhibit is not under a legal hold of "
+                                       "its own, so there is nothing to lift")
+    try:
+        record = ApprovalService(conn).request(
+            operation=LIFT_EXHIBIT, case_id=case_id,
+            payload=lift_exhibit_payload(body.evidence_id, held[1]),
+            justification=body.justification, requested_by=user.user_id,
+            element_classification=facts[1], element_compartments=facts[2])
+    except ApprovalError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _approval_out(record, reach=_request_reach(record))
+
+
 def _lift_within_reach(conn: psycopg.Connection, user: CurrentUser,
-                       case_id: UUID, evidence_id: UUID) -> None:
-    """A hold is lifted only by somebody the exhibit's own labels admit.
+                       case_id: UUID, evidence_id: UUID
+                       ) -> tuple[UUID, str, frozenset[str]]:
+    """A hold is lifted, or its lift asked for, only by somebody the exhibit's own labels admit.
 
     Placing a hold stays open above the officer's labels (preservation, decision 144); releasing
     one makes destruction lawful, so it takes the full gate on the exhibit. Refused with the same
     404 a missing exhibit gets, so the answer says nothing about what is there; the gate writes its
-    AUTHZ_DENIED row."""
+    AUTHZ_DENIED row. Returns the exhibit's (case, classification, compartments)."""
     facts = element_labels(conn, "evidence", evidence_id)
     if facts is None:
         raise Problem(404, "Not found", "no such exhibit")
@@ -986,6 +1110,7 @@ def _lift_within_reach(conn: psycopg.Connection, user: CurrentUser,
         if exc.status == 403:
             raise Problem(404, "Not found", "no such exhibit") from None
         raise
+    return facts
 
 
 class CaseHoldBody(BaseModel):
@@ -993,6 +1118,14 @@ class CaseHoldBody(BaseModel):
     #: Required both ways: a hold nobody can attribute is a hold nobody can
     #: lift, and a lift nobody can attribute makes a purge nobody can defend.
     reason: str = Field(min_length=5, max_length=1000)
+    #: The approved `legal_hold.lift_case` request a lift spends (decision 229). Ignored when
+    #: placing.
+    approval_request_id: UUID | None = None
+
+
+class CaseLiftRequestBody(BaseModel):
+    #: What the second person decides on. Bounded as a hold's reason is.
+    justification: str = Field(min_length=5, max_length=1000)
 
 
 @router.post("/cases/{case_id}/legal-hold", response_model=dict,
@@ -1013,7 +1146,12 @@ def case_legal_hold(
     on a closed case too, and lifting also needs the caller cleared for everything the case holds,
     cited documents included. A purge already running finishes the exhibit it is on and keeps the
     rest: it claims each exhibit in its own transaction and reads the hold under a share lock on
-    the case row."""
+    the case row.
+
+    Lifting takes two people (decision 229): the lifter asks first
+    (`POST /retention/cases/{case_id}/legal-hold/lift-requests`), a colleague cleared for
+    everything the case holds approves, and the lifter sends that approval here; the colleague is
+    judged again, as they stand now, when it is spent."""
     from noctornal_api.retention import RetentionNotFound
 
     _meter_lift(request, response, conn, user, body.on)
@@ -1026,20 +1164,86 @@ def case_legal_hold(
     # case, the one a document is read under: a break-glass grant scoped to this case raises
     # `clearance` above and must not release a document it does not let them open.
     doc_clearance, doc_held = user_ceiling(conn, user.user_id)
+    approver = (None if body.on
+                else _lift_approver(sconn, body.approval_request_id, case_id))
     try:
         return RetentionService(sconn).set_case_legal_hold(
             case_id, actor_id=user.user_id, on=body.on, reason=body.reason,
             lifter_ceiling=(clearance.name, sorted(held)),
+            document_ceiling=(doc_clearance.name, sorted(doc_held)),
+            approval_request_id=None if body.on else body.approval_request_id,
+            approver=approver)
+    except RetentionNotFound as exc:
+        raise Problem(404, "Not found", "case does not exist") from exc
+    except RetentionConflict as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except RetentionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+
+
+@router.post("/cases/{case_id}/legal-hold/lift-requests", response_model=ApprovalOut,
+             status_code=201, dependencies=[Depends(rate_limit("request"))])
+def request_case_lift(
+    case_id: UUID, body: CaseLiftRequestBody,
+    user: CurrentUser = Depends(require_global("retention.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    # The hold and everything it governs are read as the lift will read them, whatever the
+    # requester's row security shows.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
+) -> ApprovalOut:
+    """Ask a colleague for the second signature a case's lift takes (decision 229).
+
+    Only somebody who could lift the hold may ask: the global verb with a fresh second factor, the
+    case's own gate, and a ceiling that covers everything the case holds, refused in the lift's
+    words and recorded at the request (LEGAL_HOLD_LIFT_REFUSED, stage `request`). The request is
+    bound to the case and its hold as it stands, lasts 72 hours, and is told only to colleagues
+    cleared for everything the hold governs. It spends the ordinary request meter; the lift meter is
+    spent by the lift itself."""
+    from noctornal_api.approvals import (
+        LIFT_CASE,
+        ApprovalError,
+        ApprovalService,
+        lift_case_payload,
+    )
+    from noctornal_api.retention import RetentionNotFound
+
+    _case_scoped(conn, user, case_id, "retention.manage")
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    doc_clearance, doc_held = user_ceiling(conn, user.user_id)
+    try:
+        facts = RetentionService(sconn).case_lift_request(
+            case_id, actor_id=user.user_id, justification=body.justification,
+            lifter_ceiling=(clearance.name, sorted(held)),
             document_ceiling=(doc_clearance.name, sorted(doc_held)))
     except RetentionNotFound as exc:
         raise Problem(404, "Not found", "case does not exist") from exc
+    except RetentionConflict as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except RetentionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    try:
+        record = ApprovalService(conn).request(
+            operation=LIFT_CASE, case_id=case_id,
+            payload=lift_case_payload(facts["epoch"]),
+            justification=body.justification, requested_by=user.user_id,
+            element_classification=facts["classification"],
+            element_compartments=frozenset(facts["compartments"]))
+    except ApprovalError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _approval_out(record, reach=_request_reach(record))
 
 
 class DocumentHoldBody(BaseModel):
     on: bool = True
     reason: str | None = Field(default=None, max_length=1000)
+    #: The approved `legal_hold.lift_document` request a lift spends (decision 229). Ignored when
+    #: placing.
+    approval_request_id: UUID | None = None
+
+
+class DocumentLiftRequestBody(BaseModel):
+    #: What the second person decides on. Bounded as a hold's reason is.
+    justification: str = Field(min_length=5, max_length=1000)
 
 
 # A hold a person places on a collected document and every earlier version of it (decision 74).
@@ -1061,23 +1265,74 @@ def document_legal_hold(
     Needs retention.manage (step-up) and collection.read through a global role, so an
     administration-only account cannot hold material it has no relationship to. A document above
     the caller's labels, or whose source is, gets the same 404 as a random id; a version above them
-    is a 409, because labels gate writes too."""
+    is a 409, because labels gate writes too.
+
+    Lifting takes two people (decision 229): the lifter asks first
+    (`POST /retention/documents/{document_id}/legal-hold/lift-requests`), a colleague cleared for
+    every version approves through the deployment-wide approvals, and the lifter sends that
+    approval here; the colleague is judged again, as they stand now, when it is spent."""
     from noctornal_api.http.deps import authorize_global
     from noctornal_api.retention import RetentionConflict, RetentionNotFound
 
     _meter_lift(request, response, conn, user, body.on)
     authorize_global(conn, user, "collection.read")
     clearance, held = user_ceiling(conn, user.user_id)
+    approver = (None if body.on
+                else _lift_approver(sconn, body.approval_request_id, None))
     try:
         return RetentionService(sconn).set_document_legal_hold(
             document_id, actor_id=user.user_id, on=body.on,
-            reason=body.reason, clearance=clearance.name, compartments=held)
+            reason=body.reason, clearance=clearance.name, compartments=held,
+            approval_request_id=None if body.on else body.approval_request_id,
+            approver=approver)
     except RetentionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except RetentionConflict as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except RetentionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+
+
+@router.post("/documents/{document_id}/legal-hold/lift-requests",
+             response_model=ApprovalOut, status_code=201,
+             dependencies=[Depends(rate_limit("request"))])
+def request_document_lift(
+    document_id: UUID, body: DocumentLiftRequestBody,
+    user: CurrentUser = Depends(require_global("retention.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    # Every version is read as the lift will read it, whatever the requester's row security shows.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
+) -> ApprovalOut:
+    """Ask a colleague for the second signature a collected document's lift takes (decision 229).
+
+    Only somebody who could lift the hold may ask: the gates of the hold's own route, and the
+    requester's labels over the document, its source and every version, with the same 404 and 409.
+    The request is deployment-wide (a document belongs to no case), bound to the document and to
+    every version held as it stands, lasts 72 hours, and is told only to colleagues who hold
+    retention.manage and collection.read and are cleared for every version. It spends the ordinary
+    request meter; the lift meter is spent by the lift itself."""
+    from noctornal_api.approvals import LIFT_DOCUMENT, ApprovalError, ApprovalService
+    from noctornal_api.http.deps import authorize_global
+    from noctornal_api.retention import RetentionNotFound
+
+    authorize_global(conn, user, "collection.read")
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        facts = RetentionService(sconn).document_lift_request(
+            document_id, clearance=clearance.name, compartments=held)
+    except RetentionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except RetentionConflict as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    try:
+        record = ApprovalService(conn).request(
+            operation=LIFT_DOCUMENT, case_id=None, payload=facts["payload"],
+            justification=body.justification, requested_by=user.user_id,
+            element_classification=facts["classification"],
+            element_compartments=frozenset(facts["compartments"]))
+    except ApprovalError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _approval_out(record, reach=_request_reach(record))
 
 
 # ---------------------------------------------------------------------------

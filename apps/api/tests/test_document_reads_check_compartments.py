@@ -71,6 +71,11 @@ EXEMPT: dict[str, str] = {
     "retention:<module>": (
         "the document-citation registry: the legs the retention sweep joins "
         "to find the cases that cite a document, never a read by a person"),
+    # Decision 229 (two-person lifts): the lift's own reads, on the retention system connection.
+    "retention:case_material_sql": (
+        "the case-hold lift's cover check, notice labels and drain judgement read the labels of every item the "
+        "hold governs (decision 229): classifications and compartments, never content; each person's own "
+        "ceiling is judged against them before anything is shown or spent"),
     "retention:_held_sql": (
         "the hold predicate the retention sweep evaluates; it names no "
         "content and shows nothing to a person"),
@@ -87,6 +92,16 @@ EXEMPT: dict[str, str] = {
         "the sweep's and the readiness row's count of documents past their "
         "clock, and the oldest deadline among those no hold keeps: numbers "
         "and a date, no content, and shows nothing to a person"),
+    "retention:RetentionService._held_versions": (
+        "a document lift's read of the live versions under a hold of their own and their hold epochs, under "
+        "the chain's locks (decision 229): ids and numbers, no content, shown to nobody"),
+    "retention:RetentionService.document_held_versions": (
+        "the version ids and hold epochs a request to lift a document's hold is bound to (decision 229): ids "
+        "and numbers, no content; the requester's reach over the document is judged by the route first"),
+    "retention:RetentionService._lift_document_hold": (
+        "a document lift's write (decision 229): it clears the hold of the versions after the lifter's and the "
+        "signer's ceilings were judged over the whole chain (`document_chain_within`), and shows nothing to "
+        "a person"),
     "retention:RetentionService._purge_documents": (
         "the retention sweep's purge: it locks, rechecks and empties "
         "documents, and shows nothing to a person"),

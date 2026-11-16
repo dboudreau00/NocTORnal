@@ -129,13 +129,13 @@ def test_the_register_names_are_unique_and_in_register_order():
     both rest on. A duplicate name would make `_by_name`-style lookups
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
-    # proxy_hops_declared (docs/17 "a missing hop count"), not blocking.
-    assert len(readiness.CHECK_NAMES) == 46, readiness.CHECK_NAMES
-    # Also not blocking: retention_sweep_current, collector_split, the row-level security, Telegram,
-    # forum, screening and sandbox, outbound integration and similarity index rows, the comms rows,
-    # egress_routes_cover_sources, egress_exits_open, collection_sources_configured,
-    # collection_authority_current, sample_static_analysis, yara_rules_active,
-    # dual_control_policy_changeable, role_analysis_thread_capped, egress_boundary,
+    # conversations_minimisable (decision 231), not blocking.
+    assert len(readiness.CHECK_NAMES) == 47, readiness.CHECK_NAMES
+    # Also not blocking: proxy_hops_declared (docs/17 "a missing hop count"), retention_sweep_current,
+    # collector_split, the row-level security, Telegram, forum, screening and sandbox, outbound
+    # integration and similarity index rows, the comms rows, egress_routes_cover_sources,
+    # egress_exits_open, collection_sources_configured, collection_authority_current,
+    # sample_static_analysis, yara_rules_active, dual_control_policy_changeable, role_analysis_thread_capped, egress_boundary,
     # compartment_bindings_intact, captured_documents_compartmented, triage_claims_within_labels and
     # triage_claims_dated.
     # `credentials_not_published` and `redis_limiter_isolated` are not blocking either: the first is red on

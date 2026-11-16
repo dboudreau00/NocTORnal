@@ -199,7 +199,12 @@ the subjects of the investigation.
    Outbound lookups refuse personal data toward every provider (by type, by
    the shape of any span in the value, and social profile URLs) until a
    transfer authority is recorded; nothing in this build records one yet.
-6. What "minimisation review at closure" must actually produce.
+6. What "minimisation review at closure" must actually produce. The product
+   does not decide it, but it does not let a conversation nobody on the team
+   can minimise pass unseen: closing such a case is recorded with a count,
+   the Security officer is told and lists the case, and readiness stays red
+   until a Lead investigator cleared for it is assigned to the case, who can
+   then minimise it (docs/08, decision 231).
 
 ### L3: Persona operation and computer-misuse exposure
 

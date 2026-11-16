@@ -132,11 +132,19 @@ def _purge(client, auth, case_id, *, dry, preview=None, authority=AUTHORITY):
 
 
 def _set_hold(conn, evidence_id, on: bool):
-    conn.execute(
-        "UPDATE core.evidence SET legal_hold = %s, legal_hold_reason = %s "
-        "WHERE id = %s",
-        (on, "court order 2026-11 names this exhibit" if on else None,
-         evidence_id))
+    """The hold's state only. A lift takes two people and the database refuses one without them
+    (decision 229, `test_hold_lift_guard_pg.py`), so the lift here passes the guard disabled by name for
+    this one statement: what is under test is the dry run's binding, not who lifted."""
+    with conn.transaction():
+        if not on:
+            conn.execute("ALTER TABLE core.evidence DISABLE TRIGGER evidence_hold_lift_guarded")
+        conn.execute(
+            "UPDATE core.evidence SET legal_hold = %s, legal_hold_reason = %s "
+            "WHERE id = %s",
+            (on, "court order 2026-11 names this exhibit" if on else None,
+             evidence_id))
+        if not on:
+            conn.execute("ALTER TABLE core.evidence ENABLE TRIGGER evidence_hold_lift_guarded")
 
 
 def _alive(conn, evidence_id) -> bool:

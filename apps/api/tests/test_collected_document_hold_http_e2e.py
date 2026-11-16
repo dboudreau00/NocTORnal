@@ -1,8 +1,9 @@
 """The document-level legal hold over HTTP (docs/00 decision 74).
 
 POST /retention/documents/{id}/legal-hold holds every version of a collected document, needs
-retention.manage AND collection.read, a reason either way, and answers a document the caller may not
-see with the 404 a random id gets. DATABASE_URL-gated.
+retention.manage AND collection.read, a reason either way and, to lift, a second person's approval
+(decision 229), and answers a document the caller may not see with the 404 a random id gets.
+DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -28,6 +29,17 @@ def conn():
 
     c = connect()
     yield c
+    # The lift approvals these tests raise (decision 229), and the notices that went with them.
+    like = f"{P}%@noctornal.test"
+    mine = ("(SELECT r.id FROM core.approval_request r JOIN iam.app_user u "
+            "ON u.id = r.requested_by WHERE u.email LIKE %(like)s)")
+    with c.transaction():
+        c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN (SELECT id FROM "
+                  f"notify.notification WHERE object_type = 'approval_request' "
+                  f"AND object_id IN {mine})", {"like": like})
+        c.execute(f"DELETE FROM notify.notification WHERE object_type = 'approval_request' "
+                  f"AND object_id IN {mine}", {"like": like})
+        c.execute(f"DELETE FROM core.approval_request WHERE id IN {mine}", {"like": like})
     h.teardown(c, P)
     h.retire_users(c, P)
     c.close()
@@ -90,8 +102,20 @@ def test_a_hold_covers_every_version_and_is_audited_and_lifted_with_a_reason(con
     assert held == 2
     no_reason = api.post(_url(v2), headers=hdr, json={"on": False})
     assert no_reason.status_code == 400
+    # One person cannot lift it (decision 229): a colleague who could lift it too approves first.
+    alone = api.post(_url(v2), headers=hdr,
+                     json={"on": False, "reason": "the order was discharged"})
+    assert alone.status_code == 400
+    _second, second_hdr = _caller(conn)
+    asked = api.post(f"{_url(v2)}/lift-requests", headers=hdr,
+                     json={"justification": "the order was discharged"})
+    assert asked.status_code == 201, asked.text
+    decided = api.post(f"/api/v1/approvals/{asked.json()['id']}/decide",
+                       headers=second_hdr, json={"approve": True, "note": "checked"})
+    assert decided.status_code == 200, decided.text
     lifted = api.post(_url(v2), headers=hdr,
-                      json={"on": False, "reason": "the order was discharged"})
+                      json={"on": False, "reason": "the order was discharged",
+                            "approval_request_id": asked.json()["id"]})
     assert lifted.status_code == 200
     detail = conn.execute(
         """SELECT detail FROM audit.event WHERE object_id = %s

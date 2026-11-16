@@ -151,6 +151,97 @@ class RetentionError(Exception):
     pass
 
 
+#: What a lift that names no approval is told, by the route and the service alike (decision 229).
+LIFT_TAKES_TWO = (
+    "lifting a legal hold takes two people: ask for a second signature first, a "
+    "colleague cleared for what the hold covers approves it, and then you lift it "
+    "with that approval")
+
+#: What a lift is told when the colleague who approved it can no longer be its second person. One
+#: sentence for every such reason, which the audit row names.
+_SECOND_PERSON_GONE = (
+    "this approval cannot be used now: the colleague who approved it is no longer "
+    "active, no longer holds retention.manage here, or is no longer cleared for "
+    "everything the lift releases. The hold stays and nothing was changed; ask "
+    "for a new approval.")
+
+_NOT_HELD_EXHIBIT = ("this exhibit is not under a legal hold of its own, so there "
+                     "is nothing to lift")
+
+_NOT_HELD_CASE = "this case is not under a legal hold, so there is nothing to lift"
+
+_NOT_HELD_DOCUMENT = ("no version of this document is under a legal hold of its own, so "
+                      "there is nothing to lift")
+
+
+@dataclass(frozen=True)
+class LiftApprover:
+    """The colleague who approved a hold lift, as the lift judges them when it is spent (decision 229).
+
+    The route builds it on the system connection at the spend, from the approval's `decided_by`: whether
+    ANOTHER account is still active, assigned and cleared is not the request role's to read (0109, 0177).
+    `permitted` is the gate asked as a question: an active account holding retention.manage through a
+    global role and on the case (their second factor was asked when they approved). `ceiling` is their
+    (clearance, compartments) on the case and `document_ceiling` the same outside it, where a collected
+    document is read. The service compares both with the material inside the lift's own transaction, so a
+    clearance lowered since they approved voids the lift."""
+    user_id: UUID
+    permitted: bool
+    ceiling: tuple | None
+    document_ceiling: tuple | None = None
+
+
+@dataclass(frozen=True)
+class _Signed:
+    """The approval a lift is about to spend, read under its row lock."""
+    id: UUID
+    requested_by: UUID
+    decided_by: UUID
+    decided_at: datetime
+
+    def detail(self) -> dict:
+        """Who asked and who approved, as ids and a time: the lift's audit row names both people."""
+        return {"approval_request_id": str(self.id),
+                "requested_by": str(self.requested_by),
+                "approved_by": str(self.decided_by),
+                "approved_at": self.decided_at.isoformat()}
+
+
+class _LiftRefused(Exception):
+    """A lift refused inside its transaction, so the transaction rolls back and the refusal is
+    recorded after it."""
+
+    def __init__(self, refusal: str):
+        super().__init__(refusal)
+        self.refusal = refusal
+
+
+def _ceiling_dominates(ceiling: tuple | None, classification: str,
+                       compartments) -> bool:
+    """Whether a (clearance, compartments) ceiling admits an element at these labels. No ceiling admits
+    nothing, and an unreadable label raises, failing closed."""
+    from noctornal_api.security.access import tlp_from_name
+
+    if ceiling is None:
+        return False
+    clearance, held = _ceiling_parts(ceiling)
+    return (tlp_from_name(clearance) >= tlp_from_name(classification)
+            and set(compartments or ()) <= set(held))
+
+
+def _approver_refusal(signed: _Signed, approver: LiftApprover | None,
+                      covered: bool) -> str | None:
+    """Why the colleague who approved a lift cannot be its second person at the spend, or None. Facts
+    about anyone but the approval's own approver judge nobody, so they refuse."""
+    if approver is None or approver.user_id != signed.decided_by:
+        return "approver_not_judged"
+    if not approver.permitted:
+        return "approver_no_longer_permitted"
+    if not covered:
+        return "approver_below_material"
+    return None
+
+
 #: The clock an ingest record gets when its category has NO rule at all. `ingest.py:_retain_until` stamps it;
 #: the retention panel names it, so a category running on a period nobody chose is on screen beside the rules
 #: somebody did.
@@ -417,6 +508,68 @@ def _held_sql(alias: str = "d") -> str:
 #: registries above: `due()` and the purge's recheck both read it, so the
 #: list and the act cannot disagree and there is no second predicate.
 _DOCUMENT_HELD_SQL = _held_sql("d")
+
+
+def case_material_sql(case_ref: str) -> str:
+    """Every live item a case's hold governs, with its labels: one `(classification, compartments,
+    outside)` row for each exhibit, ingest record, sample still in the Lab, lookup and lookup answer of
+    the case, and for each collected document it cites or a version of one it cites. `outside` marks a
+    document, which an account reads under its own ceiling and never the case's. A lookup carries no
+    compartments.
+
+    `case_ref` is a SQL expression this module writes (a parameter or a column). The case-hold lift's
+    cover check, the labels its request is notified at and the drain's judgement of that notice all
+    read this one relation (decision 229), so they cannot disagree about what a lift releases."""
+    return f"""
+        SELECT e.classification, e.compartments, false AS outside
+          FROM core.evidence e
+         WHERE e.case_id = {case_ref} AND e.purged_at IS NULL
+        UNION ALL
+        SELECT r.classification, r.compartments, false
+          FROM ingest.record r
+         WHERE r.case_id = {case_ref} AND r.purged_at IS NULL
+        UNION ALL
+        SELECT s.classification, s.compartments, false
+          FROM lab.sample s
+         WHERE s.case_id = {case_ref} AND s.state <> 'REJECTED'
+        UNION ALL
+        SELECT k.classification, '{{}}'::text[], false
+          FROM ingest.lookup k
+         WHERE k.case_id = {case_ref} AND k.purged_at IS NULL
+        UNION ALL
+        SELECT k.classification, '{{}}'::text[], false
+          FROM ingest.lookup_result k
+         WHERE k.case_id = {case_ref} AND k.purged_at IS NULL
+        UNION ALL
+        SELECT d.classification, d.compartments, true
+          FROM collect.document d
+         WHERE d.purged_at IS NULL
+           AND d.id IN (SELECT s.id
+                          FROM ({_citations_sql()}) c
+                          JOIN collect.document v ON v.id = c.document_id
+                          JOIN collect.document s ON {_versions_sql("v", "s")}
+                         WHERE c.case_id = {case_ref})"""
+
+
+def document_chain_sql(document_ref: str) -> str:
+    """The labels a collected document's hold answers to: one `(classification, compartments)` row for
+    every live version of the document `document_ref` names (the same source and external id, or the
+    document itself when it has none) and one for its source. A hold covers every version (decision 74),
+    so lifting one releases them all. `document_ref` is a SQL expression this module writes.
+
+    The lift's cover of both people, the labels its request is notified at, and the drain's judgement
+    of that notice all read this one relation (decision 229). A document that is not there yields no
+    row, which a caller must read as nothing to judge and fail closed on."""
+    return f"""
+        SELECT v.classification, v.compartments
+          FROM collect.document d
+          JOIN collect.document v ON {_versions_sql("d", "v")}
+         WHERE d.id = {document_ref} AND v.purged_at IS NULL
+        UNION ALL
+        SELECT s.classification, s.compartments
+          FROM collect.document d
+          JOIN collect.source s ON s.id = d.source_id
+         WHERE d.id = {document_ref}"""
 
 #: The one refusal for due raw markup with no store to delete it from,
 #: said before the purge's transaction and again under its locks.
@@ -1146,6 +1299,7 @@ class RetentionService:
                 # spending first would make every audited write in the deployment wait out the store deletes. The
                 # spend still commits with the destruction, and cannot fail once its row is locked.
                 self._lock_approval(approval_request_id, actor_id=actor_id,
+                                    operation="evidence.purge",
                                     case_id=case_id, payload=payload)
                 storage = self._purge_evidence(evidence_ids, refuse_held=True,
                                                actor_id=actor_id,
@@ -1244,28 +1398,32 @@ class RetentionService:
         return bool(row and row[0])
 
     def _lock_approval(self, request_id: UUID, *, actor_id: UUID,
-                       case_id: UUID, payload: dict) -> None:
-        """The out-of-schedule approval, verified and locked FOR UPDATE without spending it, so nothing is
-        destroyed on an approval that would then fail to spend, and no audit row (and so no chain lock) is
-        written before the store deletes. A request that does not qualify is handed to `consume`, which refuses
-        with its one sentence and records why on a connection of its own: this transaction has audited nothing
-        yet."""
+                       operation: str, case_id: UUID | None,
+                       payload: dict) -> _Signed:
+        """An approval of `operation`, verified and locked FOR UPDATE without spending it, so nothing is
+        destroyed or lifted on an approval that would then fail to spend, and no audit row (and so no chain
+        lock) is written before the store deletes. A request that does not qualify is handed to `consume`,
+        which refuses with its one sentence and records why on a connection of its own: this transaction has
+        audited nothing yet. Returns who asked and who approved."""
         from noctornal_api.approvals import ApprovalService, payload_hash
 
         row = self._c.execute(
-            """SELECT 1 FROM core.approval_request
+            """SELECT id, requested_by, decided_by, decided_at
+                 FROM core.approval_request
                 WHERE id = %s AND state = 'APPROVED' AND expires_at > now()
-                  AND requested_by = %s AND operation = 'evidence.purge'
+                  AND requested_by = %s AND operation = %s
                   AND case_id IS NOT DISTINCT FROM %s AND payload_hash = %s
                 FOR UPDATE""",
-            (request_id, actor_id, case_id,
-             payload_hash("evidence.purge", case_id, payload))).fetchone()
+            (request_id, actor_id, operation, case_id,
+             payload_hash(operation, case_id, payload))).fetchone()
         if row is None:
             ApprovalService(self._c).consume(
-                request_id, actor_id=actor_id, operation="evidence.purge",
+                request_id, actor_id=actor_id, operation=operation,
                 case_id=case_id, payload=payload)
             raise RetentionError("this approval cannot be used for this "
                                  "operation")
+        return _Signed(id=row[0], requested_by=row[1], decided_by=row[2],
+                       decided_at=row[3])
 
     def _purge_samples(self, sample_ids: list[UUID], *, authority: str,
                        actor_id: UUID, case_id: UUID | None,
@@ -1820,8 +1978,9 @@ class RetentionService:
 
     def set_document_legal_hold(self, document_id: UUID, *, actor_id: UUID,
                                 on: bool, reason: str | None, clearance: str,
-                                compartments: frozenset[str] = frozenset()
-                                ) -> dict:
+                                compartments: frozenset[str] = frozenset(),
+                                approval_request_id: UUID | None = None,
+                                approver: LiftApprover | None = None) -> dict:
         """A hold a person places on a collected document, and every earlier version of it. The named document
         must be unpurged and within the caller's labels, on its own label, its source's and its compartments, or
         it is RetentionNotFound (a 404 indistinguishable from a missing id): a document the caller may not see is
@@ -1831,21 +1990,33 @@ class RetentionService:
         Every version is locked FOR UPDATE, in the purge's order, BEFORE the named document is read and before
         anything is written. A hold that waited on a purge's version locks would otherwise write, and report, a
         hold on the row the purge had just destroyed. Read after the wait, a destroyed document is the same 404
-        as a missing one, and only unpurged versions are written or counted."""
+        as a missing one, and only unpurged versions are written or counted.
+
+        Placing is one person's act. Lifting takes two (decision 229): the lifter spends a
+        `legal_hold.lift_document` approval raised against the versions held as they stand, and `approver`, the
+        colleague who approved it, must still hold retention.manage and collection.read and still be cleared for
+        every version and the source (`_lift_document_hold`)."""
         reason = (reason or "").strip()
         if len(reason) < 5:
             raise RetentionError(
                 "a legal hold has to say what it rests on: a hold nobody can "
                 "attribute is a hold nobody can lift")
         held = sorted(compartments)
+        if not on:
+            return self._lift_document_hold(
+                document_id, actor_id=actor_id, reason=reason, clearance=clearance,
+                held=held, approval_request_id=approval_request_id, approver=approver)
         with self._c.transaction():
             return self._document_hold_locked(
-                document_id, actor_id=actor_id, on=on, reason=reason,
+                document_id, actor_id=actor_id, reason=reason,
                 clearance=clearance, held=held)
 
-    def _document_hold_locked(self, document_id: UUID, *, actor_id: UUID,
-                              on: bool, reason: str, clearance: str,
-                              held: list[str]) -> dict:
+    def _document_chain_locked(self, document_id: UUID, *, clearance: str,
+                               held: list[str]) -> tuple:
+        """Every version of a document locked, and the caller's labels checked against the named document, its
+        source and every version (`set_document_legal_hold`): RetentionNotFound for a document they may not
+        see, RetentionConflict for a version above them. Returns (source_id, external_id, prior_on,
+        prior_reason, prior_placed_by) of the named document."""
         # The versions this caller could write, locked: the compartments are the reader's, and a version outside
         # them is left unlocked because the count below refuses the whole write over it. Nothing is returned from
         # here; the label checks below decide what the caller is told.
@@ -1890,32 +2061,177 @@ class RetentionService:
             raise RetentionConflict(
                 "An earlier version of this document is above your clearance, "
                 "so somebody cleared for it places or lifts the hold.")
+        return source_id, external_id, prior_on, prior_reason, prior_by
+
+    def _document_hold_locked(self, document_id: UUID, *, actor_id: UUID,
+                              reason: str, clearance: str,
+                              held: list[str]) -> dict:
+        """A document's hold placed on every live version within the caller's labels (all of them, once
+        `_document_chain_locked` has refused a version above the caller)."""
+        source_id, external_id, prior_on, prior_reason, prior_by = (
+            self._document_chain_locked(document_id, clearance=clearance, held=held))
         written = self._c.execute(
             """UPDATE collect.document v
-                  SET legal_hold = %s,
-                      legal_hold_reason = CASE WHEN %s THEN %s ELSE NULL END,
-                      legal_hold_by = %s
+                  SET legal_hold = true, legal_hold_reason = %s, legal_hold_by = %s
                 WHERE ((%s::text IS NULL AND v.id = %s)
                        OR (%s::text IS NOT NULL AND v.source_id = %s
                            AND v.external_id = %s))
                   AND v.purged_at IS NULL
                   AND v.classification <= %s::core.tlp
                   AND v.compartments <@ %s::text[]""",
-            (bool(on), bool(on), reason, actor_id, external_id, document_id,
-             external_id, source_id, external_id, clearance, held)).rowcount
+            (reason, actor_id, external_id, document_id, external_id, source_id,
+             external_id, clearance, held)).rowcount
+        self._audit_document(actor_id, "LEGAL_HOLD_APPLIED", document_id, {
+            "document_id": str(document_id), "versions": written, "reason": reason,
+            "prior_reason": prior_reason,
+            "prior_placed_by": str(prior_by) if prior_by else None,
+            "prior_on": bool(prior_on)})
+        return {"document_id": str(document_id), "legal_hold": True,
+                "legal_hold_reason": reason, "versions": written}
+
+    def _held_versions(self, document_id: UUID, source_id: UUID,
+                       external_id: str | None) -> dict[str, int]:
+        """{version id: hold epoch} of the live versions of a document under a hold of their own, read under
+        the chain's locks: what a lift releases, and what its approval is bound to."""
+        return {str(r[0]): int(r[1]) for r in self._c.execute(
+            """SELECT v.id, v.legal_hold_epoch FROM collect.document v
+                WHERE ((%s::text IS NULL AND v.id = %s)
+                       OR (%s::text IS NOT NULL AND v.source_id = %s
+                           AND v.external_id = %s))
+                  AND v.purged_at IS NULL AND v.legal_hold
+                ORDER BY v.id""",
+            (external_id, document_id, external_id, source_id, external_id)).fetchall()}
+
+    def _lift_document_hold(self, document_id: UUID, *, actor_id: UUID, reason: str,
+                            clearance: str, held: list[str],
+                            approval_request_id: UUID | None,
+                            approver: LiftApprover | None) -> dict:
+        """The lift of a document's hold, in one transaction, as an exhibit's is (`_lift_exhibit_hold`): every
+        version locked and the lifter's labels checked as for placing, the approval checked and locked for the
+        versions held as they stand (their ids and epochs), the colleague who approved it judged against every
+        version and the source as they are now, then the approval consumed, the hold written off every held
+        version and the lift audited with who asked and who approved. A refusal rolls the transaction back,
+        leaves the approval unspent and is recorded afterwards as LEGAL_HOLD_LIFT_REFUSED (DENIED, stage
+        `spend`). The database refuses the write without the approval as well (migration
+        document_hold_lift_two_people)."""
+        from noctornal_api.approvals import (
+            LIFT_DOCUMENT,
+            ApprovalError,
+            ApprovalService,
+            lift_document_payload,
+        )
+
+        try:
+            with self._c.transaction():
+                source_id, external_id, _on, prior_reason, prior_by = (
+                    self._document_chain_locked(document_id, clearance=clearance,
+                                                held=held))
+                versions = self._held_versions(document_id, source_id, external_id)
+                if not versions:
+                    raise RetentionConflict(_NOT_HELD_DOCUMENT)
+                if approval_request_id is None:
+                    raise _LiftRefused("no_approval")
+                payload = lift_document_payload(document_id, versions)
+                signed = self._lock_approval(
+                    approval_request_id, actor_id=actor_id, operation=LIFT_DOCUMENT,
+                    case_id=None, payload=payload)
+                refusal = _approver_refusal(
+                    signed, approver,
+                    approver is not None
+                    and self.document_chain_within(document_id, approver.document_ceiling))
+                if refusal:
+                    raise _LiftRefused(refusal)
+                ApprovalService(self._c).consume(
+                    approval_request_id, actor_id=actor_id,
+                    operation="legal_hold.lift_document", case_id=None,
+                    payload=payload)
+                written = self._c.execute(
+                    """UPDATE collect.document
+                          SET legal_hold = false, legal_hold_reason = NULL,
+                              legal_hold_by = %s
+                        WHERE id = ANY(%s::uuid[])""",
+                    (actor_id, sorted(versions))).rowcount
+                self._audit_document(actor_id, "LEGAL_HOLD_LIFTED", document_id, {
+                    "document_id": str(document_id), "versions": written,
+                    "reason": reason, "prior_reason": prior_reason,
+                    "prior_placed_by": str(prior_by) if prior_by else None,
+                    "prior_on": True, **signed.detail()})
+        except _LiftRefused as refused:
+            self._lift_refused(None, actor_id, reason, refused.refusal,
+                               object_type="document", object_id=document_id,
+                               approval_request_id=approval_request_id)
+            if refused.refusal == "no_approval":
+                raise RetentionError(LIFT_TAKES_TWO) from None
+            raise RetentionConflict(_SECOND_PERSON_GONE) from None
+        except ApprovalError as exc:
+            self._lift_refused(None, actor_id, reason, "approval_unusable",
+                               object_type="document", object_id=document_id,
+                               approval_request_id=approval_request_id)
+            raise RetentionConflict(str(exc)) from exc
+        return {"document_id": str(document_id), "legal_hold": False,
+                "legal_hold_reason": None, "versions": written}
+
+    def document_lift_request(self, document_id: UUID, *, clearance: str,
+                              compartments: frozenset[str] = frozenset()) -> dict:
+        """What a request for a document lift's second signature is raised against (decision 229): its
+        payload (the document and every held version's epoch) and the labels of every version and the source,
+        which the signers' notice is labelled at. Only somebody who could lift the hold may ask, so the
+        requester's labels are checked as the hold's own route checks them: RetentionNotFound for a document
+        they may not see, RetentionConflict for a version above them or for nothing held."""
+        from noctornal_api.approvals import lift_document_payload
+
+        held = sorted(compartments)
+        with self._c.transaction():
+            source_id, external_id, *_prior = self._document_chain_locked(
+                document_id, clearance=clearance, held=held)
+            versions = self._held_versions(document_id, source_id, external_id)
+        if not versions:
+            raise RetentionConflict(_NOT_HELD_DOCUMENT)
+        classification, labels = self.document_chain_labels(document_id)
+        return {"payload": lift_document_payload(document_id, versions),
+                "classification": classification, "compartments": labels}
+
+    def document_held_versions(self, document_id) -> dict[str, int]:
+        """{version id: hold epoch} of every live version of a document under a hold of its own, read
+        without locking: what a request to lift its hold as it stands would be bound to."""
+        row = self._c.execute(
+            "SELECT source_id, external_id FROM collect.document WHERE id = %s",
+            (document_id,)).fetchone()
+        return {} if row is None else self._held_versions(document_id, row[0], row[1])
+
+    def document_chain_labels(self, document_id: UUID) -> tuple[str | None, list[str]]:
+        """The highest classification, and every compartment, of a document's live versions and its source
+        (`document_chain_sql`)."""
+        row = self._c.execute(
+            f"""WITH m AS ({document_chain_sql('%(d)s')})
+                SELECT (SELECT max(m.classification)::text FROM m),
+                       ARRAY(SELECT DISTINCT x FROM m, unnest(m.compartments) AS x
+                              ORDER BY x)""", {"d": document_id}).fetchone()
+        return row[0], list(row[1] or [])
+
+    def document_chain_within(self, document_id: UUID, ceiling: tuple | None) -> bool:
+        """Whether a (clearance, compartments) ceiling admits every live version of a document and its
+        source (`document_chain_sql`). No ceiling, an unreadable one or a document that is not there admits
+        nothing: it fails closed."""
+        if ceiling is None:
+            return False
+        clearance, held = _ceiling_parts(ceiling)
+        row = self._c.execute(
+            f"""SELECT count(*),
+                       count(*) FILTER (WHERE m.classification > %(l)s::core.tlp
+                                           OR NOT m.compartments <@ %(h)s::text[])
+                  FROM ({document_chain_sql('%(d)s')}) m""",
+            {"d": document_id, "l": clearance, "h": held}).fetchone()
+        return row[0] > 0 and row[1] == 0
+
+    def _audit_document(self, actor_id: UUID, action: str, document_id: UUID,
+                        detail: dict) -> None:
+        """A document hold's audit row: no case, the document as its object."""
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id, detail)
                VALUES (%s, 'USER', %s, 'document', %s, %s)""",
-            (actor_id, "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
-             document_id,
-             Json({"document_id": str(document_id), "versions": written,
-                   "reason": reason, "prior_reason": prior_reason,
-                   "prior_placed_by": str(prior_by) if prior_by else None,
-                   "prior_on": bool(prior_on)})))
-        return {"document_id": str(document_id), "legal_hold": bool(on),
-                "legal_hold_reason": reason if on else None,
-                "versions": written}
+            (actor_id, action, document_id, Json(detail)))
 
     def _tombstone(self, *, case_id: UUID | None, object_type: str,
                    ids: list[UUID], authority: str, actor_id: UUID,
@@ -1962,11 +2278,17 @@ class RetentionService:
                 for r in rows]
 
     def set_legal_hold(self, evidence_id: UUID, *, actor_id: UUID,
-                       on: bool, reason: str | None) -> None:
+                       on: bool, reason: str | None,
+                       approval_request_id: UUID | None = None,
+                       approver: LiftApprover | None = None) -> None:
         """A hold overrides all deletion, everywhere. Lifting one is as consequential as applying one, since it
         is what makes a later purge lawful, so both need a reason, as a document hold does, and the audit keeps
-        the reason it replaces. The route gates a lift on the exhibit's labels, so a lead cleared below an
-        exhibit cannot release a court hold on it.
+        the reason it replaces. Placing is one person's act, above the placer's own labels too (decision 144).
+
+        Lifting takes two people (decision 229): the requester, whom the route gates on the exhibit's labels,
+        spends a `legal_hold.lift_exhibit` approval raised against the hold as it stands, and `approver`, the
+        colleague who approved it, must still be active, still hold retention.manage and still be cleared for
+        the exhibit (`_lift_exhibit_hold`).
 
         The row is locked first, so a hold sent while a purge holds the row waits for it, and a destroyed
         exhibit is refused rather than reported held."""
@@ -1976,15 +2298,20 @@ class RetentionService:
                 "a legal hold has to say what it rests on, placed or lifted: "
                 "a hold nobody can attribute is a hold nobody can lift, and "
                 "a lift nobody can attribute makes a purge nobody can defend")
+        if not on:
+            self._lift_exhibit_hold(evidence_id, actor_id=actor_id, reason=reason,
+                                    approval_request_id=approval_request_id,
+                                    approver=approver)
+            return
         with self._c.transaction():
             prior = self._c.execute(
                 """SELECT case_id, legal_hold, legal_hold_reason
                      FROM core.evidence WHERE id = %s FOR UPDATE""",
                 (evidence_id,)).fetchone()
             cur = self._c.execute(
-                "UPDATE core.evidence SET legal_hold = %s, legal_hold_reason = %s "
+                "UPDATE core.evidence SET legal_hold = true, legal_hold_reason = %s "
                 "WHERE id = %s AND purged_at IS NULL",
-                (on, reason if on else None, evidence_id))
+                (reason, evidence_id))
             # A hold that changed no row is refused, never audited as applied. Under row-level security a blind
             # UPDATE on a row the connection cannot see changes nothing and reports nothing; this check keeps
             # "held" from being said of an exhibit that is not, or that a purge has destroyed.
@@ -1994,17 +2321,108 @@ class RetentionService:
                     "hold was placed or lifted")
             # `object_id` names the exhibit: `/audit/events` does not return `detail`, so an officer reading the
             # log could not otherwise tell which exhibit was held.
-            self._audit(prior[0], actor_id,
-                        "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
+            self._audit(prior[0], actor_id, "LEGAL_HOLD_APPLIED",
                         {"evidence_id": str(evidence_id), "reason": reason,
                          "prior_on": bool(prior[1]),
                          "prior_reason": prior[2]},
                         object_type="evidence", object_id=evidence_id)
 
+    def _lift_exhibit_hold(self, evidence_id: UUID, *, actor_id: UUID, reason: str,
+                           approval_request_id: UUID | None,
+                           approver: LiftApprover | None) -> None:
+        """The lift of an exhibit's hold, in one transaction: the row locked FOR UPDATE, the approval checked
+        and locked for the hold as it stands (its epoch), the approver judged against the exhibit's labels as
+        they are now, then the approval consumed, the row written and the lift audited with who asked and who
+        approved. Nothing calls out of the database in between, so the spend is the transaction's first audited
+        write and a refused consume is recorded on a connection of its own (approvals.py, the out-of-band rule).
+
+        A refusal rolls the transaction back, so the approval stays unspent, and is recorded afterwards as
+        LEGAL_HOLD_LIFT_REFUSED (DENIED, stage `spend`), so the record of the attempt survives the rollback.
+        The database refuses the write without the approval as well (migration exhibit_hold_lift_two_people)."""
+        from noctornal_api.approvals import (
+            LIFT_EXHIBIT,
+            ApprovalError,
+            ApprovalService,
+            lift_exhibit_payload,
+        )
+
+        case_id = None
+        try:
+            with self._c.transaction():
+                prior = self._c.execute(
+                    """SELECT case_id, legal_hold, legal_hold_reason, legal_hold_epoch,
+                              classification, compartments
+                         FROM core.evidence
+                        WHERE id = %s AND purged_at IS NULL FOR UPDATE""",
+                    (evidence_id,)).fetchone()
+                if prior is None:
+                    raise RetentionError(
+                        "no such exhibit, or it has been destroyed, so no legal "
+                        "hold was placed or lifted")
+                case_id = prior[0]
+                if not prior[1]:
+                    raise RetentionConflict(_NOT_HELD_EXHIBIT)
+                if approval_request_id is None:
+                    raise _LiftRefused("no_approval")
+                payload = lift_exhibit_payload(evidence_id, prior[3])
+                signed = self._lock_approval(
+                    approval_request_id, actor_id=actor_id, operation=LIFT_EXHIBIT,
+                    case_id=case_id, payload=payload)
+                refusal = _approver_refusal(
+                    signed, approver,
+                    approver is not None
+                    and _ceiling_dominates(approver.ceiling, prior[4], prior[5]))
+                if refusal:
+                    raise _LiftRefused(refusal)
+                ApprovalService(self._c).consume(
+                    approval_request_id, actor_id=actor_id,
+                    operation="legal_hold.lift_exhibit", case_id=case_id,
+                    payload=payload)
+                cur = self._c.execute(
+                    "UPDATE core.evidence SET legal_hold = false, legal_hold_reason = NULL "
+                    "WHERE id = %s AND purged_at IS NULL", (evidence_id,))
+                if cur.rowcount != 1:
+                    raise RetentionError(
+                        "no such exhibit, or it has been destroyed, so no legal "
+                        "hold was placed or lifted")
+                self._audit(case_id, actor_id, "LEGAL_HOLD_LIFTED",
+                            {"evidence_id": str(evidence_id), "reason": reason,
+                             "prior_on": True, "prior_reason": prior[2],
+                             **signed.detail()},
+                            object_type="evidence", object_id=evidence_id)
+        except _LiftRefused as refused:
+            self._lift_refused(case_id, actor_id, reason, refused.refusal,
+                               object_type="evidence", object_id=evidence_id,
+                               approval_request_id=approval_request_id)
+            if refused.refusal == "no_approval":
+                raise RetentionError(LIFT_TAKES_TWO) from None
+            raise RetentionConflict(_SECOND_PERSON_GONE) from None
+        except ApprovalError as exc:
+            self._lift_refused(case_id, actor_id, reason, "approval_unusable",
+                               object_type="evidence", object_id=evidence_id,
+                               approval_request_id=approval_request_id)
+            raise RetentionConflict(str(exc)) from exc
+
+    def _lift_refused(self, case_id: UUID | None, actor_id: UUID, reason: str,
+                      refusal: str, *, object_type: str, object_id: UUID,
+                      approval_request_id: UUID | None, stage: str = "spend") -> None:
+        """LEGAL_HOLD_LIFT_REFUSED (DENIED), written after the lift's transaction has rolled back, so it
+        survives: an attempt to release a hold is what an officer looks for. `refusal` says why, `stage`
+        whether the lift was refused when it was asked for (`request`) or when it was spent (`spend`), and
+        nothing in it names what lies above anybody."""
+        detail = {f"{object_type}_id": str(object_id), "scope": object_type,
+                  "reason": reason, "refusal": refusal, "stage": stage}
+        if approval_request_id is not None:
+            detail["approval_request_id"] = str(approval_request_id)
+        self._audit(case_id, actor_id, "LEGAL_HOLD_LIFT_REFUSED", detail,
+                    outcome="DENIED", object_type=object_type, object_id=object_id)
+
     def set_case_legal_hold(self, case_id: UUID, *, actor_id: UUID,
                             on: bool, reason: str | None,
                             lifter_ceiling: tuple | None = None,
-                            document_ceiling: tuple | None = None) -> dict:
+                            document_ceiling: tuple | None = None,
+                            approval_request_id: UUID | None = None,
+                            approver: LiftApprover | None = None) -> dict:
         """Hold, or release, everything a case governs: its exhibits (those lodged later too), the ingest
         records attached to it, its lookups, answers and batches, its samples, and the collected documents it
         cites. Every leg of the purge already reads `core.case.legal_hold`.
@@ -2026,59 +2444,149 @@ class RetentionService:
         they count too. `document_ceiling` is the lifter's ceiling OUTSIDE this case (no case-scoped break-glass
         grant): a collected document is read under the account's own clearance, never the case's, so a grant
         scoped to this case must not let somebody release a document they cannot open. Left out it is the case
-        ceiling, which can only be the wider of the two."""
+        ceiling, which can only be the wider of the two.
+
+        Lifting takes two people as well (decision 229): the lifter spends a `legal_hold.lift_case` approval
+        raised against the hold as it stands, and `approver`, the colleague who approved it, must still sign and
+        still be cleared for everything the case holds (`_lift_case_hold`)."""
         reason = (reason or "").strip()
         if len(reason) < 5:
             raise RetentionError(
                 "a legal hold has to say what it rests on, placed or lifted: "
                 "a hold nobody can attribute is a hold nobody can lift")
-        refused = False
+        if not on:
+            return self._lift_case_hold(
+                case_id, actor_id=actor_id, reason=reason,
+                lifter_ceiling=lifter_ceiling, document_ceiling=document_ceiling,
+                approval_request_id=approval_request_id, approver=approver)
         waited: dict[str, int] = {}
         with self._c.transaction():
             # What the case has had destroyed, counted before the wait and again once the lock is ours: the
             # difference is what a purge destroyed while this hold stood behind it.
-            before = (self._destroyed_so_far(case_id, lifter_ceiling)
-                      if on else {})
+            before = self._destroyed_so_far(case_id, lifter_ceiling)
             prior = self._c.execute(
                 """SELECT legal_hold, legal_hold_reason FROM core."case"
                     WHERE id = %s FOR UPDATE""", (case_id,)).fetchone()
             if prior is None:
                 raise RetentionNotFound("no such case")
-            if on:
-                after = self._destroyed_so_far(case_id, lifter_ceiling)
-                waited = {kind: after[kind] - before[kind] for kind in after
-                          if after[kind] > before[kind]}
-            if not on and not self._ceiling_covers_case(
-                    case_id, lifter_ceiling, document_ceiling):
-                refused = True
-            else:
-                self._c.execute(
-                    """UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s
-                        WHERE id = %s""", (on, reason if on else None, case_id))
-                detail = {"case_id": str(case_id), "scope": "case",
-                          "reason": reason, "prior_on": bool(prior[0]),
-                          "prior_reason": prior[1]}
-                if waited:
-                    detail["destroyed_while_waiting"] = waited
-                self._audit(case_id, actor_id,
-                            "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
-                            detail, object_type="case", object_id=case_id)
-        if refused:
-            # Recorded, as an exhibit's lift below its label is (the gate's AUTHZ_DENIED row): an attempt to
-            # release a hold over material above the lifter is what an officer looks for. Names nothing above the
-            # lifter.
-            self._audit(case_id, actor_id, "LEGAL_HOLD_LIFT_REFUSED",
-                        {"case_id": str(case_id), "scope": "case",
-                         "reason": reason}, outcome="DENIED",
-                        object_type="case", object_id=case_id)
-            raise RetentionError(self._lift_refusal(case_id))
-        out = {"case_id": str(case_id), "legal_hold": bool(on),
-               "legal_hold_reason": reason if on else None}
+            after = self._destroyed_so_far(case_id, lifter_ceiling)
+            waited = {kind: after[kind] - before[kind] for kind in after
+                      if after[kind] > before[kind]}
+            self._c.execute(
+                """UPDATE core."case" SET legal_hold = true, legal_hold_reason = %s
+                    WHERE id = %s""", (reason, case_id))
+            detail = {"case_id": str(case_id), "scope": "case",
+                      "reason": reason, "prior_on": bool(prior[0]),
+                      "prior_reason": prior[1]}
+            if waited:
+                detail["destroyed_while_waiting"] = waited
+            self._audit(case_id, actor_id, "LEGAL_HOLD_APPLIED",
+                        detail, object_type="case", object_id=case_id)
+        out = {"case_id": str(case_id), "legal_hold": True,
+               "legal_hold_reason": reason}
         if waited:
             out["destroyed_while_waiting"] = {**waited,
                                               "total": sum(waited.values())}
             out["notice"] = _waited_sentence(waited)
         return out
+
+    def _lift_case_hold(self, case_id: UUID, *, actor_id: UUID, reason: str,
+                        lifter_ceiling: tuple | None, document_ceiling: tuple | None,
+                        approval_request_id: UUID | None,
+                        approver: LiftApprover | None) -> dict:
+        """The lift of a case's hold, in one transaction, as an exhibit's is (`_lift_exhibit_hold`): the case
+        row locked FOR UPDATE, the lifter's cover of everything the case holds, the approval checked and locked
+        for the hold as it stands, the colleague who approved it judged against the same material as it is now
+        (material lodged since they approved counts), then the approval consumed, the hold written off and the
+        lift audited with who asked and who approved. A refusal rolls the transaction back, leaves the approval
+        unspent and is recorded afterwards as LEGAL_HOLD_LIFT_REFUSED (DENIED, stage `spend`). The database
+        refuses the write without the approval as well (migration case_hold_lift_two_people)."""
+        from noctornal_api.approvals import (
+            LIFT_CASE,
+            ApprovalError,
+            ApprovalService,
+            lift_case_payload,
+        )
+
+        try:
+            with self._c.transaction():
+                prior = self._c.execute(
+                    """SELECT legal_hold, legal_hold_reason, legal_hold_epoch
+                         FROM core."case" WHERE id = %s FOR UPDATE""",
+                    (case_id,)).fetchone()
+                if prior is None:
+                    raise RetentionNotFound("no such case")
+                if not prior[0]:
+                    raise RetentionConflict(_NOT_HELD_CASE)
+                if not self._ceiling_covers_case(case_id, lifter_ceiling,
+                                                 document_ceiling):
+                    raise _LiftRefused("lifter_below_material")
+                if approval_request_id is None:
+                    raise _LiftRefused("no_approval")
+                payload = lift_case_payload(prior[2])
+                signed = self._lock_approval(
+                    approval_request_id, actor_id=actor_id, operation=LIFT_CASE,
+                    case_id=case_id, payload=payload)
+                refusal = _approver_refusal(
+                    signed, approver,
+                    approver is not None and self._ceiling_covers_case(
+                        case_id, approver.ceiling, approver.document_ceiling))
+                if refusal:
+                    raise _LiftRefused(refusal)
+                ApprovalService(self._c).consume(
+                    approval_request_id, actor_id=actor_id,
+                    operation="legal_hold.lift_case", case_id=case_id,
+                    payload=payload)
+                self._c.execute(
+                    """UPDATE core."case" SET legal_hold = false, legal_hold_reason = NULL
+                        WHERE id = %s""", (case_id,))
+                self._audit(case_id, actor_id, "LEGAL_HOLD_LIFTED",
+                            {"case_id": str(case_id), "scope": "case",
+                             "reason": reason, "prior_on": True,
+                             "prior_reason": prior[1], **signed.detail()},
+                            object_type="case", object_id=case_id)
+        except _LiftRefused as refused:
+            self._lift_refused(case_id, actor_id, reason, refused.refusal,
+                               object_type="case", object_id=case_id,
+                               approval_request_id=approval_request_id)
+            if refused.refusal == "lifter_below_material":
+                raise RetentionError(self._lift_refusal(case_id)) from None
+            if refused.refusal == "no_approval":
+                raise RetentionError(LIFT_TAKES_TWO) from None
+            raise RetentionConflict(_SECOND_PERSON_GONE) from None
+        except ApprovalError as exc:
+            self._lift_refused(case_id, actor_id, reason, "approval_unusable",
+                               object_type="case", object_id=case_id,
+                               approval_request_id=approval_request_id)
+            raise RetentionConflict(str(exc)) from exc
+        return {"case_id": str(case_id), "legal_hold": False,
+                "legal_hold_reason": None}
+
+    def case_lift_request(self, case_id: UUID, *, actor_id: UUID, justification: str,
+                          lifter_ceiling: tuple | None,
+                          document_ceiling: tuple | None = None) -> dict:
+        """What a request for a case lift's second signature is raised against (decision 229): the hold as it
+        stands (`epoch`) and the labels of everything it governs (`classification`, `compartments`), which the
+        signers' notice is labelled at. Only somebody who could lift the hold may ask, so a lifter below the
+        material is refused here as the lift would refuse them, in `_lift_refusal`'s words, and the attempt is
+        recorded (LEGAL_HOLD_LIFT_REFUSED, DENIED, stage `request`). Read on this service's connection, a
+        system connection: what lies above the lifter is exactly what has to be seen."""
+        row = self._c.execute(
+            'SELECT legal_hold, legal_hold_epoch FROM core."case" WHERE id = %s',
+            (case_id,)).fetchone()
+        if row is None:
+            raise RetentionNotFound("no such case")
+        if not row[0]:
+            raise RetentionConflict(_NOT_HELD_CASE)
+        if not self._ceiling_covers_case(case_id, lifter_ceiling, document_ceiling):
+            self._lift_refused(case_id, actor_id, justification.strip(),
+                               "lifter_below_material", object_type="case",
+                               object_id=case_id, approval_request_id=None,
+                               stage="request")
+            raise RetentionError(self._lift_refusal(case_id))
+        classification, compartments = self.case_material_labels(case_id)
+        return {"epoch": int(row[1]), "classification": classification,
+                "compartments": compartments}
 
     def _destroyed_so_far(self, case_id: UUID, ceiling: tuple | None
                           ) -> dict[str, int]:
@@ -2149,7 +2657,7 @@ class RetentionService:
         deployment-wide document sweep could then destroy it. A document counts when the case cites it through
         any registered citation (`_citations_sql`, the one list the hold predicate reads) or cites another
         version of it: a citation of any version holds them all (`_versions_sql`). Cited and not above the
-        ceiling, or already purged, is not counted."""
+        ceiling, or already purged, is not counted. The items are `case_material_sql`'s."""
         if ceiling is None:
             return False
         clearance, held = _ceiling_parts(ceiling)
@@ -2157,43 +2665,32 @@ class RetentionService:
             (clearance, held) if document_ceiling is None
             else _ceiling_parts(document_ceiling))
         above = self._c.execute(
-            f"""WITH cited AS (
-                  SELECT DISTINCT c.document_id AS id
-                    FROM ({_citations_sql()}) c WHERE c.case_id = %(c)s),
-                held_documents AS (
-                  SELECT v.id FROM collect.document v
-                    JOIN cited ON cited.id = v.id
-                  UNION
-                  SELECT s.id FROM collect.document v
-                    JOIN cited ON cited.id = v.id
-                    JOIN collect.document s ON {_versions_sql("v", "s")})
-               SELECT
-                 (SELECT count(*) FROM core.evidence e
-                   WHERE e.case_id = %(c)s AND e.purged_at IS NULL
-                     AND (e.classification > %(l)s::core.tlp
-                          OR NOT e.compartments <@ %(h)s::text[]))
-               + (SELECT count(*) FROM ingest.record r
-                   WHERE r.case_id = %(c)s AND r.purged_at IS NULL
-                     AND (r.classification > %(l)s::core.tlp
-                          OR NOT r.compartments <@ %(h)s::text[]))
-               + (SELECT count(*) FROM lab.sample s
-                   WHERE s.case_id = %(c)s AND s.state <> 'REJECTED'
-                     AND (s.classification > %(l)s::core.tlp
-                          OR NOT s.compartments <@ %(h)s::text[]))
-               + (SELECT count(*) FROM ingest.lookup k
-                   WHERE k.case_id = %(c)s AND k.purged_at IS NULL
-                     AND k.classification > %(l)s::core.tlp)
-               + (SELECT count(*) FROM ingest.lookup_result k
-                   WHERE k.case_id = %(c)s AND k.purged_at IS NULL
-                     AND k.classification > %(l)s::core.tlp)
-               + (SELECT count(*) FROM collect.document d
-                   WHERE d.id IN (SELECT id FROM held_documents)
-                     AND d.purged_at IS NULL
-                     AND (d.classification > %(dl)s::core.tlp
-                          OR NOT d.compartments <@ %(dh)s::text[]))""",
+            f"""SELECT count(*) FROM ({case_material_sql('%(c)s')}) m
+                 WHERE CASE WHEN m.outside
+                            THEN m.classification > %(dl)s::core.tlp
+                                 OR NOT m.compartments <@ %(dh)s::text[]
+                            ELSE m.classification > %(l)s::core.tlp
+                                 OR NOT m.compartments <@ %(h)s::text[] END""",
             {"c": case_id, "l": clearance, "h": held,
              "dl": doc_clearance, "dh": doc_held}).fetchone()[0]
         return above == 0
+
+    def ceiling_covers(self, case_id: UUID, ceiling: tuple | None,
+                       document_ceiling: tuple | None = None) -> bool:
+        """`_ceiling_covers_case` for a reader of a case's lift request (decision 229): whether the request
+        is theirs to read and sign. The answer is yes or no and never what lies above them."""
+        return self._ceiling_covers_case(case_id, ceiling, document_ceiling)
+
+    def case_material_labels(self, case_id: UUID) -> tuple[str | None, list[str]]:
+        """The highest classification, and every compartment, of what a case's hold governs
+        (`case_material_sql`): the labels a request for its lift is notified at, so no signer below any
+        of it is sent the justification. None for a case that governs nothing."""
+        row = self._c.execute(
+            f"""WITH m AS ({case_material_sql('%(c)s')})
+                SELECT (SELECT max(m.classification)::text FROM m),
+                       ARRAY(SELECT DISTINCT x FROM m, unnest(m.compartments) AS x
+                              ORDER BY x)""", {"c": case_id}).fetchone()
+        return row[0], list(row[1] or [])
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
                detail: dict, *, outcome: str = "SUCCESS",

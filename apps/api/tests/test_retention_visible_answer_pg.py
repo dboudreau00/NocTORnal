@@ -94,6 +94,13 @@ def _boss_case(conn, *, exhibits=0):
     return boss, case_id, held
 
 
+def _second_lead(conn, case_id):
+    """The colleague a lift's second signature comes from (decision 229)."""
+    second = g.user(conn, "RED", roles=("CASE_OWNER",))
+    s.assign(conn, case_id, second, "CASE_OWNER")
+    return second
+
+
 def test_a_request_refused_for_a_stale_sign_in_spends_no_meter(conn, store, real):
     """Run first of all, as a dependency of the route, the meter was spent by
     a request the global gate then refused for a stale sign-in: after three
@@ -143,25 +150,34 @@ def test_a_lift_refused_for_a_stale_sign_in_spends_no_lift_meter(conn, store, re
                       json={"on": False, "reason": REASON})
         assert r.status_code == 403 and "re-authentication" in r.json()["detail"]
 
-    # Twenty-five refused lifts later, the three that are allowed still are.
+    # Twenty-five refused lifts later, the three that are allowed still are, each with a second
+    # person's approval (decision 229), which asking for spends no lift meter either.
+    second = _second_lead(conn, case_id)
+    approvals = [g.http_exhibit_lift_approval(real, conn, e, requester=boss,
+                                              approver_id=second) for e in exhibits]
     lifted = [real.post(f"{API}/retention/legal-hold", headers=fresh,
-                        json={"evidence_id": str(e), "on": False,
-                              "reason": REASON}).status_code for e in exhibits]
+                        json={"evidence_id": str(e), "on": False, "reason": REASON,
+                              "approval_request_id": rid}).status_code
+              for e, rid in zip(exhibits, approvals, strict=True)]
     assert lifted == [200, 200, 200, 429], lifted
 
 
 def test_a_lift_a_dry_run_and_a_purge_do_not_wait_on_each_other(conn, store, real):
     boss, case_id, exhibits = _boss_case(conn, exhibits=4)
+    second = _second_lead(conn, case_id)
     headers = g.token(conn, boss)
 
-    def hold(exhibit, on):
+    def hold(exhibit, on, approval=None):
         return real.post(f"{API}/retention/legal-hold", headers=headers,
                          json={"evidence_id": str(exhibit), "on": on,
-                               "reason": REASON})
+                               "reason": REASON, "approval_request_id": approval})
 
-    # Placing is never metered; lifting has its burst of three.
+    # Placing is never metered; lifting, with a second person's approval, has its burst of three.
     assert [hold(e, True).status_code for e in exhibits] == [200] * 4
-    lifted = [hold(e, False).status_code for e in exhibits]
+    approvals = [g.http_exhibit_lift_approval(real, conn, e, requester=boss,
+                                              approver_id=second) for e in exhibits]
+    lifted = [hold(e, False, rid).status_code
+              for e, rid in zip(exhibits, approvals, strict=True)]
     assert lifted == [200, 200, 200, 429], lifted
 
     # A spent lift meter leaves the other two acts alone.

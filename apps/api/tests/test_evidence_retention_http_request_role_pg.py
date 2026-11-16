@@ -1,7 +1,7 @@
 """Over HTTP, as the request role:
 
-- a lead cleared below an exhibit cannot lift its hold, and a lift without a reason is refused for
-  everybody.
+- a lead cleared below an exhibit cannot lift its hold or ask for its lift, a lift without a reason is
+  refused for everybody, and a lift takes a second person cleared for the exhibit (decision 229).
 - `POST /retention/cases/{id}/legal-hold` places and lifts a case-level hold, with a reason and a gate.
 - `/retention/due` shows nothing about an exhibit above the caller, for any date, and the free text of a
   hold only to a holder of retention.manage.
@@ -89,12 +89,19 @@ def test_a_lead_cleared_below_an_exhibit_cannot_lift_its_hold(conn, client):
     missing = _hold(client, g.token(conn, lead), uuid4(), on=False,
                     reason="lifting this hold on my own authority")
     assert (missing.status_code, missing.json()["detail"]) == (404, "no such exhibit")
+    # Nor may they ask a colleague to lift it: a request is behind the lift's own gates.
+    asked = client.post(f"{API}/retention/legal-hold/lift-requests",
+                        headers=g.token(conn, lead),
+                        json={"evidence_id": str(exhibit),
+                              "justification": "lifting this on my own authority"})
+    assert (asked.status_code, asked.json()["detail"]) == (404, "no such exhibit")
 
 
 def test_placing_holds_does_not_spend_the_destruction_meter(conn):
     """A hold route must not spend `retention.destroy` (a burst of three, ten an hour), or the fourth hold
     an officer placed inside a few minutes would be refused. With the REAL limits: five placements in a row
-    succeed, and lifting still meets the tight meter (its own, `retention.lift`)."""
+    succeed, and lifting, with a second person's approval each time, still meets the tight meter (its own,
+    `retention.lift`)."""
     from fastapi.testclient import TestClient
 
     from noctornal_api.http.app import create_app
@@ -104,16 +111,22 @@ def test_placing_holds_does_not_spend_the_destruction_meter(conn):
     app.state.limiter = RateLimiter(InProcessBackend(), limits=dict(LIMITS))
     real = TestClient(app, raise_server_exceptions=False)
     boss = g.user(conn, "RED", roles=("CASE_OWNER",))
+    second = g.user(conn, "RED", roles=("CASE_OWNER",))
     case_id = g.case(conn, boss)
     s.assign(conn, case_id, boss, "CASE_OWNER")
+    s.assign(conn, case_id, second, "CASE_OWNER")
     exhibits = [s.exhibit(conn, case_id, boss, "AMBER") for _ in range(5)]
     headers = g.token(conn, boss)
     placed = [_hold(real, headers, e).status_code for e in exhibits]
     assert placed == [200] * 5, placed
     assert all(_is_held(conn, e) for e in exhibits)
-    lifted = [_hold(real, headers, e, on=False,
-                    reason="order discharged by the court").status_code
-              for e in exhibits]
+    approvals = [g.http_exhibit_lift_approval(real, conn, e, requester=boss,
+                                              approver_id=second) for e in exhibits]
+    lifted = [real.post(f"{API}/retention/legal-hold", headers=headers,
+                        json={"evidence_id": str(e), "on": False,
+                              "reason": "order discharged by the court",
+                              "approval_request_id": rid}).status_code
+              for e, rid in zip(exhibits, approvals, strict=True)]
     assert lifted[:3] == [200] * 3 and 429 in lifted[3:], lifted
 
 
@@ -126,14 +139,17 @@ def test_a_lead_below_an_exhibit_may_still_place_a_hold_on_it(conn, client):
 
 
 def test_somebody_cleared_for_the_exhibit_lifts_it_with_a_reason_that_is_kept(conn, client):
+    """With a second person cleared for it, as every lift (decision 229)."""
     boss, _lead, case_id, exhibit = _setup_red_exhibit(conn)
+    second = g.user(conn, "RED", roles=("CASE_OWNER",))
+    s.assign(conn, case_id, second, "CASE_OWNER")
     _hold(client, g.token(conn, boss), exhibit)
     for reason in (None, "", "no"):
         r = _hold(client, g.token(conn, boss), exhibit, on=False, reason=reason)
         assert r.status_code in (400, 422), (reason, r.text)
         assert _is_held(conn, exhibit)
-    r = _hold(client, g.token(conn, boss), exhibit, on=False,
-              reason="order discharged by the court, ref 2026-0042/b")
+    r = g.http_lift_exhibit(client, conn, exhibit, requester=boss, approver_id=second,
+                            reason="order discharged by the court, ref 2026-0042/b")
     assert r.status_code == 200 and r.json()["legal_hold"] is False
     assert not _is_held(conn, exhibit)
     lifted = g.audit_rows(conn, "LEGAL_HOLD_LIFTED", case_id=case_id)
@@ -156,10 +172,21 @@ def _case_held(conn, case_id) -> bool:
                         (case_id,)).fetchone()[0]
 
 
+def _second(conn, case_id):
+    """The second Lead investigator a lift's approval comes from (decision 229), cleared for all of
+    the case."""
+    second = g.user(conn, "RED", roles=("CASE_OWNER",))
+    s.assign(conn, case_id, second, "CASE_OWNER")
+    return second
+
+
 def test_a_case_hold_is_placed_and_lifted_through_the_product(conn, client):
+    from noctornal_api.retention import LIFT_TAKES_TWO
+
     boss = g.user(conn, "RED", roles=("CASE_OWNER",))
     case_id = g.case(conn, boss)
     s.assign(conn, case_id, boss, "CASE_OWNER")
+    second = _second(conn, case_id)
     headers = g.token(conn, boss)
     for bad in (None, "no"):
         assert _case_hold(client, headers, case_id, reason=bad).status_code in (400, 422)
@@ -173,7 +200,12 @@ def test_a_case_hold_is_placed_and_lifted_through_the_product(conn, client):
     assert g.audit_rows(conn, "LEGAL_HOLD_APPLIED", case_id=case_id)[-1][0]["scope"] == "case"
 
     assert _case_hold(client, headers, case_id, on=False, reason=None).status_code in (400, 422)
-    r = _case_hold(client, headers, case_id, on=False, reason="order discharged, g44")
+    # One person cannot lift it (decision 229): a second person's approval is spent with it.
+    alone = _case_hold(client, headers, case_id, on=False, reason="order discharged, g44")
+    assert (alone.status_code, alone.json()["detail"]) == (400, LIFT_TAKES_TWO)
+    assert _case_held(conn, case_id)
+    r = g.http_lift_case(client, conn, case_id, requester=boss, approver_id=second,
+                         reason="order discharged, g44")
     assert r.status_code == 200 and r.json()["legal_hold"] is False
     assert not _case_held(conn, case_id)
 
@@ -216,8 +248,9 @@ def test_a_lead_below_something_in_the_case_places_the_hold_and_cannot_lift_it(c
     assert r.status_code == 400, r.text
     assert "cleared for everything" in r.json()["detail"]
     assert _case_held(conn, case_id)
-    assert _case_hold(client, g.token(conn, boss), case_id, on=False,
-                      reason="order discharged, g44").status_code == 200
+    assert g.http_lift_case(client, conn, case_id, requester=boss,
+                            approver_id=_second(conn, case_id),
+                            reason="order discharged, g44").status_code == 200
     assert not _case_held(conn, case_id)
 
 
@@ -248,8 +281,9 @@ def test_a_lead_below_a_cited_document_places_the_case_hold_and_cannot_lift_it(c
     assert _case_held(conn, case_id)
     assert _document_held(conn, doc) == "cited by a case under legal hold"
 
-    assert _case_hold(client, g.token(conn, boss), case_id, on=False,
-                      reason="order discharged, g44").status_code == 200
+    assert g.http_lift_case(client, conn, case_id, requester=boss,
+                            approver_id=_second(conn, case_id),
+                            reason="order discharged, g44").status_code == 200
     assert not _case_held(conn, case_id)
     assert _document_held(conn, doc) is None
 

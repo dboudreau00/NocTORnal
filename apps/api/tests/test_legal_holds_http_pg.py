@@ -68,15 +68,17 @@ def _rows(conn, action, case_id):
 
 def test_a_hold_and_a_lift_name_the_exhibit_in_the_audit_row(conn, client):
     boss = g.user(conn, "RED", roles=("CASE_OWNER",))
+    second = g.user(conn, "RED", roles=("CASE_OWNER",))
     officer = g.user(conn, "RED", roles=("SECURITY_OFFICER",))
     case_id = g.case(conn, boss)
     s.assign(conn, case_id, boss, "CASE_OWNER")
+    s.assign(conn, case_id, second, "CASE_OWNER")
     exhibit = s.exhibit(conn, case_id, boss, "AMBER")
     headers = g.token(conn, boss)
 
     assert _hold(client, headers, exhibit).status_code == 200
-    assert _hold(client, headers, exhibit, on=False,
-                 reason="order discharged, g79").status_code == 200
+    assert g.http_lift_exhibit(client, conn, exhibit, requester=boss, approver_id=second,
+                               reason="order discharged, g79").status_code == 200
 
     assert _rows(conn, "LEGAL_HOLD_APPLIED", case_id) == [
         ("evidence", exhibit, "SUCCESS")]
@@ -105,8 +107,10 @@ def test_a_case_hold_and_a_refused_lift_name_the_case(conn, client):
     refused = _case_hold(client, g.token(conn, lead), case_id, on=False,
                          reason="lifting this on my own authority")
     assert refused.status_code == 400, refused.text
-    assert _case_hold(client, g.token(conn, boss), case_id, on=False,
-                      reason="order discharged, g79").status_code == 200
+    second = g.user(conn, "RED", roles=("CASE_OWNER",))
+    s.assign(conn, case_id, second, "CASE_OWNER")
+    assert g.http_lift_case(client, conn, case_id, requester=boss, approver_id=second,
+                            reason="order discharged, g79").status_code == 200
 
     assert _rows(conn, "LEGAL_HOLD_APPLIED", case_id) == [
         ("case", case_id, "SUCCESS")]

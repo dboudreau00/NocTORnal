@@ -207,7 +207,8 @@ class CaseService:
             )
             self._audit("CASE_UPDATED", updated_by, case_id, {"changed": changed})
 
-    def transition_status(self, case_id: UUID, new_status: str, *, actor_id: UUID) -> None:
+    def transition_status(self, case_id: UUID, new_status: str, *, actor_id: UUID) -> str:
+        """Move the case to `new_status` if `_TRANSITIONS` allows it; returns the status it left."""
         current = self.get(case_id)
         if current is None:
             raise CaseError(f"case {case_id} not found")
@@ -227,6 +228,7 @@ class CaseService:
             )
             self._audit("CASE_STATUS_CHANGED", actor_id, case_id,
                         {"from": current.status, "to": new_status})
+        return current.status
 
     def assign_user(
         self, case_id: UUID, user_id: UUID, role_key: str, *,

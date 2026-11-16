@@ -115,6 +115,17 @@ def readable_predicate(alias: str = "n") -> str:
     """
 
 
+#: The labels a notice's element is judged at when they cannot be read: RED, under a compartment no
+#: account can hold, since a key is registered upper case (`iam.compartment`'s check) and an account
+#: holds only registered keys. Nobody dominates it, so the notice is not delivered.
+UNREADABLE_LABELS = ("'RED'::core.tlp", "ARRAY['unreadable']::text[]")
+
+#: A payload value read as a uuid only when it is shaped like one, so a malformed payload never fails
+#: the drain's whole statement on a cast.
+_UUID_RE = ("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
 def element_rows_sql(alias: str = "n") -> str:
     """SQL for the labels, as they stand now, of what `alias`'s notification is about: one
     `(classification, compartments)` row for each element the notification names through `object_type` and
@@ -128,7 +139,19 @@ def element_rows_sql(alias: str = "n") -> str:
 
     Read through `iam.element_facts` where it answers (a definer function: it reads the element whoever
     asks) and from the tables where it does not. The drain reads as a system role. The centre reads the
-    notice's own labels and its case's; this is the egress side's check."""
+    notice's own labels and its case's; this is the egress side's check.
+
+    A hold lift's request (decision 229) fails CLOSED: when the exhibit it names cannot be read, its row
+    is `UNREADABLE_LABELS`, which no account dominates, so a notice whose labels cannot be judged is not
+    delivered. A case's lift is judged at everything the case's hold governs, as it stands now
+    (`retention.case_material_sql`, the relation the lift's own cover check reads), so material lodged
+    after the request was raised is counted too. A collected document's lift is judged at every live
+    version of the document and its source (`retention.document_chain_sql`), and fails closed when the
+    document cannot be read. Every other branch yields no row for an element that is gone."""
+    from noctornal_api.retention import case_material_sql, document_chain_sql
+
+    named_document = (f"CASE WHEN a.payload ->> 'document_id' ~ '{_UUID_RE}' "
+                      f"THEN (a.payload ->> 'document_id')::uuid END")
     return f"""
         SELECT f.classification, f.compartments
           FROM iam.element_facts('evidence', {alias}.object_id) f
@@ -149,6 +172,28 @@ def element_rows_sql(alias: str = "n") -> str:
                 THEN ends.id::uuid END) f
          WHERE {alias}.object_type = 'approval_request' AND a.id = {alias}.object_id
            AND a.operation = 'node.merge'
+        UNION ALL
+        SELECT coalesce(f.classification, {UNREADABLE_LABELS[0]}),
+               coalesce(f.compartments, {UNREADABLE_LABELS[1]})
+          FROM core.approval_request a
+          LEFT JOIN LATERAL iam.element_facts('evidence', CASE
+                WHEN a.payload ->> 'evidence_id' ~ '{_UUID_RE}'
+                THEN (a.payload ->> 'evidence_id')::uuid END) f ON true
+         WHERE {alias}.object_type = 'approval_request' AND a.id = {alias}.object_id
+           AND a.operation = 'legal_hold.lift_exhibit'
+        UNION ALL
+        SELECT m.classification, m.compartments
+          FROM core.approval_request a
+         CROSS JOIN LATERAL ({case_material_sql('a.case_id')}) m
+         WHERE {alias}.object_type = 'approval_request' AND a.id = {alias}.object_id
+           AND a.operation = 'legal_hold.lift_case'
+        UNION ALL
+        SELECT coalesce(x.classification, {UNREADABLE_LABELS[0]}),
+               coalesce(x.compartments, {UNREADABLE_LABELS[1]})
+          FROM core.approval_request a
+          LEFT JOIN LATERAL ({document_chain_sql(named_document)}) x ON true
+         WHERE {alias}.object_type = 'approval_request' AND a.id = {alias}.object_id
+           AND a.operation = 'legal_hold.lift_document'
         UNION ALL
         SELECT f.classification, f.compartments
           FROM lab.detonation d
@@ -287,6 +332,12 @@ KINDS: dict[str, Kind] = {
         "A recorded detonation names you as the person who agreed to it"),
     "SANDBOX_RESULT": Kind(
         "SANDBOX_RESULT", NORMAL, "A sandbox run you requested ended"),
+    # A case was closed with conversations nobody assigned to it can minimise (decision 231): the
+    # Security officers, content-free and caseless, and the case's Leads as its withheld-disclosure
+    # setting allows. Raised by notify_events.minimisation_gap; never routed to Jira.
+    "COMMS_MINIMISATION_GAP": Kind(
+        "COMMS_MINIMISATION_GAP", NORMAL,
+        "A case was closed with conversations nobody on its team can minimise"),
 }
 
 # Channel defaults when a user has no preference row. IN_APP takes everything; email only takes what would

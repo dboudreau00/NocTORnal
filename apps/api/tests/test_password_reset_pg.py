@@ -452,7 +452,9 @@ def test_the_way_in_tells_an_administrator_what_is_blocking(conn, client):
                     "integration_manage": False,
                     # Prohibited-content screening.
                     "sample_screening_review": False,
-                    "sample_screening_manage": False}
+                    "sample_screening_manage": False,
+                    # The minimisation gaps (decision 231).
+                    "comms_minimise_oversee": False}
 
 
 # --- the shell ---------------------------------------------------------------

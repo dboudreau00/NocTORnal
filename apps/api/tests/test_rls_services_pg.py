@@ -106,8 +106,7 @@ def test_a_legal_hold_reaches_an_exhibit_above_the_officer_and_refuses_a_ghost(o
     held = owner.execute("SELECT legal_hold FROM core.evidence WHERE id = %s",
                          (exhibit,)).fetchone()[0]
     assert held is True
-    owner.execute("UPDATE core.evidence SET legal_hold = false, legal_hold_reason = NULL "
-                  "WHERE id = %s", (exhibit,))
+    s.release_exhibit_hold(owner, exhibit)
 
 
 def test_the_gate_still_answers_a_hidden_element_with_its_own_refusal(owner, scene):

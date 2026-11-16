@@ -531,6 +531,92 @@ def global_approval_decided(conn: psycopg.Connection, *, request_id: UUID,
         actor_id=actor_id)
 
 
+#: A collected document's hold lift (decision 229), named by its key in the deployment-wide request's
+#: templates (0181 accepts an operation key there), so a request raised by the request role passes
+#: `notify.enqueue` without a description of its own in the templates.
+DOCUMENT_LIFT = "legal_hold.lift_document"
+
+
+def document_lift_requested(conn: psycopg.Connection, *, request_id: UUID,
+                            document_id, justification: str, actor_id: UUID,
+                            element_classification: str | None,
+                            element_compartments: frozenset[str] = frozenset(),
+                            ) -> int:
+    """Tell everyone who could sign a collected document's lift (decision 229): an active account other
+    than the requester whose global roles carry retention.manage and collection.read, which the decide
+    route asks of them. The notice is labelled at every version of the document and its source, so
+    `notify.enqueue` tells nobody below them, and the drain judges them again as they stand
+    (`notifications.element_rows_sql`). The body, read in-app only, names the document and quotes the
+    justification, as a case's request does.
+
+    Returns how many were raised."""
+    rows = conn.execute(
+        """SELECT u.id FROM iam.app_user u
+            WHERE u.id <> %(actor)s AND u.is_active
+              AND EXISTS (SELECT 1 FROM iam.user_role ur
+                            JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                           WHERE ur.user_id = u.id
+                             AND rp.permission_key = 'retention.manage')
+              AND EXISTS (SELECT 1 FROM iam.user_role ur
+                            JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                           WHERE ur.user_id = u.id
+                             AND rp.permission_key = 'collection.read')""",
+        {"actor": actor_id}).fetchall()
+    svc = NotificationService(conn)
+    event = uuid4()
+    sent = 0
+    for (user_id,) in rows:
+        raised = svc.notify(
+            recipient_id=user_id, case_id=None, event_id=event,
+            kind="APPROVAL_REQUESTED",
+            subject=f"A second signature is needed: {DOCUMENT_LIFT}",
+            summary=("A deployment-wide change is waiting for a second "
+                     "signature. Sign in to review it."),
+            body=(f"A colleague asks for your second signature to lift the legal "
+                  f"hold on collected document {document_id} and every earlier "
+                  f"version of it.\n\nTheir justification:\n\n    {justification}\n\n"
+                  f"Open a case you work on, then Feeds, Collected, and load the "
+                  f"documents: the document's card shows the request, with Approve "
+                  f"and Refuse. You are asked because you hold retention.manage and "
+                  f"collection.read and are cleared for every version of it. "
+                  f"Approving means you have checked what discharged the hold, "
+                  f"not that you trust the person asking."),
+            classification="GREEN", compartments=frozenset(),
+            element_classification=element_classification,
+            element_compartments=element_compartments,
+            object_type="approval_request", object_id=request_id,
+            actor_id=actor_id)
+        if raised is not None:
+            sent += 1
+    return sent
+
+
+def document_lift_decided(conn: psycopg.Connection, *, request_id: UUID,
+                          document_id, requested_by: UUID, approved: bool,
+                          actor_id: UUID, element_classification: str | None,
+                          element_compartments: frozenset[str] = frozenset(),
+                          ) -> Notification | None:
+    """Tell the one who asked that their document lift was decided, at the document's labels as they
+    stand. The colleague's note is not quoted, as no deployment-wide decision quotes one."""
+    verdict = "countersigned" if approved else "refused"
+    return NotificationService(conn).notify(
+        recipient_id=requested_by, case_id=None, kind="APPROVAL_DECIDED",
+        subject=f"Your request was {verdict}: {DOCUMENT_LIFT}",
+        summary=f"Your deployment-wide request was {verdict}.",
+        body=((f"A colleague approved lifting the legal hold on collected document "
+               f"{document_id}. The hold is still in force: lift it from the "
+               f"document's card with a written reason before the approval "
+               f"expires. It is spent once.")
+              if approved else
+              (f"A colleague refused to lift the legal hold on collected document "
+               f"{document_id}. The hold stays. A refused request cannot be "
+               f"decided again; ask again if the facts change.")),
+        classification="GREEN", compartments=frozenset(),
+        element_classification=element_classification,
+        element_compartments=element_compartments,
+        object_type="approval_request", object_id=request_id, actor_id=actor_id)
+
+
 # The collection foundation (docs/00 decision 69).
 
 def _global_holders(conn: psycopg.Connection, permission: str) -> list[UUID]:
@@ -1000,3 +1086,77 @@ def sandbox_result(conn: psycopg.Connection, *, detonation_id: UUID,
         body=(f"The detonation you requested {outcome}. The Lab card of the "
               f"sample has the details."),
         detonation_id=detonation_id, actor_id=None, caseless=True)
+
+
+# The minimisation gap (decision 231).
+
+#: The oversight permission whose holders are told of every gap, whatever the case's setting.
+MINIMISATION_OVERSIGHT = "comms.minimise.oversee"
+
+
+def minimisation_gap(conn: psycopg.Connection, *, case_id: UUID, count: int,
+                     mode: str, actor_id: UUID) -> int:
+    """A case was closed with `count` conversations nobody assigned to it can minimise.
+
+    Two audiences, never a conversation, a platform, a label or a compartment. The holders of
+    `comms.minimise.oversee` (the Security officers) are told whatever the case's setting, GREEN and
+    caseless like the break-glass alert: no case code and no count, because the officer holds no
+    case content and this can go out by email; Oversight, Minimisation gaps names the case. The
+    case's assigned holders of `case.grant`, who can assign a cleared colleague, are told only as
+    `withheld_disclosure` allows: nothing under NONE, that there are some under PRESENCE, how many
+    under COUNT, at the case's labels, so a holder below the case gets nothing. The closer is not
+    told here (suppression 1): the status reply says it. Returns how many were raised."""
+    from noctornal_api.projections import DISCLOSURE_COUNT, DISCLOSURE_NONE
+
+    svc = NotificationService(conn)
+    raised = 0
+    for user_id in _global_holders(conn, MINIMISATION_OVERSIGHT):
+        if svc.notify(
+                recipient_id=user_id, case_id=None,
+                kind="COMMS_MINIMISATION_GAP",
+                subject="A case was closed with conversations nobody on its team can minimise",
+                summary=("A case was closed with conversations above everyone "
+                         "assigned to it, so nobody on its team can minimise "
+                         "them. Sign in to Oversight to see it."),
+                body=("A case was closed with conversations that nobody "
+                      "assigned to it is cleared to minimise. Nothing about "
+                      "them is reproduced here. Oversight, Minimisation gaps, "
+                      "names the case; its Lead investigator can assign a Lead "
+                      "investigator who is cleared for them, who can then "
+                      "minimise them."),
+                classification="GREEN", compartments=frozenset(),
+                object_type="case", object_id=case_id,
+                actor_id=actor_id) is not None:
+            raised += 1
+    if mode == DISCLOSURE_NONE:
+        return raised
+    code, classification, compartments = _case(conn, case_id)
+    if mode == DISCLOSURE_COUNT:
+        some = count_of(count, "conversation", "conversations")
+        them = agree(count, "it", "them")
+    else:
+        some, them = "some conversations", "them"
+    said = (f"{code} was closed with {some} above everyone assigned to it, so "
+            f"nobody on the team can minimise {them}.")
+    leads = [r[0] for r in conn.execute(
+        """SELECT a.user_id FROM iam.case_assignment a
+             JOIN iam.app_user u ON u.id = a.user_id
+            WHERE a.case_id = %s AND u.is_active
+              AND (a.expires_at IS NULL OR a.expires_at > now())
+              AND EXISTS (SELECT 1 FROM iam.role_permission rp
+                           WHERE rp.role_key = a.role_key
+                             AND rp.permission_key = 'case.grant')""",
+        (case_id,)).fetchall()]
+    for user_id in leads:
+        if svc.notify(
+                recipient_id=user_id, case_id=case_id,
+                kind="COMMS_MINIMISATION_GAP",
+                subject=f"{code}: conversations nobody on the team can minimise",
+                summary=said,
+                body=(f"{said} Ask a Lead investigator cleared for {them} to be "
+                      f"assigned to this case: Share adds a colleague."),
+                classification=classification, compartments=compartments,
+                object_type="case", object_id=case_id,
+                actor_id=actor_id) is not None:
+            raised += 1
+    return raised

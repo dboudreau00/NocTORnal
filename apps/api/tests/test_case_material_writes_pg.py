@@ -164,13 +164,38 @@ def client(monkeypatch):
     return TestClient(app, raise_server_exceptions=False)
 
 
+def _second_lead(owner, case_id):
+    """The colleague a lift's second signature comes from (decision 229)."""
+    second = s.user(owner, prefix=P)
+    s.grant_global(owner, second, "CASE_OWNER")
+    s.assign(owner, case_id, second, "CASE_OWNER")
+    _sid, raw = s.session(owner, second)
+    return {"Authorization": f"Bearer {raw}"}
+
+
+def _approved(client, headers, approver, path, body) -> str:
+    """A lift asked for at `path` and approved by `approver`, as the console does."""
+    asked = client.post(path, headers=headers, json=body)
+    assert asked.status_code == 201, asked.text
+    request = asked.json()
+    decided = client.post(
+        f"/api/v1/cases/{request['case_id']}/approvals/{request['id']}/decide",
+        headers=approver, json={"approve": True, "note": "checked"})
+    assert decided.status_code == 200, decided.text
+    return request["id"]
+
+
 def test_a_lead_still_holds_lifts_and_edits_over_http(owner, client):
     lead, case_id, exhibit, raw = _lead_with_exhibit(owner)
     s.grant_global(owner, lead, "CASE_OWNER")
     headers = {"Authorization": f"Bearer {raw}"}
+    second = _second_lead(owner, case_id)
+    rid = _approved(client, headers, second, "/api/v1/retention/legal-hold/lift-requests",
+                    {"evidence_id": str(exhibit), "justification": "the order was discharged"})
     r = client.post("/api/v1/retention/legal-hold", headers=headers,
                     json={"evidence_id": str(exhibit), "on": False,
-                          "reason": "the order was discharged"})
+                          "reason": "the order was discharged",
+                          "approval_request_id": rid})
     assert r.status_code == 200, r.text
     assert owner.execute("SELECT legal_hold FROM core.evidence WHERE id = %s",
                          (exhibit,)).fetchone()[0] is False
@@ -178,8 +203,12 @@ def test_a_lead_still_holds_lifts_and_edits_over_http(owner, client):
                     json={"evidence_id": str(exhibit), "on": True,
                           "reason": "a fresh preservation order"})
     assert r.status_code == 200, r.text
+    case_rid = _approved(client, headers, second,
+                         f"/api/v1/retention/cases/{case_id}/legal-hold/lift-requests",
+                         {"justification": "the order was discharged"})
     r = client.post(f"/api/v1/retention/cases/{case_id}/legal-hold", headers=headers,
-                    json={"on": False, "reason": "the order was discharged"})
+                    json={"on": False, "reason": "the order was discharged",
+                          "approval_request_id": case_rid})
     assert r.status_code == 200, r.text
     assert owner.execute('SELECT legal_hold FROM core."case" WHERE id = %s',
                          (case_id,)).fetchone()[0] is False

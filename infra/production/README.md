@@ -514,7 +514,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Forty-six checks, each with the evidence behind it and, when it fails, the
+Forty-seven checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -548,7 +548,7 @@ register is the one that answers for the deployment.
 
 ### What stays red, and what a red check refuses
 
-Four of the forty-six are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the forty-seven are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -603,6 +603,14 @@ with `--forwarded-allow-ips` for Caddy, so there it is the client's own; a
 deployment started any other way would see the proxy for every client in all
 three. It is not blocking, and a count above the real one is not caught by any
 check, because it lets a client choose its own address.
+
+`conversations_minimisable` (decision 231) is green on a fresh stack and red
+while a closed case still holds a conversation that nobody assigned to it is
+cleared to minimise. It says whether, never which case or how many, because
+every holder of `user.manage` reads it: the Security officer's Oversight,
+Minimisation gaps, names the cases, and the remedy is the case's Lead
+investigator assigning one who is cleared. It is not blocking, and a case not
+yet closed with such a conversation is a caveat on the green row.
 
 **1. `prohibited_content_policy`**, `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and

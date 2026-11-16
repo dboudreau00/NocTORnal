@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0192.
+-- GENERATED MIRROR of the schema at Alembic revision 0196.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0192
+-- Alembic revision: 0196
 -- =====================================================================
 
 --
@@ -765,6 +765,46 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+--
+-- Name: guard_document_hold_lift(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_document_hold_lift() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF (OLD.legal_hold, OLD.legal_hold_reason)
+     IS NOT DISTINCT FROM (NEW.legal_hold, NEW.legal_hold_reason) THEN
+    IF NEW.legal_hold_epoch IS DISTINCT FROM OLD.legal_hold_epoch THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+        'legal_hold_epoch moves only with the legal hold';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.legal_hold AND NOT NEW.legal_hold AND NOT EXISTS (
+       SELECT 1 FROM core.approval_request r
+        WHERE r.operation = 'legal_hold.lift_document'
+          AND r.case_id IS NULL
+          AND r.state = 'CONSUMED'
+          AND r.consumed_at = now()
+          AND r.payload->'versions'->>(NEW.id::text) = OLD.legal_hold_epoch::text) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'collected document ' || NEW.id || ' is under a legal hold, and lifting it'
+      || ' takes a legal_hold.lift_document approval for the hold as it stands,'
+      || ' consumed in the same transaction';
+  END IF;
+  NEW.legal_hold_epoch := OLD.legal_hold_epoch + 1;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_document_hold_lift(); Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON FUNCTION collect.guard_document_hold_lift() IS 'A collected document''s legal hold comes off a version only in a transaction that consumed a legal_hold.lift_document approval naming that version at that epoch, whoever writes it (migration document_hold_lift_two_people, decision 229).';
 
 --
 -- Name: guard_persona_act(); Type: FUNCTION; Schema: collect; Owner: -
@@ -2195,6 +2235,46 @@ $$;
 COMMENT ON FUNCTION core.guard_approval_request() IS 'An approval request is inserted pending, what it asks for never changes, it is decided once at now(), spent once at now(), and never gains time (migration approval_request_frozen, F9 2026-09-24).';
 
 --
+-- Name: guard_case_hold_lift(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.guard_case_hold_lift() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF (OLD.legal_hold, OLD.legal_hold_reason)
+     IS NOT DISTINCT FROM (NEW.legal_hold, NEW.legal_hold_reason) THEN
+    IF NEW.legal_hold_epoch IS DISTINCT FROM OLD.legal_hold_epoch THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+        'legal_hold_epoch moves only with the legal hold';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.legal_hold AND NOT NEW.legal_hold AND NOT EXISTS (
+       SELECT 1 FROM core.approval_request r
+        WHERE r.operation = 'legal_hold.lift_case'
+          AND r.case_id = NEW.id
+          AND r.state = 'CONSUMED'
+          AND r.consumed_at = now()
+          AND r.payload->>'epoch' = OLD.legal_hold_epoch::text) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'case ' || NEW.code || ' is under a legal hold, and lifting it takes a'
+      || ' legal_hold.lift_case approval for the hold as it stands, consumed'
+      || ' in the same transaction';
+  END IF;
+  NEW.legal_hold_epoch := OLD.legal_hold_epoch + 1;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_case_hold_lift(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.guard_case_hold_lift() IS 'A case''s legal hold comes off only in a transaction that consumed a legal_hold.lift_case approval for that case and that epoch, whoever writes it (migration case_hold_lift_two_people, decision 229).';
+
+--
 -- Name: guard_case_merge_switch(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -2290,6 +2370,47 @@ $$;
 --
 
 COMMENT ON FUNCTION core.guard_evidence_hold_purge() IS 'A held exhibit is never marked purged and a purged one is never held (evidence-purge-hold-race, 2026-10-03).';
+
+--
+-- Name: guard_exhibit_hold_lift(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.guard_exhibit_hold_lift() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF (OLD.legal_hold, OLD.legal_hold_reason)
+     IS NOT DISTINCT FROM (NEW.legal_hold, NEW.legal_hold_reason) THEN
+    IF NEW.legal_hold_epoch IS DISTINCT FROM OLD.legal_hold_epoch THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+        'legal_hold_epoch moves only with the legal hold';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.legal_hold AND NOT NEW.legal_hold AND NOT EXISTS (
+       SELECT 1 FROM core.approval_request r
+        WHERE r.operation = 'legal_hold.lift_exhibit'
+          AND r.case_id = NEW.case_id
+          AND r.state = 'CONSUMED'
+          AND r.consumed_at = now()
+          AND r.payload->>'evidence_id' = NEW.id::text
+          AND r.payload->>'epoch' = OLD.legal_hold_epoch::text) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'exhibit ' || NEW.id || ' is under a legal hold, and lifting it takes a'
+      || ' legal_hold.lift_exhibit approval for the hold as it stands, consumed'
+      || ' in the same transaction';
+  END IF;
+  NEW.legal_hold_epoch := OLD.legal_hold_epoch + 1;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_exhibit_hold_lift(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.guard_exhibit_hold_lift() IS 'An exhibit''s legal hold comes off only in a transaction that consumed a legal_hold.lift_exhibit approval for that exhibit and that epoch, whoever writes it (migration exhibit_hold_lift_two_people, decision 229).';
 
 --
 -- Name: node_tsv_update(); Type: FUNCTION; Schema: core; Owner: -
@@ -5458,6 +5579,7 @@ CREATE TABLE collect.document (
     compartments text[] DEFAULT '{}'::text[] NOT NULL,
     legal_hold_reason text,
     legal_hold_by uuid,
+    legal_hold_epoch bigint DEFAULT 0 NOT NULL,
     CONSTRAINT document_hold_has_reason CHECK (((NOT legal_hold) OR (length(btrim(COALESCE(legal_hold_reason, ''::text))) > 0)))
 );
 
@@ -5478,6 +5600,12 @@ COMMENT ON COLUMN collect.document.legal_hold_reason IS 'Why this document, and 
 --
 
 COMMENT ON COLUMN collect.document.legal_hold_by IS 'Who last placed or lifted the document-level hold.';
+
+--
+-- Name: COLUMN document.legal_hold_epoch; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.document.legal_hold_epoch IS 'Moves by one each time this version''s legal hold goes on, comes off or is placed again for another reason. A legal_hold.lift_document approval names every version it releases at its epoch (migration document_hold_lift_two_people, decision 229).';
 
 --
 -- Name: document_embedding; Type: TABLE; Schema: collect; Owner: -
@@ -6665,6 +6793,7 @@ CREATE TABLE core."case" (
     legal_hold boolean DEFAULT false NOT NULL,
     legal_hold_reason text,
     dual_control_merge_epoch bigint DEFAULT 0 NOT NULL,
+    legal_hold_epoch bigint DEFAULT 0 NOT NULL,
     CONSTRAINT case_hold_has_reason CHECK (((NOT legal_hold) OR (legal_hold_reason IS NOT NULL))),
     CONSTRAINT case_retention_sane CHECK ((retention_until > ((created_at AT TIME ZONE 'UTC'::text))::date)),
     CONSTRAINT case_withheld_disclosure_known CHECK ((withheld_disclosure = ANY (ARRAY['NONE'::text, 'PRESENCE'::text, 'COUNT'::text])))
@@ -6675,6 +6804,12 @@ CREATE TABLE core."case" (
 --
 
 COMMENT ON COLUMN core."case".dual_control_merge_epoch IS 'Moves by one with every change of dual_control_merge. A case.policy.relax approval names the epoch it was raised against (migration case_merge_relax_two_people, F9b 2026-09-24).';
+
+--
+-- Name: COLUMN "case".legal_hold_epoch; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core."case".legal_hold_epoch IS 'Moves by one each time the case''s legal hold goes on, comes off or is placed again for another reason. A legal_hold.lift_case approval names the epoch it was raised against (migration case_hold_lift_two_people, decision 229).';
 
 --
 -- Name: edge; Type: TABLE; Schema: core; Owner: -
@@ -6831,6 +6966,7 @@ CREATE TABLE core.evidence (
     purged_at timestamp with time zone,
     is_hostile_markup boolean DEFAULT false NOT NULL,
     storage_version_id text,
+    legal_hold_epoch bigint DEFAULT 0 NOT NULL,
     CONSTRAINT evidence_hold_has_reason CHECK (((NOT legal_hold) OR (legal_hold_reason IS NOT NULL)))
 );
 
@@ -6845,6 +6981,12 @@ COMMENT ON COLUMN core.evidence.is_hostile_markup IS 'Attacker-authored markup/c
 --
 
 COMMENT ON COLUMN core.evidence.storage_version_id IS 'The object store version the exhibit was lodged as, set once after the put (evidence-integrity-anchors-mutable, 2026-10-03). Reads ask for this version; NULL reads the latest version of storage_key.';
+
+--
+-- Name: COLUMN evidence.legal_hold_epoch; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.evidence.legal_hold_epoch IS 'Moves by one each time the legal hold goes on, comes off or is placed again for another reason. A legal_hold.lift_exhibit approval names the epoch it was raised against (migration exhibit_hold_lift_two_people, decision 229).';
 
 --
 -- Name: evidence_custody; Type: TABLE; Schema: core; Owner: -
@@ -11981,6 +12123,12 @@ CREATE TRIGGER document_embedding_labels BEFORE INSERT OR UPDATE OF document_id,
 CREATE TRIGGER document_embedding_queued AFTER INSERT ON collect.document FOR EACH ROW WHEN ((new.purged_at IS NULL)) EXECUTE FUNCTION collect.document_embedding_queued();
 
 --
+-- Name: document document_hold_lift_guarded; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER document_hold_lift_guarded BEFORE UPDATE ON collect.document FOR EACH ROW WHEN (((old.legal_hold IS DISTINCT FROM new.legal_hold) OR (old.legal_hold_reason IS DISTINCT FROM new.legal_hold_reason) OR (old.legal_hold_epoch IS DISTINCT FROM new.legal_hold_epoch))) EXECUTE FUNCTION collect.guard_document_hold_lift();
+
+--
 -- Name: document document_tsv; Type: TRIGGER; Schema: collect; Owner: -
 --
 
@@ -12329,6 +12477,12 @@ CREATE TRIGGER assertion_supersedes_guarded BEFORE INSERT ON core.assertion FOR 
 CREATE TRIGGER assertion_supersedes_unchanged BEFORE UPDATE OF supersedes_id ON core.assertion FOR EACH ROW WHEN ((old.supersedes_id IS DISTINCT FROM new.supersedes_id)) EXECUTE FUNCTION core.assertion_supersedes_fixed();
 
 --
+-- Name: case case_hold_lift_guarded; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER case_hold_lift_guarded BEFORE UPDATE ON core."case" FOR EACH ROW WHEN (((old.legal_hold IS DISTINCT FROM new.legal_hold) OR (old.legal_hold_reason IS DISTINCT FROM new.legal_hold_reason) OR (old.legal_hold_epoch IS DISTINCT FROM new.legal_hold_epoch))) EXECUTE FUNCTION core.guard_case_hold_lift();
+
+--
 -- Name: case case_merge_switch_guarded; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -12477,6 +12631,12 @@ CREATE TRIGGER evidence_embedding_case BEFORE INSERT OR UPDATE OF evidence_id, c
 --
 
 CREATE TRIGGER evidence_embedding_queued AFTER INSERT ON core.evidence FOR EACH ROW WHEN ((new.purged_at IS NULL)) EXECUTE FUNCTION core.evidence_embedding_queued();
+
+--
+-- Name: evidence evidence_hold_lift_guarded; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER evidence_hold_lift_guarded BEFORE UPDATE ON core.evidence FOR EACH ROW WHEN (((old.legal_hold IS DISTINCT FROM new.legal_hold) OR (old.legal_hold_reason IS DISTINCT FROM new.legal_hold_reason) OR (old.legal_hold_epoch IS DISTINCT FROM new.legal_hold_epoch))) EXECUTE FUNCTION core.guard_exhibit_hold_lift();
 
 --
 -- Name: evidence evidence_hold_purge_exclusive; Type: TRIGGER; Schema: core; Owner: -

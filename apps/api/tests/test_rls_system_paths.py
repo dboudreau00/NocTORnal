@@ -118,6 +118,21 @@ _MUST_BE_SYSTEM = {
     ("http/routers/collection.py", "run_once"): "COLLECTION",
     ("http/routers/proposals.py", "capture"): "COLLECTION",
     ("http/routers/governance.py", "document_legal_hold"): "RETENTION",
+    # A hold lift's request reads the hold as the lift will, whatever the requester's row security
+    # shows (decision 229).
+    ("http/routers/governance.py", "request_exhibit_lift"): "RETENTION",
+    ("http/routers/governance.py", "request_case_lift"): "RETENTION",
+    # Whether a case's lift request is the reader's to see and sign: their cover of everything the
+    # case's hold governs, which row security would hide.
+    ("http/routers/approvals.py", "_hidden_lift_requests"): "RETENTION",
+    ("approvals.py", "_case_lifts_covered"): "RETENTION",
+    # A collected document's lift: every version is judged, which row security would hide.
+    ("http/routers/governance.py", "request_document_lift"): "RETENTION",
+    ("http/routers/approvals.py", "_hidden_global_requests"): "RETENTION",
+    ("approvals.py", "_document_lift_labels"): "RETENTION",
+    # The open lift a hold's control offers, to a reader cleared for what it releases.
+    ("http/routers/cases.py", "_case_lift_request"): "RETENTION",
+    ("http/routers/collection.py", "_attach_document_lifts"): "RETENTION",
     ("http/routers/embeddings.py", "register_embedding_space"): "EMBEDDINGS",
     ("http/routers/embeddings.py", "activate_embedding_space"): "EMBEDDINGS",
     ("http/routers/embeddings.py", "retire_embedding_space"): "EMBEDDINGS",
@@ -138,6 +153,11 @@ _MUST_BE_SYSTEM = {
     # it finds third parties by.
     ("http/routers/comms.py", "minimise"): "MINIMISATION",
     ("http/routers/comms.py", "mark_incidental"): "MINIMISATION",
+    # The conversations nobody assigned can minimise (decision 231) are the ones above the reader,
+    # at closure and on the case record.
+    ("http/routers/cases.py", "_say_the_minimisation_gap"): "MINIMISATION",
+    ("http/routers/cases.py", "_minimisation_notice"): "MINIMISATION",
+    ("http/routers/admin.py", "minimisation_gaps"): "MINIMISATION",
     # Watches under policy (0124). A quarantined record scores against every watch in the deployment.
     ("ingest.py", "_watches_for"): "INGEST",
 }

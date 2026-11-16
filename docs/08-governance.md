@@ -84,22 +84,53 @@ past its review date rather than letting it roll on silently.
   have a limit of their own, so none of them waits on another, and a request
   refused for a stale sign-in spends none
 - A hold on an exhibit or on a whole case is placed and lifted from the
-  console (the exhibit's card has a Place a legal hold or Lift the legal
-  hold button for a reader who may, and the case header has a Hold button
-  that opens a dialog) or through the API: `POST /api/v1/retention/legal-hold`
+  console (the exhibit's card has a Place a legal hold button for a reader
+  who may, and the case header has a Hold button that opens a dialog). On a
+  held exhibit or case the control takes a lift's steps: Ask for a second
+  signature, then Waiting for a second person with Withdraw for the one who
+  asked, Review the request for a colleague (decided under Triage, Dual
+  control, where a lift request names what it releases), and Lift the legal
+  hold, naming who approved, once one has. A collected document's card does
+  the same, with Approve and Refuse on the card, and its notice opens Feeds,
+  Collected. The same steps are open through the API: `POST /api/v1/retention/legal-hold`
   with `evidence_id`, `on` and `reason`, and
   `POST /api/v1/retention/cases/{id}/legal-hold` with `on` and `reason`. Both
   need `retention.manage` with a fresh second factor and a written reason of
   at least five characters whichever way the hold goes, and both are
   audited, the row naming the exhibit (object type `evidence`) or the case.
-  Lifting is one person and is refused below the material: a case-level
-  lift needs the lifter cleared for everything the case holds. A purge that
+  Lifting an exhibit's hold takes two people (decision 229). The lifter asks
+  for a second signature first, `POST /api/v1/retention/legal-hold/lift-requests`
+  with `evidence_id` and a `justification`, behind the same gates as the lift,
+  so somebody who could not lift it cannot ask either. A colleague who could
+  lift it too (`retention.manage` through a global role and on the case,
+  cleared for the exhibit) approves it under the case's approvals with a
+  sign-in from the last 15 minutes, and the lifter then lifts with
+  `approval_request_id`. The approval is for that exhibit and the hold as it
+  stood when it was asked for, lasts 72 hours and is spent once; the colleague
+  is judged again when it is spent, and one whose clearance, permission or
+  account was lowered since approves nothing. The database refuses the lift
+  without it. A case's hold is lifted the same way:
+  `POST /api/v1/retention/cases/{id}/legal-hold/lift-requests` with a
+  `justification`, then the lift with `approval_request_id`. Both people must
+  be cleared for everything the case holds, cited documents included, and a
+  lead below any of it is refused when they ask, in the words a refused lift
+  uses. Material the case gains after the approval is counted when it is spent,
+  so a colleague who approved the case as it was cannot release what they never
+  saw; the request's notice is judged at the case's material as it stands too.
+  A collected document's hold is lifted the same way, every version at once:
+  `POST /api/v1/retention/documents/{id}/legal-hold/lift-requests`, a decision
+  through `POST /api/v1/approvals/{id}/decide` by a colleague who holds
+  `retention.manage` and `collection.read` and is cleared for every version and
+  the source, then the lift with `approval_request_id`. A purge that
   is running when a case hold arrives finishes the exhibit it is destroying
   and keeps every one after it, and the hold's answer says what the purge
   destroyed while the hold waited (`destroyed_while_waiting` and a `notice`),
   counting only what the holder may see. The console offers each control
-  only to a reader whose register or case record says `may_hold`, and shows
-  the LEGAL HOLD chip to every reader of a held exhibit or case
+  only to a reader whose register or case record says `may_hold`, draws a
+  request to lift a hold (`lift_request` on the register's exhibits, the case
+  record and the document listing) only for one cleared for what it
+  releases, and shows the LEGAL HOLD chip to every reader of a held exhibit
+  or case
 - Documents supporting an accepted assertion are pinned past source
   retention, otherwise you delete the evidence and leave the conclusion,
   which is the worst possible outcome
@@ -124,6 +155,29 @@ rights in most jurisdictions.
   conversation's message bodies and keeps its metadata graph, records the
   authority, and works in a closed case. Deleting incidental entities is not
   built.
+- A conversation above everyone assigned to its case (decision 231). The
+  minimiser acts only on a conversation they can read (decision 177), so where
+  nobody assigned is cleared for one, nobody on the team can minimise it.
+  Closing such a case, or archiving it straight from a draft, is never
+  refused: the closure is recorded with the count and the TLP tier
+  (`CASE_CLOSED_WITH_UNMINIMISABLE_CONVERSATIONS`), every
+  Security officer is told, and the case's Lead investigators are told as its
+  withheld-disclosure setting allows, nothing under NONE, that there are some
+  under PRESENCE and how many under COUNT. Nobody is told which conversation,
+  its platform, its label or its compartment. The record and the notices are
+  written after the closing reply, so the reply does the same work with a gap
+  or without and, under NONE, its time says nothing either; a process that
+  stops in between loses them, and Oversight and the readiness row, which
+  count live, still show the case. The Security officer's Oversight,
+  Minimisation gaps (`comms.minimise.oversee`), names each case with the
+  count, the TLP tier and how many cleared Lead investigators there are
+  elsewhere, and the readiness row `conversations_minimisable` stays red while
+  a closed case has one (an open case is a caveat). The remedy is a Lead
+  investigator cleared for it, assigned to the case, who then minimises it
+  through the same route; the count is live, so it falls on the next read.
+  Under NONE the team is told nothing, so the Security officer raises it with
+  the case's Lead outside the product. Flagging a participant
+  (`comms.bind`) is not counted.
 - A subject access request procedure, even if the answer is usually a
   lawful exemption. You need to be able to *find* the data to exempt it. The
   product has no subject access tooling.

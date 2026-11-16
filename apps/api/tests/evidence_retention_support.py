@@ -119,14 +119,28 @@ def _cleanup_extra(c) -> None:
     bsub = f"(SELECT id FROM ingest.batch WHERE api_key_id IN {ksub})"
     ssub = f"(SELECT id FROM lab.sample WHERE submitted_by IN {sub})"
     statements = (
+        # A document lift's notices (decision 229) reach every colleague in the database who could
+        # sign it, not only this test's: they go with the requests.
+        f"DELETE FROM notify.delivery WHERE notification_id IN (SELECT n.id FROM "
+        f"notify.notification n JOIN core.approval_request r ON r.id = n.object_id "
+        f"WHERE n.object_type = 'approval_request' AND r.requested_by IN {sub})",
+        f"DELETE FROM notify.notification n USING core.approval_request r "
+        f"WHERE r.id = n.object_id AND n.object_type = 'approval_request' "
+        f"AND r.requested_by IN {sub}",
+        # The lift approvals these tests raise (decision 229), so their cases and accounts can go.
+        f"DELETE FROM core.approval_request WHERE requested_by IN {sub} "
+        f"OR decided_by IN {sub}",
         # A case these tests aged into expiry holds exhibits that custody rows pin for ever, and every
         # global sweep after this file (`purge_due(case_id=None)` in the document and dead-letter
         # suites) would pick them up and refuse for want of a store. Not expired is not due, so the
-        # leftover is left alone.
+        # leftover is left alone. A lift takes two people and the database refuses one without them
+        # (decision 229), so the reset passes the guard disabled by name for its own transaction.
+        'ALTER TABLE core."case" DISABLE TRIGGER case_hold_lift_guarded; '
         f"""UPDATE core."case" SET retention_until = '2099-12-31',
                 review_due = '2099-12-30', legal_hold = false,
                 legal_hold_reason = NULL
-             WHERE owner_user_id IN {sub}""",
+             WHERE owner_user_id IN {sub}; """
+        'ALTER TABLE core."case" ENABLE TRIGGER case_hold_lift_guarded',
         f"DELETE FROM ingest.victim_credential WHERE record_id IN "
         f"(SELECT id FROM ingest.record WHERE batch_id IN {bsub})",
         f"UPDATE ingest.record SET duplicate_of = NULL WHERE batch_id IN {bsub}",
@@ -290,3 +304,164 @@ def audit_rows(conn, action: str, **where) -> list:
 def token(conn, uid) -> dict:
     _, raw = s.session(conn, uid)
     return {"Authorization": f"Bearer {raw}"}
+
+
+# --- lifting a hold takes two people (decision 229) -----------------------------
+
+LIFT_JUSTIFICATION = "Order 2026-0042 discharged on appeal; the hold no longer stands"
+LIFT_REASON = "order discharged by the court, ref 2026-0042/b"
+
+
+def lift_approval(conn, *, operation: str, case_id, payload: dict, requester,
+                  approver, justification: str = LIFT_JUSTIFICATION):
+    """An APPROVED hold-lift request through the real service, raised by `requester` and approved by
+    `approver`: what a lift spends. The routes' own gates are `test_hold_lift_two_person_http_pg.py`'s."""
+    from noctornal_api.approvals import ApprovalService
+    svc = ApprovalService(conn)
+    raised = svc.request(operation=operation, case_id=case_id, payload=payload,
+                         justification=justification, requested_by=requester)
+    svc.decide(raised.id, decided_by=approver, approve=True, note="checked the order")
+    return raised.id
+
+
+def exhibit_epoch(conn, evidence_id) -> tuple:
+    """(case, the hold's epoch) of an exhibit."""
+    return conn.execute("SELECT case_id, legal_hold_epoch FROM core.evidence WHERE id = %s",
+                        (evidence_id,)).fetchone()
+
+
+def exhibit_lift_approval(conn, evidence_id, *, requester, approver):
+    from noctornal_api.approvals import LIFT_EXHIBIT, lift_exhibit_payload
+    case_id, epoch = exhibit_epoch(conn, evidence_id)
+    return lift_approval(conn, operation=LIFT_EXHIBIT, case_id=case_id,
+                         payload=lift_exhibit_payload(evidence_id, epoch),
+                         requester=requester, approver=approver)
+
+
+def approver(conn, approval_request_id, case_id):
+    """The approver as the lift route judges them at the spend (`governance._lift_approver`)."""
+    from noctornal_api.http.routers.governance import _lift_approver
+    return _lift_approver(conn, approval_request_id, case_id)
+
+
+def lift_exhibit(conn, evidence_id, *, requester, approver_id, reason: str = LIFT_REASON,
+                 service=None):
+    """Lift an exhibit's hold through the service with a second person's approval."""
+    from noctornal_api.retention import RetentionService
+    rid = exhibit_lift_approval(conn, evidence_id, requester=requester, approver=approver_id)
+    case_id = exhibit_epoch(conn, evidence_id)[0]
+    (service or RetentionService(conn)).set_legal_hold(
+        evidence_id, actor_id=requester, on=False, reason=reason,
+        approval_request_id=rid, approver=approver(conn, rid, case_id))
+    return rid
+
+
+def http_exhibit_lift_approval(client, conn, evidence_id, *, requester, approver_id) -> str:
+    """Ask from the hold and approve through the case's approvals, over HTTP, as the console does.
+    Returns the approved request's id."""
+    asked = client.post("/api/v1/retention/legal-hold/lift-requests",
+                        headers=token(conn, requester),
+                        json={"evidence_id": str(evidence_id),
+                              "justification": LIFT_JUSTIFICATION})
+    assert asked.status_code == 201, asked.text
+    request = asked.json()
+    decided = client.post(
+        f"/api/v1/cases/{request['case_id']}/approvals/{request['id']}/decide",
+        headers=token(conn, approver_id), json={"approve": True, "note": "checked"})
+    assert decided.status_code == 200, decided.text
+    return request["id"]
+
+
+def http_lift_exhibit(client, conn, evidence_id, *, requester, approver_id,
+                      reason: str = LIFT_REASON, headers: dict | None = None):
+    """Ask, approve and lift over HTTP: the request from the hold, the decision through the case's
+    approvals, the lift with the approval. Returns the lift's response."""
+    rid = http_exhibit_lift_approval(client, conn, evidence_id, requester=requester,
+                                     approver_id=approver_id)
+    return client.post("/api/v1/retention/legal-hold",
+                       headers=headers or token(conn, requester),
+                       json={"evidence_id": str(evidence_id), "on": False,
+                             "reason": reason, "approval_request_id": rid})
+
+
+def case_epoch(conn, case_id) -> int:
+    return conn.execute('SELECT legal_hold_epoch FROM core."case" WHERE id = %s',
+                        (case_id,)).fetchone()[0]
+
+
+def case_lift_approval(conn, case_id, *, requester, approver):
+    """An APPROVED `legal_hold.lift_case` request for the case's hold as it stands."""
+    from noctornal_api.approvals import LIFT_CASE, lift_case_payload
+    return lift_approval(conn, operation=LIFT_CASE, case_id=case_id,
+                         payload=lift_case_payload(case_epoch(conn, case_id)),
+                         requester=requester, approver=approver)
+
+
+def lift_case(conn, case_id, *, requester, approver_id=None, reason: str = LIFT_REASON,
+              lifter_ceiling=("RED", []), document_ceiling=None, approver_ceiling=None,
+              service=None) -> dict:
+    """Lift a case's hold through the service with a second person's approval. The second person is
+    taken as still signing and cleared to `approver_ceiling` (the lifter's own unless named): where this
+    is called, what is under test is the lifter's cover, and `test_hold_lift_two_person_pg.py` judges
+    the second person."""
+    from noctornal_api.retention import LiftApprover, RetentionService
+    approver_id = approver_id or user(conn, "RED")
+    rid = case_lift_approval(conn, case_id, requester=requester, approver=approver_id)
+    ceiling = approver_ceiling or lifter_ceiling
+    return (service or RetentionService(conn)).set_case_legal_hold(
+        case_id, actor_id=requester, on=False, reason=reason,
+        lifter_ceiling=lifter_ceiling, document_ceiling=document_ceiling,
+        approval_request_id=rid,
+        approver=LiftApprover(user_id=approver_id, permitted=True, ceiling=ceiling,
+                              document_ceiling=document_ceiling or ceiling))
+
+
+def http_case_lift_approval(client, conn, case_id, *, requester, approver_id) -> str:
+    """Ask from the case's hold and approve through the case's approvals, over HTTP."""
+    asked = client.post(f"/api/v1/retention/cases/{case_id}/legal-hold/lift-requests",
+                        headers=token(conn, requester),
+                        json={"justification": LIFT_JUSTIFICATION})
+    assert asked.status_code == 201, asked.text
+    request = asked.json()
+    decided = client.post(
+        f"/api/v1/cases/{case_id}/approvals/{request['id']}/decide",
+        headers=token(conn, approver_id), json={"approve": True, "note": "checked"})
+    assert decided.status_code == 200, decided.text
+    return request["id"]
+
+
+def http_lift_case(client, conn, case_id, *, requester, approver_id,
+                   reason: str = LIFT_REASON, headers: dict | None = None):
+    """Ask, approve and lift a case's hold over HTTP. Returns the lift's response."""
+    rid = http_case_lift_approval(client, conn, case_id, requester=requester,
+                                  approver_id=approver_id)
+    return client.post(f"/api/v1/retention/cases/{case_id}/legal-hold",
+                       headers=headers or token(conn, requester),
+                       json={"on": False, "reason": reason, "approval_request_id": rid})
+
+
+def held_versions(conn, document_id) -> dict[str, int]:
+    """{version id: hold epoch} of a document's live versions under a hold of their own: what a
+    `legal_hold.lift_document` approval names."""
+    return {str(r[0]): int(r[1]) for r in conn.execute(
+        """SELECT v.id, v.legal_hold_epoch
+             FROM collect.document d
+             JOIN collect.document v
+               ON (d.external_id IS NULL AND v.id = d.id)
+               OR (d.external_id IS NOT NULL AND v.source_id = d.source_id
+                   AND v.external_id = d.external_id)
+            WHERE d.id = %s AND v.purged_at IS NULL AND v.legal_hold""",
+        (document_id,)).fetchall()}
+
+
+def document_lift_approval(conn, document_id, *, requester, approver):
+    """An APPROVED `legal_hold.lift_document` request for the versions held as they stand."""
+    from noctornal_api.approvals import LIFT_DOCUMENT, lift_document_payload
+    return lift_approval(conn, operation=LIFT_DOCUMENT, case_id=None,
+                         payload=lift_document_payload(document_id,
+                                                       held_versions(conn, document_id)),
+                         requester=requester, approver=approver)
+
+
+release_exhibit_hold = s.release_exhibit_hold
+release_case_hold = s.release_case_hold

@@ -411,9 +411,9 @@ def test_a_case_hold_freezes_everything_the_case_governs(conn, lab):
                         (sample.id,)).fetchone()[0] != "REJECTED"
     assert g.audit_rows(conn, "LEGAL_HOLD_APPLIED", case_id=case_id)[0][0]["scope"] == "case"
 
-    _service(conn).set_case_legal_hold(
-        case_id, actor_id=boss, on=False, reason="order lifted, g44 test",
-        lifter_ceiling=("RED", ["STEALER-2026"]))
+    # Lifted with a second person's approval, as every lift is (decision 229).
+    g.lift_case(conn, case_id, requester=boss, reason="order lifted, g44 test",
+                lifter_ceiling=("RED", ["STEALER-2026"]), service=_service(conn))
     freed = svc.purge_due(actor_id=boss, authority=AUTHORITY, case_id=case_id)
     assert (freed.evidence_purged, freed.records_purged, freed.samples_purged) == (2, 1, 1)
 
@@ -431,8 +431,7 @@ def test_a_case_hold_needs_a_reason_both_ways_and_says_what_it_replaced(conn):
     with pytest.raises(RetentionError, match="say what it rests on"):
         svc.set_case_legal_hold(case_id, actor_id=boss, on=False, reason=None,
                                 lifter_ceiling=("RED", []))
-    svc.set_case_legal_hold(case_id, actor_id=boss, on=False, reason="released by order",
-                            lifter_ceiling=("RED", []))
+    g.lift_case(conn, case_id, requester=boss, reason="released by order", service=svc)
     lifted = g.audit_rows(conn, "LEGAL_HOLD_LIFTED", case_id=case_id)[0][0]
     assert lifted["prior_on"] is True and lifted["prior_reason"] == REASON
     with pytest.raises(RetentionNotFound):
@@ -441,7 +440,8 @@ def test_a_case_hold_needs_a_reason_both_ways_and_says_what_it_replaced(conn):
 
 def test_a_case_hold_is_lifted_only_by_somebody_cleared_for_all_of_it(conn):
     """The case-level twin of evidence-hold-lift-below-label: a lead below an
-    exhibit may place the hold, and may not release it."""
+    exhibit may place the hold, and may not release it, before any second
+    person is asked about."""
     from noctornal_api.retention import RetentionError
     store = g.VersionedStore()
     boss = g.user(conn, "RED")
@@ -461,10 +461,11 @@ def test_a_case_hold_is_lifted_only_by_somebody_cleared_for_all_of_it(conn):
             WHERE action = 'LEGAL_HOLD_LIFT_REFUSED' AND case_id = %s
             ORDER BY seq""", (case_id,)).fetchall()
     assert [r[0] for r in refused] == ["DENIED", "DENIED"]
-    assert set(refused[0][1]) == {"case_id", "scope", "reason"}
-    out = svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
-                                  reason="released by order",
-                                  lifter_ceiling=("RED", []))
+    assert set(refused[0][1]) == {"case_id", "scope", "reason", "refusal", "stage"}
+    assert (refused[0][1]["refusal"], refused[0][1]["stage"]) == (
+        "lifter_below_material", "spend")
+    out = g.lift_case(conn, case_id, requester=boss, reason="released by order",
+                      service=svc)
     assert out["legal_hold"] is False
     assert not _purged(conn, red.evidence_id)
 
@@ -482,9 +483,8 @@ def test_a_compartmented_exhibit_also_keeps_the_case_hold_from_a_lead_not_read_i
         svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
                                 reason="released by order",
                                 lifter_ceiling=("RED", []))
-    svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
-                            reason="released by order",
-                            lifter_ceiling=("RED", ["G44-HELD"]))
+    g.lift_case(conn, case_id, requester=boss, reason="released by order",
+                lifter_ceiling=("RED", ["G44-HELD"]), service=svc)
 
 
 def test_a_lift_with_an_unknown_clearance_refuses(conn):
@@ -543,9 +543,8 @@ def test_a_cited_red_document_keeps_the_case_hold_from_a_lead_below_it(conn):
                                     lifter_ceiling=ceiling)
     assert _case_is_held(conn, case_id)
     assert _document_hold(conn, doc) == CASE_HOLD_ON_DOCUMENT
-    out = svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
-                                  reason="order discharged by the court",
-                                  lifter_ceiling=("RED", []))
+    out = g.lift_case(conn, case_id, requester=boss,
+                      reason="order discharged by the court", service=svc)
     assert out["legal_hold"] is False
     assert _document_hold(conn, doc) is None
 
@@ -565,9 +564,8 @@ def test_a_compartmented_document_keeps_the_case_hold_from_a_lead_not_read_in(co
                                 reason="released by the lead",
                                 lifter_ceiling=("RED", []))
     assert _document_hold(conn, doc) == CASE_HOLD_ON_DOCUMENT
-    svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
-                            reason="order discharged by the court",
-                            lifter_ceiling=("RED", ["G44-DOC"]))
+    g.lift_case(conn, case_id, requester=boss, reason="order discharged by the court",
+                lifter_ceiling=("RED", ["G44-DOC"]), service=svc)
     assert _document_hold(conn, doc) is None
 
 
@@ -605,9 +603,9 @@ def test_what_the_case_does_not_cite_or_the_sweep_already_destroyed_does_not_cou
     svc = _service(conn)
     svc.set_case_legal_hold(case_id, actor_id=boss, on=True, reason=REASON)
     assert _document_hold(conn, mine) == CASE_HOLD_ON_DOCUMENT
-    out = svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
-                                  reason="order discharged by the court",
-                                  lifter_ceiling=("AMBER", []))
+    out = g.lift_case(conn, case_id, requester=boss,
+                      reason="order discharged by the court",
+                      lifter_ceiling=("AMBER", []), service=svc)
     assert out["legal_hold"] is False
 
 
@@ -624,10 +622,8 @@ def test_a_grant_scoped_to_the_case_does_not_release_a_document_it_cannot_open(c
                                 lifter_ceiling=("RED", []),
                                 document_ceiling=("AMBER", []))
     assert _document_hold(conn, doc) == CASE_HOLD_ON_DOCUMENT
-    svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
-                            reason="order discharged by the court",
-                            lifter_ceiling=("RED", []),
-                            document_ceiling=("RED", []))
+    g.lift_case(conn, case_id, requester=boss, reason="order discharged by the court",
+                lifter_ceiling=("RED", []), document_ceiling=("RED", []), service=svc)
     assert _document_hold(conn, doc) is None
 
 

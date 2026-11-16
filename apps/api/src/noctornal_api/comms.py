@@ -19,6 +19,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api.db import SystemContextUnavailable, is_exempt
 from noctornal_ontology import normalise as _canonical
 from noctornal_ontology import refusal
 
@@ -63,6 +64,61 @@ _HEX = re.compile(r"^[0-9a-fA-F]+$")
 
 class CommsError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class MinimisationGap:
+    """How many conversations of a case nobody assigned to it can minimise, and the highest TLP
+    their labels need. Never which: no id, platform, compartment or handle leaves `CommsService`
+    (decision 231)."""
+
+    count: int
+    highest_tlp: str | None
+
+
+@dataclass(frozen=True)
+class CaseMinimisationGap:
+    """One case's gap, for the oversight list and the readiness row. `leads_assigned` counts the
+    live assignees whose role carries `comms.minimise`; `eligible_elsewhere` counts the active
+    accounts whose global role carries it and who are cleared for at least one of the
+    conversations and for the case. Counts only, never a name."""
+
+    case_id: UUID
+    count: int
+    highest_tlp: str
+    leads_assigned: int
+    eligible_elsewhere: int
+
+
+#: The conversations nobody assigned can minimise: each still holds a message body, and no live
+#: assignee of an active account whose case role carries `comms.minimise` is cleared for it. Cleared
+#: is the gate's own composition (`deps.effective_labels`): the stricter of the conversation's and
+#: the case's classification, compared as `core.tlp` orders it, and the union of their compartments.
+#: A break-glass grant makes nobody a minimiser: it is an emergency, not an owner. The labels are
+#: read here and never returned.
+_UNMINIMISABLE_SQL = """
+SELECT c.id, c.case_id,
+       greatest(c.classification, k.classification) AS needed,
+       coalesce(c.compartments, '{}'::text[])
+         || coalesce(k.compartments, '{}'::text[]) AS needed_compartments
+  FROM comms.conversation c
+  JOIN core."case" k ON k.id = c.case_id
+ WHERE (%(case)s::uuid IS NULL OR c.case_id = %(case)s::uuid)
+   AND EXISTS (SELECT 1 FROM comms.message m
+                WHERE m.conversation_id = c.id AND m.body IS NOT NULL)
+   AND NOT EXISTS (
+       SELECT 1 FROM iam.case_assignment a
+         JOIN iam.app_user u ON u.id = a.user_id
+         JOIN iam.role_permission rp ON rp.role_key = a.role_key
+        WHERE a.case_id = c.case_id
+          AND (a.expires_at IS NULL OR a.expires_at > now())
+          AND u.is_active
+          AND rp.permission_key = 'comms.minimise'
+          AND u.tlp_clearance >= greatest(c.classification, k.classification)
+          AND (coalesce(c.compartments, '{}'::text[])
+               || coalesce(k.compartments, '{}'::text[]))
+              <@ coalesce(u.compartments, '{}'::text[]))
+"""
 
 
 @dataclass(frozen=True)
@@ -678,6 +734,72 @@ class CommsService:
                     conversation_id, {"messages": len(rows),
                                       "authority": authority.strip()})
         return len(rows)
+
+    # -- the minimisation gap (decision 231) -------------------------------
+
+    def _require_complete(self, what: str) -> None:
+        """A gap counted under row-level security would leave out exactly the conversations it is
+        about, the ones above the caller, and read as none."""
+        if not is_exempt(self._c):
+            raise SystemContextUnavailable(
+                f"{what} counts every conversation of a case, those above its "
+                f"caller included, and must run on a system connection")
+
+    def minimisation_gap(self, case_id: UUID) -> MinimisationGap:
+        """The case's conversations that nobody assigned to it can minimise (`_UNMINIMISABLE_SQL`).
+
+        Computed live and never stored, so assigning a cleared Lead investigator, or minimising,
+        moves it on the next read. Decision 177 stands: nobody acts above their own labels; this
+        only stops the gap being invisible."""
+        self._require_complete("minimisation_gap")
+        count, highest = self._c.execute(
+            f"WITH gap AS ({_UNMINIMISABLE_SQL}) "
+            f"SELECT count(*), max(needed)::text FROM gap",
+            {"case": case_id}).fetchone()
+        return MinimisationGap(int(count), highest)
+
+    def minimisation_gaps(self) -> list[CaseMinimisationGap]:
+        """Every case with a gap, in one query for the deployment, unordered."""
+        self._require_complete("minimisation_gaps")
+        rows = self._c.execute(
+            f"""WITH gap AS ({_UNMINIMISABLE_SQL})
+                SELECT g.case_id, count(*), max(g.needed)::text,
+                       (SELECT count(*) FROM iam.case_assignment a
+                          JOIN iam.app_user u ON u.id = a.user_id
+                         WHERE a.case_id = g.case_id AND u.is_active
+                           AND (a.expires_at IS NULL OR a.expires_at > now())
+                           AND EXISTS (SELECT 1 FROM iam.role_permission rp
+                                        WHERE rp.role_key = a.role_key
+                                          AND rp.permission_key = 'comms.minimise')),
+                       (SELECT count(*) FROM iam.app_user u
+                         WHERE u.is_active
+                           AND EXISTS (SELECT 1 FROM iam.user_role ur
+                                         JOIN iam.role_permission rp
+                                           ON rp.role_key = ur.role_key
+                                        WHERE ur.user_id = u.id
+                                          AND rp.permission_key = 'comms.minimise')
+                           AND EXISTS (SELECT 1 FROM gap g2
+                                        WHERE g2.case_id = g.case_id
+                                          AND u.tlp_clearance >= g2.needed
+                                          AND g2.needed_compartments
+                                              <@ coalesce(u.compartments, '{{}}'::text[])))
+                  FROM gap g
+                 GROUP BY g.case_id""",
+            {"case": None}).fetchall()
+        return [CaseMinimisationGap(r[0], int(r[1]), r[2], int(r[3]), int(r[4]))
+                for r in rows]
+
+    def minimisation_gap_states(self) -> frozenset[str]:
+        """The statuses of the cases with a gap, for the readiness row, which says whether a shut
+        case has one and never which: one pass over the gap, without the per-case Lead and
+        cleared-elsewhere counts the oversight list pays for."""
+        self._require_complete("minimisation_gap_states")
+        rows = self._c.execute(
+            f"""WITH gap AS ({_UNMINIMISABLE_SQL})
+                SELECT DISTINCT k.status::text
+                  FROM gap g JOIN core."case" k ON k.id = g.case_id""",
+            {"case": None}).fetchall()
+        return frozenset(r[0] for r in rows)
 
     def contact_graph(self, case_id: UUID) -> list[dict]:
         """Who talks to whom, from metadata alone.

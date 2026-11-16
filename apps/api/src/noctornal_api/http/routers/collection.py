@@ -506,6 +506,37 @@ def runs(
 # The read path: what the collector collected
 # ---------------------------------------------------------------------------
 
+def _attach_document_lifts(conn: psycopg.Connection, user: CurrentUser, docs: list[dict],
+                           ceiling: tuple) -> None:
+    """The open request to lift each held document's hold as it stands (decision 229), as
+    `lift_request`, for a reader who places and lifts holds and whose own ceiling admits every
+    version of the document and its source, as both people must be. Which versions are held, and
+    whether every one is within the reader, is read on a system connection: row security would hide
+    exactly the version above them."""
+    from noctornal_api.approvals import (
+        LIFT_DOCUMENT,
+        lift_document_payload,
+        open_lift_requests,
+    )
+    from noctornal_api.retention import RetentionService
+
+    held = [d["id"] for d in docs if d.get("legal_hold")]
+    found: dict = {}
+    if held:
+        with system_connection(SystemPurpose.RETENTION, reuse=conn) as sconn:
+            judge = RetentionService(sconn)
+            payloads = {}
+            for document_id in held:
+                versions = judge.document_held_versions(document_id)
+                if versions:
+                    payloads[document_id] = lift_document_payload(document_id, versions)
+            found = {k: v for k, v in open_lift_requests(
+                conn, viewer_id=user.user_id, operation=LIFT_DOCUMENT, case_id=None,
+                payloads=payloads).items() if judge.document_chain_within(k, ceiling)}
+    for d in docs:
+        d["lift_request"] = found.get(d["id"])
+
+
 @router.get("/documents", response_model=dict)
 def documents(
     source_id: UUID | None = Query(default=None),
@@ -529,6 +560,8 @@ def documents(
         triage_state=triage_state, limit=limit, with_hold_reason=can_hold)
     # A Telegram document carries its capture record.
     docs = telegram_service.attach_message_meta(conn, docs)
+    if can_hold:
+        _attach_document_lifts(conn, user, docs, (clearance.name, sorted(held)))
     return {"documents": docs, "count": len(docs),
             "can_hold": can_hold,
             "note": ("Bodies are excerpted to 400 characters; `truncated` "

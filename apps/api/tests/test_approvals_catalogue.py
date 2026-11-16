@@ -111,10 +111,81 @@ def test_every_operation_states_its_scope_and_enforcement():
 
 def test_the_deployment_wide_operations_are_global():
     ops = _ops()
-    for key in ("role.manage", "collection_account.reveal", "dual_control.policy"):
+    for key in ("role.manage", "collection_account.reveal", "dual_control.policy",
+                "legal_hold.lift_document"):
         assert ops[key].scope == "global", key
-    for key in ("node.merge", "case.delete", "evidence.purge", "case.policy.relax"):
+    for key in ("node.merge", "case.delete", "evidence.purge", "case.policy.relax",
+                "legal_hold.lift_exhibit", "legal_hold.lift_case"):
         assert ops[key].scope == "case", key
+
+
+def test_a_hold_lift_is_unconditional_and_lasts_three_days():
+    """Decision 229: lifting a hold takes two people every time (no per-case switch and no mode a
+    deployment can lower), the second holds the same permission, nobody is seasoned, and a signature
+    lasts 72 hours, for an order signed late on a Friday."""
+    from datetime import timedelta
+
+    from noctornal_api.approvals import LIFT_OPERATIONS
+    ops = _ops()
+    assert LIFT_OPERATIONS == {"legal_hold.lift_exhibit", "legal_hold.lift_case",
+                               "legal_hold.lift_document"}
+    for key in LIFT_OPERATIONS:
+        op = ops[key]
+        assert op.modes == ("ALWAYS",) and not op.configurable, key
+        assert op.permission == op.signer_permission == "retention.manage", key
+        assert op.ttl == timedelta(hours=72), key
+        assert not op.countersigner_seasoned and not op.signer_assignment_seasoned, key
+        assert op.enforced_at, key
+
+
+#: Every function that writes a hold, by table: placing is one person's act and lifting spends a
+#: second signature (decision 229), so a table's hold comes off only in the function its lift
+#: operation names as `enforced_at`. The database refuses a lift without the approval as well
+#: (`test_hold_lift_guard_pg.py`); this finds a new writer before it ever runs.
+_HOLD_WRITERS = {
+    "core.evidence": {"retention.py::set_legal_hold",
+                      "retention.py::_lift_exhibit_hold"},
+    'core."case"': {"retention.py::set_case_legal_hold",
+                    "retention.py::_lift_case_hold"},
+    "collect.document": {"retention.py::_document_hold_locked",
+                         "retention.py::_lift_document_hold"},
+}
+
+_HOLD_UPDATE = {
+    table: re.compile(r"UPDATE\s+" + re.escape(table) + r"\s(?:(?!;).)*?\blegal_hold\s*=",
+                      re.S | re.I)
+    for table in _HOLD_WRITERS}
+
+
+def _strings_by_function(tree: ast.AST):
+    """(function name, string constant) for every string a function's own body holds, nested
+    functions excluded, so each SQL statement is named by the function that runs it."""
+    def walk(node, owner):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield from walk(child, child.name)
+            elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+                if owner is not None:
+                    yield owner, child.value
+            else:
+                yield from walk(child, owner)
+    yield from walk(tree, None)
+
+
+def test_a_hold_comes_off_only_where_its_second_signature_is_spent():
+    found: dict[str, set[str]] = {table: set() for table in _HOLD_WRITERS}
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for owner, text in _strings_by_function(tree):
+            for table, pattern in _HOLD_UPDATE.items():
+                if pattern.search(text):
+                    found[table].add(f"{path.relative_to(SRC).as_posix()}::{owner}")
+    assert found == _HOLD_WRITERS, found
+    from noctornal_api.approvals import LIFT_OPERATIONS
+    lifters = {w for writers in _HOLD_WRITERS.values() for w in writers}
+    for key in LIFT_OPERATIONS:
+        rel, qualname = _ops()[key].enforced_at.split("::")
+        assert f"{rel}::{qualname.split('.')[-1]}" in lifters, key
 
 
 def test_an_entry_without_scope_or_enforcement_does_not_construct():
@@ -270,9 +341,11 @@ def test_the_shortest_signature_is_still_the_credential_reveal():
 
 
 def test_the_global_gate_is_what_something_spends():
+    """The policy's two halves, and retention.manage, which a collected document's lift spends
+    (decision 229)."""
     from noctornal_api.approvals import GLOBAL_GATE_PERMISSIONS
     assert GLOBAL_GATE_PERMISSIONS == ("dual_control.countersign",
-                                       "dual_control.manage")
+                                       "dual_control.manage", "retention.manage")
 
 
 def test_the_relax_payload_is_the_switch_as_it_stands():

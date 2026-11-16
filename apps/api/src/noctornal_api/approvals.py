@@ -111,10 +111,22 @@ class Operation:
         return len(self.modes) > 1
 
 
+#: Lifting a legal hold (decision 229). Unconditional, as `evidence.purge` is: lifting is what makes a
+#: destruction lawful, and a hold placed by one person on a court order is not undone by one. The
+#: second person holds the same permission and is cleared for the same material.
+LIFT_EXHIBIT = "legal_hold.lift_exhibit"
+LIFT_CASE = "legal_hold.lift_case"
+LIFT_DOCUMENT = "legal_hold.lift_document"
+
+#: How long a lift's second signature lasts: three days, where a purge's is one. A court discharges a
+#: preservation order in its own time, and an order signed late on a Friday should still be answerable
+#: on the Monday morning without asking twice.
+LIFT_TTL = timedelta(hours=72)
+
 # The catalogue. docs/05 names four; docs/08 adds out-of-schedule purge; docs/04 adds credential
-# reveal; the two-person policy itself and the case switch's relaxation are also here. Operations
-# not wired yet are registered so the control exists when they are built; each says why it is not
-# wired, and the Two-person controls screen shows that sentence.
+# reveal; the two-person policy itself, the case switch's relaxation and the hold lifts are also
+# here. Operations not wired yet are registered so the control exists when they are built; each says
+# why it is not wired, and the Two-person controls screen shows that sentence.
 OPERATIONS: dict[str, Operation] = {
     "node.merge": Operation(
         key="node.merge", permission="graph.merge", ttl=timedelta(hours=8),
@@ -184,7 +196,39 @@ OPERATIONS: dict[str, Operation] = {
         enforced_at="http/routers/approvals.py::set_policy",
         signer_assignment_seasoned=True,
     ),
+    # The second person is another holder of retention.manage, through a global role and on the
+    # case, cleared for the exhibit, with a fresh second factor when they approve. Not seasoned and
+    # the placer is not barred: the owner asked for two people, not for two particular people.
+    LIFT_EXHIBIT: Operation(
+        key=LIFT_EXHIBIT, permission="retention.manage", ttl=LIFT_TTL,
+        description="Lift the legal hold on an exhibit",
+        scope="case",
+        enforced_at="retention.py::RetentionService._lift_exhibit_hold",
+    ),
+    # A case's hold, the same way. The second person is cleared for everything the case's hold
+    # governs, as the one who lifts must be (`retention.RetentionService.ceiling_covers`).
+    LIFT_CASE: Operation(
+        key=LIFT_CASE, permission="retention.manage", ttl=LIFT_TTL,
+        description="Lift the legal hold on a case",
+        scope="case",
+        enforced_at="retention.py::RetentionService._lift_case_hold",
+    ),
+    # A collected document's hold, every version at once. A document belongs to no case, so the
+    # request is deployment-wide and decided through the global routes; the second person holds
+    # retention.manage and collection.read through a global role, as the hold's own route asks, and
+    # is cleared for every version and the source (`retention.document_chain_sql`).
+    LIFT_DOCUMENT: Operation(
+        key=LIFT_DOCUMENT, permission="retention.manage", ttl=LIFT_TTL,
+        description="Lift the legal hold on a collected document",
+        scope="global",
+        enforced_at="retention.py::RetentionService._lift_document_hold",
+    ),
 }
+
+#: The hold lifts. Each is asked for from the hold itself (the exhibit, the case or the document),
+#: which checks the requester is cleared for what the lift releases, and never through the generic
+#: request route.
+LIFT_OPERATIONS: frozenset[str] = frozenset({LIFT_EXHIBIT, LIFT_CASE, LIFT_DOCUMENT})
 
 # A merge TTL of eight hours is one shift. Long enough that an approval
 # obtained at handover survives to the end of the day; short enough that it
@@ -216,6 +260,59 @@ def relax_payload(epoch: int) -> dict:
     an off and on again."""
     return {"setting": "dual_control_merge", "from": True, "to": False,
             "epoch": epoch}
+
+
+def lift_exhibit_payload(evidence_id: UUID, epoch: int) -> dict:
+    """The one payload a `legal_hold.lift_exhibit` approval carries: the exhibit and its hold as it
+    stands (its epoch, migration exhibit_hold_lift_two_people), so an approval is for one placing of
+    the hold and cannot be kept across a lift and a new hold."""
+    return {"evidence_id": str(evidence_id), "epoch": int(epoch)}
+
+
+def lift_case_payload(epoch: int) -> dict:
+    """The one payload a `legal_hold.lift_case` approval carries: the case's hold as it stands (its
+    epoch, migration case_hold_lift_two_people). The case itself is bound by the hash."""
+    return {"epoch": int(epoch)}
+
+
+def lift_document_payload(document_id: UUID, versions: Mapping[str, int]) -> dict:
+    """The one payload a `legal_hold.lift_document` approval carries: the document it was asked for from,
+    and the hold epoch of every version under a hold of its own (migration document_hold_lift_two_people).
+    A version held, lifted or held again afterwards changes the payload, so the approval cannot be kept
+    across a change to what it would release."""
+    return {"document_id": str(document_id),
+            "versions": {str(k): int(v) for k, v in versions.items()}}
+
+
+def open_lift_requests(conn: psycopg.Connection, *, viewer_id: UUID, operation: str,
+                       case_id: UUID | None, payloads: Mapping) -> dict:
+    """The newest open request of a hold lift for each subject, as the hold's own control shows it
+    (decision 229): `payloads` maps a subject (an exhibit, the case or a document) to the payload a lift
+    of its hold as it stands would carry, and a request is offered only when its hash is that payload's,
+    so one raised against an earlier hold is never offered. Open is waiting for a decision, or approved
+    and not yet spent, and unexpired. Each answer carries the request's id and state, whether it is the
+    viewer's own, who asked and who approved by name, when it expires and the justification, which a
+    signer decides on. The caller decides who may see a subject's request; this only reads them."""
+    if not payloads:
+        return {}
+    subjects = {payload_hash(operation, case_id, p): s for s, p in payloads.items()}
+    rows = conn.execute(
+        """SELECT DISTINCT ON (r.payload_hash)
+                  r.payload_hash, r.id, r.state, r.requested_by, r.expires_at,
+                  ru.display_name, du.display_name, r.justification
+             FROM core.approval_request r
+             LEFT JOIN iam.app_user ru ON ru.id = r.requested_by
+             LEFT JOIN iam.app_user du ON du.id = r.decided_by
+            WHERE r.operation = %s AND r.case_id IS NOT DISTINCT FROM %s
+              AND r.payload_hash = ANY(%s) AND r.expires_at > now()
+              AND (r.state = 'PENDING'
+                   OR (r.state = 'APPROVED' AND r.consumed_at IS NULL))
+            ORDER BY r.payload_hash, r.requested_at DESC""",
+        (operation, case_id, list(subjects))).fetchall()
+    return {subjects[bytes(r[0])]: {
+        "id": str(r[1]), "state": r[2], "mine": r[3] == viewer_id,
+        "expires_at": r[4].isoformat(), "requested_by_name": r[5],
+        "decided_by_name": r[6], "justification": r[7]} for r in rows}
 
 
 def policy_mode(conn: psycopg.Connection, operation: str) -> str:
@@ -633,6 +730,15 @@ class ApprovalService:
                     justification=record.justification, actor_id=requested_by,
                     element_classification=element_classification,
                     element_compartments=element_compartments)
+            elif operation == LIFT_DOCUMENT:
+                # A document's lift is told to those who could sign it and are cleared for every
+                # version, at those labels, and names the document; not as a policy change.
+                reach = notify_events.document_lift_requested(
+                    self._c, request_id=record.id,
+                    document_id=(payload or {}).get("document_id"),
+                    justification=record.justification, actor_id=requested_by,
+                    element_classification=element_classification,
+                    element_compartments=element_compartments)
             else:
                 reach = notify_events.global_approval_requested(
                     self._c, request_id=record.id, operation=operation,
@@ -716,6 +822,14 @@ class ApprovalService:
                     operation=record.operation, requested_by=record.requested_by,
                     approved=approve, note=record.decision_note,
                     actor_id=decided_by) is not None
+            elif record.operation == LIFT_DOCUMENT:
+                classification, labels = self._document_lift_labels(record.payload)
+                told = notify_events.document_lift_decided(
+                    self._c, request_id=record.id,
+                    document_id=(record.payload or {}).get("document_id"),
+                    requested_by=record.requested_by, approved=approve,
+                    actor_id=decided_by, element_classification=classification,
+                    element_compartments=frozenset(labels)) is not None
             else:
                 told = notify_events.global_approval_decided(
                     self._c, request_id=record.id,
@@ -727,6 +841,22 @@ class ApprovalService:
                           "notification failed", record.id)
             told = None
         return replace(record, requester_notified=told)
+
+    def _document_lift_labels(self, payload) -> tuple[str, list[str]]:
+        """The labels of every version of the document a lift names and of its source, as they stand, read
+        on a system connection (the decider's row security would hide a version above them, which the
+        decide route has refused already). RED when the payload names no document, failing closed."""
+        from noctornal_api.db import SystemPurpose, system_connection
+        from noctornal_api.retention import RetentionService
+
+        try:
+            document_id = UUID(str((payload or {})["document_id"]))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return "RED", []
+        with system_connection(SystemPurpose.RETENTION, reuse=self._c) as sconn:
+            classification, labels = RetentionService(sconn).document_chain_labels(
+                document_id)
+        return classification or "RED", labels
 
     def _refuse_unless_second_person(self, current: ApprovalRequest,
                                      op: Operation, decided_by: UUID) -> None:
@@ -967,42 +1097,95 @@ class ApprovalService:
         `awaiting_global_signature`.
 
         A merge request is the signer's to count only when they may see both of its entities, as the
-        listing shows it."""
+        listing shows it. A hold lift only when they hold `retention.manage` through a global role as
+        well, which the decide route asks of them, and are cleared for what it releases: the exhibit
+        it names, or for a case's lift everything the case's hold governs (`_case_lifts_covered`)."""
         pairs = [(k, op.signer_permission) for k, op in OPERATIONS.items()
-                 if op.scope == "case"]
+                 if op.scope == "case" and k != LIFT_CASE]
+        within = """.classification <= %(clearance)s::core.tlp
+                    AND {a}.compartments <@ %(held)s::text[]"""
         rows = self._c.execute(
             """SELECT r.case_id, count(DISTINCT r.id)
                  FROM core.approval_request r
                  JOIN core."case" c ON c.id = r.case_id
-                  AND c.classification <= %s::core.tlp
-                  AND c.compartments <@ %s::text[]
-                 JOIN unnest(%s::text[], %s::text[]) AS o(operation, permission)
+                  AND c""" + within.format(a="c") + """
+                 JOIN unnest(%(ops)s::text[], %(perms)s::text[]) AS o(operation, permission)
                    ON o.operation = r.operation
                  JOIN iam.case_assignment ca
-                   ON ca.case_id = r.case_id AND ca.user_id = %s
+                   ON ca.case_id = r.case_id AND ca.user_id = %(user)s
                   AND (ca.expires_at IS NULL OR ca.expires_at > now())
                  JOIN iam.role_permission rp
                    ON rp.role_key = ca.role_key
                   AND rp.permission_key = o.permission
                 WHERE r.state = 'PENDING' AND r.expires_at > now()
-                  AND r.requested_by <> %s
+                  AND r.requested_by <> %(user)s
                   AND (r.operation <> 'node.merge' OR (
                        EXISTS (SELECT 1 FROM core.node n
                                 WHERE n.id = """ + _PAYLOAD_UUID.format(key="source_node_id") + """
                                   AND n.case_id = r.case_id
-                                  AND n.classification <= %s::core.tlp
-                                  AND n.compartments <@ %s::text[])
+                                  AND n""" + within.format(a="n") + """)
                    AND EXISTS (SELECT 1 FROM core.node n
                                 WHERE n.id = """ + _PAYLOAD_UUID.format(key="target_node_id") + """
                                   AND n.case_id = r.case_id
-                                  AND n.classification <= %s::core.tlp
-                                  AND n.compartments <@ %s::text[])))
+                                  AND n""" + within.format(a="n") + """)))
+                  AND (r.operation <> %(lift_exhibit)s OR (
+                       EXISTS (SELECT 1 FROM iam.element_facts('evidence', """
+            + _PAYLOAD_UUID.format(key="evidence_id") + """) f
+                                WHERE f.case_id = r.case_id
+                                  AND f""" + within.format(a="f") + """)
+                   AND EXISTS (SELECT 1 FROM iam.user_role gur
+                                 JOIN iam.role_permission grp
+                                   ON grp.role_key = gur.role_key
+                                WHERE gur.user_id = %(user)s
+                                  AND grp.permission_key = 'retention.manage')))
                 GROUP BY r.case_id""",
-            (clearance, sorted(compartments),
-             [p[0] for p in pairs], [p[1] for p in pairs], user_id, user_id,
-             clearance, sorted(compartments), clearance, sorted(compartments)),
+            {"clearance": clearance, "held": sorted(compartments),
+             "ops": [p[0] for p in pairs], "perms": [p[1] for p in pairs],
+             "user": user_id, "lift_exhibit": LIFT_EXHIBIT},
         ).fetchall()
-        return {str(r[0]): r[1] for r in rows}
+        counts = {str(r[0]): r[1] for r in rows}
+        for case_id, n in self._case_lifts_covered(user_id, clearance, compartments):
+            counts[str(case_id)] = counts.get(str(case_id), 0) + n
+        return counts
+
+    def _case_lifts_covered(self, user_id: UUID, clearance: str,
+                            compartments: frozenset[str]) -> list[tuple[UUID, int]]:
+        """(case, waiting case-hold lifts) this person could sign, by role, the global verb and their
+        cover of everything the case's hold governs. The cover is asked on a system connection: on the
+        caller's own, row security would hide exactly the material above them and every case would look
+        covered. Their own labels judge both the case's material and the documents it cites, so a grant
+        scoped to the case only ever leaves a request out of the count."""
+        rows = self._c.execute(
+            """SELECT r.case_id, count(DISTINCT r.id)
+                 FROM core.approval_request r
+                 JOIN core."case" c ON c.id = r.case_id
+                  AND c.classification <= %(clearance)s::core.tlp
+                  AND c.compartments <@ %(held)s::text[]
+                 JOIN iam.case_assignment ca
+                   ON ca.case_id = r.case_id AND ca.user_id = %(user)s
+                  AND (ca.expires_at IS NULL OR ca.expires_at > now())
+                 JOIN iam.role_permission rp
+                   ON rp.role_key = ca.role_key AND rp.permission_key = %(perm)s
+                WHERE r.operation = %(op)s AND r.state = 'PENDING'
+                  AND r.expires_at > now() AND r.requested_by <> %(user)s
+                  AND EXISTS (SELECT 1 FROM iam.user_role gur
+                                JOIN iam.role_permission grp ON grp.role_key = gur.role_key
+                               WHERE gur.user_id = %(user)s
+                                 AND grp.permission_key = %(perm)s)
+                GROUP BY r.case_id""",
+            {"clearance": clearance, "held": sorted(compartments), "user": user_id,
+             "op": LIFT_CASE, "perm": OPERATIONS[LIFT_CASE].signer_permission},
+        ).fetchall()
+        if not rows:
+            return []
+        from noctornal_api.db import SystemPurpose, system_connection
+        from noctornal_api.retention import RetentionService
+
+        ceiling = (clearance, sorted(compartments))
+        with system_connection(SystemPurpose.RETENTION, reuse=self._c) as sconn:
+            judge = RetentionService(sconn)
+            return [(case_id, n) for case_id, n in rows
+                    if judge.ceiling_covers(case_id, ceiling, ceiling)]
 
     # Deployment-wide requests. Explicit about `case_id IS NULL` in every statement and kept apart
     # from the case reads above, so the row-level security (docs/00 decision 76) can see exactly
@@ -1013,8 +1196,10 @@ class ApprovalService:
         sign: not the requester, and an eligible signer of that operation
         (`eligible_signers_sql`). A request they are blocked from
         countersigning by the seven-day rule still counts: they may refuse
-        it."""
-        ops = [op for op in OPERATIONS.values() if op.scope == "global"]
+        it. A document hold's lift is not counted: it is the Two-person
+        changes figure, and a lift is signed where the hold is."""
+        ops = [op for op in OPERATIONS.values()
+               if op.scope == "global" and op.key not in LIFT_OPERATIONS]
         total = 0
         for op in ops:
             total += self._c.execute(

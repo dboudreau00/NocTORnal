@@ -4,15 +4,18 @@ Guards the service layer does not provide: classification may be raised, never l
 assignment that confers nothing is refused; ARCHIVED to PURGED, a mark for destruction rather than
 a close, is checked again under `case.delete`; the owner cannot be removed or regraded. Every
 mutation is audited inside `CaseService`, in the write's transaction, so this router writes no
-success rows of its own.
+success rows of its own but one: a closure that leaves conversations nobody assigned can minimise
+is recorded after the reply (`_say_the_minimisation_gap`, decision 231).
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
+from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from noctornal_api.cases import (
@@ -22,6 +25,7 @@ from noctornal_api.cases import (
     RoleHeldOnAnotherCase,
     allowed_transitions,
 )
+from noctornal_api.comms import CommsService
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -34,9 +38,13 @@ from noctornal_api.http.deps import (
     require,
     require_global,
 )
+from noctornal_api.http.element_gate import disclosure_mode, withheld_notice
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.projections import DISCLOSURE_NONE
 from noctornal_api.security.access import Tlp, tlp_from_name
+
+log = logging.getLogger("noctornal.cases")
 
 router = APIRouter(tags=["cases"])
 
@@ -91,6 +99,15 @@ class CaseOut(BaseModel):
     legal_hold: bool = False
     legal_hold_reason: str | None = None
     may_hold: bool = False
+    #: The open request to lift the case's hold as it stands (decision 229), for a caller who may hold
+    #: and is cleared for everything the hold governs, as a signer of its lift must be
+    #: (`approvals.open_lift_requests`). None for every other caller, and in a listing.
+    lift_request: dict | None = None
+    # Whether some of the case's conversations are above everyone assigned to it, so nobody on
+    # the team can minimise them (decision 231). Only for a caller who holds `case.grant` here, who
+    # can assign a cleared colleague, and only as `withheld_disclosure` allows: null under NONE,
+    # whether under PRESENCE, how many under COUNT. Never which, never a label.
+    minimisation_gap: dict | None = None
 
 
 def _out(c) -> CaseOut:
@@ -146,7 +163,29 @@ def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID, *,
             if holds and "retention.manage" in role[2]:
                 row.legal_hold_reason = case.legal_hold_reason
                 row.may_hold = may_hold_globally
+            # Drawn for one case, as the hold's reason is, never for a list.
+            if holds and "case.grant" in role[2]:
+                row.minimisation_gap = _minimisation_notice(conn, case.id)
     return out
+
+
+def _minimisation_notice(conn: psycopg.Connection, case_id: UUID) -> dict | None:
+    """The case's minimisation gap as its `withheld_disclosure` allows (`withheld_notice`), or None.
+
+    Counted on a system connection, because the conversations it is about are the ones above the
+    reader. Under NONE nothing is counted. A count that cannot be had says nothing and is logged,
+    so a case record never fails over it and never says "none" when it does not know."""
+    mode = disclosure_mode(conn, case_id)
+    if mode == DISCLOSURE_NONE:
+        return None
+    try:
+        with system_connection(SystemPurpose.MINIMISATION, reuse=conn) as sconn:
+            gap = CommsService(sconn).minimisation_gap(case_id)
+    except Exception:  # noqa: BLE001 - a record is never refused over this
+        log.warning("the minimisation gap of a case could not be counted",
+                    exc_info=True)
+        return None
+    return withheld_notice(mode, gap.count, noun="conversations") or None
 
 
 def _now() -> datetime:
@@ -190,7 +229,35 @@ def get_case(case_id: UUID,
     case = CaseService(conn).get(case_id)
     if case is None:
         raise Problem(404, "Not found", "case does not exist")
-    return _with_caller(conn, [case], user.user_id)[0]
+    out = _with_caller(conn, [case], user.user_id)[0]
+    if out.may_hold and out.legal_hold:
+        out.lift_request = _case_lift_request(conn, user, case_id)
+    return out
+
+
+def _case_lift_request(conn: psycopg.Connection, user: CurrentUser,
+                       case_id: UUID) -> dict | None:
+    """The open request to lift this case's hold as it stands (decision 229), when the caller's
+    ceilings cover everything the hold governs: the test a signer of its lift is held to, asked on a
+    system connection because row security would hide exactly the material above them."""
+    from noctornal_api.approvals import LIFT_CASE, lift_case_payload, open_lift_requests
+    from noctornal_api.http.deps import user_ceiling
+    from noctornal_api.retention import RetentionService
+
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    outside, outside_held = user_ceiling(conn, user.user_id)
+    with system_connection(SystemPurpose.RETENTION, reuse=conn) as sconn:
+        if not RetentionService(sconn).ceiling_covers(
+                case_id, (clearance.name, sorted(held)),
+                (outside.name, sorted(outside_held))):
+            return None
+    epoch = conn.execute('SELECT legal_hold_epoch FROM core."case" WHERE id = %s',
+                         (case_id,)).fetchone()
+    if epoch is None:
+        return None
+    return open_lift_requests(
+        conn, viewer_id=user.user_id, operation=LIFT_CASE, case_id=case_id,
+        payloads={case_id: lift_case_payload(epoch[0])}).get(case_id)
 
 
 # ---------------------------------------------------------------------
@@ -745,7 +812,7 @@ class TransitionBody(BaseModel):
 
 @router.post("/cases/{case_id}/status", response_model=CaseOut,
              dependencies=[Depends(rate_limit("request"))])
-def transition(case_id: UUID, body: TransitionBody,
+def transition(case_id: UUID, body: TransitionBody, background: BackgroundTasks,
                user: CurrentUser = Depends(require("case.close")),
                conn: psycopg.Connection = Depends(get_conn)) -> CaseOut:
     """Move the case along its lifecycle (`_TRANSITIONS` in cases.py).
@@ -753,6 +820,12 @@ def transition(case_id: UUID, body: TransitionBody,
     Gated on `case.close`. ARCHIVED to PURGED marks the case for destruction, so that one move is
     checked again under `case.delete`, which needs a fresh step-up. It is still one signature: dual
     control for `case.delete` is not enforced yet.
+
+    Closing is never refused over conversations nobody assigned can minimise. The gap is said after
+    the reply has gone (`_say_the_minimisation_gap`, a background task), so the request does the
+    same work whether there is one or not and, under NONE, its time says nothing either. The reply
+    carries the case record's `minimisation_gap` as `GET /cases/{id}` does, which under NONE is
+    nothing and is not counted.
     """
     svc = CaseService(conn)
     if body.status == "PURGED":
@@ -760,5 +833,51 @@ def transition(case_id: UUID, body: TransitionBody,
                          permission_key="case.delete", after_case_gate=True)
     # Written as the system role after the gate (and the PURGED move's second one), as an edit is.
     with system_connection(SystemPurpose.CASE_RECORD, reuse=conn) as sconn:
-        CaseService(sconn).transition_status(case_id, body.status, actor_id=user.user_id)
+        left = CaseService(sconn).transition_status(case_id, body.status, actor_id=user.user_id)
+    # Shut from a state whose content was writable: CLOSED, or ARCHIVED straight from a draft.
+    # Moving on between the shut states (archiving a closed case, marking it for purge) says
+    # nothing again: the gap was said when the case shut.
+    if (body.status in CONTENT_READ_ONLY_STATES
+            and left not in CONTENT_READ_ONLY_STATES):
+        background.add_task(_say_the_minimisation_gap, case_id, user.user_id)
     return _with_caller(conn, [svc.get(case_id)], user.user_id)[0]
+
+
+def _say_the_minimisation_gap(case_id: UUID, actor_id: UUID) -> None:
+    """After a case is closed, or archived straight from a draft, and the closer has the reply: when
+    some of its conversations are above everyone assigned to it, one audit row with the count and the
+    TLP tier, and the notices `notify_events.minimisation_gap` raises (decision 231).
+
+    The closure is never refused over it and never undone by it. A refusal would be an existence
+    oracle for a hidden conversation under NONE, and the closer, below the conversations by
+    definition, could not act on it; so would a reply that took longer when there is one, which is
+    why this runs after it, on a system connection of its own and never the request's. So a
+    failure to count, record or notify is logged and the closure stands; the row is written before
+    the notices, so a failed notice never takes the record with it. A process that stops between the
+    reply and this loses both; Oversight and the readiness row count live and still show the case."""
+    from noctornal_api import notify_events
+
+    try:
+        with system_connection(SystemPurpose.MINIMISATION) as sconn:
+            gap = CommsService(sconn).minimisation_gap(case_id)
+            if not gap.count:
+                return
+            sconn.execute(
+                """INSERT INTO audit.event
+                       (actor_id, actor_kind, action, object_type, object_id,
+                        case_id, outcome, detail)
+                   VALUES (%s, 'USER', 'CASE_CLOSED_WITH_UNMINIMISABLE_CONVERSATIONS',
+                           'case', %s, %s, 'SUCCESS', %s)""",
+                (actor_id, case_id, case_id,
+                 Json({"count": gap.count, "highest_tlp": gap.highest_tlp})))
+            try:
+                with sconn.transaction():
+                    notify_events.minimisation_gap(
+                        sconn, case_id=case_id, count=gap.count,
+                        mode=disclosure_mode(sconn, case_id), actor_id=actor_id)
+            except Exception:  # noqa: BLE001 - a closure never fails over a notice
+                log.warning("the notices of a case closed with a minimisation gap "
+                            "could not be raised", exc_info=True)
+    except Exception:  # noqa: BLE001 - a closure never fails over its gap
+        log.warning("the minimisation gap of a closed case could not be counted "
+                    "or recorded", exc_info=True)

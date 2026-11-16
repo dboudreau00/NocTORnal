@@ -298,14 +298,27 @@ def test_governance_still_works_on_a_closed_case_and_reopening_restores_writes(
     r = client.delete(f"{base}/users/{colleague}", headers=h)
     assert r.status_code in (200, 204), r.text
     # A legal hold, on and off: a hold overrides deletion whatever the
-    # case's state.
+    # case's state. The lift is two people's (decision 229): asked for, approved
+    # by a second Lead investigator and spent, all of it governance.
     r = client.post("/api/v1/retention/legal-hold", headers=h,
                     json={"evidence_id": exhibit, "on": True,
                           "reason": "appeal lodged"})
     assert r.status_code == 200, r.text
+    deputy = _user(conn)
+    conn.execute("INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by) "
+                 "VALUES (%s, %s, 'CASE_OWNER', %s)", (case_id, deputy, owner))
+    asked = client.post("/api/v1/retention/legal-hold/lift-requests", headers=h,
+                        json={"evidence_id": exhibit,
+                              "justification": "the appeal was withdrawn"})
+    assert asked.status_code == 201, asked.text
+    r = client.post(f"{base}/approvals/{asked.json()['id']}/decide",
+                    headers=_auth(_token(conn, deputy)),
+                    json={"approve": True, "note": "checked the withdrawal"})
+    assert r.status_code == 200, r.text
     r = client.post("/api/v1/retention/legal-hold", headers=h,
                     json={"evidence_id": exhibit, "on": False,
-                          "reason": "appeal withdrawn"})
+                          "reason": "appeal withdrawn",
+                          "approval_request_id": asked.json()["id"]})
     assert r.status_code == 200, r.text
     # A report build writes no content; a closed case is when one is wanted.
     r = client.post(f"{base}/report", headers=h)
