@@ -753,10 +753,7 @@ class IngestService:
                               "batch")
 
         if idempotency_key:
-            existing = self._c.execute(
-                """SELECT id FROM ingest.batch
-                    WHERE api_key_id = %s AND idempotency_key = %s""",
-                (key["id"], idempotency_key)).fetchone()
+            existing = self._existing_batch(key["id"], idempotency_key)
             if existing:
                 # Retrying clients are the norm, not the exception. There is no time window: the unique
                 # index on (api_key_id, idempotency_key) is permanent, so a repeat after any interval
@@ -779,14 +776,31 @@ class IngestService:
                 "partner to resend three months of feed.")
         self._storage.put(key_name, raw)
 
-        batch_id = self._c.execute(
-            "SELECT ingest.batch_accept(%s, %s, %s, %s, %s, %s, %s, %s)",
-            (key["id"], proof, idempotency_key, key_name, len(raw), digest,
-             content_type, detect_format(raw))).fetchone()[0]
+        try:
+            with self._c.transaction():
+                batch_id = self._c.execute(
+                    "SELECT ingest.batch_accept(%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (key["id"], proof, idempotency_key, key_name, len(raw), digest,
+                     content_type, detect_format(raw))).fetchone()[0]
+        except psycopg.errors.UniqueViolation:
+            # Two requests with one key at the same moment both missed the lookup above; the unique index
+            # let one in. The other is the duplicate it would have been a moment later.
+            existing = self._existing_batch(key["id"], idempotency_key) if idempotency_key else None
+            if existing is None:
+                raise
+            return AcceptResult(batch_id=existing[0], accepted=True, duplicate=True,
+                                detail="already received")
         if batch_id is None:
             # Only a key revoked or expired since it authenticated reaches this.
             raise IngestError("the batch was refused: this key is no longer live")
         return AcceptResult(batch_id=batch_id, accepted=True)
+
+    def _existing_batch(self, api_key_id, idempotency_key):
+        """The batch this API key already made for this Idempotency-Key, as a one-column row, or None."""
+        return self._c.execute(
+            """SELECT id FROM ingest.batch
+                WHERE api_key_id = %s AND idempotency_key = %s""",
+            (api_key_id, idempotency_key)).fetchone()
 
     def raw_for(self, batch_id: UUID) -> bytes:
         """The bytes as they arrived, for a re-parse.
@@ -962,8 +976,7 @@ class IngestService:
     def _store_record(self, batch_id: UUID, key, payload: dict, *,
                       case_id: UUID | None) -> dict:
         if maasspec.enabled() and maasspec.looks_like_spectrum(payload):
-            maasspec.validate(payload, raw_size=len(json.dumps(
-                payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")))
+            maasspec.validate(payload, raw_size=maasspec.compact_size(payload))
             category, confidence, source = "IOC_FEED", 1.0, "STRUCTURE"
         else:
             category, confidence, source = categorise(
@@ -1181,7 +1194,11 @@ class IngestService:
                 """SELECT id, declared_category, classification_ceiling,
                           forced_compartment FROM ingest.api_key WHERE id = %s""",
                 (row[1],)).fetchone()
-            created = self._store_record(row[0], key, payload, case_id=case_id)
+            try:
+                created = self._store_record(row[0], key, payload, case_id=case_id)
+            except maasspec.SpectrumRefused as exc:
+                # A spectrum that is still wrong after the repair is the caller's to fix, as any bad repair is.
+                raise RepairInvalid(str(exc)) from None
             self._c.execute(
                 """UPDATE ingest.dead_letter
                       SET replayed_at = now(), replayed_by = %s, resolution = %s
