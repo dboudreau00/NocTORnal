@@ -76,7 +76,7 @@ psycopg==3.3.5
 psycopg-binary==3.3.5
 psycopg-pool==3.3.3
 pyaes==1.6.1
-pyasn1==0.6.4
+pyasn1==0.6.5
 pycparser==3.0
 pycryptodome==3.23.0
 pydantic==2.13.5
