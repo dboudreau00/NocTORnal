@@ -162,7 +162,10 @@ def named_statement_timeout(conninfo: str) -> tuple[bool, int | None]:
             continue
         number, unit = match.group(1), match.group(2) or ""
         amount = int(number, 16) if number.lstrip("+-")[:2].lower() == "0x" else float(number)
-        found = (True, int(amount * _TIME_UNITS_MS[unit]))
+        try:
+            found = (True, int(amount * _TIME_UNITS_MS[unit]))
+        except (OverflowError, ValueError):
+            found = (True, None)
     return found
 
 
