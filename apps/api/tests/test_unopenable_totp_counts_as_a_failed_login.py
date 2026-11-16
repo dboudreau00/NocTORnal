@@ -53,6 +53,12 @@ class _UnopenableSecretStore:
     def consume_recovery_hash(self, user_id: UUID, code_hash: str) -> bool:
         return False
 
+    def update_password_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool:
+        return False
+
+    def replace_recovery_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool:
+        return False
+
 
 @pytest.mark.parametrize("raises", [
     InvalidTag(),                          # a key of that id that does not open it

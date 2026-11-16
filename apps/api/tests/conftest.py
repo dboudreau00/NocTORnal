@@ -205,6 +205,21 @@ class InMemoryUserStore(UserStore):
         self.recovery[user_id] = [h for h in held if h != code_hash]
         return True
 
+    def update_password_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool:
+        from dataclasses import replace
+        email = self._email_of(user_id)
+        if email is None or self.users[email].password_hash != current_hash:
+            return False
+        self.users[email] = replace(self.users[email], password_hash=new_hash)
+        return True
+
+    def replace_recovery_hash(self, user_id: UUID, current_hash: str, new_hash: str) -> bool:
+        held = self.recovery.get(user_id, [])
+        if current_hash not in held:
+            return False
+        self.recovery[user_id] = [new_hash if h == current_hash else h for h in held]
+        return True
+
     def clear_failed_logins(self, user_id: UUID, at: datetime) -> None:
         from dataclasses import replace
         email = self._email_of(user_id)
