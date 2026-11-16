@@ -10,8 +10,8 @@ L1 to L5 are settled outside this codebase.
 ### MaaSSpec
 
 - **A host switch, `NOCTORNAL_MAASSPEC`, off by default.** Only `on` (case and
-  surrounding spaces do not matter) enables it; unset, empty, `off`, `true`, `1`
-  and `yes` all mean off. It is a host setting in `secrets.env`, passed through
+  surrounding spaces do not matter) enables it; unset, empty and `off` mean off,
+  and a production start refuses any other value. It is a host setting in `secrets.env`, passed through
   compose and checked at start, like `NOCTORNAL_OUTBOUND_LOOKUPS`. It is read
   each time a record is parsed.
 - **Off, nothing changes.** A MaaSSpec spectrum is categorised as any other JSON
@@ -32,24 +32,26 @@ L1 to L5 are settled outside this codebase.
   entity, tie, assertion or proposal, and scoring is unchanged.
 - **A status route.** `GET /api/v1/ingest/maasspec`, for `ingest.read`, answers
   whether the switch is on, its name, the contract versions accepted (`0.1.0`),
-  the 1 MiB cap, the category and a notice.
+  the 16 MiB spectrum cap, the category and a notice.
 - **A metadata block on the record.** `GET /api/v1/ingest/records/{id}` carries a
   `maasspec` block only when the switch is on and the record is a valid
   spectrum. It holds counts and names (findings by type, selectors by kind and
   how many have no NocTORnal type, claimed and graded findings, grade counts,
-  artifacts, errors by severity) and never a value.
+  artifacts, errors by severity) and never a finding, selector or file value;
+  the analysis id and the tool's name and version are the sender's own text.
 - **Versions.** `maasspec_version` is the contract version and does not move when
   the MaaSSpec package does. `tool.version` is the package version and is
   informational.
 - **No outbound traffic.** NocTORnal never calls MaaSSpec; a spectrum arrives as
-  an ordinary POST to `/api/v1/ingest`, with the 1 MiB body cap that route has.
+  an ordinary POST to `/api/v1/ingest`, with the body cap the key sets (32 MiB by default); a spectrum over 16 MiB is a dead letter at parse.
 
 ### Ingest
 
 - **A repeated `Idempotency-Key` after 24 hours answers as a duplicate.** It
   answered with a database error once the first batch was a day old. A repeat of
   the same key on the same API key now always answers as the first batch, and
-  the new body is not stored. The same key on another API key stays independent.
+  the new body is not stored. Two requests with one key at the same moment answer
+  as one batch and its duplicate. The same key on another API key stays independent.
 
 ### What this release did not do
 
