@@ -43,6 +43,8 @@ from noctornal_api.http.element_gate import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.routers.read import _visible_edge
+from noctornal_api.security.access import tlp_from_name
 from noctornal_api.selectors import (
     CREDENTIAL_REFUSAL,
     SelectorStore,
@@ -489,25 +491,36 @@ def _element_labels(conn: psycopg.Connection, table: str, element_id: UUID, *,
     return facts_or_phantom(conn, table, element_id, case_id=case_id)
 
 
-def _gate_tie_endpoints(conn: psycopg.Connection, user: CurrentUser,
-                        case_id: UUID, edge_id: UUID,
-                        permission_key: str) -> None:
-    """A write on a tie is gated at its two entities' labels as well as its own.
+def _tie_facts(conn: psycopg.Connection, facts: ElementFacts, *, case_id: UUID,
+               edge_id: UUID | None = None,
+               assertion_id: UUID | None = None) -> ElementFacts:
+    """The labels a tie, or a claim on one, is gated at: the tie's own (`facts`) joined with its
+    two entities', the stricter classification and every compartment.
 
     The projection draws a tie only when both ends are visible, so its own label alone would let a
-    reader who cannot see it correct, review or retire it. The refusal is the tie's own: the missing
-    tie's 404, with the AUTHZ_DENIED row kept."""
+    reader who cannot see one end read its claims, review it, correct it, retire it or retract and
+    date its claims. One statement whatever the id names, reading the ends' labels as facts
+    (`iam.element_facts`), and one gate after it, so a tie with a hidden end, a hidden tie and an id
+    that names nothing send the same statements and write the same AUTHZ_DENIED row (decision
+    230). The tie is read under the caller's row policy, so one above them, like one in another
+    case or none, has no ends here, and its own facts (the phantom's for an id that names nothing)
+    refuse it. A claim on an entity has no tie, and `facts` stand."""
     ends = conn.execute(
-        "SELECT src_node_id, dst_node_id FROM core.edge WHERE id = %s",
-        (edge_id,)).fetchone()
-    for node_id in ends or ():
-        facts = facts_or_phantom(conn, "node", node_id, case_id=case_id)
-        authorize_element(conn, user, case_id=case_id,
-                          permission_key=permission_key,
-                          classification=facts.classification,
-                          compartments=facts.compartments,
-                          missing_detail="no such edge in this case",
-                          absent=facts.absent)
+        """SELECT s.classification, s.compartments, d.classification, d.compartments
+             FROM core.edge e
+            CROSS JOIN LATERAL iam.element_facts('node', e.src_node_id) s
+            CROSS JOIN LATERAL iam.element_facts('node', e.dst_node_id) d
+            WHERE e.case_id = %s
+              AND e.id = coalesce(%s::uuid, (SELECT a.edge_id FROM core.assertion a
+                                              WHERE a.id = %s::uuid))""",
+        (case_id, edge_id, assertion_id)).fetchone()
+    if ends is None:
+        return facts
+    strictest = max(tlp_from_name(facts.classification), tlp_from_name(ends[0]),
+                    tlp_from_name(ends[2]))
+    return facts._replace(
+        classification=strictest.name,
+        compartments=facts.compartments | frozenset(ends[1] or ()) | frozenset(ends[3] or ()))
 
 
 def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> IdOut:
@@ -515,18 +528,18 @@ def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> 
     # The path's case_id is the one the gate authorised, so an element from another case is the
     # phantom, as a missing one is.
     found = _element_labels(conn, table, node_id or edge_id, case_id=case_id)
+    if edge_id is not None:
+        found = _tie_facts(conn, found, case_id=case_id, edge_id=edge_id)
     # Re-authorise against the element's labels, not just the case's: a RED node can live in an
-    # AMBER case, and asserting about it is a write against the node. This second gate counts a
-    # break-glass use only if the route's did not. A refusal is the missing element's 404, its
-    # AUTHZ_DENIED row kept.
+    # AMBER case, and asserting about it is a write against the node, as asserting about a tie is
+    # a write against its two entities. This second gate counts a break-glass use only if the
+    # route's did not. A refusal is the missing element's 404, its AUTHZ_DENIED row kept.
     authorize_element(conn, user, case_id=case_id,
                       permission_key="assertion.create",
                       classification=found.classification,
                       compartments=found.compartments,
                       missing_detail=f"no such {table} in this case",
                       absent=found.absent)
-    if edge_id is not None:
-        _gate_tie_endpoints(conn, user, case_id, edge_id, "assertion.create")
     _check_evidence(conn, case_id, body.evidence_id)
     try:
         aid = GraphWriteService(conn).add_assertion(
@@ -576,10 +589,11 @@ def retract_assertion(
     # security giving a silent 404, and the same row for an id that names nothing in the case
     # (decision 230); the answer is the missing element's 404. Content is read after the gate.
     subject = facts_or_phantom(conn, "assertion", assertion_id, case_id=case_id)
+    subject = _tie_facts(conn, subject, case_id=case_id, assertion_id=assertion_id)
     # The element's own labels gate the retraction (the assertion's facts are its subject's
-    # labels): retracting the last live assertion dissolves the element from every projection, so a
-    # caller must be able to see what they destroy. A refusal is the missing claim's 404, its
-    # AUTHZ_DENIED row kept.
+    # labels, and a tie's are joined with its two entities'): retracting the last live assertion
+    # dissolves the element from every projection, so a caller must be able to see what they
+    # destroy. A refusal is the missing claim's 404, its AUTHZ_DENIED row kept.
     authorize_element(conn, user, case_id=case_id,
                       permission_key="assertion.retract",
                       classification=subject.classification,
@@ -629,10 +643,11 @@ def supersede_assertion(
     refusals come after the gates, so a caller who may not see the claim is told nothing about it.
     """
     subject = facts_or_phantom(conn, "assertion", assertion_id, case_id=case_id)
-    # A refusal at the claim's labels (or the phantom's, for an id that names nothing in the case)
-    # is the missing claim's 404, its AUTHZ_DENIED row kept. The
-    # route's gate names assertion.retract only, so assertion.create is first asked at the case's
-    # labels, and a caller without it still gets the gate's 403.
+    subject = _tie_facts(conn, subject, case_id=case_id, assertion_id=assertion_id)
+    # A refusal at the claim's labels (a tie's joined with its two entities', or the phantom's for
+    # an id that names nothing in the case) is the missing claim's 404, its AUTHZ_DENIED row kept.
+    # The route's gate names assertion.retract only, so assertion.create is first asked at the
+    # case's labels, and a caller without it still gets the gate's 403.
     for permission in ("assertion.retract", "assertion.create"):
         authorize_element(conn, user, case_id=case_id, permission_key=permission,
                           classification=subject.classification,
@@ -718,16 +733,17 @@ def _gate_for_change(
     # security giving a silent 404, and the same row for an id that names nothing in the case; the
     # answer is the missing element's 404. Content is read after the gate.
     facts = facts_or_phantom(conn, table, element_id, case_id=case_id)
-    # A refusal at the element's labels is the missing element's 404, its AUTHZ_DENIED row kept: a
-    # 403 would tell a caller holding a leaked id that it names something in the case.
+    if table == "edge":
+        facts = _tie_facts(conn, facts, case_id=case_id, edge_id=element_id)
+    # A refusal at the element's labels (a tie's joined with its two entities') is the missing
+    # element's 404, its AUTHZ_DENIED row kept: a 403 would tell a caller holding a leaked id that
+    # it names something in the case.
     authorize_element(conn, user, case_id=case_id,
                       permission_key=permission_key,
                       classification=facts.classification,
                       compartments=facts.compartments,
                       missing_detail=f"no such {table} in this case",
                       absent=facts.absent)
-    if table == "edge":
-        _gate_tie_endpoints(conn, user, case_id, element_id, permission_key)
     row = conn.execute(
         f"SELECT case_id, classification, compartments, deleted_at, "
         f"       {_BEFORE_COLUMNS[table]} "
@@ -1257,17 +1273,19 @@ def edge_review(
 
     The record is the EDGE_REVIEWED audit rows `review_edge` writes, since `edge.review` has no
     reviewer column. `/audit` never returns their `detail`; it is returned here only to a caller
-    who may read this case and this tie. A tie above the caller's clearance is the same 404 as one
-    that does not exist.
+    who may read this case and this tie. A tie above the caller's clearance, or joining an entity
+    above it, is the same 404 as one that does not exist (`read._visible_edge`, the test its claims
+    and exhibits pass).
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    if not _visible_edge(conn, case_id, edge_id, clearance.name, list(compartments)):
+        raise Problem(404, "Not found", "no such edge in this case")
     row = conn.execute(
         """SELECT e.review::text, e.created_at, u.display_name
              FROM core.edge e
              LEFT JOIN iam.app_user u ON u.id = e.created_by
-            WHERE e.id = %s AND e.case_id = %s AND e.deleted_at IS NULL
-              AND e.classification <= %s::core.tlp AND e.compartments <@ %s""",
-        (edge_id, case_id, clearance.name, list(compartments)),
+            WHERE e.id = %s AND e.case_id = %s AND e.deleted_at IS NULL""",
+        (edge_id, case_id),
     ).fetchone()
     if row is None:
         raise Problem(404, "Not found", "no such edge in this case")

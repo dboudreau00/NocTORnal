@@ -3,7 +3,9 @@
 One table, `FAMILIES`, serves the equality test (`test_absent_element_work_pg.py`) and the timing
 harness (`measure_absent_cost.py`). Each row is a route that names an element, asked by one caller
 with three ids: one hidden from them (RED, in a compartment they are not read into, in their own
-case), one that names nothing, and one from another case. Decision 230 says the three cost the same
+case; or a tie labelled as the case is whose one end is such an entity, or a claim on that tie), one
+that names nothing, and one from another case; a tie or a claim on one is asked a fourth time, with
+the hidden entity at the tie's source end. Decision 230 says they all cost the same
 and record the same; a row whose answer comes from a label predicate rather than the gate records
 nothing for any of them, and stays in the table so it stays equal.
 
@@ -89,10 +91,18 @@ class World:
         self.visible = s.node(owner, self.case_id, self.boss, "g230 visible")
         self.visible2 = s.node(owner, self.case_id, self.boss, "g230 visible 2")
         self.dual_visible = s.node(owner, self.dual, self.boss, "g230 dual visible")
+        # A hypothesis to score a claim against and an exhibit the analyst may cite, for the routes
+        # that name a claim or a tie in the body.
+        self.hypothesis = owner.execute(
+            """INSERT INTO core.hypothesis (case_id, statement, created_by)
+               VALUES (%s, 'g230 hypothesis', %s) RETURNING id""",
+            (self.case_id, self.boss)).fetchone()[0]
+        self.exhibit = s.exhibit(owner, self.case_id, self.boss)
         self._made: dict[tuple[str, UUID], UUID] = {}
         self._missing: dict[str, UUID] = {}
         self._approvals: dict[UUID, UUID] = {}
         self._proposals: dict[UUID, UUID] = {}
+        self._tie_proposals: dict[UUID, UUID] = {}
         from noctornal_api.curation import NodeSetService, TagService
         self.tag = TagService(owner).create_tag(namespace="g230", name="t", case_id=self.case_id)
         self.working_set = NodeSetService(owner).create_set(
@@ -122,6 +132,17 @@ class World:
                          "claim_value": {"role": "g230"}},
                 origin="g230_probe_v1", rationale="g230 probe", score=0.5)
         return self._proposals[entity]
+
+    def tie_proposal_for(self, entity: UUID) -> UUID:
+        """An EDGE proposal in the case tying `entity` to a visible entity."""
+        if entity not in self._tie_proposals:
+            from noctornal_api.proposals import ProposalStore
+            self._tie_proposals[entity] = ProposalStore(self.owner).propose(
+                case_id=self.case_id, kind="EDGE",
+                payload={"edge_type": "VOUCHED_FOR", "src_node_id": str(entity),
+                         "dst_node_id": str(self.visible)},
+                origin="g230_probe_v1", rationale="g230 probe", score=0.5)
+        return self._tie_proposals[entity]
 
     def headers(self, uid: UUID) -> dict:
         """A fresh session with a second factor, so a step-up route is decided by the gate."""
@@ -172,6 +193,31 @@ class World:
         """The claim a fresh hidden node was made with."""
         return self.owner.execute("SELECT id FROM core.assertion WHERE node_id = %s",
                                   (self._make_node(case_id),)).fetchone()[0]
+
+    def _make_end_edge(self, case_id: UUID) -> UUID:
+        """A tie labelled as its case is, joining a visible entity to one above the caller: its own
+        labels let the caller through, its hidden end does not. In the foreign case, a tie as
+        `_make_edge` makes one there."""
+        if case_id != self.case_id:
+            return self._make_edge(case_id)
+        return s.edge(self.owner, case_id, self.boss, self.visible, self._make_node(case_id))
+
+    def _make_src_end_edge(self, case_id: UUID) -> UUID:
+        """The same tie with the entity above the caller at its source end."""
+        if case_id != self.case_id:
+            return self._make_edge(case_id)
+        return s.edge(self.owner, case_id, self.boss, self._make_node(case_id), self.visible)
+
+    def _make_end_claim(self, case_id: UUID) -> UUID:
+        """The claim a fresh tie to an entity above the caller was made with."""
+        return self._claim_on(self._make_end_edge(case_id))
+
+    def _make_src_end_claim(self, case_id: UUID) -> UUID:
+        return self._claim_on(self._make_src_end_edge(case_id))
+
+    def _claim_on(self, edge_id: UUID) -> UUID:
+        return self.owner.execute("SELECT id FROM core.assertion WHERE edge_id = %s",
+                                  (edge_id,)).fetchone()[0]
 
     def _make_merge(self, case_id: UUID) -> UUID:
         """A merge of two entities above the caller, so its reversal is refused at the first
@@ -287,7 +333,14 @@ class Family:
         ids = {"hidden": world.hidden(self.kind), "missing": world.missing(self.name)}
         if self.case_scoped:
             ids["other"] = world.other(self.kind)
+        if self.kind in END_KINDS:
+            # The hidden id hides the tie's destination; this one hides its source.
+            ids["hidden_source"] = world.hidden(f"src_{self.kind}")
         return ids
+
+
+#: The kinds whose hidden id is a tie, or a claim on one, with one end above the caller.
+END_KINDS = frozenset({"end_edge", "end_claim"})
 
 
 NOT_FOUND = "Not found"
@@ -388,6 +441,30 @@ FAMILIES: list[Family] = [
            lambda wd, i: ("POST", wd.url(f"/graph/edges/{i}/review"),
                           {"review": "DISPUTED", "note": "g230 probe"}),
            NO_EDGE),
+    # `routers/graph._tie_facts`: a tie labelled as its case is, joining an entity above the
+    # caller, is gated at its entities' labels too, and so is a claim on it.
+    Family("a claim on a tie to a hidden entity", "end_edge", "analyst",
+           lambda wd, i: ("POST", wd.url(f"/edges/{i}/assertions"), CLAIM),
+           NO_EDGE),
+    Family("a tie to a hidden entity corrected", "end_edge", "analyst",
+           lambda wd, i: ("PATCH", wd.url(f"/graph/edges/{i}"),
+                          {"weight": 0.5, "assertion": CLAIM}),
+           NO_EDGE),
+    Family("a tie to a hidden entity retired", "end_edge", "analyst",
+           lambda wd, i: ("DELETE", wd.url(f"/graph/edges/{i}"), {"reason": "g230 probe"}),
+           NO_EDGE),
+    Family("a tie to a hidden entity reviewed", "end_edge", "lead",
+           lambda wd, i: ("POST", wd.url(f"/graph/edges/{i}/review"),
+                          {"review": "DISPUTED", "note": "g230 probe"}),
+           NO_EDGE),
+    Family("a claim on a tie to a hidden entity retracted", "end_claim", "analyst",
+           lambda wd, i: ("POST", wd.url(f"/assertions/{i}/retract"),
+                          {"reason": "g230 probe"}),
+           NO_ASSERTION),
+    Family("a claim on a tie to a hidden entity dated", "end_claim", "analyst",
+           lambda wd, i: ("POST", wd.url(f"/assertions/{i}/supersede"), {
+               "observed_at": "2026-01-01T00:00:00Z", "rationale": "g230 probe"}),
+           NO_ASSERTION),
     # `routers/curation._node_for_write`: a tag or a working set's member, gated at the node's labels.
     Family("an entity tagged", "node", "analyst",
            lambda wd, i: ("POST", wd.url(f"/curation/tags/{wd.tag}/nodes"),
@@ -430,6 +507,11 @@ FAMILIES: list[Family] = [
            (409, "Conflict",
             "the entity this proposal makes a claim about is not in this case; nothing was "
             "written")),
+    # The same, for each entity a proposed tie names.
+    Family("a tie proposed to an entity, accepted", "node", "lead",
+           lambda wd, i: ("POST", wd.url(f"/proposals/{wd.tie_proposal_for(i)}/accept"), {}),
+           (409, "Conflict",
+            "an entity this proposal would tie is not in this case; nothing was written")),
     # `routers/governance._own_evidence`: a legal hold names an exhibit and takes its case from it.
     Family("a legal hold placed on an exhibit", "foreign_evidence", "officer",
            lambda wd, i: ("POST", f"{API}/retention/legal-hold", {
@@ -467,9 +549,29 @@ FAMILIES: list[Family] = [
     Family("a tie's review history", "edge", "analyst",
            lambda wd, i: ("GET", wd.url(f"/graph/edges/{i}/review"), None),
            (404, NOT_FOUND, "no such edge in this case"), refused_by_gate=False),
+    Family("the review history of a tie to a hidden entity", "end_edge", "analyst",
+           lambda wd, i: ("GET", wd.url(f"/graph/edges/{i}/review"), None),
+           (404, NOT_FOUND, "no such edge in this case"), refused_by_gate=False),
+    Family("the claims of a tie to a hidden entity", "end_edge", "analyst",
+           lambda wd, i: ("GET", wd.url(f"/edges/{i}/assertions"), None),
+           (404, NOT_FOUND, "edge does not exist in this case"), refused_by_gate=False),
+    Family("the exhibits of a tie to a hidden entity", "end_edge", "analyst",
+           lambda wd, i: ("GET", wd.url(f"/edges/{i}/evidence"), None),
+           (404, NOT_FOUND, "edge does not exist in this case"), refused_by_gate=False),
     Family("an entity's tags", "node", "analyst",
            lambda wd, i: ("GET", wd.url(f"/curation/nodes/{i}/tags"), None),
            (404, NOT_FOUND, "no such node in this case"), refused_by_gate=False),
+    # Row security admits a tie at its own labels; these routes join its two entities to it too.
+    Family("a claim on a tie to a hidden entity scored", "end_claim", "analyst",
+           lambda wd, i: ("PUT", wd.url(f"/ach/hypotheses/{wd.hypothesis}/stance"),
+                          {"assertion_id": str(i), "stance": -1}),
+           (404, NOT_FOUND, "no such live assertion in this case; a retracted assertion "
+                            "cannot support a conclusion"), refused_by_gate=False),
+    Family("an exhibit cited for a tie to a hidden entity", "end_edge", "analyst",
+           lambda wd, i: ("POST", wd.url(f"/evidence/{wd.exhibit}/links"),
+                          {"edge_id": str(i)}),
+           (400, "Invalid request", "link target is not in this case"),
+           refused_by_gate=False),
     Family("a merge's basis selector", "selector", "analyst",
            lambda wd, i: ("POST", wd.url("/merges"), {
                "source_node_id": str(wd.visible), "target_node_id": str(wd.visible2),

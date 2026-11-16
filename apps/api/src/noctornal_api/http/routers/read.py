@@ -224,11 +224,20 @@ def _visible_node(conn, case_id, node_id, clearance, compartments) -> bool:
 
 
 def _visible_edge(conn, case_id, edge_id, clearance, compartments) -> bool:
+    """A live tie of this case the reader may see at its own labels and at both its entities'
+    labels: its claims, exhibits and review are not the reader's when one end is above them. Only
+    the labels are matched; unlike `GET /edges` it does not ask that the ends be undeleted, which
+    reveals nothing, since a retired end passes the same label test. One statement for any id, so a
+    tie with a hidden end, a hidden tie and a missing one are the same 404."""
     return conn.execute(
-        """SELECT 1 FROM core.edge
-            WHERE id = %s AND case_id = %s AND deleted_at IS NULL
-              AND classification <= %s::core.tlp AND compartments <@ %s""",
-        (edge_id, case_id, clearance, compartments),
+        """SELECT 1 FROM core.edge e
+             JOIN core.node s ON s.id = e.src_node_id
+             JOIN core.node d ON d.id = e.dst_node_id
+            WHERE e.id = %s AND e.case_id = %s AND e.deleted_at IS NULL
+              AND e.classification <= %s::core.tlp AND e.compartments <@ %s
+              AND s.classification <= %s::core.tlp AND s.compartments <@ %s
+              AND d.classification <= %s::core.tlp AND d.compartments <@ %s""",
+        (edge_id, case_id, *(clearance, compartments) * 3),
     ).fetchone() is not None
 
 
