@@ -321,6 +321,8 @@ def test_the_pip_pin_is_one_hashed_file_and_both_installers_install_from_it():
         < install.index("-c constraints.txt -r db/requirements.txt")
     resolve = _step(_job(_ci(), "pinned-images"), "Every hash-pinned requirement resolves on PyPI")
     assert "--require-hashes -r requirements-pip.txt" in resolve and "pip download" in resolve
+    assert "--require-hashes -r requirements-lock.txt" in resolve
+    assert "--require-hashes -r requirements-telegram.txt" in resolve
     assert "'requirements-pip.txt'" in (ROOT / "scripts/package_release.ps1").read_text(
         encoding="utf-8"), "the release package must carry the file the installers refuse without"
 
@@ -372,9 +374,32 @@ def test_the_constraints_file_reaches_the_image():
     that dropped the file would fail the build at `pip install -c`."""
     ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
     rules = [r.strip() for r in ignored if r.strip() and not r.startswith("#")]
-    for rule in rules:
-        assert not re.fullmatch(rule.replace(".", r"\.").replace("*", ".*"),
-                                "constraints.txt"), rule
+    for name in ("constraints.txt", "requirements-lock.txt", "requirements-telegram.txt",
+                 "requirements-yara.txt"):
+        for rule in rules:
+            assert not re.fullmatch(rule.replace(".", r"\.").replace("*", ".*"),
+                                    name), (name, rule)
+
+
+def test_the_image_lock_is_hashed_and_matches_the_constraints():
+    """The application image's hashed install is a lock of the same versions
+    constraints.txt pins, plus a telegram-only file, with no overlap. Every
+    pin carries at least one sha256. The Dockerfile installs both with
+    --require-hashes before the editable --no-deps step."""
+    constraints = _pins()
+    lock = _hashed_requirements(ROOT / "requirements-lock.txt")
+    telegram = _hashed_requirements(ROOT / "requirements-telegram.txt")
+    assert lock and telegram
+    assert not set(lock) & set(telegram), sorted(set(lock) & set(telegram))
+    for name, (version, hashes) in {**lock, **telegram}.items():
+        assert name in constraints, f"{name} is locked but not pinned"
+        assert version == constraints[name], (name, version, constraints[name])
+        assert hashes, name
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    joined = re.sub(r"\\\r?\n\s*", " ", dockerfile)
+    assert "--require-hashes -c constraints.txt -r requirements-lock.txt" in joined
+    assert "--require-hashes -c constraints.txt" in joined and "-r requirements-telegram.txt" in joined
+    assert "--no-deps -c constraints.txt -e packages/ontology" in joined
 
 
 # ---------------------------------------------------------------------------

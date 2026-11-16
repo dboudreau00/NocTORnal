@@ -82,9 +82,16 @@ COPY . /app
 # extra and say nothing, and the value is interpolated into a pip argument, which only a closed
 # list may be.
 #
+# Hashed installs first, then the two editable trees with --no-deps: an
+# editable install cannot itself be hash-checked, and --require-hashes cannot
+# be combined with one. constraints.txt cannot carry the hashes: pip does not
+# apply them there. It still pins the versions, and every pip install keeps
+# `-c constraints.txt`.
+#
 # With yara, yara-x is installed first from requirements-yara.txt, by the sha256 of its wheel, and
 # the editable install after it finds the pin already satisfied, so the wheel in the image is the
-# hashed one. constraints.txt cannot carry the hashes: pip does not apply them there.
+# hashed one. The rest of the closure is requirements-lock.txt; the telegram extra adds
+# requirements-telegram.txt.
 #
 # The final `find`: COPY keeps the build context's modes, and a checkout made under umask 077
 # holds 0600 files and 0700 directories, which uid 10001 could not read under root-owned /app.
@@ -98,7 +105,12 @@ RUN case "$NOCTORNAL_EXTRAS" in \
       *,yara,*) pip install --no-cache-dir --require-hashes --only-binary=:all: --no-deps \
                 -c constraints.txt -r requirements-yara.txt ;; \
     esac \
-    && pip install --no-cache-dir -c constraints.txt -e packages/ontology \
+    && pip install --no-cache-dir --require-hashes -c constraints.txt -r requirements-lock.txt \
+    && case ",$NOCTORNAL_EXTRAS," in \
+      *,telegram,*) pip install --no-cache-dir --require-hashes -c constraints.txt \
+                -r requirements-telegram.txt ;; \
+    esac \
+    && pip install --no-cache-dir --no-deps -c constraints.txt -e packages/ontology \
        -e "apps/api${NOCTORNAL_EXTRAS:+[$NOCTORNAL_EXTRAS]}" \
     && find /app \( -type f ! -perm -o=r -o -type d ! -perm -o=rx \) -exec chmod go+rX {} +
 
