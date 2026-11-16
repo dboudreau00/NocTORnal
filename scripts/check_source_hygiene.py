@@ -42,7 +42,7 @@ REPO = Path(__file__).resolve().parent.parent
 # kind of tracked file cannot slip past.
 SUFFIXES = {".py", ".js", ".css", ".html", ".sql", ".md", ".toml", ".yml",
             ".yaml", ".ps1", ".sh", ".ini", ".json", ".ts",
-            ".cmd", ".bat", ".txt", ".mako", ".asc", ".svg", ".example"}
+            ".cmd", ".bat", ".txt", ".mako", ".asc", ".svg", ".example", ".caddyfile"}
 NAMES = {"Dockerfile", "Caddyfile", "LICENSE", ".gitignore", ".gitattributes",
          ".dockerignore", "pg_hba.conf"}
 SKIP_DIRS = {".git", ".claude", ".venv", "node_modules", "__pycache__", ".next",

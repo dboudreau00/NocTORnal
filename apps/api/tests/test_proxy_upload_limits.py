@@ -245,8 +245,9 @@ def test_the_sample_origin_has_a_small_one_because_it_reads_no_body_of_any_size(
 
 def test_no_other_application_service_was_given_a_tmpfs_by_this():
     with_tmpfs = {name for name, s in _services().items() if "tmpfs" in s}
-    # postgres holds its TLS key on one (test_tls_hops_compose.py), not an upload.
-    assert with_tmpfs == {"api", "sample-origin", "analysis-worker", "postgres"}, with_tmpfs
+    # postgres holds its TLS key on one (test_tls_hops_compose.py), not an upload; the MinIO filter's
+    # Caddy keeps its data and config on one and proxies an upload without spooling it.
+    assert with_tmpfs == {"api", "sample-origin", "analysis-worker", "postgres", "minio-filter"}, with_tmpfs
 
 
 def test_the_command_that_writes_into_tmp_still_does_so_as_a_file_the_user_can_make():
