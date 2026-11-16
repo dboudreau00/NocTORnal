@@ -552,3 +552,43 @@ def test_a_path_on_the_sample_origin_is_reported_not_silently_dropped(
     assert "https://app.example/samples" in check["evidence"]
     assert "not an origin" in check["evidence"]
     assert "CONTROL OFF" not in check["evidence"]
+
+
+# --- a setting that is not an origin is not told back (independent review, CONSOLE-03) ------------------------------
+
+def test_an_unusable_sample_origin_is_not_quoted_to_a_caller_with_no_session(
+        conn, client, monkeypatch):
+    """Both download routes ask the origin split before they read a credential, so the refusal reaches a
+    caller who sent none. It is one fixed sentence: the value, userinfo included, is in the server log."""
+    secret = "hunter2-not-a-real-secret"
+    monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", f"https://svc:{secret}@samples.example/lab")
+    for url in (f"{API}/samples/{uuid4()}/download",
+                f"{API}/cases/{uuid4()}/evidence/{uuid4()}/download"):
+        r = client.post(url)
+        assert r.status_code == 409, (url, r.status_code, r.text)
+        assert secret not in r.text and "samples.example" not in r.text, r.text
+        assert "not an origin" in r.json()["detail"]
+
+
+def test_an_unusable_sample_origin_is_not_quoted_to_a_signed_in_account(conn, client, monkeypatch):
+    """`GET /samples/policy` is read by any signed-in account, which the console shows instead of the
+    download button."""
+    secret = "hunter2-not-a-real-secret"
+    monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", f"https://svc:{secret}@samples.example")
+    token, _ = _analyst(conn)
+    policy = client.get(f"{API}/samples/policy", headers=_auth(token)).json()
+    assert policy["sample_origin_configured"] is False and policy["sample_origin"] is None
+    assert secret not in str(policy) and "samples.example" not in str(policy)
+    assert "not an origin" in policy["sample_origin_problem"]
+
+
+def test_the_register_quotes_an_unusable_sample_origin_without_its_credentials(
+        conn, client, monkeypatch):
+    """An administrator reads what was typed (the register says so, and the test above holds it), so the
+    mistake can be found; a password in the userinfo of the value is not repeated."""
+    secret = "hunter2-not-a-real-secret"
+    monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", f"https://svc:{secret}@samples.example/lab")
+    check = _readiness(conn, client)["sample_origin_configured"]
+    assert check["ok"] is False, check
+    assert "https://***@samples.example/lab" in check["evidence"]
+    assert secret not in str(check)

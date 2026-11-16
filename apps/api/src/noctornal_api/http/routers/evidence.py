@@ -297,6 +297,7 @@ async def upload(
         # Bytes of an exhibit above the uploader are lodged as their own exhibit, never
         # deduplicated onto the hidden one.
         reader_ceiling=user_ceiling(conn, user.user_id, case_id=case_id),
+        filename=file.filename,
         **provenance,
     )
     return IngestOut(evidence_id=str(res.evidence_id), sha256=res.sha256_hex,

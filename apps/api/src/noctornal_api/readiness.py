@@ -532,7 +532,7 @@ def _sample_origin_configured(conn: psycopg.Connection) -> Check:
     as "invariant 10 holds". What stays human: that the sample origin is served by a process configured as it,
     and that the two hostnames are a real split and not a CNAME.
     """
-    from noctornal_api.samples import origin_split, sample_origin
+    from noctornal_api.samples import masked_origin, origin_split, sample_origin
 
     split = origin_split()
     action = (
@@ -555,7 +555,7 @@ def _sample_origin_configured(conn: psycopg.Connection) -> Check:
     if split.split_problem is not None:
         return Check(
             "sample_origin_configured", False,
-            f"NOCTORNAL_SAMPLE_ORIGIN={sample_origin()}: {split.split_problem}",
+            f"NOCTORNAL_SAMPLE_ORIGIN={masked_origin(sample_origin())}: {split.split_problem}",
             action)
     if split.serves_here:
         return Check(

@@ -304,4 +304,8 @@ key <= binding.
 **Key lookups (F10c).** A Web Key Directory lookup is off by default,
 asked for by one person, approved and sent by another, through the
 integration route `wkd` only, to a directory an administrator listed on
-it. See docs/16 C14 and L5.
+it. A request is stored at the labels of the contact block and channel
+binding it cites; the approval reads the case and both of those again
+and refuses a lookup whose citation has been raised or given a
+compartment since it was asked, whatever the case says. See docs/16 C14
+and L5, and docs/17 for what the database repeats of that check.

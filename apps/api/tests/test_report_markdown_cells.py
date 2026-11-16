@@ -12,7 +12,13 @@ Pure: builds `Report` objects directly; no database.
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
 
 HOSTILE_LABELS = (
     "x | RED",
@@ -299,3 +305,117 @@ def test_a_withheld_section_counts_in_words_that_agree():
     assert "_3 recorded assumptions withheld with the case header" in document
     assert "_2 competing hypotheses withheld with the case header" in document
     assert "assumption(s)" not in document and "hypothes(is/es)" not in document
+
+
+# --- the saved file is the text the console previews (independent review, CONSOLE-02) ------------------------------------
+
+STATIC = (Path(__file__).resolve().parents[1] / "src" / "noctornal_api" / "http" / "static")
+_WIN_NODE = Path("C:/Program Files/nodejs/node.exe")
+NODE = shutil.which("node") or (str(_WIN_NODE) if _WIN_NODE.exists() else None)
+needs_node = pytest.mark.skipif(not NODE, reason="Node is not installed here")
+
+RLO = chr(0x202E)
+#: A right-to-left override, an isolate, a zero-width space, a mark, a BOM, a NUL, an escape, DEL and a C1
+#: control: each is a different range of what the console replaces.
+DECEPTIVE_LABELS = tuple(f"relay{chr(code)}after" for code in (
+    0x202E, 0x202A, 0x2066, 0x2069, 0x200B, 0x200F, 0x061C, 0xFEFF, 0x0000, 0x001B, 0x007F, 0x009F))
+
+
+def _shown(code: int) -> str:
+    return f"{chr(0x2039)}U+{code:04X}{chr(0x203A)}"
+
+
+def _console_script() -> str:
+    """The console's own `_DECEPTIVE` and `visibleText`, as shipped."""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    start = js.index("const _DECEPTIVE = new RegExp(")
+    pattern = js[start:js.index("]', 'g');", start) + len("]', 'g');")]
+    fn = re.search(r"^function visibleText\(", js, flags=re.M)
+    return pattern + "\n" + js[fn.start():js.index("\n}", fn.start()) + 2] + "\n"
+
+
+def _node(tmp_path, body: str):
+    script = tmp_path / "run.js"
+    script.write_text(_console_script() + body, encoding="utf-8")
+    out = subprocess.run([NODE, str(script)], capture_output=True, text=True, encoding="utf-8",
+                         timeout=60, check=False)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_a_bidi_override_or_a_control_in_a_label_does_not_reach_the_file():
+    """A right-to-left override inside an entity label reorders the rest of that table line in a viewer
+    that applies the bidirectional algorithm, the TLP cell included. Every field that enters the markdown
+    goes through `_line`, so the character is replaced by its code point wherever it is."""
+    from noctornal_api.reports import render_markdown
+    document = render_markdown(_report(DECEPTIVE_LABELS))
+    for label in DECEPTIVE_LABELS:
+        code = ord(label[len("relay")])
+        assert chr(code) not in document, hex(code)
+        assert "relay" + _shown(code) + "after" in document, hex(code)
+    # The row keeps its four cells and its own classification, in the bytes as in any rendering.
+    rows = [line for line in document.split("\n") if line.startswith("| IDENTITY | relay")]
+    assert len(rows) == len(DECEPTIVE_LABELS)
+    for row in rows:
+        assert row.endswith(" | GREEN | NO |") and len(_cells_lookbehind(row)) == 4
+
+
+def test_a_bidi_override_is_replaced_in_a_title_a_statement_and_a_case_field():
+    from noctornal_api.reports import Report, render_markdown
+    hostile = f"mark{RLO}ed"
+    base = _report((hostile,))
+    case = dict(base.case, title=hostile, legal_basis=hostile, code=hostile)
+    document = render_markdown(Report(
+        case=case, redaction=base.redaction, summary=base.summary, actors=base.actors,
+        relationships=base.relationships, evidence=base.evidence, hypotheses=base.hypotheses,
+        assumptions=base.assumptions))
+    assert RLO not in document
+    assert document.count(f"mark{_shown(0x202E)}ed") >= 6
+
+
+def test_what_the_file_keeps_is_what_it_kept_before():
+    """The substitution touches the characters above and nothing else: a tab, an ordinary label, a
+    Cyrillic handle, a right-to-left word, an emoji and a path with backslashes pass through byte for
+    byte."""
+    from noctornal_api.reports import _line
+    cyrillic = "".join(chr(code) for code in (0x434, 0x430, 0x20, 0x442, 0x435, 0x441, 0x442))
+    hebrew = "".join(chr(code) for code in (0x5E9, 0x5DC, 0x5D5, 0x5DD))
+    for text in ("plain label", "tab" + chr(9) + "here", cyrillic, hebrew,
+                 "emoji " + chr(0x1F600), PLAIN_BACKSLASHES):
+        assert _line(text) == text
+    assert _line(None) == "None"
+
+
+@needs_node
+def test_the_python_and_the_console_replace_the_same_characters_the_same_way(tmp_path):
+    """`reports._DECEPTIVE` is written out beside the console's `_DECEPTIVE` and not imported from it, so
+    this is what keeps them one set: every code unit the console would show as `U+XXXX` is replaced
+    here by the same text, and no other is."""
+    from noctornal_api.reports import _DECEPTIVE, _visible
+    console = _node(tmp_path, """
+const out = {};
+for (let i = 0; i < 0x10000; i += 1) {
+  const ch = String.fromCharCode(i);
+  const seen = visibleText(ch);
+  if (seen !== ch) out[i] = seen;
+}
+console.log(JSON.stringify(out));
+""")
+    here = {str(i): _DECEPTIVE.sub(_visible, chr(i)) for i in range(0x10000)
+            if _DECEPTIVE.match(chr(i))}
+    assert here == console
+
+
+@needs_node
+def test_the_saved_report_is_the_text_the_console_previews(tmp_path):
+    """The preview is the document drawn through `visibleText` under "The full text as it would be saved".
+    Saved bytes that the preview would change are bytes the analyst did not see: after the fix there are
+    none, whatever the labels hold."""
+    from noctornal_api.reports import render_markdown
+    document = render_markdown(_report(DECEPTIVE_LABELS + HOSTILE_LABELS))
+    (tmp_path / "doc.json").write_text(json.dumps(document), encoding="utf-8")
+    same = _node(tmp_path, """
+const doc = JSON.parse(require('fs').readFileSync(%s, 'utf8'));
+console.log(JSON.stringify(visibleText(doc) === doc));
+""" % json.dumps(str(tmp_path / "doc.json")))
+    assert same is True

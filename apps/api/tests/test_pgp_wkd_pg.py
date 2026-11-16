@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -24,6 +24,7 @@ from pgp_support import (  # noqa: E402
     SUB_PRIMARY,
     assign,
     auth,
+    block as make_block,
     case,
     fix_bytes,
     session,
@@ -482,3 +483,106 @@ def test_over_http_the_lookup_meter_applies(conn, wkd, client):
                                "reason": REASON}).status_code
              for _ in range(30)]
     assert 429 in codes and set(codes) <= {409, 429}
+
+
+# ---------------------------------------------------------------------------
+# What the lookup cites moves after it was asked (independent review, OUT-01)
+# ---------------------------------------------------------------------------
+
+def _cited(conn, case_id, lead, table):
+    """A GREEN binding or contact block, and the keyword that cites it in a request."""
+    if table == "comms.channel_binding":
+        return tox_binding(conn, case_id, lead, classification="GREEN"), "binding"
+    return UUID(str(make_block(conn, case_id, lead, classification="GREEN")["id"])), "block"
+
+
+def _raise_cited(conn, table, object_id, how):
+    """What a writer with UPDATE on the table (the owner, the worker, the request role) can do to a
+    cited row once the lookup is stored: raise it, or add a compartment. The case row does not move."""
+    if how == "classification":
+        conn.execute(f"UPDATE {table} SET classification = 'AMBER' WHERE id = %s",
+                     (object_id,))
+        return
+    key = f"PGPW-{uuid4().hex[:6].upper()}"
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, 'wkd test')",
+                 (key,))
+    conn.execute(f"UPDATE {table} SET compartments = ARRAY[%s] WHERE id = %s",
+                 (key, object_id))
+
+
+def _sent_rows(conn, lookup_id) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM audit.event WHERE action = 'PGP_KEY_LOOKUP_SENT' "
+        "AND object_id = %s", (lookup_id,)).fetchone()[0]
+
+
+@pytest.mark.parametrize("how", ["classification", "compartment"])
+@pytest.mark.parametrize("table", ["comms.channel_binding", "comms.contact_block"],
+                         ids=["binding", "block"])
+def test_a_cited_object_raised_after_the_request_is_not_sent(conn, wkd, table, how):
+    """The lookup is stored at GREEN, citing a GREEN binding or block; the cited row is then raised, and
+    the case is as it was. The approval re-read only the case, so the local-part hash left for a
+    directory the cited object no longer allows. It is refused before anything is sent, the lookup
+    keeps waiting (it can be declined or lapse), and nothing says it was sent."""
+    from noctornal_api.pgp import PgpConflict
+    lead, reviewer, case_id = _people(conn)
+    cited, keyword = _cited(conn, case_id, lead, table)
+    lookup_id = _request(conn, case_id, lead, **{keyword: cited})["lookup"]["id"]
+    _raise_cited(conn, table, cited, how)
+    with pytest.raises(PgpConflict, match="what the lookup cites changed"):
+        _approve(conn, case_id, lookup_id, reviewer, _never)
+    assert conn.execute("SELECT state FROM comms.pgp_key_lookup WHERE id = %s",
+                        (lookup_id,)).fetchone()[0] == "REQUESTED"
+    assert _sent_rows(conn, lookup_id) == 0
+
+
+def test_a_cited_binding_and_block_that_did_not_move_are_sent(conn, wkd):
+    lead, reviewer, case_id = _people(conn)
+    binding = tox_binding(conn, case_id, lead, classification="GREEN")
+    cited_block = UUID(str(make_block(conn, case_id, lead, classification="GREEN")["id"]))
+    lookup_id = _request(conn, case_id, lead, binding=binding,
+                         block=cited_block)["lookup"]["id"]
+    out = _approve(conn, case_id, lookup_id, reviewer,
+                   lambda url, *, route: _Fetched(404))
+    assert out["state"] == "NOT_FOUND"
+    assert _sent_rows(conn, lookup_id) == 1
+
+
+def test_the_refusal_of_a_raised_citation_says_the_same_whichever_one_moved(conn, wkd):
+    """One sentence for the binding and for the block, so the refusal tells an approver who may not read
+    the raised row nothing about which one moved or to what."""
+    from noctornal_api.pgp import PgpConflict
+    lead, reviewer, case_id = _people(conn)
+    binding = tox_binding(conn, case_id, lead, classification="GREEN")
+    cited_block = UUID(str(make_block(conn, case_id, lead, classification="GREEN")["id"]))
+    lookup_id = _request(conn, case_id, lead, binding=binding,
+                         block=cited_block)["lookup"]["id"]
+    said = []
+    for table, object_id in (("comms.channel_binding", binding),
+                             ("comms.contact_block", cited_block)):
+        _raise_cited(conn, table, object_id, "classification")
+        with pytest.raises(PgpConflict) as refused:
+            _approve(conn, case_id, lookup_id, reviewer, _never)
+        said.append(str(refused.value))
+    assert said[0] == said[1]
+    assert "RED" not in said[0] and "AMBER" not in said[0]
+
+
+def test_the_sending_update_does_not_yet_compare_what_the_lookup_cites(conn, wkd):
+    """The residual docs/17 states, held so a change to it is a decision: the database repeats the
+    case's half of the approval check on the SENDING update and not the cited object's, because that
+    needs a migration. The application check above is the fix, and a writer that skips the service
+    can still commit SENDING for a lookup whose citation has been raised."""
+    lead, reviewer, case_id = _people(conn)
+    binding = tox_binding(conn, case_id, lead, classification="GREEN")
+    lookup_id = _request(conn, case_id, lead, binding=binding)["lookup"]["id"]
+    _raise_cited(conn, "comms.channel_binding", binding, "classification")
+    conn.execute(
+        """UPDATE comms.pgp_key_lookup
+              SET state = 'SENDING', decided_by = %s, decided_at = now(),
+                  sent_at = now(),
+                  planned_urls = ARRAY['https://' || domain
+                    || '/.well-known/openpgpkey/hu/' || wkd_hash]
+            WHERE id = %s""", (reviewer, lookup_id))
+    assert conn.execute("SELECT state FROM comms.pgp_key_lookup WHERE id = %s",
+                        (lookup_id,)).fetchone()[0] == "SENDING"
