@@ -93,12 +93,13 @@ def test_minios_default_inside_a_longer_secret_is_not_its_default():
     assert _refused(env) == []
 
 
-# The identity half of a pair. `_KEY` marks an access key as a credential, but the access key is the
-# account NAME, not the secret: refusing `MINIO_ACCESS_KEY=minioadmin` beside a strong secret would give a
-# false reason and teach somebody to unset NOCTORNAL_ENV.
+# The identity half of a pair (a KEK id, a login user name). An access key
+# is not in this set: it authenticates a write on the pinned MinIO by itself.
 
-_IDENTITIES = ("MINIO_ACCESS_KEY", "SAMPLE_ACCESS_KEY", "PRESERVE_ACCESS_KEY",
-               "NOCTORNAL_TOTP_KEK_ID")
+_IDENTITIES = ("NOCTORNAL_TOTP_KEK_ID", "SMTP_USERNAME")
+
+_ACCESS_KEYS = ("MINIO_ACCESS_KEY", "SAMPLE_ACCESS_KEY", "PRESERVE_ACCESS_KEY",
+                "MINIO_ROOT_USER")
 
 
 @pytest.mark.parametrize("variable", _IDENTITIES)
@@ -113,20 +114,29 @@ def test_a_published_identity_beside_a_strong_secret_starts(variable, value):
     problems = [p for p in _refused(env) if "already holds" in p]
     assert problems == [], problems
     assert variable not in {p.variable for p in config.published_credentials(env)}
-    if variable != "NOCTORNAL_TOTP_KEK_ID":
-        assert _refused(env) == []
 
 
-def test_minios_default_in_both_halves_is_refused_once_on_the_secret():
-    """The deployment MinIO's own warning is about. The secret is what
-    makes it published, so that is the variable the refusal names; the
-    access key beside it adds nothing an operator has to read twice."""
+@pytest.mark.parametrize("variable", _ACCESS_KEYS)
+@pytest.mark.parametrize("value", ["minioadmin", " MinioAdmin ",
+                                   "replace-me-minio-root-user",
+                                   config.DEV_CREDENTIAL])
+def test_a_published_access_key_is_refused(variable, value):
+    env = _production()
+    env[variable] = value
+    problem = _only(_refused(env), variable)
+    assert "already holds" in problem, problem
+
+
+def test_minios_default_in_both_halves_is_refused_on_each():
+    """Both halves are credentials: the secret, and the access key the
+    unsigned-trailer bypass authenticates with on its own."""
     env = _production()
     env["MINIO_ACCESS_KEY"] = "minioadmin"
     env["MINIO_SECRET_KEY"] = "minioadmin"
     problems = _refused(env)
-    assert len(problems) == 1, problems
-    assert problems[0].startswith("MINIO_SECRET_KEY "), problems
+    assert len(problems) == 2, problems
+    names = {p.split()[0] for p in problems}
+    assert names == {"MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"}, problems
 
 
 @pytest.mark.parametrize("variable", ["AWS_SECRET_ACCESS_KEY", "SMTP_PASSWORD_USER",
@@ -141,22 +151,33 @@ def test_a_secret_word_wins_over_an_identity_suffix(variable):
 
 
 @pytest.mark.parametrize("variable, identity", [
-    ("MINIO_ACCESS_KEY", True), ("minio_access_key", True),
-    ("SAMPLE_ACCESS_KEY", True), ("NOCTORNAL_TOTP_KEK_ID", True),
+    ("NOCTORNAL_TOTP_KEK_ID", True),
     ("DB_USER", True), ("SMTP_USERNAME", True), ("APP_DB_ROLE", True),
+    ("MINIO_ACCESS_KEY", False), ("minio_access_key", False),
+    ("SAMPLE_ACCESS_KEY", False), ("MINIO_ROOT_USER", False),
     ("MINIO_SECRET_KEY", False), ("NOCTORNAL_TOTP_KEK", False),
     ("DATABASE_URL", False), ("NOCTORNAL_INGEST_PEPPER", False),
     ("MINIO_ACCESS_KEY_SUFFIXED", False),
+    ("AWS_SECRET_ACCESS_KEY", False),
 ])
 def test_what_counts_as_an_identity(variable, identity):
     assert config._names_identity(variable) is identity
 
 
 def test_the_row_does_not_list_an_identity(clean_environment):
-    clean_environment.setenv("MINIO_ACCESS_KEY", "minioadmin")
+    clean_environment.setenv("SMTP_USERNAME", "minioadmin")
+    clean_environment.setenv("MINIO_ACCESS_KEY", "evidence-writer")
     clean_environment.setenv("MINIO_SECRET_KEY", "Qp7xL2vD9strongsecret")
     check = readiness._credentials_not_published(None)
     assert check.ok is True, check
+
+
+def test_the_row_lists_a_published_access_key(clean_environment):
+    clean_environment.setenv("MINIO_ACCESS_KEY", "minioadmin")
+    clean_environment.setenv("MINIO_SECRET_KEY", "Qp7xL2vD9strongsecret")
+    check = readiness._credentials_not_published(None)
+    assert check.ok is False, check
+    assert "MINIO_ACCESS_KEY" in check.evidence
 
 
 #: CI's KEK (base64 of 32 'A' bytes), conftest's ("A" * 43 + "=", 32 zero
@@ -351,6 +372,13 @@ def _is_credential_literal(name: str, value: str) -> bool:
     # pair is the secret.
     if not config._carries_credential(name) or config._names_identity(name):
         return False
+    # An access key is a credential, but a chosen username that is not a
+    # known published value (the development root user `noctornal`, say)
+    # would start a production API, and refusing the product's name would
+    # be a false stop. Only a value this repository already publishes is
+    # a literal the refusal test has to catch.
+    if config._names_an_access_key(name) and config._published_in(value) is None:
+        return False
     if not value or "$" in value or "%" in value or value.startswith("<"):
         return False
     if name.endswith(("_URL", "_DSN")):
@@ -387,6 +415,9 @@ _MUST_FIND = {
     ("secrets.env.example", "NOCTORNAL_INGEST_PEPPER"),
     ("secrets.env.example", "NOCTORNAL_AUDIT_PEPPER"),
     ("secrets.env.example", "PRESERVE_SECRET_KEY"),
+    ("secrets.env.example", "PRESERVE_ACCESS_KEY"),
+    ("secrets.env.example", "MINIO_ACCESS_KEY"),
+    ("secrets.env.example", "MINIO_ROOT_USER"),
     ("secrets.env.example", "SMTP_PASSWORD"),
     ("install.sh", "REDIS_URL"), ("install.sh", "MINIO_SECRET_KEY"),
     ("install.ps1", "DATABASE_URL"), ("install.ps1", "REDIS_URL"),

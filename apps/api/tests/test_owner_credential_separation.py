@@ -107,11 +107,12 @@ def test_the_owner_variables_are_blanked_where_a_secrets_file_reaches():
     anchor = anchor[:anchor.index("\n\n")]
     assert anchor.splitlines()[1:] == ['  POSTGRES_PASSWORD: ""',
                                        '  NOCTORNAL_MIGRATION_DATABASE_URL: ""']
-    # Ten services merge it. redis, minio and minio-init merge x-no-app-secret instead, which blanks the
-    # owner's DSN with every other application secret, and each blanks the owner's password beside it
-    # (test_third_party_services_hold_no_app_secret.py); the test above holds the outcome on all of them.
+    # Ten services merge it. redis, minio, minio-filter and minio-init merge x-no-app-secret instead,
+    # which blanks the owner's DSN with every other application secret, and each blanks the owner's
+    # password beside it (test_third_party_services_hold_no_app_secret.py); the test above holds the
+    # outcome on all of them.
     assert text.count("<<: *no-owner-credential") == 10
-    assert text.count("<<: *no-app-secret") == 4
+    assert text.count("<<: *no-app-secret") == 5
 
 
 def test_the_templates_put_each_owner_variable_where_it_lives():

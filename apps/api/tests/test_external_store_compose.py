@@ -38,7 +38,7 @@ def _override() -> dict:
 
 def test_the_override_inactivates_minio_and_minio_init():
     services = _override()
-    for name in ("minio", "minio-init"):
+    for name in ("minio", "minio-filter", "minio-init"):
         assert services[name] == {"profiles": ["bundled-store"]}, services[name]
 
 

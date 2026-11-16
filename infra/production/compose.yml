@@ -120,13 +120,13 @@ x-no-owner-credential: &no-owner-credential
   POSTGRES_PASSWORD: ""
   NOCTORNAL_MIGRATION_DATABASE_URL: ""
 
-# The application's secrets, blanked on the four services that run another project's image:
-# postgres, redis, minio and minio-init. None of them reads secrets.env (each reads an env file of
+# The application's secrets, blanked on the five services that run another project's image:
+# postgres, redis, minio, minio-filter and minio-init. None of them reads secrets.env (each reads an env file of
 # its own: postgres-init.env, redis.env, minio.env), and none reads one of these, so a line pasted
 # into its file reaches nothing: their processes start as root and check nothing, and a key they
 # held would be readable to anybody who ran code in one of them (docs/17, 2026-11-15). Each service
 # also blanks the other three's secrets, so it holds its own alone. Merged with `<<:`; a test holds
-# that every secret an env template names is blanked on each of the four but what that one reads.
+# that every secret an env template names is blanked on each of the five but what that one reads.
 x-no-app-secret: &no-app-secret
   NOCTORNAL_MIGRATION_DATABASE_URL: ""
   DATABASE_URL: ""
@@ -571,10 +571,40 @@ services:
           echo '(release/secrets-upgrade/README.md).' >&2
           exit 1
         fi
-        exec minio server /data --console-address ":9001"
+        # Bind loopback only. The compose network reaches the store through
+        # minio-filter, which refuses STREAMING-UNSIGNED-PAYLOAD-TRAILER
+        # (GHSA-hv4r-mvr4-25vw, GHSA-9c4q-hq6p-c237) and terminates TLS
+        # for DNS:minio on 9000 and 9001.
+        exec minio server /data --address 127.0.0.1:19000 --console-address 127.0.0.1:19001
     volumes:
       - prod-miniodata:/data
       - ./tls/minio:/root/.minio/certs:ro
+
+
+  # Sits in MinIO's network namespace and is the only listener on 9000 and 9001
+  # of the compose network. Clients keep MINIO_ENDPOINT=minio:9000 and the
+  # certificate's DNS:minio name. The filter process is root because it must
+  # read the existing 0600 key at tls/minio/private.key; MinIO itself already
+  # runs as root for the same reason. Capabilities are dropped and the
+  # filesystem is read-only.
+  minio-filter:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    network_mode: service:minio
+    depends_on: [minio]
+    restart: unless-stopped
+    logging: *logging
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/data", "/config", "/tmp"]
+    environment:
+      <<: *no-app-secret
+      POSTGRES_PASSWORD: ""
+      XDG_DATA_HOME: /data
+      XDG_CONFIG_HOME: /config
+    volumes:
+      - ./minio-filter.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls/minio:/certs:ro
 
   # ------------------------------------------------------------------------
   # Creates the buckets, once; every process that touches storage waits for it to succeed.
@@ -630,7 +660,7 @@ services:
   # stdout goes to /dev/null and stderr stays.
   minio-init:
     image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780
-    depends_on: [minio]
+    depends_on: [minio, minio-filter]
     networks: [noctornal]
     env_file:
       - path: minio.env

@@ -319,7 +319,7 @@ def test_only_the_proxy_joins_exits_and_models_and_only_it_and_caddy_join_edge(d
     assert members["edge"] == {"egress-proxy"}
     # The analysis worker joins no network at all: test_analysis_worker_compose.py holds it there.
     assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "caddy-init", "egress-proxy",
-                                                    "analysis-worker"}
+                                                    "analysis-worker", "minio-filter"}
     assert not _nets(doc["services"]["analysis-worker"])
     # caddy-init only gives Caddy's volumes away (test_tls_hops_compose.py) and needs no network.
     assert not _nets(doc["services"]["caddy-init"])

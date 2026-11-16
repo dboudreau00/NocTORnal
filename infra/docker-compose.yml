@@ -74,12 +74,32 @@ services:
     # anonymous pullers, so this is the same build mirrored byte for byte to this project's GHCR
     # namespace (NOTICE.md names the upstream source).
     image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb
-    command: server /data --console-address ":9001"
+    command: server /data --address 127.0.0.1:19000 --console-address 127.0.0.1:19001
     environment:
       MINIO_ROOT_USER: noctornal
       MINIO_ROOT_PASSWORD: dev_only_change_me
     ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes: [miniodata:/data]
+
+
+  # Shares MinIO's network namespace so the published 127.0.0.1:9000/9001
+  # ports, and minio-init's http://minio:9000 probes, reach this filter
+  # rather than the server. Same unsigned-trailer refusal as production,
+  # without TLS: the development MinIO speaks HTTP.
+  minio-filter:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    network_mode: service:minio
+    depends_on: [minio]
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/data", "/config", "/tmp"]
+    environment:
+      XDG_DATA_HOME: /data
+      XDG_CONFIG_HOME: /config
+    volumes:
+      - ./minio-filter-dev.Caddyfile:/etc/caddy/Caddyfile:ro
 
   # Creates the buckets. Object lock cannot be enabled after creation, so the locked buckets are
   # made here on first run, and `set -e` with `--ignore-existing` (not `|| true`) makes a failed
@@ -96,7 +116,7 @@ services:
   # compose's escape for a literal `$`. test_compose_exposure.py runs this script with a stub `mc`.
   minio-init:
     image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780
-    depends_on: [minio]
+    depends_on: [minio, minio-filter]
     entrypoint: >
       /bin/sh -c "
       set -e;
