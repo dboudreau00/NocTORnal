@@ -343,3 +343,38 @@ def test_the_same_idempotency_key_after_24_hours_is_still_a_duplicate(
     again = svc.accept(key, raw, idempotency_key=analysis)
     assert again.duplicate is True
     assert again.batch_id == first.batch_id
+
+
+def test_replaying_a_spectrum_that_is_still_invalid_is_a_repair_error_and_a_good_repair_replays(
+        conn, svc, switch_on):
+    from noctornal_api.ingest import RepairInvalid
+    key = _key(conn, svc)
+    bad = copy.deepcopy(SPECTRUM)
+    bad["unexpected"] = SENTINEL
+    batch, _ = _ingest(svc, key, compact(bad))
+    dead = conn.execute("SELECT id FROM ingest.dead_letter WHERE batch_id = %s",
+                        (batch.batch_id,)).fetchone()[0]
+    actor = conn.execute("SELECT owner_user_id FROM ingest.api_key WHERE id = %s",
+                         (key["id"],)).fetchone()[0]
+    with pytest.raises(RepairInvalid) as raised:
+        svc.replay(dead, actor_id=actor, repaired=compact(bad).decode("utf-8"))
+    assert str(raised.value).startswith("maasspec: ") and SENTINEL not in str(raised.value)
+    record = svc.replay(dead, actor_id=actor, repaired=compact(SPECTRUM).decode("utf-8"))
+    assert record is not None
+
+
+def test_two_requests_with_one_key_at_the_same_moment_are_one_batch(conn, svc, switch_on, monkeypatch):
+    key = _key(conn, svc)
+    raw = compact(SPECTRUM)
+    first = svc.accept(key, raw, idempotency_key="race-key-1")
+    real = svc._existing_batch
+    calls = {"n": 0}
+
+    def lookup_missed_once(api_key_id, idempotency_key):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real(api_key_id, idempotency_key)
+
+    monkeypatch.setattr(svc, "_existing_batch", lookup_missed_once)
+    second = svc.accept(key, raw, idempotency_key="race-key-1")
+    assert second.duplicate is True and second.batch_id == first.batch_id
+    assert calls["n"] == 2

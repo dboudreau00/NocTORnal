@@ -13,7 +13,8 @@ Switch: NOCTORNAL_MAASSPEC=on (case-insensitive, read at call time). Any other v
 parser exactly as it is without this module.
 
 Bounds, all refused with a message naming a path and never a value:
-  MAX_SPECTRUM_BYTES   compact size of the document, MaaSSpec's own client cap
+  MAX_SPECTRUM_BYTES   compact size of the document (16 MiB; MaaSSpec's largest spectra, from a CAPE
+                       report, run to a few MiB)
   MAX_NODES            JSON values visited in the whole document
   MAX_FREE_DEPTH       nesting depth inside a free-form field (value, normalized, context, family_data,
                        metadata); the typed parts of the contract are shallower than this by construction
@@ -25,6 +26,7 @@ because the store cannot hold it.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -35,7 +37,7 @@ SWITCH_ENV = "NOCTORNAL_MAASSPEC"
 
 CONTRACT_VERSIONS: tuple[str, ...] = ("0.1.0",)
 
-MAX_SPECTRUM_BYTES = 1_048_576
+MAX_SPECTRUM_BYTES = 16 * 1024 * 1024
 MAX_NODES = 250_000
 MAX_FREE_DEPTH = 24
 MAX_FINDINGS = 10_000
@@ -174,7 +176,15 @@ def _boolean(value, path: str, st: _State) -> None:
 
 def _unit_number(value, path: str, st: _State) -> None:
     st.visit(path)
-    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+    kind = type(value)
+    # An int is compared as an int: math.isfinite converts to float and raises OverflowError past 1e308.
+    if kind is int:
+        ok = 0 <= value <= 1
+    elif kind is float:
+        ok = math.isfinite(value) and 0 <= value <= 1
+    else:
+        ok = False
+    if not ok:
         _refuse(path, "must be a number from 0 to 1")
 
 
@@ -368,7 +378,22 @@ def validate(payload: dict, *, raw_size: int | None = None) -> None:
     if raw_size is not None and (type(raw_size) is not int or raw_size > MAX_SPECTRUM_BYTES):
         raise SpectrumRefused(
             f"maasspec: the document is larger than the {MAX_SPECTRUM_BYTES} byte cap")
-    _SPECTRUM(payload, "$", _State())
+    try:
+        _SPECTRUM(payload, "$", _State())
+    except SpectrumRefused:
+        raise
+    except Exception:  # noqa: BLE001 - a hostile document must never choose an error text or escape as another type
+        raise SpectrumRefused("maasspec: the document could not be checked") from None
+
+
+def compact_size(payload: dict) -> int:
+    """The size in bytes of the compact JSON of `payload`, for `validate(raw_size=...)`. A document that cannot
+    be measured (nesting past the interpreter's limit, say) is refused like any other."""
+    try:
+        return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                   .encode("utf-8", "surrogatepass"))
+    except Exception:  # noqa: BLE001
+        raise SpectrumRefused("maasspec: the document could not be measured") from None
 
 
 def summary(payload: dict) -> dict:

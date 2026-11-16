@@ -474,5 +474,33 @@ def test_an_artifact_type_outside_the_known_list_is_still_valid():
 def test_the_module_is_stdlib_only():
     source = (Path(maasspec.__file__)).read_text(encoding="utf-8")
     imports = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
-    allowed = {"__future__", "math", "os", "re", "collections", "datetime"}
+    allowed = {"__future__", "json", "math", "os", "re", "collections", "datetime"}
     assert {line.split()[1] for line in imports} <= allowed
+
+
+# --- only SpectrumRefused escapes ---------------------------------------------------------------------------
+
+def test_an_integer_too_large_for_a_float_is_a_refusal_not_an_overflow():
+    document = rich()
+    document["findings"][0]["confidence"] = 10 ** 400
+    text = refused(document)
+    assert text.startswith("maasspec: ") and "confidence" in text
+
+
+def test_a_document_that_cannot_be_checked_is_a_refusal_and_never_another_exception():
+    nested = current = {}
+    for _ in range(5000):
+        current["a"] = {}
+        current = current["a"]
+    document = rich()
+    document["metadata"] = nested
+    refused(document)
+    with pytest.raises(maasspec.SpectrumRefused):
+        maasspec.compact_size(document)
+
+
+def test_a_lone_surrogate_is_measured_and_checked_without_an_encoding_error():
+    document = rich()
+    document["metadata"] = {"note": chr(0xD800)}
+    assert maasspec.compact_size(document) > 0
+    maasspec.validate(document, raw_size=maasspec.compact_size(document))
