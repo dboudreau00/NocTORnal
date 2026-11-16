@@ -35,7 +35,7 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.element_gate import ElementFacts, phantom
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.body_ceiling import own_body_cap
-from noctornal_api.http.limits import rate_limit, read_body_capped
+from noctornal_api.http.limits import authorised_client_ip, rate_limit, read_body_capped
 from noctornal_api.ingest import (
     CATEGORIES,
     HIGH_RISK_CATEGORIES,
@@ -287,10 +287,11 @@ async def submit(
     that crosses it, with a 413 naming the cap.
     """
     svc = _with_raw(conn)
-    # From the server's own view of the connection, never from a header:
-    # an allowlist is only a control if the caller cannot choose the
-    # address it is compared against.
-    peer = request.client.host if request.client else None
+    # The address the allowlist is compared against comes from `limits.authorised_client_ip`: the
+    # socket peer uvicorn resolved, and the right-counted X-Forwarded-For entry only with two or
+    # more declared proxies and a chain that ends at the peer. An allowlist is only a control if
+    # the caller cannot choose the address it is compared against. None (no address) is refused.
+    peer = authorised_client_ip(request)
     token = _key_from_header(authorization)
     key = svc.authenticate(token, peer_ip=peer)
     if key is not None and key.get("ip_allowlist") and not peer:

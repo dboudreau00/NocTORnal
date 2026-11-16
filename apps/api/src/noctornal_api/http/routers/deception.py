@@ -201,6 +201,36 @@ class CaptureIn(BaseModel):
     compartments: list[str] = []
 
 
+def _gate_exhibits(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                   body: BaseModel, fields: tuple[str, ...]) -> dict[str, UUID | None]:
+    """Every exhibit the body names must be in this case and readable by this caller, checked
+    before anything is written: the evidence columns are only FK-constrained, and the constraint
+    runs as the table owner, so any id in `core.evidence` would otherwise do, including one the
+    screenshot route would then render, and an id that names nothing would be a 500.
+
+    One answer for an exhibit that does not exist, belongs to a case the caller cannot see, or is
+    above their labels, so the status is no existence oracle; the refusal still writes its
+    AUTHZ_DENIED row (`gate_element`, decision 230). `evidence.read`, which the route's gate did
+    not ask, is asked first whether or not the exhibit exists. Content is read only after the gate.
+    Returns each field's id as a UUID, None where the body left it out."""
+    parsed: dict[str, UUID | None] = {}
+    for field in fields:
+        raw = getattr(body, field)
+        if not raw:
+            parsed[field] = None
+            continue
+        try:
+            exhibit_id = UUID(raw)
+        except ValueError as exc:
+            raise Problem(422, "Invalid field", f"{field} is not a UUID") from exc
+        gate_element(conn, user, case_id=case_id, kind="evidence",
+                     element_id=exhibit_id, permission_key="evidence.read",
+                     missing_detail=f"no such exhibit for {field}",
+                     case_gated=False)
+        parsed[field] = exhibit_id
+    return parsed
+
+
 @router.post("/captures", status_code=201,
              dependencies=[Depends(rate_limit("capture"))])
 def create_capture(
@@ -211,26 +241,9 @@ def create_capture(
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.upload")
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=frozenset(body.compartments))
-    # Every referenced exhibit must be in this case and readable by this caller, checked before
-    # the row is written: the three evidence columns are only FK-constrained, so any id in
-    # `core.evidence` would otherwise do, including one the screenshot route would then render.
-    for field in ("screenshot_evidence_id", "dom_evidence_id",
-                  "har_evidence_id"):
-        raw = getattr(body, field)
-        if not raw:
-            continue
-        try:
-            exhibit_id = UUID(raw)
-        except ValueError as exc:
-            raise Problem(422, "Invalid field", f"{field} is not a UUID") from exc
-        # One answer for an exhibit that does not exist, belongs to a case the caller cannot see,
-        # or is above their labels, so the status is no existence oracle; the refusal still writes
-        # its AUTHZ_DENIED row. `evidence.read`, which the route's gate did not ask, is asked first
-        # whether or not the exhibit exists. Content is read only after the gate.
-        gate_element(conn, user, case_id=case_id, kind="evidence",
-                     element_id=exhibit_id, permission_key="evidence.read",
-                     missing_detail=f"no such exhibit for {field}",
-                     case_gated=False)
+    exhibits = _gate_exhibits(
+        conn, user, case_id, body,
+        ("screenshot_evidence_id", "dom_evidence_id", "har_evidence_id"))
     _one_of(body.capture_method, _CAPTURE_METHODS, "capture_method")
     # The table refuses an active capture with no egress profile; said here as a sentence, as the
     # console's form posts to this route and a CHECK violation is a 500.
@@ -255,12 +268,9 @@ def create_capture(
             hops=hops,
             egress_profile_id=(UUID(body.egress_profile_id)
                                if body.egress_profile_id else None),
-            screenshot_evidence_id=(UUID(body.screenshot_evidence_id)
-                                    if body.screenshot_evidence_id else None),
-            dom_evidence_id=(UUID(body.dom_evidence_id)
-                             if body.dom_evidence_id else None),
-            har_evidence_id=(UUID(body.har_evidence_id)
-                             if body.har_evidence_id else None),
+            screenshot_evidence_id=exhibits["screenshot_evidence_id"],
+            dom_evidence_id=exhibits["dom_evidence_id"],
+            har_evidence_id=exhibits["har_evidence_id"],
             tls={"subject": body.tls_subject, "issuer": body.tls_issuer,
                  "not_before": body.tls_not_before,
                  "not_after": body.tls_not_after,
@@ -277,6 +287,13 @@ def create_capture(
         )
     except DeceptionError as exc:
         raise Problem(422, "Capture refused", safe_detail(exc)) from exc
+    except psycopg.errors.ForeignKeyViolation as exc:
+        # A well-formed profile id that names no row is the one foreign key the body can still
+        # break (the exhibits were gated above): a sentence, with no id echoed, and no row stored.
+        if exc.diag.constraint_name != "capture_egress_profile_id_fkey":
+            raise
+        raise Problem(422, "Invalid field",
+                      "egress_profile_id names no egress profile") from None
     except ValueError as exc:
         raise Problem(422, "Invalid field", safe_detail(exc)) from exc
     return {"id": str(capture_id)}
@@ -554,14 +571,14 @@ def create_call(
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.upload")
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=frozenset(body.compartments))
+    exhibits = _gate_exhibits(conn, user, case_id, body,
+                              ("evidence_id", "recording_evidence_id"))
     payload = body.model_dump()
     for key in ("started_at", "direction", "record_source", "classification",
                 "compartments", "recording_evidence_id",
                 "recording_lawful_basis"):
         payload.pop(key, None)
-    for key in ("evidence_id",):
-        if payload.get(key):
-            payload[key] = UUID(payload[key])
+    payload["evidence_id"] = exhibits["evidence_id"]
     _one_of(body.direction, _CALL_DIRECTIONS, "direction")
     _one_of(body.record_source, _RECORD_SOURCES, "record_source")
     _one_of(body.disposition, _DISPOSITIONS, "disposition")
@@ -588,8 +605,7 @@ def create_call(
             case_id=case_id, started_at=body.started_at,
             direction=body.direction, record_source=body.record_source,
             recorded_by=user.user_id,
-            recording_evidence_id=(UUID(body.recording_evidence_id)
-                                   if body.recording_evidence_id else None),
+            recording_evidence_id=exhibits["recording_evidence_id"],
             recording_lawful_basis=body.recording_lawful_basis,
             classification=body.classification,
             compartments=frozenset(body.compartments), **payload)
@@ -663,9 +679,7 @@ def propose_from_record(
     elif channel == "email":
         record = svc.email(record_id, clearance=clearance, compartments=comps)
     else:
-        record = next((c for c in svc.calls(case_id, clearance=clearance,
-                                            compartments=comps, limit=500)
-                       if c["id"] == str(record_id)), None)
+        record = svc.call(record_id, clearance=clearance, compartments=comps)
     if record is None or record["case_id"] != str(case_id):
         raise Problem(404, "Not found", f"no such {channel}")
     check_writable_labels(

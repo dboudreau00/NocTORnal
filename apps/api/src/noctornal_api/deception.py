@@ -1777,6 +1777,22 @@ class DeceptionService:
             (case_id, clearance, list(compartments), limit)).fetchall()
         return [_call_row(r) for r in rows]
 
+    def call(self, call_id: UUID, *, clearance: str,
+             compartments: frozenset[str] = frozenset()) -> dict | None:
+        """One call, or None if the caller may not know it exists.
+
+        Shaped like `capture()` and `email()`: the same label predicate as `calls()`, no case
+        filter (the caller compares `case_id`), and None for an id that names nothing and one above
+        the caller's labels alike, so the answer is no oracle for either.
+        """
+        row = self._c.execute(
+            f"""SELECT {_CALL_Q}, u.display_name FROM deception.call_record x
+                  LEFT JOIN core."case" c ON c.id = x.case_id
+                  LEFT JOIN iam.app_user u ON u.id = x.recorded_by
+                 WHERE x.id = %s AND {_labels_clause()}""",
+            (call_id, clearance, list(compartments))).fetchone()
+        return _call_row(row) if row is not None else None
+
     # -- across the channels ---------------------------------------------
     def _observables(self, case_id: UUID, clearance: str,
                      compartments: frozenset[str], *,

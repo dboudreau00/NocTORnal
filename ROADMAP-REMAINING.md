@@ -1,12 +1,12 @@
 # What is left
 
 **State (2026-10-29):** branch `main`, Alembic head `0197`,
-8902 tests counted as `def test_` functions across the two pytest roots,
+8922 tests counted as `def test_` functions across the two pytest roots,
 version 0.9.5 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Beta 1.5 (2026-10-29) is released. **Every roadmap item is built.** The
+Beta 1.5c (2026-11-13) is the latest release. **Every roadmap item is built.** The
 end-to-end check of the Telegram adapter is `scripts/telegram_live_check.py`,
 which an operator runs with the deployment's own Telegram account (docs/17
 F31). What stands between the product and a deployment is not software: it is
@@ -116,6 +116,53 @@ section, and there was no Alpha 8 release.
   stated for the rest, and four stated and not fixed. docs/17, "The
   2026-10-03 review at Beta 1.1", lists each by area with its status.
 
+**Beta 1.5c (2026-11-13).**
+
+- **A console release**, with no migration and no setting: the sociogram has a
+  stage (a lit ground, halos, lit bodies, labels on plates; a view of up to 1,200
+  entities gets all of it and a larger one is drawn flat); the rows under the
+  canvas are one row with a **Key** and a **Shortcuts** button; and about
+  sixty-five help lines sit behind an **i** on the heading they explain. A warning,
+  a refusal or a consequence is never folded. The README screenshots and the
+  manual's figures were re-shot.
+
+**Beta 1.5b (2026-10-30).**
+
+- **The findings Beta 1.5 listed as known and not fixed** (Alembic 0184): the
+  request role can no longer strip a compartment list or lower the label of a
+  document, a selector, a sample, a message, a conversation, a contact block, a
+  channel binding, a key acquisition, a capture, an e-mail, a call record or a
+  dead letter. An out-of-schedule purge names only exhibits the caller may read,
+  the notice of a reversed merge counts only the ties its owner may read, a third
+  party's identifier is not taken for the publisher's however its label is
+  spelled, the extension blocks of a GNU sparse header count against the
+  archive's caps, and the egress preview shows a bidirectional override as an
+  escape.
+
+**Beta 1.5 (2026-10-29).**
+
+- **An 18-finding code review of the whole tree** (Alembic 0183): a TOTP secret the
+  key ring cannot open is a failed sign-in; the request role cannot lower the
+  label of an entity or a tie; the Received chain records the peer that connected
+  and not the address a sender claimed in HELO; a merge notice counts only the
+  ties its owner may read; the bearer token is dropped from the console once the
+  session cookie pair has landed; and `scripts/runtime_roles.py ensure` keeps the
+  vocabulary read-only.
+- **A cleaned codebase**: dated markers and session narration are gone from the
+  source, the console and the tests, the test files are named for what they prove,
+  and seven functions nothing called are removed.
+
+**Beta 1.4 (2026-10-21).**
+
+- **A quiet console and a manual that is a book**, with no migration. A pane opens
+  on its work and not on a paragraph about itself; about 60 percent of the prose
+  a person read in the panes is off the screen, text a service wrote is cut to its
+  first sentence where it is shown, and what is needed once opens under **More**.
+  What protects somebody (the legal notice, the destruction and legal-hold
+  warnings, the break-glass consequence line) stays on screen.
+  `release/MANUAL.md` is Parts I to V with thirteen appendices, and
+  `release/NocTORnal-Manual.pdf` is the same book.
+
 **Beta 1.3 (2026-10-12).**
 
 - **What installing the production stack on a clean machine found**, with no
@@ -196,7 +243,7 @@ server may receive case text (D12).
 | WebAuthn | A deliberate absence: password and TOTP today. SECURITY.md says reporting it is not a finding. |
 
 What the request role can still reach, and the other gaps the fixes and the
-release reviews found and left, are in docs/17, "Known residuals at Beta 1.1".
+release reviews found and left, are in docs/17, "Known residuals".
 
 ---
 

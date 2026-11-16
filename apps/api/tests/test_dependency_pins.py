@@ -653,7 +653,7 @@ def test_the_image_takes_extras_only_by_name():
     assert "*) echo" in run and "exit 1" in run
     assert run.index("esac") < run.index("pip install")
     assert '-e "apps/api${NOCTORNAL_EXTRAS:+[$NOCTORNAL_EXTRAS]}"' in run
-    assert "ONE image, five commands" in text and "egress_proxy" in text
+    assert "ONE image, ten services" in text and "egress_proxy" in text
     sh = shutil.which("sh")
     if sh is None:
         return  # the static reading above holds the guard where no sh runs it

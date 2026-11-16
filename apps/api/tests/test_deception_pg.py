@@ -346,6 +346,28 @@ def test_an_unreadable_capture_returns_none_not_a_raise(conn):
     assert _svc(conn).capture(uuid4(), clearance="RED") is None
 
 
+def test_one_call_reads_as_its_listed_row_and_an_unreadable_one_is_none(conn):
+    """`call()` is the single-row read `capture()` and `email()` already have: the row `calls()`
+    lists, under the same labels, and None for an id above the caller and an id that names nothing
+    alike."""
+    owner = _user(conn, compartments=("OPX",))
+    case_id = _case(conn, owner, classification="GREEN", compartments=("OPX",))
+    call_id = _svc(conn).record_call(
+        case_id=case_id, started_at=NOW, direction="INBOUND_TO_VICTIM",
+        record_source="CARRIER_CDR", recorded_by=owner,
+        classification="RED", note="Caller asked for a gift card.")
+    [listed] = _svc(conn).calls(
+        case_id, clearance="RED", compartments=frozenset({"OPX"}))
+    one = _svc(conn).call(
+        call_id, clearance="RED", compartments=frozenset({"OPX"}))
+    assert one == listed
+    assert one["recorded_by_name"] == "Dcp"
+    assert _svc(conn).call(call_id, clearance="RED") is None
+    assert _svc(conn).call(call_id, clearance="AMBER",
+                           compartments=frozenset({"OPX"})) is None
+    assert _svc(conn).call(uuid4(), clearance="RED") is None
+
+
 # --- invariant 10: hostile markup ----------------------------------------
 
 def test_an_eml_is_marked_hostile_at_ingest_without_being_asked(conn):

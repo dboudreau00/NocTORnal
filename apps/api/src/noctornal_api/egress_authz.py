@@ -176,13 +176,6 @@ def _in_networks(policy: RoutePolicy, literal) -> bool:
                for rule in policy.rules)
 
 
-def _compartments_column(conn) -> bool:
-    return conn.execute(
-        """SELECT EXISTS (SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'collect' AND table_name = 'source'
-              AND column_name = 'compartments')""").fetchone()[0]
-
-
 # ---------------------------------------------------------------------------
 # The decision
 # ---------------------------------------------------------------------------
@@ -580,9 +573,9 @@ def _stop(conn, claim, decision, profile, literal) -> None:
 
 
 def _source_compartmented(conn, source_id: UUID | None) -> bool:
-    """Whether the source carries compartments, once collect.source has the
-    column (no migration adds it yet)."""
-    if source_id is None or not _compartments_column(conn):
+    """Whether the source carries compartments (collect.source.compartments,
+    Alembic 0163)."""
+    if source_id is None:
         return False
     row = conn.execute(
         "SELECT cardinality(coalesce(compartments, '{}')) > 0 FROM collect.source WHERE id = %s",

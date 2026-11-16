@@ -19,7 +19,7 @@ For the legal dependencies see
 about engineering judgement and does not repeat docs/16.
 
 The order is: the data already recorded that should not be trusted; what is
-open; the known residuals at Beta 1.1, by area; the decisions the owner took;
+open; the known residuals, by area; the decisions the owner took;
 and an index of what is closed, ids included, so that a citation of a closed
 id still resolves.
 
@@ -43,7 +43,7 @@ is the section to act on first.**
 | **Records written under older rules** | Triage claims accepted before Alpha 6 with no `observed_at`; ATTRIBUTE claims readable below the material they came from, or attached across cases; captured documents cited by cases that share no compartment, which migration 0071 could not label | Each was written under a rule that was later tightened, and nothing can recompute what was never recorded: an observation date, or the lock every citing case's readers hold. They are counted by the readiness rows `triage_claims_dated`, `triage_claims_within_labels` and `captured_documents_compartmented` | `python scripts/legacy_records.py` lists them per case. An analyst decides each: raise an entity, retract a claim, or file the capture again under the right case. An analyst gives a claim its date by superseding it (the inspector's Date this claim); nothing writes a date onto a recorded claim (docs/00 decision 170) |
 | **Contact blocks parsed under cb-1 with a gpg-spaced PGP line** (F37) | `comms.contact_block` where `parser_version = 'cb-1'` and an entry has `selector_type = 'PGP_FPR'` with a 20-character `durable_value` | The parser cut the value at the first run of two spaces, so a fingerprint copied from gpg kept 20 of 40 hex characters; a CLAIMED proposal may carry the truncated value, the line cannot confirm a key, and the block is not paired with the same text parsed later | Nothing re-reads a stored block: parse the text again in a case of its own and reject the old proposal. Do not edit the rows |
 | **Telegram ids recorded from a bare positive number** before 2026-09-11 | `core.selector` and `comms.channel_binding`, `TELEGRAM_ID` | A bare positive id was assumed to be a user (`u:`), so an MTProto channel observed as a bare number shares a row with a same-numbered user. The normaliser refuses a bare positive now, but nothing can recompute a type that was never observed. | `scripts/telegram_bare_ids.py` lists them per case. Confirm each against its source and re-record typed (`c:<id>`) where a channel is wearing a user's row. |
-| **Credentials that stayed after 0137** | `core.assertion.rationale` where an accepted proposal copied its context; `collect.document` text; `core.selector` e-mail rows read out of the userinfo of a link that is not http or https; URL rows of the `url:login:password` layout written before that shape was refused | 0137 scrubbed URL selectors, entity labels, proposals, extraction rows and a correction's `prior_value`, and does not touch a claim's recorded rationale (invariant 5), the captured text or the audit detail | The queries under Known residuals at Beta 1.1 list them. Removing one is an owner decision |
+| **Credentials that stayed after 0137** | `core.assertion.rationale` where an accepted proposal copied its context; `collect.document` text; `core.selector` e-mail rows read out of the userinfo of a link that is not http or https; URL rows of the `url:login:password` layout written before that shape was refused | 0137 scrubbed URL selectors, entity labels, proposals, extraction rows and a correction's `prior_value`, and does not touch a claim's recorded rationale (invariant 5), the captured text or the audit detail | The queries under Known residuals list them. Removing one is an owner decision |
 | **Forks in the audit and custody chains from before 0149** | The audit and custody rows at or below the boundary 0149 recorded | Alpha 7a's concurrent writers forked both chains. Verification reports them as legacy and they do not break `intact`; a fork above the boundary is a break | Nothing: they are history, and the log is append-only |
 | **Refusals recorded with outcome SUCCESS** before Beta 1.1 | `audit.event` rows whose action is AUTHZ_DENIED, AUTH_SESSION_REJECTED, RLS_BINDING_FAILED, SESSION_BINDING_REFUSED or CASE_SHARE_REFUSED, the sign-in router's cookie, recovery-code and password-change refusals, the PII reveal and search refusals, and the AUTHZ_DENIED and AUTH_FAILED rows of the egress and Telegram persona scripts | A refusal was stored with outcome SUCCESS, so a filter on outcome missed it. Since Beta 1.1 each is stored with outcome DENIED, and the log is append-only, so the earlier rows keep SUCCESS | Find refusals by action and not by outcome for anything recorded before the upgrade. Do not edit the rows: the ledger refuses it |
 | **SPF, DKIM and DMARC verdicts on uploaded mail** recorded before 0197 | `deception.email_message` where `auth_basis IS NULL` and any of `spf_result`, `dkim_result`, `dmarc_result` is set | The verdict was believed on where its header sat in the message, which a sender can arrange (http_ui-007), so a recorded `dkim=pass` and its `dkim_domain` may be the sender's. The console marks each "recorded before the mail stamp" | Read each as the sender's claim. A DOMAIN selector proposed from one is checked against the exhibit before it is relied on. Do not edit the rows |
@@ -62,7 +62,7 @@ would be.
 Decisions the owner took below), and F3 is an accepted cost: it was never a
 defect, because the register already refuses on it.
 
-Every entry under **Known residuals at Beta 1.1** is CHANGE LIKELY unless it says
+Every entry under **Known residuals** is CHANGE LIKELY unless it says
 it is an accepted cost or a judgement to confirm. Read that section before
 reporting a weakness: a residual named there is known.
 
@@ -442,11 +442,11 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 | WebAuthn | TOTP only. A deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding |
 
 Row-level security stands on 83 tables and defers none (F51). What the request
-role can still reach outside it is under Known residuals at Beta 1.1.
+role can still reach outside it is under Known residuals.
 
 ---
 
-## Known residuals at Beta 1.1
+## Known residuals
 
 The gaps that remain, by area. Each entry says what is true, what it costs and
 what would close it. An entry marked "decision" records a call the owner may
@@ -940,7 +940,7 @@ what Beta 1.1 closed, in the order of the areas under Known residuals.
 | **F20** | The ACH matrix ranked an untested hypothesis top, and the warning that would have caught it could not fire | 2026-07-26 |
 | **Approvals UI** | Phase 6 dual control had no analyst surface, so Merge was unreachable from a browser whenever it was on | 2026-08-10, Triage, Dual control |
 | **Key ring** | A mismatched `NOCTORNAL_TOTP_KEK` made login answer 500, and the readiness check could not see it, because it verified the key decoded and not that it decrypted anything | 2026-09-11: `key_id` selects the key, the register opens stored secrets and counts, and a secret the ring cannot open is a failed sign-in (audit reason `totp_secret_unopenable`, the lockout counts it, 401 at login and 403 at a password change) |
-| **The 2026-10-03 review** | 82 findings, 16 high, 25 medium and 41 low | 2026-10-07: 77 fixed, one fixed for credentials and stated for the rest (rls-6), four stated and not fixed. 2026-10-08: 78 fixed, rls-6 fixed apart from case membership, three stated and not fixed. Each finding's status is below, and what the fixes left is in Known residuals at Beta 1.1 |
+| **The 2026-10-03 review** | 82 findings, 16 high, 25 medium and 41 low | 2026-10-07: 77 fixed, one fixed for credentials and stated for the rest (rls-6), four stated and not fixed. 2026-10-08: 78 fixed, rls-6 fixed apart from case membership, three stated and not fixed. Each finding's status is below, and what the fixes left is in Known residuals |
 | **the application image and the proxy hops** | Caddy ran as uid 0 with a route out and a bridge shared with the database, Redis and MinIO; the hops to Postgres and Redis were plain text; `./tls`, with MinIO's `private.key`, was mounted into every application container | 2026-11-15: a CA of the deployment's own (`scripts/internal_tls.py`, name-constrained to `minio`, `postgres` and `redis`) signs one certificate per server, each key is mounted into its own server alone and the clients mount `tls/public`, which holds no key (`test_internal_tls_script.py`, `test_tls_hops_compose.py`); Postgres serves TLS 1.3 behind a `hostssl`-only hba file, Redis TLS 1.3 with no plain port, and production refuses a DSN without `sslmode=verify-full` or a `REDIS_URL` that does not check the server (`test_database_and_redis_transport_refusals.py`, `test_redis_limiter_acl.py`, `test_production_secrets_script.py`); Caddy runs as uid 10002 on `frontend` and `ingress` with no route out, ACME being `compose.acme.yml` (`test_tls_hops_compose.py`, `test_egress_topology.py`); the readiness row `internal_hops_encrypted` reads the live hops (`test_readiness_internal_hops.py`); decision 236. What it leaves is under Deployment, installers and backups |
 
 ### The 2026-10-03 review: its 82 findings at Beta 1.1

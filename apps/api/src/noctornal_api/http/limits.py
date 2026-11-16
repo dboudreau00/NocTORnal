@@ -99,6 +99,30 @@ def client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def authorised_client_ip(request: Request) -> str | None:
+    """`client_ip`, for a check that grants access (the ingest key allowlist).
+
+    A rate limit can tolerate a caller choosing its own address; an allowlist cannot. With one
+    declared proxy uvicorn has already put the client's address in `request.client` when the
+    connection came from the trusted proxy, so that is returned as it stands and the header is
+    never read: a caller that reaches the API directly writes the header but not the socket peer.
+    With two or more, uvicorn leaves the outer proxy as the peer and the chain is counted from the
+    right, but only when the peer is the last entry, which is what uvicorn's own rewrite leaves
+    for a connection that came through the proxies; a chain that does not end at the peer is not
+    one the proxies wrote, so the peer is returned. A caller that can reach the API directly and
+    also write a chain ending in its own address still chooses the entries before it, so two
+    hops needs the API reachable only through the proxy, which the production compose file
+    enforces."""
+    peer = request.client.host if request.client else None
+    if trusted_proxy_hops() < 2 or not peer:
+        return peer
+    lines = request.headers.getlist("x-forwarded-for")
+    parts = [p.strip() for p in ", ".join(line for line in lines if line).split(",") if p.strip()]
+    if parts and parts[-1] == peer:
+        return client_ip(request)
+    return peer
+
+
 def credential_subject(request: Request) -> str:
     """A stable per-caller key with no database lookup.
 

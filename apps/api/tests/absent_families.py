@@ -31,6 +31,9 @@ COMPARTMENT = "G230-X"
 #: A claim every graph write is grounded in (invariant 1).
 CLAIM = {"basis": "DIRECT_OBSERVATION", "reliability": "A", "credibility": "1",
          "confidence": "HIGH"}
+#: The least a call record needs; a family adds the exhibit it names.
+CALL = {"started_at": "2026-01-01T00:00:00Z", "direction": "INBOUND_TO_VICTIM",
+        "record_source": "PBX_LOG"}
 API = "/api/v1"
 
 
@@ -338,6 +341,15 @@ FAMILIES: list[Family] = [
                "requested_url": "https://lure.example/g230",
                "capture_method": "ANALYST_UPLOAD", "screenshot_evidence_id": str(i)}),
            (404, NOT_FOUND, "no such exhibit for screenshot_evidence_id")),
+    Family("a call's linked exhibit", "evidence", "analyst",
+           lambda wd, i: ("POST", wd.url("/deception/calls"), {
+               **CALL, "evidence_id": str(i)}),
+           (404, NOT_FOUND, "no such exhibit for evidence_id")),
+    Family("a call's recording exhibit", "evidence", "analyst",
+           lambda wd, i: ("POST", wd.url("/deception/calls"), {
+               **CALL, "recording_evidence_id": str(i),
+               "recording_lawful_basis": "g230 probe"}),
+           (404, NOT_FOUND, "no such exhibit for recording_evidence_id")),
     Family("a selector's entity", "node", "analyst",
            lambda wd, i: ("POST", wd.url("/selectors"), {
                "selector_type": "EMAIL", "raw_value": "g230-probe@lure.example",

@@ -39,8 +39,8 @@ name: noctornal-prod
 #
 # uvicorn's --forwarded-allow-ips "*" would set `request.client` from the first X-Forwarded-For
 # entry, which the caller writes, and http/routers/ingest.py checks its allowlist against
-# `request.client.host` (failing closed on an unknown peer). Naming this one trusted proxy makes
-# uvicorn read the header from the right and return the address Caddy saw, which Caddy appends
+# `limits.authorised_client_ip` (the socket peer, failing closed on an unknown one). Naming this
+# one trusted proxy makes uvicorn read the header from the right and return the address Caddy saw, which Caddy appends
 # and the caller cannot forge. The network reserves the address for Caddy, and api and
 # sample-origin, which join `frontend` to be reached by it, pass it to uvicorn as
 # NOCTORNAL_TRUSTED_PROXY_IP; were the two to drift, every request would meter and audit as

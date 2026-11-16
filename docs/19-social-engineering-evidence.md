@@ -338,6 +338,13 @@ field on the record that authenticates anything.
 the vendor-detonation constraint in `lab`. Metadata is not content; the
 constraint sits only on the content.
 
+A call links two exhibits at most, the CDR (`evidence_id`) and the recording,
+and the route gates each as a capture's exhibits are gated: it must be in this
+case and readable at the caller's labels, and another case's exhibit, one above
+the caller and an id that names nothing are one 404 with one audit row
+(decision 230). The gate runs before anything is written, and before the
+lawful-basis sentence.
+
 ### 3.4 Ontology: deliberately two additions, not twelve
 
 `CONVENTIONS.md` says ask before adding a node or edge type that duplicates an

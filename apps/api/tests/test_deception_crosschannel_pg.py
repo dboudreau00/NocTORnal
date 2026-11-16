@@ -269,6 +269,53 @@ def test_a_record_proposes_what_it_holds_once_and_nothing_it_was_not_shown(
                         (case_id,)).fetchone()[0] == 0, "a proposal wrote the graph"
 
 
+def test_a_call_older_than_the_newest_500_proposes_and_every_refusal_still_reads_alike(
+        conn, client):
+    """The route read the case's newest 500 calls and searched them for the id, so an older call
+    answered "no such call". It reads the one row now, under the caller's labels. A call above the
+    caller, one in another case and an id that names nothing answer the same 404 as before."""
+    owner = _user(conn)
+    case_id = _case(conn, owner)
+    other_case = _case(conn, owner)
+    _capture, _message, oldest = _seed(conn, owner, case_id)
+    conn.execute(
+        """INSERT INTO deception.call_record
+               (case_id, direction, started_at, record_source, recorded_by)
+           SELECT %s, 'INBOUND_TO_VICTIM', '2026-08-01'::timestamptz + n * interval '1 minute',
+                  'CARRIER_CDR', %s FROM generate_series(1, 501) AS n""",
+        (case_id, owner))
+    token = _token(conn, owner)
+    base = f"{API}/cases/{case_id}/deception"
+    listed = client.get(f"{base}/calls?limit=500", headers=_auth(token)).json()["calls"]
+    assert oldest not in {c["id"] for c in listed}, (
+        "the fixture's call is inside the newest 500")
+    r = client.post(f"{base}/calls/{oldest}/propose", headers=_auth(token),
+                    json={"key": f"ip:{SHARED}"})
+    assert r.status_code == 201, r.text
+    assert r.json()["created"] is True
+
+    from noctornal_api.deception import DeceptionService
+    elsewhere = str(DeceptionService(conn).record_call(
+        case_id=other_case, started_at=datetime(2026, 7, 17, 9, 5, tzinfo=timezone.utc),
+        direction="INBOUND_TO_VICTIM", record_source="CARRIER_CDR",
+        recorded_by=owner, source_ip=SHARED))
+    amber = _user(conn, clearance="AMBER", roles=())
+    conn.execute("INSERT INTO iam.case_assignment (case_id, user_id, role_key, "
+                 "granted_by) VALUES (%s, %s, 'ANALYST', %s)",
+                 (case_id, amber, owner))
+    _c2, _m2, red = _seed(conn, owner, case_id, call_classification="RED")
+    refusals = [
+        client.post(f"{base}/calls/{red}/propose", headers=_auth(_token(conn, amber)),
+                    json={"key": f"ip:{SHARED}"}),
+        client.post(f"{base}/calls/{uuid4()}/propose", headers=_auth(_token(conn, amber)),
+                    json={"key": f"ip:{SHARED}"}),
+        client.post(f"{base}/calls/{elsewhere}/propose", headers=_auth(token),
+                    json={"key": f"ip:{SHARED}"}),
+    ]
+    assert [x.status_code for x in refusals] == [404, 404, 404]
+    assert {x.json()["detail"] for x in refusals} == {"no such call"}
+
+
 def test_proposing_names_an_entity_only_to_a_reader_who_may_see_it(conn, client):
     """"Already an entity" must not come back with the id of ANY node carrying the label, or an AMBER
     case member proposing the address from a capture they could see would learn that a RED entity held

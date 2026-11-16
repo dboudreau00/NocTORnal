@@ -300,6 +300,18 @@ where these say `you@example.org`:
 > role. [`release/INSTALL.md`](release/INSTALL.md#nobody-holds-the-security-officer-role-yet)
 > gives the command that makes a second person the officer.
 
+> **Four readiness checks block collection until they are green.** A source
+> will not run while `readiness.BLOCKING_CHECKS` has one open:
+> `security_officer_present` needs an active account holding the Security
+> officer role (a second person, if break-glass is to be usable);
+> `retention_rules_confirmed` needs every retention rule
+> confirmed with a rationale by a named person; `prohibited_content_policy`
+> needs the policy and the designated person declared (docs/16 L1); and
+> `sample_origin_configured` needs `NOCTORNAL_SAMPLE_ORIGIN` set. The
+> register is the Admin pane, and each row says what it needs
+> ([`infra/production/README.md`](infra/production/README.md#what-stays-red-and-what-a-red-check-refuses)
+> for a production stack).
+
 > **If TOTP rejects every code**, your host clock is out of step.
 > `bootstrap.py totp-diagnose` says whether the clock or the secret is
 > wrong, and `bootstrap.py session` prints a URL that opens the console
@@ -325,7 +337,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **8902 tests** (`def test_`
+With the containers up, expect **no failures** across **8922 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -689,7 +701,7 @@ enforces it.
 
 ### Testing
 
-**8902 tests** (`def test_` functions across two pytest roots, maintained by
+**8922 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -831,7 +843,7 @@ and 7-Zip archives, and live SIP interception. The reasons are in
 [`docs/17`](docs/17-flagged-for-review.md), [`docs/11`](docs/11-malware-handling.md)
 and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-**What is still open is in `docs/17`.** Its Known residuals at Beta 1.1 lists,
+**What is still open is in `docs/17`.** Its Known residuals lists,
 by area, what remains, among them a request role that can still read who works
 which case and still writes the collector's heartbeat and four queues, watches
 that cannot be stopped or edited, and YARA sources that ship unpinned until an

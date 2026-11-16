@@ -318,9 +318,9 @@ def close_sentence(reason: str) -> str:
 
 
 def source_has_compartments(conn: psycopg.Connection) -> bool:
-    """Whether collect.source carries a compartments column (no
-    migration adds one yet). Read per call: cheap, and a reader built
-    before such a migration ran must not keep the old answer."""
+    """Whether collect.source carries a compartments column (Alembic 0163 adds it,
+    so on a migrated database this is always true). Read per call: cheap, and a
+    reader built before that migration ran must not keep the old answer."""
     return conn.execute(
         """SELECT EXISTS (SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'collect' AND table_name = 'source'

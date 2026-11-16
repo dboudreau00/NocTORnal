@@ -72,7 +72,7 @@ use**. That means:
   register.
 - **Known and already documented:** everything in
   [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md), above
-  all its Known residuals at Beta 1.1. Please read it before reporting.
+  all its Known residuals. Please read it before reporting.
   WebAuthn is absent *on purpose and on the record*, and session binding is
   recorded on every session (0058) and enforced under
   `NOCTORNAL_SESSION_STRICT_BINDING`, which a production start requires

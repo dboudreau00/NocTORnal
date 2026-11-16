@@ -1,7 +1,8 @@
-# The image every NocTORnal process runs from. ONE image, five commands: the API, the sample origin,
-# the Alembic migration job, the cron loop and the egress proxy (`python -m noctornal_api.egress_proxy`)
-# are the same code started differently (infra/production/compose.yml). One image is the architecture
-# (CONVENTIONS, decision 30: one process, no worker); two would be two dependency sets that can drift.
+# The image every NocTORnal process runs from. ONE image, ten services: the API, the sample origin,
+# the Alembic migration job, the cron loop, the collector, the analysis worker, the Lab's triage, cron
+# and embedding loops and the egress proxy (`python -m noctornal_api.egress_proxy`) are the same code
+# started differently (infra/production/compose.yml). One image is the architecture (CONVENTIONS,
+# decision 30: no task-queue worker); two would be two dependency sets that can drift.
 FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
 
 # Pinned by digest, since a tag is whatever its registry says at pull time; the tag stays for the
