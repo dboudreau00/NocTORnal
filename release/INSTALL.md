@@ -97,13 +97,16 @@ Optional, and only for the features that use them:
 for: `telegram` (Telethon, for collecting from Telegram) and `yara`
 (yara-x, for YARA scanning of samples). Ask for them with
 `bash release/install.sh --with-telegram --with-yara` or
-`.\release\install.ps1 -WithTelegram -WithYara`, and for the image with
-the build argument `--build-arg NOCTORNAL_EXTRAS=telegram,yara`. A switch
+`.\release\install.ps1 -WithTelegram -WithYara`. The production image
+carries `yara` by default and `telegram` only with the build argument
+`--build-arg NOCTORNAL_EXTRAS=telegram,yara`. A switch
 that is given and fails stops the install, where the dev tools above
 fail quietly. Without `telegram` the Telegram collection features refuse
 and say how to install it; without `yara` samples are not YARA-scanned,
-and the readiness register says so. yara-x publishes wheels for macOS 14
-and newer only, so on macOS 13 leave `--with-yara` off.
+and the readiness register says so: the production image includes it by
+default, and the host installer still needs `--with-yara`. yara-x
+publishes wheels for macOS 14 and newer only, so on macOS 13 leave
+`--with-yara` off.
 
 ---
 
@@ -116,8 +119,9 @@ Nothing hidden, in this order:
    a specific instruction if Python or Docker is missing or too old, if
    Python cannot build a virtual environment, if the Docker engine is not
    reachable, or if the port is taken.
-2. **Creates a virtual environment** at `.venv` and installs the API and
-   the ontology package into it.
+2. **Creates a virtual environment** at `.venv`, installs pip into it at
+   the version and hash `requirements-pip.txt` pins, and installs the API
+   and the ontology package into it.
 3. **Generates secrets** into `.env.local`: a TOTP key-encryption key, a
    persona key and an ingest pepper, each made from 32 random bytes. *It
    never writes a default secret.* Beside them it writes the development

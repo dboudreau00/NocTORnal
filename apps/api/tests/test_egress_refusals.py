@@ -91,7 +91,7 @@ def test_the_sample_origin_is_not_refused_for_what_api_and_cron_do(monkeypatch):
 
 def _proxy_env(**extra):
     env = {**PRODUCTION, **es.keys(),
-           "NOCTORNAL_EGRESS_DATABASE_URL": "postgresql://noctornal_egress:x@postgres/noctornal",
+           "NOCTORNAL_EGRESS_DATABASE_URL": "postgresql://noctornal_egress:x@postgres/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt",
            "NOCTORNAL_EGRESS_LISTEN": "172.31.243.11:3128"}
     env.update(extra)
     return env

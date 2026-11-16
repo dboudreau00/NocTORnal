@@ -641,6 +641,104 @@ def _proxy_hops_declared(conn: psycopg.Connection) -> Check:
         f"one lets a client choose its own address")
 
 
+def _internal_hops_encrypted(conn: psycopg.Connection) -> Check:
+    """Are the hops to Postgres and to the limiter's Redis TLS that checks the server?
+
+    Postgres: this register's own session, from `pg_stat_ssl` for its backend, and the sslmode each DSN
+    this process holds asks for (`config.database_hop`, the reader the boot refusal uses), since a session
+    that happens to be TLS under `prefer` could be downgraded on the next connection. Redis: the
+    limiter's own connection, through `RedisBackend.transport`, which reads the negotiated protocol and
+    the server certificate's end from the live socket, and the URL as `config.redis_hop` reads it.
+
+    In production a hop that is not TLS 1.3, or a setting that does not check the server, fails the row,
+    naming the hop; a unix socket stays on the host and passes. Outside production it passes and says
+    what it read, as `proxy_hops_declared` does: the development stack is plain text on purpose. Not
+    blocking: it describes the transport, not material a poll collects. The evidence names protocols,
+    ciphers and a date, never a host, a user or a value.
+    """
+    from noctornal_api.config import database_hop, is_production, redis_hop
+    from noctornal_api.db import WORKER_DSN_ENV
+    from noctornal_api.ratelimit_redis import RedisBackend
+
+    name = "internal_hops_encrypted"
+    production = is_production()
+    faults: list[str] = []
+    said: list[str] = []
+
+    hops = {variable: database_hop(os.environ[variable])
+            for variable in ("DATABASE_URL", WORKER_DSN_ENV) if os.environ.get(variable, "").strip()}
+    row = conn.execute("SELECT ssl, version, cipher FROM pg_stat_ssl "
+                       "WHERE pid = pg_backend_pid()").fetchone()
+    session_tls, session_version, session_cipher = (bool(row[0]), row[1], row[2]) if row else \
+        (False, None, None)
+    if session_tls:
+        said.append(f"this register's database session is {session_version} ({session_cipher})")
+    else:
+        said.append("this register's database session is not encrypted")
+    for variable, hop in hops.items():
+        said.append(f"{variable} asks for "
+                    + {"verified": "sslmode=verify-full", "socket": "a unix socket",
+                       "unverified": "no sslmode=verify-full",
+                       "unreadable": "something the driver cannot read"}[hop])
+        if hop in ("unverified", "unreadable"):
+            faults.append(f"{variable} does not ask for TLS that checks the database")
+    all_socket = bool(hops) and all(hop == "socket" for hop in hops.values())
+    if not all_socket and not (session_tls and session_version == "TLSv1.3"):
+        faults.append("the database session is not TLS 1.3")
+
+    url = os.environ.get("REDIS_URL", "").strip()
+    if not url:
+        said.append("REDIS_URL is not set, so there is no Redis hop "
+                    "(redis_limiter_store reports that)")
+    else:
+        hop = redis_hop(url)
+        backend = RedisBackend(url)
+        try:
+            seen = backend.transport()
+        finally:
+            backend.close()
+        if hop == "socket":
+            said.append("REDIS_URL is a unix socket")
+        elif not seen["answered"]:
+            said.append("the limiter's Redis did not answer, so its transport could not be read")
+            faults.append("the Redis hop could not be read")
+        elif seen["read_from"] == "socket":
+            if seen["tls"]:
+                said.append(f"the limiter's Redis connection is {seen['version']} "
+                            f"({seen['cipher']}), its certificate valid until "
+                            f"{seen['not_after'] or 'a date the client did not verify'}")
+            else:
+                said.append("the limiter's Redis connection is not encrypted")
+            if not (seen["tls"] and seen["version"] == "TLSv1.3"):
+                faults.append("the Redis hop is not TLS 1.3")
+        else:
+            said.append(f"the limiter's Redis connection keeps no socket this can read, so its "
+                        f"transport is taken from the URL's scheme ({'TLS' if hop != 'plaintext' else 'plain text'})")
+        if hop == "plaintext" and "the Redis hop is not TLS 1.3" not in faults:
+            faults.append("REDIS_URL is not rediss://")
+        elif hop == "unverified":
+            faults.append("REDIS_URL switches off the check of the server")
+
+    evidence = "; ".join(said)
+    if not production:
+        return Check(
+            name, True,
+            f"{evidence}. Outside production this passes whatever it read: the development "
+            f"stack's database and Redis are plain text on purpose, and the production compose "
+            f"file encrypts both")
+    if faults:
+        return Check(
+            name, False,
+            f"{evidence}. So {'; '.join(faults)}, and what crosses that hop (queries and rows, or "
+            f"the limiter's password and meters) can be read on the network, or answered by "
+            f"something that is not the server",
+            "issue the internal certificates with scripts/internal_tls.py, then give every DSN "
+            "sslmode=verify-full and REDIS_URL rediss:// naming the CA; for the compose "
+            "deployment sudo bash release/install.sh --production-secrets rewrites both "
+            "(infra/production/README.md, step 3 and Upgrading)")
+    return Check(name, True, evidence)
+
+
 def _redis_limiter_store(conn: psycopg.Connection) -> Check:
     """Reachable, and not an evictor. An unknown policy is NOT ok: the register lists things confirmed, and
     "the server would not say" confirms nothing. The action tells the operator to confirm it by other means
@@ -2672,6 +2770,13 @@ def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
     return None, words, caveat
 
 
+#: What the two YARA caveats add for a container deployment: its image carries yara-x unless it was built
+#: without it on purpose, or before the image carried it by default.
+_YARA_REBUILD = ("A production image built before 2026-11-15, or with "
+                 "NOCTORNAL_EXTRAS set empty, has none: rebuild it with "
+                 "up -d --build.")
+
+
 def _sample_static_analysis(conn: psycopg.Connection) -> Check:
     """Whether static triage and forum parsing can run here, where, under which limits, and whether anything is
     draining the triage queue.
@@ -2689,7 +2794,8 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
     Also fails on a settings problem, on a child that will not start or whose selftest fails, and when the
     oldest queued run has waited an hour with no run finishing in that hour ("nothing is running static
     triage"); a large backfill that is draining does not fail it. Passes with a caveat for platforms that cannot
-    bound memory, and when YARA is not installed."""
+    bound memory, and when YARA is not installed; fails when yara-x is installed and the child's selftest could
+    not compile and scan a one-rule test with it under the child's limits."""
     from urllib.parse import urlsplit
 
     from noctornal_api import analysis_runner, fuzzyhash, lab_static, lab_triage
@@ -2790,6 +2896,23 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
         f"{count_of(depth, 'run', 'runs')} waiting"
         + (f", the oldest since {fmt(oldest)}" if oldest else "")
         + f"; last finished run {fmt(last_done)}.")
+    engine = out.get("yara")
+    if yara is not None and isinstance(engine, dict) and engine.get("ok") is False:
+        # Installed and unable to run is worse than absent: every YARA step would fail, and each sample would
+        # be recorded unscanned for a reason this row would not otherwise state.
+        error = engine.get("error_class")
+        shown = (f" ({error})" if isinstance(error, str) and error.isidentifier()
+                 and len(error) <= 64 else "")
+        return Check(name, False,
+                     f"{evidence} yara-x is installed, and the analysis child could "
+                     f"not compile a one-rule test and scan with it{shown}, so no "
+                     f"sample would be scanned with a rule.",
+                     "the child's limits stop the engine: check "
+                     f"{lab_triage.MEMORY_ENV} and "
+                     + ("the analysis-worker service's pids and memory limits "
+                        "against infra/production/README.md (Analysis worker), "
+                        "and read its log" if choice.mode == "isolated"
+                        else "this host's limits, and read the child's log"))
     now = datetime.now(timezone.utc)
     stale = timedelta(minutes=_TRIAGE_STALE_MINUTES)
     schedule = ("nothing is running static triage; schedule "
@@ -2820,7 +2943,7 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
                        f"{lab_static.LIMITS_WORDS[kind]}.")
     if yara is None:
         caveats.append("YARA is not installed, so static triage scans with no "
-                       "rules: install noctornal-api[yara].")
+                       "rules: install noctornal-api[yara]. " + _YARA_REBUILD)
     if explicit_local:
         # Chosen out loud, and still not isolated: the row stays red so a green register never hides it. A stale
         # queue is said in the same action rather than hiding this one.
@@ -2854,7 +2977,7 @@ def _yara_rules_active(conn: psycopg.Connection) -> Check:
                      f"activation.",
                      caveat="The YARA engine (yara-x) is not installed, so no "
                             "rule set scans anything: install "
-                            "noctornal-api[yara].")
+                            "noctornal-api[yara]. " + _YARA_REBUILD)
     svc = RulesetService(conn)
     built = stuck = 0
     for (version_id,) in active:
@@ -3721,6 +3844,11 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("redis_limiter_isolated", _redis_limiter_isolated,
      "fix REDIS_URL or start the Redis it names; the limiter needs an "
      "instance of its own (docs/16 C8)"),
+    # Not blocking, no console target: the transport is settled by the certificates and secrets.env.
+    ("internal_hops_encrypted", _internal_hops_encrypted,
+     "the database or Redis could not be asked how it is reached; issue the "
+     "internal certificates with scripts/internal_tls.py (infra/production/README.md, "
+     "step 3)"),
     ("evidence_bucket_object_lock", _evidence_bucket_object_lock,
      "fix MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY or start the "
      "object store; the evidence bucket must be created with object lock"),

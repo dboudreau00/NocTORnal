@@ -34,17 +34,19 @@
 name: noctornal-prod
 
 # --------------------------------------------------------------------------
-# Caddy's fixed address on the internal network, declared once.
+# Caddy's fixed address on `frontend`, the one network it shares with the application, declared
+# once.
 #
 # uvicorn's --forwarded-allow-ips "*" would set `request.client` from the first X-Forwarded-For
 # entry, which the caller writes, and http/routers/ingest.py checks its allowlist against
 # `request.client.host` (failing closed on an unknown peer). Naming this one trusted proxy makes
 # uvicorn read the header from the right and return the address Caddy saw, which Caddy appends
 # and the caller cannot forge. The network reserves the address for Caddy, and api and
-# sample-origin pass it to uvicorn as NOCTORNAL_TRUSTED_PROXY_IP; were the two to drift, every
-# request would meter and audit as coming from the proxy. A new value must sit inside the subnet
-# under `networks:` and outside its `ip_range`.
-x-caddy-ip: &caddy_ip "172.31.243.10"
+# sample-origin, which join `frontend` to be reached by it, pass it to uvicorn as
+# NOCTORNAL_TRUSTED_PROXY_IP; were the two to drift, every request would meter and audit as
+# coming from the proxy. A new value must sit inside frontend's subnet under `networks:` and
+# outside its `ip_range`, and compose.acme.yml repeats it.
+x-caddy-ip: &caddy_ip "172.31.247.10"
 
 # The egress proxy's fixed address on the internal network: clients reach it through
 # NOCTORNAL_EGRESS_PROXY_URL, and it listens there alone (NOCTORNAL_EGRESS_LISTEN). A YAML alias
@@ -78,9 +80,16 @@ x-logging: &logging
 # The tag tracks apps/api/pyproject.toml's version, its one declaration. `up -d` reuses a local
 # tag, so after a code change run `up -d --build` or the old image is redeployed.
 #
-# `./tls` carries MinIO's certificate, from which each application service builds a CA bundle at
-# start (see the api service). `migrate` shares the mount but not this env_file: it reads
-# migrate.env alone.
+# The build passes NOCTORNAL_EXTRAS, `yara` unless the shell that runs compose sets it: the
+# analysis worker scans samples with yara-x only if the image carries it. `${NOCTORNAL_EXTRAS-yara}`
+# and not `:-`, so an explicitly empty value builds the image without it; leave the variable unset
+# otherwise (infra/production/README.md, Analysis worker). Compose takes the value from the shell,
+# or from a file it reads for interpolation (`--env-file`, or a `.env` beside this file).
+#
+# `./tls/public` holds `ca.crt` alone, the deployment's own CA (scripts/internal_tls.py), from
+# which each application service builds a CA bundle at start (see the api service). No private
+# key is under it: each server's key sits in a directory of its own under ./tls that only that
+# server mounts. `migrate` shares the mount but not this env_file: it reads migrate.env alone.
 #
 # No capabilities and no-new-privileges: the process is uid 10001 and needs none, and dropping
 # them all takes CAP_NET_RAW (reading or spoofing a hop on the bridge) out of the bounding set.
@@ -96,7 +105,7 @@ x-noctornal-app: &noctornal-app
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   volumes:
-    - ./tls:/certs:ro
+    - ./tls/public:/certs:ro
 
 # The schema owner's password and DSN, blanked on every runtime service. They belong in
 # postgres-init.env and migrate.env, but secrets.env reaches most services, and a line pasted
@@ -111,24 +120,56 @@ x-no-owner-credential: &no-owner-credential
 services:
 
   # ------------------------------------------------------------------------
+  # Gives Caddy's two volumes to the uid Caddy runs as, then exits; caddy waits for it to succeed.
+  # Docker initialises a new named volume from the image, root's, and a deployment from before
+  # Caddy ran unprivileged has root's files in both, so this runs at every start and a fresh and
+  # an upgraded host need no command of their own. It is root because only root may give a file
+  # away. From the second start the volumes hold mode 0700 directories Caddy made, which root cannot
+  # open without DAC_READ_SEARCH, and a failed chown keeps Caddy down; so it holds CHOWN and
+  # DAC_READ_SEARCH (open and read, never write) and nothing else: no network, no env file, and
+  # the one command.
+  caddy-init:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    user: "0:0"
+    restart: "no"
+    logging: *logging
+    network_mode: none
+    environment:
+      <<: *no-owner-credential
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    entrypoint: [chown, -R, "10002:10002", /data, /config]
+
+  # ------------------------------------------------------------------------
   # The only service with a published port. Caddy terminates TLS for both hostnames and proxies
   # to the two application processes, appending the X-Forwarded-For entry that
   # NOCTORNAL_TRUSTED_PROXY_HOPS=1 tells them to read. 443/udp is not published: 80 and 443 are
   # the whole published surface, so HTTP/3 is unavailable from outside.
   #
-  # It reads caddy.env alone: the two hostnames and the TLS mode. Its one capability is
-  # NET_BIND_SERVICE, which the caddy binary carries as a file capability and cannot exec
-  # without. Without NET_RAW a compromised Caddy cannot read or spoof the plaintext Postgres and
-  # Redis hops on the bridge. The root filesystem is read-only (Caddy writes its two volumes
-  # only), so the one "failed to install root certificate" line under NOCTORNAL_TLS_MODE=internal
-  # is harmless. It still runs as uid 0 because caddy-data and caddy-config are root's on a
-  # running deployment; infra/production/README.md, Hardening, has the chown that allows a
-  # `user:`.
+  # It reads caddy.env alone: the two hostnames and the TLS mode. It runs as uid 10002, which
+  # owns its two volumes (caddy-init) and nothing else. It keeps NET_BIND_SERVICE in its bounding
+  # set only because the caddy binary carries that capability as a file capability and the kernel
+  # refuses to exec it otherwise; under no-new-privileges a non-root process is not granted it,
+  # so the sysctl below is what lets it bind 80 and 443. Without NET_RAW a compromised Caddy
+  # cannot read or spoof a hop on a bridge. The root filesystem is read-only (Caddy writes its two
+  # volumes only), so the one "failed to install root certificate" line under
+  # NOCTORNAL_TLS_MODE=internal is harmless.
   #
-  # It routes out through `edge` as the TLS terminator, outside the egress proxy's scope (docs/00
-  # decision 68).
+  # No route out, and no network shared with the database, Redis, MinIO or the egress proxy. It
+  # sits on `frontend` (internal, with api and sample-origin alone) and `ingress` (Caddy alone,
+  # no masquerade), which only carries the published ports: a connection Caddy starts leaves the
+  # host with an unroutable private source address, or not at all once the host drops it
+  # (infra/production/README.md, What a human still has to confirm). ACME needs a route out, so
+  # compose.acme.yml gives Caddy `edge` instead, by choice and in the open; the default is
+  # NOCTORNAL_TLS_MODE=internal, which needs none.
   caddy:
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    user: "10002:10002"
     restart: unless-stopped
     logging: *logging
     env_file: [caddy.env]
@@ -137,6 +178,8 @@ services:
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
     security_opt: ["no-new-privileges:true"]
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
     read_only: true
     ports:
       - "80:80"
@@ -149,13 +192,19 @@ services:
       # it looks like.
       - caddy-data:/data
       - caddy-config:/config
-    # `edge` carries the published ports and ACME; `noctornal` keeps
-    # the fixed address the application trusts (NOCTORNAL_TRUSTED_PROXY_IP).
+    # `ingress` carries the published ports; `frontend` keeps the fixed address the application
+    # trusts (NOCTORNAL_TRUSTED_PROXY_IP).
     networks:
-      noctornal:
+      frontend:
         ipv4_address: *caddy_ip
-      edge:
-    depends_on: [api, sample-origin]
+      ingress:
+    depends_on:
+      caddy-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+      sample-origin:
+        condition: service_started
 
   # ------------------------------------------------------------------------
   # The image and tuning flags of infra/docker-compose.yml, so a query plan measured in
@@ -164,6 +213,17 @@ services:
   #
   # The entrypoint starts as root, chowns the data directory and drops to the postgres user,
   # which needs the five capabilities below and no others.
+  #
+  # TLS 1.3 on every connection from the network. The server's certificate and key are
+  # ./tls/postgres (scripts/internal_tls.py, DNS:postgres), the one service that mounts that key.
+  # Postgres refuses a key file that is not its own user's, mode 0600 (or root's, 0640 with its
+  # group), and the host's copy is root's, 0600, so the entrypoint below copies the pair, as
+  # root, into a tmpfs it gives to the postgres user before the image's own entrypoint starts:
+  # the key is never written to a disk. The hba file (./pg_hba.conf) admits the network over
+  # `hostssl` alone, so a client that leaves sslmode out is refused by the server; it is a flag
+  # rather than the volume's own pg_hba.conf so that an existing volume gets it too. Every DSN
+  # asks for sslmode=verify-full against /certs/ca.crt, and production refuses one that does not
+  # (config.database_hop_problems).
   #
   # A statement slower than log_min_duration_statement is logged with its bind parameters, which
   # hold third-party text, addresses, hashes and sealed blobs. The two log_parameter_max_length
@@ -196,6 +256,18 @@ services:
       # NOCTORNAL_MIGRATION_DATABASE_URL; `release/install.sh --production-secrets` compares them.
       POSTGRES_USER: noctornal
       POSTGRES_INITDB_ARGS: "--data-checksums"
+    tmpfs:
+      - /run/pg-tls:size=1m,mode=0700,noexec,nosuid,nodev
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        install -d -m 0700 -o postgres -g postgres /run/pg-tls
+        install -m 0644 -o postgres -g postgres /pg-tls-src/server.crt /run/pg-tls/server.crt
+        install -m 0600 -o postgres -g postgres /pg-tls-src/server.key /run/pg-tls/server.key
+        exec docker-entrypoint.sh "$$@"
+      - noctornal-postgres
     command: >
       postgres
       -c shared_preload_libraries=pg_stat_statements
@@ -206,6 +278,11 @@ services:
       -c max_connections=200
       -c shared_buffers=512MB
       -c work_mem=32MB
+      -c ssl=on
+      -c ssl_cert_file=/run/pg-tls/server.crt
+      -c ssl_key_file=/run/pg-tls/server.key
+      -c ssl_min_protocol_version=TLSv1.3
+      -c hba_file=/etc/postgresql/pg_hba.conf
     # db/init, as in dev: CREATE EXTENSION needs superuser, so extensions load here and the
     # schema comes from Alembic alone. 10-app-role.sh creates the least-privilege role from
     # NOCTORNAL_APP_DB_PASSWORD (env_file, with the other secrets); when that is absent it creates
@@ -219,8 +296,11 @@ services:
     volumes:
       - prod-pgdata:/var/lib/postgresql/data
       - ../../db/init:/docker-entrypoint-initdb.d:ro
+      - ./tls/postgres:/pg-tls-src:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     # -h 127.0.0.1 matters: during first-run init the temporary server listens on the unix
-    # socket only, so a socket probe would report healthy before the extensions exist.
+    # socket only, so a socket probe would report healthy before the extensions exist. The hba
+    # file trusts the loopback address, as the image's own initdb does, so the probe needs no TLS.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U noctornal -d noctornal"]
       interval: 5s
@@ -245,17 +325,25 @@ services:
   # umask 077 and holds the password's SHA-256, never the password, so it cannot drift from
   # secrets.env and a new password costs a restart.
   #
-  # REDIS_URL is checked before the server starts. One that names this service (host `redis`,
-  # compared in lower case) but would not sign in as noctornal_limiter with REDIS_PASSWORD, or
-  # that names no host, would leave every fail-closed limit refusing everyone, the login
-  # included, so the service refuses to start and names the installer step that rewrites the
-  # URL; api and cron wait for it. A URL naming another host is the operator's own Redis
-  # (infra/production/README.md, The limiter's Redis): this one then starts with its ACL and no
-  # client, and says so.
+  # TLS 1.3 alone: `--port 0` closes the plain listener and 6379 is the TLS port. The certificate
+  # and key are ./tls/redis (scripts/internal_tls.py, DNS:redis), the one service that mounts
+  # that key; without them the service refuses to start rather than listen in plain text.
+  # Clients authenticate with the ACL password, not a certificate (`--tls-auth-clients no`): a
+  # client certificate would be a second secret in every application container for nothing the
+  # ACL does not already give.
   #
-  # The healthcheck signs in as the limiter, since `default` cannot. Pinned by digest. The
-  # command replaces the image's start, which is what would switch to the redis user, so this
-  # runs as root with DAC_OVERRIDE alone, without which it cannot open its append-only directory.
+  # REDIS_URL is checked before the server starts. One that names this service (host `redis`,
+  # compared in lower case) but would not sign in as noctornal_limiter with REDIS_PASSWORD over
+  # TLS (rediss://), or that names no host, would leave every fail-closed limit refusing everyone,
+  # the login included, so the service refuses to start and names the installer step that
+  # rewrites the URL; api and cron wait for it. A URL naming another host is the operator's own
+  # Redis (infra/production/README.md, The limiter's Redis): this one then starts with its ACL and
+  # no client, and says so, and the API refuses that URL unless it is rediss:// too.
+  #
+  # The healthcheck signs in as the limiter, since `default` cannot, over TLS against the CA in
+  # ./tls/public. Pinned by digest. The command replaces the image's start, which is what would
+  # switch to the redis user, so this runs as root with DAC_OVERRIDE alone, without which it
+  # cannot open its append-only directory; root owns the key it reads.
   redis:
     image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     restart: unless-stopped
@@ -267,7 +355,10 @@ services:
     cap_drop: [ALL]
     cap_add: [DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
-    volumes: [prod-redisdata:/data]
+    volumes:
+      - prod-redisdata:/data
+      - ./tls/redis:/tls:ro
+      - ./tls/public:/certs:ro
     command:
       - /bin/sh
       - -c
@@ -278,17 +369,24 @@ services:
           echo 'Redis has, and an empty one would let any container in.' >&2
           exit 1
         fi
+        if [ ! -r /tls/server.crt ] || [ ! -r /tls/server.key ]; then
+          echo 'This Redis speaks TLS alone, and /tls/server.crt or /tls/server.key is missing' >&2
+          echo 'or unreadable: refusing to start, rather than listen in plain text. Run' >&2
+          echo 'sudo python3 scripts/internal_tls.py init (or migrate, then check), which writes' >&2
+          echo 'them into infra/production/tls/redis (infra/production/README.md, step 3).' >&2
+          exit 1
+        fi
         host=$${REDIS_URL#*://}
         host=$${host%%[/?#]*}
         host=$${host##*@}
         host=$${host%:*}
         host=$$(printf '%s' "$$host" | tr 'A-Z' 'a-z')
         case "$$REDIS_URL" in
-          "redis://noctornal_limiter:$$REDIS_PASSWORD@"*) ;;
+          "rediss://noctornal_limiter:$$REDIS_PASSWORD@"*) ;;
           *://*)
             if [ -z "$$host" ] || [ "$$host" = redis ]; then
-              echo 'REDIS_URL does not sign in to this Redis as noctornal_limiter with REDIS_PASSWORD: refusing to start.' >&2
-              echo 'This Redis disables its default user, so the limiter would be refused and every' >&2
+              echo 'REDIS_URL does not sign in to this Redis as noctornal_limiter with REDIS_PASSWORD over TLS (rediss://): refusing to start.' >&2
+              echo 'This Redis speaks TLS alone and disables its default user, so the limiter would be refused and every' >&2
               echo 'limit that fails closed would refuse everyone. Run sudo bash release/install.sh' >&2
               echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows), which' >&2
               echo 'rewrites REDIS_URL and keeps a backup (release/secrets-upgrade/README.md).' >&2
@@ -313,12 +411,18 @@ services:
           --appendonly yes \
           --maxmemory 1gb \
           --maxmemory-policy noeviction \
-          --aclfile /tmp/users.acl
+          --aclfile /tmp/users.acl \
+          --port 0 \
+          --tls-port 6379 \
+          --tls-cert-file /tls/server.crt \
+          --tls-key-file /tls/server.key \
+          --tls-auth-clients no \
+          --tls-protocols TLSv1.3
     healthcheck:
       # The password goes in REDISCLI_AUTH, not `-a`: an argument sits on the command line of a
       # process that starts every five seconds, where any local account on the host can read
       # it. The user name is not a secret.
-      test: ['CMD-SHELL', 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --user noctornal_limiter ping | grep -q PONG']
+      test: ['CMD-SHELL', 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --tls --cacert /certs/ca.crt -h redis --user noctornal_limiter ping | grep -q PONG']
       interval: 5s
       retries: 10
       start_period: 10s
@@ -334,9 +438,11 @@ services:
   # start unless MINIO_SECURE and SAMPLE_SECURE are "true". SigV4 keeps the secret key off the
   # wire, but every exhibit's bytes cross it, and a request's signature can be lifted and
   # replayed against the evidence bucket until it expires. MinIO finds `public.crt` and
-  # `private.key` in its default /root/.minio/certs, so no flag is needed. The operator creates
-  # them (infra/production/README.md) with subjectAltName DNS:minio, the name MINIO_ENDPOINT
-  # uses; with ./tls empty MinIO serves plain HTTP and every client fails its handshake.
+  # `private.key` in its default /root/.minio/certs, so no flag is needed. They are
+  # ./tls/minio, which scripts/internal_tls.py fills (infra/production/README.md, step 3) with a
+  # certificate for DNS:minio, the name MINIO_ENDPOINT uses, signed by the CA every client
+  # trusts; this is the one service that mounts that key. With ./tls/minio empty MinIO serves
+  # plain HTTP and every client fails its handshake.
   #
   # MINIO_ACCESS_KEY and MINIO_SECRET_KEY are the API's client credentials and also MinIO's
   # legacy names for its root pair, which this image still reads. env_file cannot filter them,
@@ -376,7 +482,7 @@ services:
         exec minio server /data --console-address ":9001"
     volumes:
       - prod-miniodata:/data
-      - ./tls:/root/.minio/certs:ro
+      - ./tls/minio:/root/.minio/certs:ro
 
   # ------------------------------------------------------------------------
   # Creates the buckets, once; every process that touches storage waits for it to succeed.
@@ -411,11 +517,10 @@ services:
   # A literal block (`|`), not the dev file's folded `>`: in a folded scalar a `#` comments out
   # every command after it, and the literal form keeps every expansion quoted.
   #
-  # mc trusts MinIO's certificate from a copy in its CA directory: mounting the directory would
-  # put private.key there too, and mounting the file makes docker create a directory in its
-  # place when the certificate does not exist yet.
+  # mc trusts the deployment's CA from a copy in its CA directory: mounting the file makes docker
+  # create a directory in its place when the CA does not exist yet.
   #
-  # The wait for MinIO is bounded, 60 attempts a second apart. With ./tls empty MinIO serves
+  # The wait for MinIO is bounded, 60 attempts a second apart. With ./tls/minio empty MinIO serves
   # plain HTTP, and with a pair it cannot read it crash-loops, so an unbounded wait would never
   # exit and everything behind it would wait for ever while `up -d` reports success. The message
   # names the URL and both causes, which look alike from here: no TLS there, or root credentials
@@ -439,7 +544,7 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     volumes:
-      - ./tls:/certs:ro
+      - ./tls/public:/certs:ro
       - ./mc-alias.sh:/mc-alias.sh:ro
     entrypoint:
       - /bin/sh
@@ -465,9 +570,10 @@ services:
           attempts=$$((attempts + 1))
           if [ "$$attempts" -ge 60 ]; then
             echo "minio-init: gave up dialling https://minio:9000 after $$attempts tries." >&2
-            echo "minio-init: either MinIO is not serving TLS there -- ./tls must hold a" >&2
-            echo "minio-init: public.crt and private.key it can read, and an EMPTY ./tls" >&2
-            echo "minio-init: gets plain HTTP with no complaint -- or MINIO_ROOT_USER and" >&2
+            echo "minio-init: either MinIO is not serving TLS there -- ./tls/minio must hold a" >&2
+            echo "minio-init: public.crt and private.key it can read, and an EMPTY ./tls/minio" >&2
+            echo "minio-init: gets plain HTTP with no complaint (scripts/internal_tls.py check)" >&2
+            echo "minio-init: -- or MINIO_ROOT_USER and" >&2
             echo "minio-init: MINIO_ROOT_PASSWORD are not what it started with." >&2
             exit 1
           fi
@@ -529,6 +635,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        NOCTORNAL_EXTRAS: "${NOCTORNAL_EXTRAS-yara}"
     pull_policy: missing
     env_file:
       - path: migrate.env
@@ -565,7 +673,7 @@ services:
   #
   # --forwarded-allow-ips takes Caddy's address from NOCTORNAL_TRUSTED_PROXY_IP (see x-caddy-ip).
   #
-  # SSL_CERT_FILE is the system bundle plus MinIO's certificate, rebuilt in /tmp at each start
+  # SSL_CERT_FILE is the system bundle plus the deployment's CA, rebuilt in /tmp at each start
   # from the read-only mount. minio-py hands it to urllib3 as `ca_certs`, so for the evidence, raw
   # and sample clients it is the whole set of trusted roots. The other clients (urlopen, SMTP,
   # readiness's PoolManager) also read OpenSSL's SSL_CERT_DIR and would keep the public roots
@@ -573,6 +681,8 @@ services:
   # `cert_store_stats()` does not count that directory, so it reports one CA where there are many.
   api:
     <<: *noctornal-app
+    # `frontend` as well, the one network Caddy reaches it on.
+    networks: [noctornal, frontend]
     # The egress client keys, optional to compose so an upgrade starts
     # and the API then refuses by name (config.verify_environment).
     env_file:
@@ -582,7 +692,7 @@ services:
     # The analysis worker's socket, read-only: forum pages polled from the console and an
     # analyst's "run static triage now" are parsed there, never in this container.
     volumes:
-      - ./tls:/certs:ro
+      - ./tls/public:/certs:ro
       - analysis-socket:/run/noctornal-analysis:ro
     # /tmp is a size-limited tmpfs. Starlette spools a multipart body over 1 MiB to a temporary
     # file before the route sees who sent it, and a request carrying any bearer value or session
@@ -599,7 +709,7 @@ services:
       NOCTORNAL_ENV: production
       NOCTORNAL_TRUSTED_PROXY_IP: *caddy_ip
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
-      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24,172.31.247.0/24,172.31.248.0/24"
       NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
@@ -621,7 +731,7 @@ services:
       - -c
       - |
         set -e
-        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
+        cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         exec uvicorn noctornal_api.http.app:app \
           --host 0.0.0.0 --port 8000 --workers 4 --ws-max-size 8192 \
@@ -649,6 +759,8 @@ services:
   # that needs a least-privilege service account and has not been done.
   sample-origin:
     <<: *noctornal-app
+    # `frontend` as well, the one network Caddy reaches it on.
+    networks: [noctornal, frontend]
     # /tmp is a size-limited tmpfs here too, and a small one: this process refuses everything but
     # the two downloads before it reads a body, and their tickets arrive in bodies capped at
     # 2 KiB. 64 MiB holds the 0.2 MiB CA bundle and whatever a library parks there, and is all a
@@ -683,7 +795,7 @@ services:
       - -c
       - |
         set -e
-        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
+        cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         export NOCTORNAL_PUBLIC_ORIGIN="$$NOCTORNAL_SAMPLE_ORIGIN"
         exec uvicorn noctornal_api.http.app:app \
@@ -729,7 +841,7 @@ services:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
-      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24,172.31.247.0/24,172.31.248.0/24"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -743,7 +855,7 @@ services:
       - /bin/sh
       - -c
       - |
-        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         stop=
         trap 'stop=1' TERM INT
@@ -801,14 +913,14 @@ services:
         required: false
     # The collection poll's forum pages are parsed in the analysis worker; its socket, read-only.
     volumes:
-      - ./tls:/certs:ro
+      - ./tls/public:/certs:ro
       - analysis-socket:/run/noctornal-analysis:ro
     environment:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_COLLECTOR: "1"
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
-      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24,172.31.247.0/24,172.31.248.0/24"
       NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
@@ -825,7 +937,7 @@ services:
       - /bin/sh
       - -c
       - |
-        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         exec python scripts/collector.py
 
@@ -845,7 +957,7 @@ services:
     env_file:
       - secrets.env
     volumes:
-      - ./tls:/certs:ro
+      - ./tls/public:/certs:ro
       - analysis-socket:/run/noctornal-analysis:ro
     environment:
       <<: *no-owner-credential
@@ -860,7 +972,7 @@ services:
       - /bin/sh
       - -c
       - |
-        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         stop=
         trap 'stop=1' TERM INT
@@ -884,7 +996,7 @@ services:
   # nothing kept between requests.
   #
   # It does not merge x-noctornal-app, which carries secrets.env, the `noctornal` network and the
-  # MinIO certificate; it repeats the image tag and `pull_policy: never` instead, and readiness
+  # CA certificate; it repeats the image tag and `pull_policy: never` instead, and readiness
   # refuses a worker whose parser versions differ from the API's.
   #
   #   * No env_file: the worker refuses any variable it cannot name, and readiness asks what it
@@ -970,7 +1082,7 @@ services:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
-      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24,172.31.247.0/24,172.31.248.0/24"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -982,7 +1094,7 @@ services:
       - /bin/sh
       - -c
       - |
-        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         stop=
         trap 'stop=1' TERM INT
@@ -1019,7 +1131,7 @@ services:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
-      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24,172.31.247.0/24,172.31.248.0/24"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -1029,7 +1141,7 @@ services:
       - /bin/sh
       - -c
       - |
-        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         stop=
         trap 'stop=1' TERM INT
@@ -1066,12 +1178,15 @@ services:
     env_file:
       - path: egress-proxy.env
         required: false
-    volumes: []
+    # The CA alone, for its database hop (sslmode=verify-full): no key, and none of the
+    # application's files.
+    volumes:
+      - ./tls/public:/certs:ro
     environment:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_LISTEN: "172.31.243.11:3128"
-      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24,172.31.247.0/24,172.31.248.0/24"
     networks:
       noctornal:
         ipv4_address: *egress_ip
@@ -1090,8 +1205,8 @@ services:
       start_period: 15s
 
 # --------------------------------------------------------------------------
-# The networks. `noctornal` has a fixed subnet so that Caddy and the egress proxy can hold fixed
-# addresses (x-caddy-ip, x-egress-ip).
+# The networks. `noctornal` and `frontend` have fixed subnets so that the egress proxy and Caddy
+# can hold fixed addresses (x-egress-ip, x-caddy-ip).
 #
 # The subnet is inside Docker's default pool (172.16/12), so an older network on this host can
 # already sit on it, and `up` then fails with "Pool overlaps with other one on this address
@@ -1105,8 +1220,12 @@ services:
 # outside the range.
 #
 # `noctornal` is internal, so nothing on it reaches the internet but through the egress proxy.
-# `edge` is the one bridge with a route out, joined by caddy and the proxy alone; its subnet is
-# fixed so the deployment's own networks (NOCTORNAL_EGRESS_INTERNAL_CIDRS,
+# `edge` is the one bridge with a route out, joined by the proxy alone (and by Caddy under
+# compose.acme.yml). `frontend` is internal too, joined by Caddy, api and sample-origin alone,
+# so Caddy reaches the two processes it proxies to and nothing else. `ingress` is Caddy's alone
+# and exists to carry the published ports: Docker publishes a port only on a network that is not
+# internal, and with masquerade off nothing Caddy starts is given the host's address on the way
+# out. Their subnets are fixed so the deployment's own networks (NOCTORNAL_EGRESS_INTERNAL_CIDRS,
 # egress_policy.DEFAULT_INTERNAL_NETWORKS) are known and no route can reach them. The proxy is
 # the only other member of `exits` (Tor or VPN sidecars) and `models` (a local model server).
 # Whether an internal network really has no route out depends on the host's Docker and
@@ -1126,6 +1245,21 @@ networks:
     ipam:
       config:
         - subnet: 172.31.244.0/24
+  frontend:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.247.0/24
+          ip_range: 172.31.247.128/25
+          gateway: 172.31.247.1
+  ingress:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: 172.31.248.0/24
   exits:
     driver: bridge
     ipam:

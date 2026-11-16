@@ -233,6 +233,8 @@ def test_no_documented_command_passes_the_minio_root_password_as_an_argument():
 #: (infra/production/README.md, Hardening). Everything else keeps none.
 _KEPT = {
     "caddy": {"NET_BIND_SERVICE"},
+    # Gives Caddy's two volumes to uid 10002 and exits (test_tls_hops_compose.py).
+    "caddy-init": {"CHOWN", "DAC_READ_SEARCH"},
     "postgres": {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"},
     "redis": {"DAC_OVERRIDE"},
     # The isolated analysis worker (docs/17): root, so that it can give each child a user of its own and
@@ -244,7 +246,7 @@ _KEPT = {
 
 def test_every_service_drops_all_capabilities_and_keeps_only_what_is_listed():
     services = _services()
-    assert set(services) == set(APP_ONLY) | {"caddy", "egress-proxy", "analysis-worker"}
+    assert set(services) == set(APP_ONLY) | {"caddy", "caddy-init", "egress-proxy", "analysis-worker"}
     for name, service in services.items():
         assert service.get("cap_drop") == ["ALL"], name
         assert set(service.get("cap_add") or []) == _KEPT.get(name, set()), name
@@ -259,7 +261,8 @@ def test_one_service_builds_the_application_image_and_none_pulls_it():
     services = _services()
     builders = {name: s for name, s in services.items() if "build" in s}
     assert set(builders) == {"migrate"}, sorted(builders)
-    assert builders["migrate"]["build"] == {"context": "../..", "dockerfile": "Dockerfile"}
+    assert builders["migrate"]["build"] == {"context": "../..", "dockerfile": "Dockerfile",
+                                            "args": {"NOCTORNAL_EXTRAS": "${NOCTORNAL_EXTRAS-yara}"}}
     assert builders["migrate"].get("pull_policy") == "missing"
     image = builders["migrate"]["image"]
     users = {name for name, s in services.items() if s.get("image") == image}
@@ -358,7 +361,7 @@ _DIGEST = re.compile(r"^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
 def test_every_image_the_production_stack_pulls_is_pinned_by_digest():
     pulled = {name: s["image"] for name, s in _services().items()
               if "build" not in s and s.get("pull_policy") != "never"}
-    assert set(pulled) == {"caddy", "postgres", "redis", "minio", "minio-init"}, pulled
+    assert set(pulled) == {"caddy", "caddy-init", "postgres", "redis", "minio", "minio-init"}, pulled
     unpinned = {n: i for n, i in pulled.items() if not _DIGEST.match(i)}
     assert not unpinned, unpinned
 
@@ -400,7 +403,8 @@ def test_the_redis_healthcheck_passes_the_password_in_the_environment():
     command = check[-1] if isinstance(check, list) else check
     # The limiter's own user is named too (the ACL switches `default` off), as an option and not a secret:
     # redis-cli has no variable for the name.
-    assert 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --user noctornal_limiter ping' in command, command
+    assert ('REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --tls --cacert /certs/ca.crt -h redis '
+            '--user noctornal_limiter ping') in command, command
     assert " -a " not in command
 
 
@@ -470,7 +474,7 @@ def _setup(tmp_path: Path, user: str, password: str):
     shell = _posix_shell()
     if shell is None:
         pytest.skip("no POSIX shell")
-    cert = tmp_path / "public.crt"
+    cert = tmp_path / "ca.crt"
     cert.write_text("CERT", encoding="utf-8")
     script = tmp_path / "run.sh"
     script.write_text('. "$ALIAS_FILE"\nmc_setup || exit 9\nprintf %s "$MC_HOST_local"\n',
@@ -495,7 +499,7 @@ def test_the_alias_carries_the_credential_literally_as_mc_reads_it(tmp_path, pas
     done = _setup(tmp_path, "g48-root", password)
     assert done.returncode == 0, done.stderr
     assert done.stdout == f"https://g48-root:{password}@minio:9000"
-    assert (tmp_path / "mc" / "certs" / "CAs" / "minio.crt").read_text() == "CERT"
+    assert (tmp_path / "mc" / "certs" / "CAs" / "ca.crt").read_text() == "CERT"
 
 
 @pytest.mark.parametrize("user,password", [("g48-root", "pass:word-0123"), ("g48:root", "pass-word-0123")])
@@ -792,36 +796,45 @@ def test_no_readme_command_leaves_a_umask_or_shell_option_in_the_operators_shell
         "group", "group", "group", "quoted"]
 
 
-def test_the_readme_commands_for_the_tls_directory_state_modes_instead_of_trusting_umask():
-    block = _readme_block("mkdir -p infra/production/tls")
-    assert "chmod 755 infra/production/tls\n" in block
-    assert "chmod 644 infra/production/tls/public.crt\n" in block
-    assert block.index("openssl req") < block.index("chmod 755")
-    assert "sudo chown root:root infra/production/tls/private.key" in block
-    assert "sudo chmod 600       infra/production/tls/private.key" in block
+def test_the_readme_issues_the_certificates_with_the_script_that_states_their_modes():
+    """Step 3 no longer runs openssl by hand: scripts/internal_tls.py issues the CA and every server's
+    certificate, as root, and states every mode itself (test_internal_tls_script.py holds which), so the
+    operator's umask decides nothing. `check` follows `init` in the same block."""
+    block = _readme_block("scripts/internal_tls.py init")
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    assert lines == ["sudo python3 scripts/internal_tls.py init",
+                     "sudo python3 scripts/internal_tls.py check"], lines
+    assert not [b for b in _readme_sh_blocks() if "openssl " in b], "the hand-made self-signed pair is gone"
 
 
 def test_the_readme_checks_the_modes_the_containers_read_before_up():
     text = _text(README)
     step = text[text.index("## 4. Start it"):text.index("### If the API refuses to start")]
     assert step.index("find infra/production/Caddyfile") < step.index("up -d --build")
+    check = step.split("up -d --build")[0]
     for path in ("infra/production/Caddyfile", "infra/production/mc-alias.sh",
-                 "infra/production/tls", "db/init"):
-        assert path in step.split("up -d --build")[0], path
+                 "infra/production/tls/public", "infra/production/pg_hba.conf", "db/init"):
+        assert path in check, path
     assert "chmod go+rX" in step
-    # The bind mounts that need it are exactly the ones the compose file declares.
+    # The bind mounts that need it are exactly the ones the compose file declares, less the
+    # directories that hold a server's key: those are root's and 0700 on purpose, read by the one
+    # server that owns them, and `internal_tls.py check` is what checks them.
     mounts = set()
     for service in _services().values():
         for volume in service.get("volumes", []) or []:
             source = str(volume).split(":")[0]
             if source.startswith("."):
                 mounts.add(os.path.normpath(os.path.join("infra/production", source)).replace("\\", "/"))
-    assert mounts == {"infra/production/tls", "infra/production/Caddyfile", "db/init",
-                      "infra/production/mc-alias.sh"}, mounts
+    private = {f"infra/production/tls/{name}" for name in ("minio", "postgres", "redis")}
+    assert mounts - private == {"infra/production/tls/public", "infra/production/Caddyfile",
+                                "db/init", "infra/production/mc-alias.sh",
+                                "infra/production/pg_hba.conf"}, mounts
+    for path in private:
+        assert path not in check, path
 
 
 @pytest.mark.parametrize("marker", ["secrets.env.example", "egress_setup.py keygen",
-                                    "mkdir -p infra/production/tls", "set -o pipefail",
+                                    "scripts/internal_tls.py init", "set -o pipefail",
                                     "find infra/production/Caddyfile"])
 def test_every_readme_block_that_changes_modes_is_valid_shell(marker):
     bash = _bash_for_syntax()
@@ -860,8 +873,12 @@ def _run_readme_blocks(tmp_path: Path, operator_umask: str):
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("no bash")
+    if shutil.which("openssl") is None or shutil.which("python3") is None:
+        pytest.skip("step 3 runs scripts/internal_tls.py, which needs python3 and openssl")
     tree = tmp_path / "checkout"
     (tree / "infra" / "production").mkdir(parents=True)
+    (tree / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts" / "internal_tls.py", tree / "scripts" / "internal_tls.py")
     for template in PRODUCTION.glob("*.example"):
         copied = tree / "infra" / "production" / template.name
         shutil.copy(template, copied)
@@ -870,7 +887,7 @@ def _run_readme_blocks(tmp_path: Path, operator_umask: str):
     blocks = [
         ("secrets", _readme_block("secrets.env.example")),
         ("egress", _readme_block("egress_setup.py keygen")),
-        ("tls", _readme_block("mkdir -p infra/production/tls")),
+        ("tls", _readme_block("scripts/internal_tls.py init")),
         ("backup", _readme_block("set -o pipefail").replace("/srv/noctornal-backup", str(backup))),
     ]
     script = [
@@ -883,10 +900,8 @@ def _run_readme_blocks(tmp_path: Path, operator_umask: str):
         " || cp infra/production/$f.env.example infra/production/$f.env; done ); }",
         "sudo() { if [ \"$1\" = bash ] && [ \"$2\" = release/install.sh ]; then installer; else \"$@\"; fi; }",
         "python() { :; }; docker() { echo stub-dump; }; age() { cat; }",
-        # openssl creates the key 0600 whatever the umask and the certificate
-        # under the umask: that is the difference this test needs to keep.
-        "openssl() { while [ $# -gt 0 ]; do case \"$1\" in -keyout) k=\"$2\"; shift;; -out) c=\"$2\"; shift;; esac; shift; done;"
-        " ( umask 077; echo KEY > \"$k\" ); echo CERT > \"$c\"; }",
+        # Step 3 runs the real scripts/internal_tls.py, with the host's python3 and openssl, as
+        # this (non-root) user: the modes it states are what this test needs to see.
     ]
     for name, block in blocks:
         script.append(f"# ---- {name}\n{block}")
@@ -919,9 +934,12 @@ def test_the_modes_the_containers_need_hold_under_either_umask(tmp_path, operato
     assert (_mode(prod / "secrets.env"), _mode(prod / "caddy.env")) == (0o600, 0o600)
     for name in ("egress-proxy.env", "egress-client.env", "postgres-init.env", "migrate.env"):
         assert _mode(prod / name) == 0o600, name
-    assert _mode(prod / "tls") == 0o755
-    assert _mode(prod / "tls" / "public.crt") == 0o644
-    assert _mode(prod / "tls" / "private.key") == 0o600
+    assert _mode(prod / "tls") == 0o755 and _mode(prod / "tls" / "public") == 0o755
+    assert _mode(prod / "tls" / "public" / "ca.crt") == 0o644
+    for server, key in (("minio", "private.key"), ("postgres", "server.key"), ("redis", "server.key")):
+        assert _mode(prod / "tls" / server) == 0o700, server
+        assert _mode(prod / "tls" / server / key) == 0o600, server
+    assert _mode(prod / "tls" / "ca" / "ca.key") == 0o600
     assert _mode(backup) == 0o700
     dumps = list(backup.glob("noctornal-*.dump.age"))
     assert len(dumps) == 1 and _mode(dumps[0]) == 0o600
@@ -934,15 +952,17 @@ def test_the_mode_check_names_what_a_container_could_not_read(tmp_path):
         pytest.skip("no bash")
     check = _readme_block("find infra/production/Caddyfile").strip()
     prod = tmp_path / "infra" / "production"
-    for directory in (prod / "tls", tmp_path / "db" / "init"):
+    for directory in (prod / "tls" / "public", prod / "tls" / "minio", tmp_path / "db" / "init"):
         directory.mkdir(parents=True)
-    files = {prod / "Caddyfile": 0o644, prod / "mc-alias.sh": 0o644, prod / "tls" / "public.crt": 0o644,
-             prod / "tls" / "private.key": 0o600, tmp_path / "db" / "init" / "10-app-role.sh": 0o644}
+    files = {prod / "Caddyfile": 0o644, prod / "mc-alias.sh": 0o644, prod / "pg_hba.conf": 0o644,
+             prod / "tls" / "public" / "ca.crt": 0o644, prod / "tls" / "minio" / "private.key": 0o600,
+             tmp_path / "db" / "init" / "10-app-role.sh": 0o644}
     for path, mode in files.items():
         path.write_text("x", encoding="utf-8")
         path.chmod(mode)
-    for directory in (prod / "tls", tmp_path / "db" / "init"):
+    for directory in (prod / "tls", prod / "tls" / "public", tmp_path / "db" / "init"):
         directory.chmod(0o755)
+    (prod / "tls" / "minio").chmod(0o700)
 
     def run() -> list[str]:
         done = subprocess.run([bash, "-c", check], cwd=tmp_path, capture_output=True, text=True,
@@ -950,11 +970,13 @@ def test_the_mode_check_names_what_a_container_could_not_read(tmp_path):
         assert done.returncode == 0, done.stderr
         return sorted(done.stdout.split())
 
-    assert run() == [], "a correct tree is named as wrong (private.key is skipped on purpose)"
+    assert run() == [], "a correct tree is named as wrong (the key directories are left out on purpose)"
     (prod / "Caddyfile").chmod(0o600)
-    (prod / "tls").chmod(0o700)
+    (prod / "pg_hba.conf").chmod(0o600)
+    (prod / "tls" / "public").chmod(0o700)
     (tmp_path / "db" / "init" / "10-app-role.sh").chmod(0o640)
-    assert run() == ["db/init/10-app-role.sh", "infra/production/Caddyfile", "infra/production/tls"]
+    assert run() == ["db/init/10-app-role.sh", "infra/production/Caddyfile",
+                     "infra/production/pg_hba.conf", "infra/production/tls/public"]
 
 
 def _dockerfile_normalisation() -> str:
@@ -1104,7 +1126,7 @@ def test_no_template_or_script_still_calls_connecting_as_the_owner_a_silent_supp
 
 def test_the_readme_says_how_to_get_the_app_role_on_a_volume_that_was_initialised_without_it():
     text = _text(README)
-    step = text[text.index("## 2. Check the two passwords"):text.index("## 3. Give MinIO a certificate")]
+    step = text[text.index("## 2. Check the two passwords"):text.index("## 3. Issue the internal certificates")]
     assert "initialised without that password has no `noctornal_app`" in step
     block = next(b for b in re.findall(r"```sh\n(.*?)```", step, flags=re.S) if "runtime_roles.py" in b)
     assert "scripts/runtime_roles.py ensure --production" in block
@@ -1131,14 +1153,51 @@ def _image_refs(path: Path) -> list[str]:
     return re.findall(r"(?m)^\s+image:\s*(\S+)\s*$", _text(path))
 
 
-def _tag_only_images() -> dict[str, str]:
-    """image -> where, for every image CI's `image:` keys pull by tag. The development stack's are pinned by
-    digest (below), and CI's two service containers are tags, which the README says."""
-    found: dict[str, str] = {}
-    for image in _image_refs(CI):
-        assert "@sha256:" not in image, f"{image} in {CI.name} is pinned now: update this test"
-        found.setdefault(image, CI.name)
-    return found
+#: `docker run` options that take no value, and those that take the next word. An option in neither is a
+#: failure, never a guess: a value read as the image would let an unpinned image through.
+_RUN_FLAGS = frozenset({"-d", "--detach", "--rm", "-i", "-t", "-it", "--init", "--read-only"})
+_RUN_VALUED = frozenset({"--name", "-p", "--publish", "-e", "--env", "-v", "--volume", "--network",
+                         "--entrypoint", "--tmpfs", "-u", "--user", "--mount", "--cap-drop",
+                         "--cap-add", "--security-opt", "--pids-limit", "-m", "--memory",
+                         "--memory-swap", "--sysctl", "--ipc", "-w", "--workdir"})
+
+
+def _run_image(command: str) -> str:
+    """The image operand of one `docker run` command: the first word after its options."""
+    import shlex
+    words = shlex.split(command.split("docker run", 1)[1])
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if not word.startswith("-"):
+            return word
+        if word in _RUN_FLAGS or (word.startswith("--") and "=" in word):
+            i += 1
+        elif word in _RUN_VALUED:
+            i += 2
+        else:
+            raise AssertionError(f"`docker run` option {word!r} is not known to this reader: {command!r}")
+    raise AssertionError(f"`docker run` with no image: {command!r}")
+
+
+def _ci_images() -> list[str]:
+    """Every image the CI workflow pulls: its `image:` keys and the image operand of each `docker run`
+    command, continuation lines joined and comments left out. An image a `docker build -t` in the
+    workflow makes is not pulled, so it is left out too."""
+    text = re.sub(r"\\\n\s*", " ", _text(CI))
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    built = {m for line in lines for m in re.findall(r"docker build\b.*?\s-t\s+(\S+)", line)}
+    runs = [_run_image(m.group(1)) for line in lines
+            for m in re.finditer(r"(?:^|\$\(|;|&&|\|\||\bif|\bthen|!)\s*(docker run\s.*)", line)]
+    return _image_refs(CI) + [image for image in runs if image not in built]
+
+
+def test_the_workflow_image_reader_finds_the_operand_after_the_options():
+    assert _run_image('docker run -d --name m -p 1:1 -e A="b c" -v /x:/y:ro img:1@sha256:'
+                      + "0" * 64 + " server /data") == "img:1@sha256:" + "0" * 64
+    assert _run_image('docker run --rm --network host -e X=y img:2 "$@"') == "img:2"
+    with pytest.raises(AssertionError, match="not known"):
+        _run_image("docker run --privileged img:3")
 
 
 def _pinned(path: Path) -> dict[str, str]:
@@ -1163,12 +1222,33 @@ def test_every_image_the_development_stack_pulls_is_pinned_by_digest():
     assert not unpinned, f"the development stack pulls these by tag: {unpinned}"
 
 
-def test_the_ci_images_still_pulled_by_tag_are_named_in_the_readme_with_a_digest():
-    table = _readme_digest_table()
-    pulled = _tag_only_images()
-    assert {"pgvector/pgvector:pg16", "redis:7-alpine"} <= set(pulled), pulled
-    missing = sorted(set(pulled) - set(table))
-    assert not missing, f"README Hardening does not list these tag-only images with a digest: {missing}"
+def test_every_image_the_ci_workflow_pulls_is_pinned_by_digest():
+    """docs/17 "unpinned inputs": the workflow's service containers and every `docker run` it starts name
+    their image by digest, so CI does not test against whatever a registry serves for a tag that day."""
+    images = _ci_images()
+    names = {image.split("@")[0] for image in images}
+    assert {"pgvector/pgvector:pg16", "redis:7-alpine", "axllent/mailpit:v1.31.0",
+            "ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z",
+            "ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z"} <= names, names
+    unpinned = sorted({i for i in images if not _DIGEST.match(i)})
+    assert not unpinned, f"the CI workflow pulls these by tag: {unpinned}"
+
+
+def test_the_ci_digests_are_the_ones_both_stacks_pin():
+    """A tag CI pulls carries the digest the development stack pins for it, production's where production
+    runs it too, and the README table's, so CI tests the bytes a deployment runs and a pin moved in one
+    file without the others fails here."""
+    dev, prod, table = _pinned(DEV_COMPOSE), _pinned(COMPOSE), _readme_digest_table()
+    wrong = {}
+    for image in _ci_images():
+        name, _, digest = image.partition("@")
+        expected = {"development stack": dev.get(name), "README": table.get(name)}
+        if name in prod:
+            expected["compose.yml"] = prod[name]
+        for where, pinned in expected.items():
+            if pinned != digest:
+                wrong[f"{name} ({where})"] = (digest, pinned)
+    assert not wrong, wrong
 
 
 def test_the_readme_digests_are_the_ones_both_stacks_pin():

@@ -54,8 +54,8 @@ env:
   # limiter, and the limiter works under it, against a Redis started with the production compose
   # file's own start script ("Start the ACL Redis" below). The tenant is a second user that step
   # adds, standing for another tenant of a shared Redis. Throwaways like every credential here.
-  NOCTORNAL_TEST_ACL_REDIS_URL: redis://noctornal_limiter:dev_only_change_me@localhost:6390/0
-  NOCTORNAL_TEST_ACL_REDIS_TENANT_URL: redis://acl_tenant:dev_only_change_me@localhost:6390/0
+  NOCTORNAL_TEST_ACL_REDIS_URL: rediss://noctornal_limiter:dev_only_change_me@localhost:6390/0?ssl_ca_certs=/tmp/acl-redis-tls/ca.crt
+  NOCTORNAL_TEST_ACL_REDIS_TENANT_URL: rediss://acl_tenant:dev_only_change_me@localhost:6390/0?ssl_ca_certs=/tmp/acl-redis-tls/ca.crt
   MINIO_ENDPOINT: localhost:9000
   MINIO_ACCESS_KEY: noctornal
   MINIO_SECRET_KEY: dev_only_change_me
@@ -102,17 +102,111 @@ jobs:
       # A digest copied from a local image store can name a manifest the
       # registry never had (an image pulled from one registry and re-tagged
       # for another), and the host that copied it starts the stack from its
-      # own store, so only a clean machine fails. Ask each registry.
+      # own store, so only a clean machine fails. Ask each registry, for the
+      # images this workflow runs as well as the stacks'.
       - name: Every pinned image resolves in its registry
         run: |
           set -euo pipefail
           refs=$(grep -hoE '[A-Za-z0-9./_:-]+@sha256:[0-9a-f]{64}' \
-                   infra/docker-compose.yml infra/production/compose.yml Dockerfile | sort -u)
+                   infra/docker-compose.yml infra/production/compose.yml Dockerfile \
+                   .github/workflows/ci.yml | sort -u)
           [ -n "$refs" ]
           for ref in $refs; do
             docker buildx imagetools inspect "$ref" > /dev/null
             echo "resolves: $ref"
           done
+      # The step above asks only about what carries a digest, so an image this workflow pulls by tag
+      # would pass it. Every `image:` key, and every `docker run` command with its continuation lines
+      # joined, must name a digest; comment lines start with `#` and are not read. An image the
+      # workflow builds itself (noctornal-api:ci) is not pulled.
+      - name: No workflow image is pulled by tag
+        run: |
+          set -euo pipefail
+          wf=.github/workflows/ci.yml
+          runs=$(sed -e ':a' -e '/\\$/N; s/\\\n\s*/ /; ta' "$wf" | grep -E '^\s*(if !?\s*)?docker +run ' || true)
+          [ -n "$runs" ]
+          bad=$( { grep -nE '^\s+image:\s*\S' "$wf" | grep -vE 'image:\s*\S+@sha256:[0-9a-f]{64}\s*$' || true
+                   printf '%s\n' "$runs" | grep -v '@sha256:' | grep -v 'noctornal-api:ci' || true; } )
+          if [ -n "$bad" ]; then
+            echo "::error::these images are pulled by tag; pin them by digest:"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+      # One tag, one digest, across the compose files, the Dockerfile and this workflow: a pin moved in
+      # one file and not the others would leave CI testing other bytes than a deployment runs.
+      - name: One digest per image
+        run: |
+          set -euo pipefail
+          two=$(grep -hoE '[A-Za-z0-9./_:-]+@sha256:[0-9a-f]{64}' \
+                  infra/docker-compose.yml infra/production/compose.yml Dockerfile \
+                  .github/workflows/ci.yml | sort -u | sed 's/@.*//' | uniq -d)
+          if [ -n "$two" ]; then
+            echo "::error::these tags are pinned to more than one digest:"
+            printf '%s\n' "$two"
+            exit 1
+          fi
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # The requirement files pinned by hash, downloaded with the hashes required, so a pin naming a
+      # file PyPI does not serve fails here, by name, and not on an operator's host. yara-x once per
+      # Linux architecture the image builds on, since each wheel has a hash of its own.
+      - name: Every hash-pinned requirement resolves on PyPI
+        run: |
+          set -euo pipefail
+          python -m pip download --quiet --no-deps --require-hashes -r requirements-pip.txt -d /tmp/pins
+          for platform in manylinux_2_28_x86_64 manylinux_2_28_aarch64; do
+            python -m pip download --quiet --no-deps --only-binary=:all: --require-hashes \
+              --python-version "$PYTHON_VERSION" --platform "$platform" \
+              -r requirements-yara.txt -d "/tmp/pins/$platform"
+          done
+          find /tmp/pins -name '*.whl' -printf 'resolves: %f\n'
+
+  # The production image, built from the Dockerfile as a deployment builds it, which no other job
+  # does: a pin the Dockerfile carries that no longer installs fails here and not on an operator's
+  # host. Its own job, so it runs beside the test legs. Nothing is pushed.
+  image:
+    name: Production image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Build the production image
+        run: docker build -t noctornal-api:ci .
+      # The Dockerfile already refuses a gnupg other than its pin; this reads the built image, from
+      # the ARG and not a second copy of the version, so the two cannot disagree.
+      - name: The image carries the pinned gnupg
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^ARG GNUPG_VERSION=//p' Dockerfile)
+          [ -n "$want" ]
+          got=$(docker run --rm --entrypoint dpkg-query noctornal-api:ci -W -f='${Version}' gnupg)
+          gpg=$(docker run --rm --entrypoint gpg noctornal-api:ci --version | head -1)
+          echo "gnupg $got; $gpg"
+          [ "$got" = "$want" ]
+          [ "$gpg" = "gpg (GnuPG) ${want%%-*}" ]
+      # The default build carries yara-x at the version constraints.txt pins (read from the file, not
+      # retyped), and the analysis child's selftest compiles and scans with it under the child's
+      # limits; a build with NOCTORNAL_EXTRAS empty carries none, so the opt-out is one.
+      - name: The image carries yara-x, and the opt-out does not
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^yara-x==//p' constraints.txt)
+          [ -n "$want" ]
+          docker run --rm -i -e WANT="$want" --entrypoint python noctornal-api:ci - <<'PY'
+          import importlib.metadata
+          import os
+          import sys
+          from noctornal_api import lab_triage
+          version = importlib.metadata.version("yara-x")
+          engine = lab_triage.selftest(lab_triage.settings_or_default())["yara"]
+          print(f"yara-x {version}; selftest {engine}")
+          sys.exit(0 if version == os.environ["WANT"] and engine.get("ok") is True else 1)
+          PY
+          docker build --build-arg NOCTORNAL_EXTRAS= -t noctornal-api:ci-noyara .
+          if docker run --rm --entrypoint python noctornal-api:ci-noyara -c "import yara_x"; then
+            echo "::error::the image built with NOCTORNAL_EXTRAS empty still carries yara-x"
+            exit 1
+          fi
 
   drift:
     name: Ontology drift
@@ -151,9 +245,12 @@ jobs:
             extras: dev
             select: extras_absent
             full: false
+    # Every image this job runs is pinned by digest, the same digest infra/docker-compose.yml and
+    # infra/production/compose.yml pin for that tag, so CI tests against the bytes a deployment runs.
+    # The tag stays for the reader; Docker pulls by the digest.
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
         env:
           POSTGRES_DB: noctornal
           POSTGRES_USER: noctornal
@@ -163,15 +260,16 @@ jobs:
           --health-cmd "pg_isready -U noctornal"
           --health-interval 5s --health-timeout 5s --health-retries 20
       redis:
-        image: redis:7-alpine
+        image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 20
       # MinIO is not a service container but a `docker run` step below: its image needs the
-      # argument `server /data`, which a service container cannot pass, and the step uses the
-      # same image as infra/docker-compose.yml. That is a pinned build mirrored byte for byte to
-      # this project's GHCR namespace, since public registries stopped serving it anonymously.
+      # argument `server /data`, which a service container cannot pass, and the step runs the
+      # image infra/docker-compose.yml pins, by the same digest. That is a pinned build mirrored
+      # byte for byte to this project's GHCR namespace, since public registries stopped serving it
+      # anonymously.
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -182,6 +280,8 @@ jobs:
 
       - name: Install
         run: |
+          # pip itself first, by version and hash, as both installers install it.
+          pip install --require-hashes -r requirements-pip.txt
           # -c constraints.txt on every install: the exact versions the release's suite passed on,
           # the same a developer or an installer has. test_dependency_pins.py holds this file, the
           # installers and the Dockerfile to it, and the installed environment to the pins.
@@ -197,7 +297,8 @@ jobs:
             -p 9000:9000 \
             -e MINIO_ROOT_USER=noctornal \
             -e MINIO_ROOT_PASSWORD=dev_only_change_me \
-            ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb \
+            server /data
           # Wait for readiness rather than sleeping: a fixed sleep is either
           # too short on a slow runner or wasted on a fast one.
           for i in $(seq 1 40); do
@@ -213,12 +314,13 @@ jobs:
       - name: Start Mailpit
         run: |
           # A step, not a service container: the health check has to reach Mailpit's own /readyz,
-          # and `docker run` keeps CI on the image and ports infra/docker-compose.yml uses. The
-          # same pinned tag as that file, since `:latest` is a dependency on somebody else's
-          # release day; test_dependency_pins.py fails if the two tags differ.
+          # and `docker run` keeps CI on the image and ports infra/docker-compose.yml uses. Pinned
+          # by digest, the same as that file, since a tag is a dependency on somebody else's
+          # release day; test_dependency_pins.py fails if the two tags differ, and
+          # test_image_context_and_production_stack.py if the two digests do.
           docker run -d --name mailpit \
             -p 1025:1025 -p 8025:8025 \
-            axllent/mailpit:v1.31.0
+            axllent/mailpit:v1.31.0@sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24
           for i in $(seq 1 40); do
             if curl -fsS http://localhost:8025/readyz >/dev/null 2>&1; then
               echo "Mailpit ready after ${i} attempt(s)"; exit 0
@@ -235,22 +337,37 @@ jobs:
       # apps/api/tests/acl_redis_support.py with the tenant user added, in the image that file
       # names; REDIS_URL names host `redis` inside, so the script takes production's branch. A step
       # because a service container cannot be given a command, and after Install because the
-      # renderer imports the suite's compose reader.
+      # renderer imports the suite's compose reader. It speaks TLS alone, as production does, with
+      # a throwaway CA and a certificate for the runner's own name (the tests reach it at
+      # localhost), made here and mounted where the compose file mounts tls/redis.
       - name: Start the ACL Redis
         run: |
           python apps/api/tests/acl_redis_support.py --tenant > /tmp/acl-redis-start.sh
+          mkdir -p /tmp/acl-redis-tls && cd /tmp/acl-redis-tls
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+            -subj /CN=acl-redis-test-ca -keyout ca.key -out ca.crt \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+          openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+            -subj /CN=localhost -keyout server.key -out server.csr
+          printf '%s\n' "subjectAltName=DNS:localhost,DNS:redis,IP:127.0.0.1" \
+            "basicConstraints=critical,CA:FALSE" "keyUsage=critical,digitalSignature" \
+            "extendedKeyUsage=serverAuth" "authorityKeyIdentifier=keyid" > leaf.cnf
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 \
+            -sha256 -extfile leaf.cnf -out server.crt
+          chmod 644 ca.crt server.crt server.key && cd "$GITHUB_WORKSPACE"
           docker run -d --name acl-redis \
             -p 127.0.0.1:6390:6379 \
             -e REDIS_PASSWORD=dev_only_change_me \
-            -e REDIS_URL=redis://noctornal_limiter:dev_only_change_me@redis:6379/0 \
+            -e REDIS_URL=rediss://noctornal_limiter:dev_only_change_me@redis:6379/0 \
             -e ACL_TENANT_PASSWORD=dev_only_change_me \
             -v /tmp/acl-redis-start.sh:/acl-redis-start.sh:ro \
+            -v /tmp/acl-redis-tls:/tls:ro \
             redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 \
             /bin/sh /acl-redis-start.sh
-          # The compose file's own healthcheck, signed in as the limiter.
+          # The compose file's own healthcheck, signed in as the limiter, over TLS.
           for i in $(seq 1 40); do
             if docker exec -e REDISCLI_AUTH=dev_only_change_me acl-redis \
-                 redis-cli --user noctornal_limiter ping 2>/dev/null | grep -q PONG; then
+                 redis-cli --tls --cacert /tls/ca.crt --user noctornal_limiter ping 2>/dev/null | grep -q PONG; then
               echo "ACL Redis ready on attempt ${i}"; exit 0
             fi
             sleep 1
@@ -312,7 +429,8 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_local="http://noctornal:dev_only_change_me@localhost:9000" \
-              ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z "$@"
+              ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780 \
+              "$@"
           }
           for i in $(seq 1 30); do
             mc ls local >/dev/null 2>&1 && break

@@ -115,16 +115,19 @@ def test_an_old_layout_is_moved_value_for_value(prod):
     assert config.MIGRATION_DSN_ENV not in secrets
     assert init[config.OWNER_PASSWORD_ENV] == OWNER
     assert migrate[config.MIGRATION_DSN_ENV] == \
-        f"postgresql+psycopg://noctornal:{OWNER}@postgres:5432/noctornal"
+        f"postgresql+psycopg://noctornal:{OWNER}@postgres:5432/noctornal?{config.DATABASE_TLS_QUERY}"
     assert init["NOCTORNAL_EGRESS_DB_PASSWORD"] == EGRESS
     assert init["NOCTORNAL_WORKER_DB_PASSWORD"] == WORKER
-    assert secrets["DATABASE_URL"].endswith(f":{APP}@postgres:5432/noctornal")
+    assert secrets["DATABASE_URL"].endswith(
+        f":{APP}@postgres:5432/noctornal?{config.DATABASE_TLS_QUERY}")
+    assert ("DATABASE_URL in secrets.env now asks for TLS that checks the database's "
+            "certificate (sslmode=verify-full)") in said
     assert secrets["REDIS_PASSWORD"] == REDIS
-    assert secrets["REDIS_URL"] == f"redis://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0"
+    assert secrets["REDIS_URL"] == f"rediss://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0?ssl_ca_certs=/certs/ca.crt"
     text = (prod / "secrets.env").read_text(encoding="utf-8")
     assert "# POSTGRES_PASSWORD moved to postgres-init.env (docs/17 F52" in text
     assert "moved POSTGRES_PASSWORD from secrets.env to postgres-init.env" in said
-    assert f"REDIS_URL now signs in as {LIMITER_ACL_USER} with REDIS_PASSWORD" in said
+    assert f"REDIS_URL now signs in as {LIMITER_ACL_USER} with REDIS_PASSWORD, over TLS" in said
 
 
 def test_every_changed_file_is_backed_up_first_and_the_new_files_are_private(prod):
@@ -154,7 +157,8 @@ def test_the_moved_files_are_ones_every_reader_accepts(prod):
     migrate = {"NOCTORNAL_ENV": "production", **_env(prod / "migrate.env")}
     assert config.migration_job_problems(migrate) == []
     assert secrets["REDIS_URL"].startswith(
-        f"redis://{LIMITER_ACL_USER}:{secrets['REDIS_PASSWORD']}@")
+        f"rediss://{LIMITER_ACL_USER}:{secrets['REDIS_PASSWORD']}@")
+    assert config.redis_hop(secrets["REDIS_URL"]) == "verified"
 
 
 def test_a_second_run_changes_nothing(prod):
@@ -246,7 +250,7 @@ def test_a_password_that_is_not_url_safe_is_replaced(prod):
     assert secrets["REDIS_PASSWORD"] != "p@ss:w/rd"
     assert _helper().URL_SAFE.match(secrets["REDIS_PASSWORD"])
     assert secrets["REDIS_URL"] == \
-        f"redis://{LIMITER_ACL_USER}:{secrets['REDIS_PASSWORD']}@redis:6379/0"
+        f"rediss://{LIMITER_ACL_USER}:{secrets['REDIS_PASSWORD']}@redis:6379/0?ssl_ca_certs=/certs/ca.crt"
     assert "generated REDIS_PASSWORD (it was not URL-safe)" in said
     assert not any("p@ss" in s for s in said)
 
@@ -257,7 +261,7 @@ def test_a_url_that_disagreed_with_the_password_is_made_to_agree(prod):
     (prod / "secrets.env").write_text(text, encoding="utf-8")
     _run(prod)
     assert _env(prod / "secrets.env")["REDIS_URL"] == \
-        f"redis://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0"
+        f"rediss://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0?ssl_ca_certs=/certs/ca.crt"
 
 
 def test_a_redis_on_another_host_is_left_alone(prod):
@@ -279,6 +283,8 @@ def test_a_redis_on_another_host_is_left_alone(prod):
     f"redis://:{REDIS}@REDIS:6379/0",                    # host names have no case
     "redis://redis:6379/0",
     f"rediss://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0",
+    f"redis://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0",     # plain text, which it no longer speaks
+    f"rediss://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0?ssl_cert_reqs=none&ssl_check_hostname=no",
     f"redis://other:{REDIS}@redis:6379/0?socket_timeout=1",
     "unix:///run/redis.sock",
     "not a url",
@@ -288,8 +294,9 @@ def test_a_redis_on_another_host_is_left_alone(prod):
 ])
 def test_whatever_the_start_check_refuses_the_installer_rewrites(prod, url, tmp_path):
     """No circle: the redis service's start check names this step for every REDIS_URL it refuses, so after
-    this step its start check passes, whatever REDIS_URL was. A `rediss://` URL naming the bundled service
-    is rewritten here, not left alone and refused there."""
+    this step its start check passes, whatever REDIS_URL was. A `redis://` URL naming the bundled service
+    is rewritten here, not left alone and refused there, and so is one that switches the check of the
+    server off, which the API would refuse. A URL naming another host is left alone by both."""
     _old_layout(prod)
     text = OLD_SECRETS.replace(f"REDIS_URL=redis://:{REDIS}@redis:6379/0", f"REDIS_URL={url}")
     (prod / "secrets.env").write_text(text, encoding="utf-8")
@@ -300,6 +307,79 @@ def test_whatever_the_start_check_refuses_the_installer_rewrites(prod, url, tmp_
         {"REDIS_PASSWORD": secrets["REDIS_PASSWORD"], "REDIS_URL": secrets["REDIS_URL"]},
         tmp_path)
     assert code == 0, err
+    if "cache.corp.example" not in url:
+        assert config.redis_hop_problems({"REDIS_URL": secrets["REDIS_URL"]}) == []
+
+
+# ---------------------------------------------------------------------------
+# The database hop: every DSN naming the bundled database asks for verify-full
+# ---------------------------------------------------------------------------
+
+def test_the_installer_adds_verify_full_to_the_bundled_postgres_dsns(prod):
+    """The compose database admits the network over TLS alone and production refuses any sslmode but
+    verify-full, so an existing deployment's DSNs are brought along, in every file that holds one: the
+    egress proxy's too when it exists. A query parameter of the operator's own is kept, an sslmode that
+    would not check the server is replaced, and an sslrootcert already named is left as it is."""
+    _old_layout(prod)
+    text = OLD_SECRETS.replace(
+        f"DATABASE_URL=postgresql+psycopg://noctornal_app:{APP}@postgres:5432/noctornal",
+        f"DATABASE_URL=postgresql+psycopg://noctornal_app:{APP}@postgres:5432/noctornal"
+        f"?connect_timeout=5&sslmode=require")
+    text += (f"NOCTORNAL_WORKER_DATABASE_URL=postgresql+psycopg://noctornal_worker:{WORKER}"
+             f"@Postgres:5432/noctornal?sslrootcert=/srv/our-ca.crt\n")
+    (prod / "secrets.env").write_text(text, encoding="utf-8")
+    (prod / "egress-proxy.env").write_text(
+        f"NOCTORNAL_EGRESS_DATABASE_URL=postgresql://noctornal_egress:{EGRESS}@postgres:5432/noctornal\n",
+        encoding="utf-8")
+    status, said = _run(prod)
+    assert status == 0, said
+    secrets = _env(prod / "secrets.env")
+    assert secrets["DATABASE_URL"] == (f"postgresql+psycopg://noctornal_app:{APP}@postgres:5432/"
+                                       f"noctornal?connect_timeout=5&sslmode=verify-full"
+                                       f"&sslrootcert=/certs/ca.crt")
+    assert secrets["NOCTORNAL_WORKER_DATABASE_URL"] == (
+        f"postgresql+psycopg://noctornal_worker:{WORKER}@Postgres:5432/noctornal"
+        f"?sslrootcert=/srv/our-ca.crt&sslmode=verify-full")
+    assert _env(prod / "egress-proxy.env")["NOCTORNAL_EGRESS_DATABASE_URL"] == (
+        f"postgresql://noctornal_egress:{EGRESS}@postgres:5432/noctornal?{config.DATABASE_TLS_QUERY}")
+    for key, name in (("DATABASE_URL", "secrets.env"), ("NOCTORNAL_WORKER_DATABASE_URL", "secrets.env"),
+                      ("NOCTORNAL_MIGRATION_DATABASE_URL", "migrate.env"),
+                      ("NOCTORNAL_EGRESS_DATABASE_URL", "egress-proxy.env")):
+        assert (f"{key} in {name} now asks for TLS that checks the database's certificate "
+                f"(sslmode=verify-full)") in said, key
+    assert (prod / f"egress-proxy.env.backup-{STAMP}").is_file()
+    # What the API, the migration job and the proxy then ask of the hop is answered.
+    env = {"NOCTORNAL_ENV": "production", **secrets, **_env(prod / "migrate.env"),
+           **_env(prod / "egress-proxy.env")}
+    for key in ("DATABASE_URL", "NOCTORNAL_WORKER_DATABASE_URL", "NOCTORNAL_MIGRATION_DATABASE_URL",
+                "NOCTORNAL_EGRESS_DATABASE_URL"):
+        assert config.database_hop(env[key], {}) == "verified", key
+    assert _run(prod)[1] == ["nothing to change: the files are already in this release's layout"]
+
+
+def test_the_installer_leaves_another_postgres_host_alone(prod):
+    _old_layout(prod)
+    text = OLD_SECRETS.replace("@postgres:5432/noctornal\nREDIS", "@db.agency.example:5432/noctornal\nREDIS")
+    assert text != OLD_SECRETS
+    (prod / "secrets.env").write_text(text, encoding="utf-8")
+    status, said = _run(prod)
+    assert status == 0, said
+    assert _env(prod / "secrets.env")["DATABASE_URL"] == \
+        f"postgresql+psycopg://noctornal_app:{APP}@db.agency.example:5432/noctornal"
+    assert ("note: DATABASE_URL in secrets.env names a database on another host, so it was left "
+            "alone; production refuses it without sslmode=verify-full (infra/production/README.md, "
+            "step 3)") in said
+    # An egress-proxy.env that does not exist is not created: its keys come from egress_setup.py.
+    assert not (prod / "egress-proxy.env").exists()
+
+
+def test_the_helpers_database_query_is_the_applications():
+    helper = _helper()
+    assert helper.DATABASE_SSLMODE == config.DATABASE_SSLMODE
+    assert helper.DATABASE_CA_FILE == config.DATABASE_CA_FILE
+    assert config.DATABASE_TLS_QUERY == \
+        f"sslmode={helper.DATABASE_SSLMODE}&sslrootcert={helper.DATABASE_CA_FILE}"
+
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +557,7 @@ def test_a_file_it_cannot_write_stops_it_naming_the_file_and_what_changed(
     assert config.MIGRATION_DSN_ENV not in _env(prod / "secrets.env")
     assert _env(prod / "postgres-init.env")[config.OWNER_PASSWORD_ENV] == OWNER
     assert _env(prod / "migrate.env")[config.MIGRATION_DSN_ENV] == \
-        f"postgresql+psycopg://noctornal:{OWNER}@postgres:5432/noctornal"
+        f"postgresql+psycopg://noctornal:{OWNER}@postgres:5432/noctornal?{config.DATABASE_TLS_QUERY}"
     assert not any("make them the same" in line for line in said), said
 
 
@@ -498,7 +578,7 @@ def test_a_blocked_last_write_leaves_the_real_dsn_where_a_rerun_finds_it(prod):
     status, said = _run(prod)
     assert status == 0, said
     assert _env(prod / "migrate.env")[config.MIGRATION_DSN_ENV] == \
-        f"postgresql+psycopg://noctornal:{OWNER}@postgres:5432/noctornal"
+        f"postgresql+psycopg://noctornal:{OWNER}@postgres:5432/noctornal?{config.DATABASE_TLS_QUERY}"
     assert OWNER not in (prod / "secrets.env").read_text(encoding="utf-8")
     assert not any("make them the same" in line for line in said), said
 
@@ -594,7 +674,7 @@ def test_a_fresh_directory_gets_its_redis_secret_and_is_asked_for_the_owners(pro
     secrets = _env(prod / "secrets.env")
     assert "replace-me" not in secrets["REDIS_PASSWORD"]
     assert secrets["REDIS_URL"] == \
-        f"redis://{LIMITER_ACL_USER}:{secrets['REDIS_PASSWORD']}@redis:6379/0"
+        f"rediss://{LIMITER_ACL_USER}:{secrets['REDIS_PASSWORD']}@redis:6379/0?ssl_ca_certs=/certs/ca.crt"
     assert any(s.startswith("still to do: choose the schema owner's password") for s in said)
     assert "replace-me" in _env(prod / "postgres-init.env")[config.OWNER_PASSWORD_ENV]
     # The placeholders still to fill are named, never shown.

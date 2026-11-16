@@ -181,6 +181,93 @@ def test_it_passes_with_a_caveat_on_other_platforms_and_without_yara_x(queue, mo
     assert lab_static.LIMITS_WORDS["wall_clock_only"] in check.caveat
 
 
+def _selftest_saying(monkeypatch, yara):
+    """The real selftest, with its `yara` fact replaced (or removed, for None)."""
+    from noctornal_api import lab_triage
+    real = lab_triage.selftest
+
+    def reporting(settings, **kw):
+        out = real(settings, **kw)
+        out.pop("yara", None)
+        if yara is not None:
+            out["yara"] = dict(yara)
+        return out
+
+    monkeypatch.setattr(lab_triage, "selftest", reporting)
+
+
+def test_the_row_reports_the_yara_engine_version_and_no_caveat_when_installed(queue):
+    """docs/17 "YARA in the worker": with the engine installed and its selftest scan working, the row names
+    the version and says nothing about YARA being absent."""
+    pytest.importorskip("yara_x")
+    from noctornal_api.yara_rules import engine_version
+    check = readiness._sample_static_analysis(queue)
+    assert check.ok, check
+    assert f"yara-x {engine_version()}. Limits:" in check.evidence
+    assert "YARA is not installed" not in (check.caveat or "")
+    assert "up -d --build" not in (check.caveat or "")
+
+
+def test_the_row_fails_when_the_engine_is_installed_but_the_workers_selftest_scan_failed(
+        queue, monkeypatch):
+    """An installed engine that cannot run under the child's limits would fail every YARA step and record
+    each sample unscanned, so the row is red and says which limits to look at; the failure is named by
+    its class alone, and a class that is not one is not repeated."""
+    from noctornal_api import lab_triage, yara_rules
+    monkeypatch.setattr(yara_rules, "engine_version", lambda: "1.20.0")
+    _selftest_saying(monkeypatch, {"ok": False, "installed": True, "error_class": "MemoryError"})
+    check = readiness._sample_static_analysis(queue)
+    assert not check.ok
+    assert "yara-x 1.20.0" in check.evidence and "(MemoryError)" in check.evidence
+    assert "could not compile a one-rule test and scan with it" in check.evidence
+    assert lab_triage.MEMORY_ENV in check.action
+    _selftest_saying(monkeypatch, {"ok": False, "installed": True,
+                                   "error_class": "Error: <b>quoted</b> bytes"})
+    check = readiness._sample_static_analysis(queue)
+    assert not check.ok and "quoted" not in check.evidence
+
+
+@pytest.mark.parametrize("yara", [None, {"ok": None, "installed": False}])
+def test_an_installed_engine_with_no_selftest_failure_does_not_fail_the_row(queue, monkeypatch, yara):
+    """Only a scan that ran and failed fails the row: a selftest that says nothing about YARA, or that the
+    engine is absent where this process has it, is no new failure (the second is a version mismatch the
+    runner already refuses)."""
+    from noctornal_api import yara_rules
+    monkeypatch.setattr(yara_rules, "engine_version", lambda: "1.20.0")
+    _selftest_saying(monkeypatch, yara)
+    assert readiness._sample_static_analysis(queue).ok
+
+
+def test_the_row_passes_with_the_rebuild_caveat_when_yara_is_absent(queue, monkeypatch):
+    """Absent is a caveat, as before, and it now says how a container deployment gets the engine."""
+    from noctornal_api import yara_rules
+    monkeypatch.setattr(yara_rules, "engine_version", lambda: None)
+    _selftest_saying(monkeypatch, {"ok": None, "installed": False})
+    check = readiness._sample_static_analysis(queue)
+    assert check.ok
+    assert "YARA is not installed, so static triage scans with no rules" in check.caveat
+    assert readiness._YARA_REBUILD in check.caveat
+    assert "NOCTORNAL_EXTRAS set empty" in check.caveat and "up -d --build" in check.caveat
+
+
+def test_yara_rules_active_names_the_rebuild_when_the_engine_is_absent(conn, monkeypatch):
+    from noctornal_api import yara_rules
+    monkeypatch.setattr(yara_rules, "build_key", lambda: None)
+    check = readiness._yara_rules_active(conn)
+    assert check.ok
+    assert check.caveat.startswith("The YARA engine (yara-x) is not installed")
+    assert check.caveat.endswith(readiness._YARA_REBUILD)
+
+
+def test_yara_rules_active_has_no_engine_caveat_when_installed(conn):
+    pytest.importorskip("yara_x")
+    from noctornal_api.yara_rules import build_key
+    check = readiness._yara_rules_active(conn)
+    assert check.ok
+    assert f"for {build_key().engine} on" in check.evidence
+    assert "not installed" not in (check.caveat or "")
+
+
 @pytest.mark.parametrize("exposure,says,never", [
     ({"proc_environ_readable": True, "database_reachable": False},
      "secrets", "database host"),

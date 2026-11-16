@@ -8,8 +8,11 @@
 # NOCTORNAL_TLS_MODE is one token. `internal` (the default) uses Caddy's own CA, untrusted, for a
 # local run against /etc/hosts names, so a forgotten variable never hammers Let's Encrypt. An
 # e-mail address selects ACME with that account address; both hostnames must then resolve to this
-# host and reach port 80. Certificates and the ACME key live in the caddy-data volume, and
-# re-issuing is rate-limited per hostname per week.
+# host and reach port 80, and Caddy needs a route out, which compose.yml does not give it: start the
+# stack with compose.acme.yml as well (infra/production/README.md, the ACME override). Certificates
+# and the ACME key live in the caddy-data volume, and re-issuing is rate-limited per hostname per
+# week. The mode is about these two public hostnames alone; the certificates of the servers inside
+# the compose network come from scripts/internal_tls.py.
 #
 # Caddy appends the address it saw to X-Forwarded-For, so the application must run with
 # NOCTORNAL_TRUSTED_PROXY_HOPS=1 to read that last entry; entries a client invents go unread.

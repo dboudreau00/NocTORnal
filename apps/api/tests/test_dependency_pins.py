@@ -248,16 +248,81 @@ def test_no_pin_names_a_distribution_nothing_asks_for():
 
 def _pip_installs(text: str) -> list[str]:
     """Each `pip install` command in `text`, continuation lines joined, the
-    upgrade of pip itself left out (it is not a dependency of anything)."""
+    install of pip itself from requirements-pip.txt left out (it is not a
+    dependency of anything, and a test of its own below holds it)."""
     joined = re.sub(r"\\\r?\n\s*", " ", text)
     commands = []
     for line in joined.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        if re.search(r"pip['\"]?\s*,?\s*['\"]?install\b", stripped) and "--upgrade pip" not in stripped:
+        if (re.search(r"pip['\"]?\s*,?\s*['\"]?install\b", stripped)
+                and "requirements-pip.txt" not in stripped):
             commands.append(stripped)
     return commands
+
+
+PIP_PIN = ROOT / "requirements-pip.txt"
+_HASH = re.compile(r"--hash=sha256:([0-9a-f]{64})")
+
+
+def _hashed_requirements(path: Path) -> dict[str, tuple[str, list[str]]]:
+    """name -> (version, sha256 hashes) for a requirements file in pip's hash-checking form:
+    `name==version` and its `--hash=sha256:` options, continuation lines joined, comments left out.
+    Anything else on a line is a failure, never skipped."""
+    joined = re.sub(r"\\\r?\n\s*", " ", path.read_text(encoding="utf-8"))
+    found: dict[str, tuple[str, list[str]]] = {}
+    for raw in joined.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        spec, *options = line.split()
+        match = _PIN.match(spec)
+        assert match, f"{path.name}: not `name==version`: {raw!r}"
+        hashes = [_HASH.fullmatch(o) for o in options]
+        assert all(hashes), f"{path.name}: only --hash=sha256:<64 hex> may follow a pin: {raw!r}"
+        name = canonicalize_name(match.group(1))
+        assert name not in found, f"{path.name} names {name} twice"
+        found[name] = (match.group(2), [h.group(1) for h in hashes])
+    return found
+
+
+def test_the_pip_hash_in_the_file_is_a_64_hex_sha256():
+    """docs/17 "unpinned inputs": pip itself is one exact pin with the sha256 of its wheel, in the
+    form pip's --require-hashes mode reads, and no other requirement, option or editable install."""
+    pins = _hashed_requirements(PIP_PIN)
+    assert set(pins) == {"pip"}, pins
+    version, hashes = pins["pip"]
+    Version(version)
+    assert len(hashes) == 1, "the wheel's hash, not an sdist pip could be made to build"
+    assert "pip-<version>-py3-none-any.whl" in PIP_PIN.read_text(encoding="utf-8"), \
+        "the header says which file's hash to take"
+
+
+def test_the_pip_pin_is_one_hashed_file_and_both_installers_install_from_it():
+    """Both installers and CI install pip from the file with --require-hashes, say by name when the file
+    is missing, stop when the install fails, and no longer upgrade pip to whatever PyPI serves."""
+    sh = (ROOT / "release/install.sh").read_text(encoding="utf-8")
+    ps1 = (ROOT / "release/install.ps1").read_text(encoding="utf-8")
+    joined = {rel: re.sub(r"\\\r?\n\s*", " ", text) for rel, text in
+              (("install.sh", sh), ("install.ps1", ps1))}
+    assert re.search(r'"\$VENV_PY" -m pip install --quiet --require-hashes -r '
+                     r'"\$REPO_ROOT/requirements-pip\.txt"\s+\|\| stop_with', joined["install.sh"])
+    assert ("& $VenvPython -m pip install --quiet --require-hashes -r "
+            "(Join-Path $RepoRoot 'requirements-pip.txt')\nif ($LASTEXITCODE -ne 0) {\n"
+            "    Stop-With 'pip could not be installed") in ps1.replace("\r\n", "\n")
+    for rel, text in joined.items():
+        assert "requirements-pip.txt is missing" in text, rel
+        assert "--upgrade pip" not in text, rel
+        # pip before the first dependency install, so every install after it runs the pinned pip.
+        assert text.index("--require-hashes -r") < text.index("-m pip install --quiet -c"), rel
+    install = _step(_ci(), "Install")
+    assert install.index("pip install --require-hashes -r requirements-pip.txt") \
+        < install.index("-c constraints.txt -r db/requirements.txt")
+    resolve = _step(_job(_ci(), "pinned-images"), "Every hash-pinned requirement resolves on PyPI")
+    assert "--require-hashes -r requirements-pip.txt" in resolve and "pip download" in resolve
+    assert "'requirements-pip.txt'" in (ROOT / "scripts/package_release.ps1").read_text(
+        encoding="utf-8"), "the release package must carry the file the installers refuse without"
 
 
 @pytest.mark.parametrize("rel, flag", [
@@ -403,6 +468,78 @@ def _step(text: str, name: str) -> str:
     return text[start:following if following > 0 else len(text)]
 
 
+def _job(text: str, key: str) -> str:
+    """One job of the workflow: from its key under `jobs:` to the next job's key."""
+    start = text.index(f"\n  {key}:\n")
+    following = re.search(r"\n  [A-Za-z][\w-]*:\n", text[start + 1:])
+    return text[start:start + 1 + following.start() if following else len(text)]
+
+
+def test_the_ci_pinned_images_job_reads_the_workflow_itself():
+    """docs/17 "unpinned inputs": the job that asks each registry about every pin reads the workflow's own
+    images too, refuses one pulled by tag, and refuses a tag pinned to two digests across the files, so
+    a CI pin that is wrong, missing or drifted from the compose files fails on the next push. The job
+    keeps its name, which branch rules use."""
+    text = _ci()
+    job = _job(text, "pinned-images")
+    assert "name: Pinned images resolve\n" in job
+    resolve = _step(job, "Every pinned image resolves in its registry")
+    for rel in ("infra/docker-compose.yml", "infra/production/compose.yml", "Dockerfile",
+                ".github/workflows/ci.yml"):
+        assert rel in resolve, rel
+    assert "set -euo pipefail" in resolve and '[ -n "$refs" ]' in resolve
+    assert "docker buildx imagetools inspect" in resolve
+    tag_only = _step(job, "No workflow image is pulled by tag")
+    assert "@sha256:" in tag_only and "image:" in tag_only and "docker +run" in tag_only
+    assert "exit 1" in tag_only and '[ -n "$runs" ]' in tag_only, "a scan that finds nothing fails"
+    one = _step(job, "One digest per image")
+    assert ".github/workflows/ci.yml" in one and "uniq -d" in one and "exit 1" in one
+
+
+#: A Debian package version: upstream, a Debian revision, and any stable-update suffix.
+_DEBIAN_VERSION = re.compile(r"\d[0-9A-Za-z.+~]*-[0-9A-Za-z.+~]+")
+
+
+def _dockerfile_runs() -> list[str]:
+    """Each RUN instruction of the Dockerfile, continuation lines joined."""
+    joined = re.sub(r"\\\r?\n\s*", " ", (ROOT / "Dockerfile").read_text(encoding="utf-8"))
+    return [line for line in joined.splitlines() if line.startswith("RUN ")]
+
+
+def test_the_dockerfile_pins_gnupg_by_exact_version_and_checks_it():
+    """docs/17 "unpinned inputs": the image installs one exact Debian version of gnupg, the version
+    F34's attestation is about, and the same RUN refuses a build whose gnupg or gpg (the package
+    holding the binary, which a binary-only rebuild suffixes) is not that source upload."""
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    pinned = re.findall(r"(?m)^ARG GNUPG_VERSION=(\S+)$", text)
+    assert len(pinned) == 1, pinned
+    assert _DEBIAN_VERSION.fullmatch(pinned[0]), pinned[0]
+    run = next(r for r in _dockerfile_runs() if "apt-get install" in r)
+    assert text.index("ARG GNUPG_VERSION=") < text.index("RUN apt-get update")
+    install = run.index('install -y --no-install-recommends "gnupg=${GNUPG_VERSION}"')
+    version = run.index('test "$(dpkg-query -W -f=\'${Version}\' gnupg)" = "${GNUPG_VERSION}"')
+    source = run.index('test "$(dpkg-query -W -f=\'${source:Version}\' gpg)" = "${GNUPG_VERSION}"')
+    assert install < version < source < run.index("rm -rf /var/lib/apt/lists/*")
+    bare = [r for r in _dockerfile_runs() if re.search(r"apt-get install\b[^&]*\sgnupg(\s|$)", r)]
+    assert not bare, f"gnupg installed at whatever version Debian ships: {bare}"
+
+
+def test_the_ci_image_job_builds_the_dockerfile():
+    """The production image is built on every push, so a gnupg pin Debian has superseded fails CI
+    rather than an operator's build, and the built image's gnupg and gpg are read back against the
+    Dockerfile's ARG, never a second copy of the version."""
+    job = _job(_ci(), "image")
+    assert "name: Production image builds\n" in job
+    assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in job
+    assert "docker build -t noctornal-api:ci ." in _step(job, "Build the production image")
+    check = _step(job, "The image carries the pinned gnupg")
+    assert "set -euo pipefail" in check
+    assert "sed -n 's/^ARG GNUPG_VERSION=//p' Dockerfile" in check and '[ -n "$want" ]' in check
+    assert '[ "$got" = "$want" ]' in check
+    assert '[ "$gpg" = "gpg (GnuPG) ${want%%-*}" ]' in check
+    assert "secrets." not in job, "the job builds from the checkout and needs no secret"
+
+
 def _matrix_legs(text: str) -> list[dict[str, str]]:
     block = text[text.index("matrix:"):text.index("    services:")]
     legs = []
@@ -510,7 +647,7 @@ def _docker_extras_guard(text: str) -> tuple[set[str], str]:
 
 def test_the_image_takes_extras_only_by_name():
     text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert 'ARG NOCTORNAL_EXTRAS=""' in text
+    assert 'ARG NOCTORNAL_EXTRAS="yara"' in text
     allowed, run = _docker_extras_guard(text)
     assert allowed == {"", "telegram", "yara", "telegram,yara", "yara,telegram"}
     assert "*) echo" in run and "exit 1" in run

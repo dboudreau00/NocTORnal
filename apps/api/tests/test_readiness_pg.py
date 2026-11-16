@@ -56,6 +56,8 @@ EXPECTED_CHECKS = (
     "redis_limiter_store",
     # docs/16 C8's other half.
     "redis_limiter_isolated",
+    # The Postgres and Redis hops are TLS that checks the server.
+    "internal_hops_encrypted",
     "evidence_bucket_object_lock",
     # docs/17: the store rejected samples are preserved in.
     "preservation_bucket_object_lock",

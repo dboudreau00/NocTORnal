@@ -13,9 +13,9 @@
 # A test runs this file.
 
 # Sets up mc for this process and what it starts: the alias `local` with the root credential,
-# and MinIO's certificate in <config dir>/certs/CAs. The config dir is /tmp/.mc, not ~/.mc,
-# because /root in this image is mode 0550 and, with every capability dropped, root cannot
-# write there.
+# and the deployment's CA (tls/public/ca.crt) in <config dir>/certs/CAs. The config dir is
+# /tmp/.mc, not ~/.mc, because /root in this image is mode 0550 and, with every capability
+# dropped, root cannot write there.
 mc_setup() {
   case "$MINIO_ROOT_USER$MINIO_ROOT_PASSWORD" in
     *:*)
@@ -30,7 +30,7 @@ mc_setup() {
   MC_CONFIG_DIR="${MC_CONFIG_DIR:-/tmp/.mc}"
   export MC_CONFIG_DIR
   mkdir -p "$MC_CONFIG_DIR/certs/CAs"
-  cp "${MC_CERTIFICATE:-/certs/public.crt}" "$MC_CONFIG_DIR/certs/CAs/minio.crt"
+  cp "${MC_CERTIFICATE:-/certs/ca.crt}" "$MC_CONFIG_DIR/certs/CAs/ca.crt"
   MC_HOST_local="https://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000"
   export MC_HOST_local
 }

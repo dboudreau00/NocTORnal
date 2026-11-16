@@ -128,12 +128,12 @@ try {
     }
     Good 'no .env.local, no .venv, no .git, no screenshots'
 
-    # Both installers refuse to run without constraints.txt.
+    # Both installers refuse to run without constraints.txt or requirements-pip.txt.
     foreach ($needed in @('alembic.ini', 'release/install.ps1',
                           'release/install.sh', 'release/START-HERE.md',
                           'release/start.sh', 'release/start.ps1',
                           'apps/api/pyproject.toml',
-                          'constraints.txt',
+                          'constraints.txt', 'requirements-pip.txt',
                           'infra/docker-compose.yml', 'LICENSE')) {
         if (-not (Test-Path (Join-Path $Destination $needed))) {
             Die "PACKAGE IS INCOMPLETE: missing $needed"

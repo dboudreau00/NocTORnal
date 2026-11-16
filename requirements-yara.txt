@@ -1,0 +1,18 @@
+# yara-x, by version and by the sha256 of its two Linux wheels. The Dockerfile installs it from this
+# file with --require-hashes when the image is built with the yara extra, which it is by default,
+# before the editable install that would otherwise fetch it unhashed. It is not in constraints.txt
+# alone because a constraints file takes no hashes (pip does not apply them there); constraints.txt
+# pins the same version, and test_yara_worker_default.py holds the two equal.
+#
+# The two hashes, one per architecture a production host builds on:
+#   yara_x-<version>-cp38-abi3-manylinux_2_28_x86_64.whl
+#   yara_x-<version>-cp38-abi3-manylinux_2_28_aarch64.whl
+# yara-x has no dependencies, so --require-hashes needs this one entry. CI's Pinned images resolve
+# job downloads both wheels with the hashes required.
+#
+# To move it: read https://pypi.org/pypi/yara-x/<version>/json, take `digests.sha256` of the two
+# files named above, write the version and both hashes below and the version in constraints.txt,
+# run the suite, build the image, and commit the two files together.
+yara-x==1.20.0 \
+    --hash=sha256:73e7508b01991cf2443771547a982048959481462e9b641162b7fc581063a4d1 \
+    --hash=sha256:688499af8777b2b48ff4314b24ba255ec52309dbc31ac20f14e6c6a6fb55e67e

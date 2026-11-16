@@ -1,0 +1,13 @@
+# pip itself, by version and by the sha256 of its wheel. Both installers, and CI's test job, install
+# it from this file with --require-hashes before anything else; without it each install ran whatever
+# pip PyPI served that day. It is not in constraints.txt because a constraints file takes no hashes
+# (pip does not apply them there), and nothing this repository declares depends on pip.
+#
+# The release taken is at least 14 days old on the day it is pinned, so a release that is pulled or
+# found broken in its first fortnight is not the one installed. pip has no dependencies, so
+# --require-hashes needs this one entry.
+#
+# To move it: read https://pypi.org/pypi/pip/<version>/json, take `digests.sha256` of the file named
+# pip-<version>-py3-none-any.whl, write both below, run both installers and the suite, and commit.
+pip==26.2.2 \
+    --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70

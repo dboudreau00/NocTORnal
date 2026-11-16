@@ -34,8 +34,9 @@ def _production() -> dict[str, str]:
     return {
         "NOCTORNAL_ENV": "production",
         "DATABASE_URL":
-            "postgresql+psycopg://noctornal_app:Xk9pQ@db:5432/noctornal",
-        "REDIS_URL": "redis://:Zm4tR@redis:6379/0",
+            "postgresql+psycopg://noctornal_app:Xk9pQ@db:5432/noctornal"
+            "?sslmode=verify-full&sslrootcert=/certs/ca.crt",
+        "REDIS_URL": "rediss://:Zm4tR@redis:6379/0?ssl_ca_certs=/certs/ca.crt",
         "NOCTORNAL_TOTP_KEK": _KEK,
         "NOCTORNAL_INGEST_PEPPER": "9f2c1ad4e6b8",
         "NOCTORNAL_AUDIT_PEPPER": "Qz4-audit-pepper-of-its-own",
@@ -53,7 +54,8 @@ def _production() -> dict[str, str]:
         "NOCTORNAL_MAX_EVIDENCE_BYTES": "268435456",
         # The system role's DSN, required on every process but the sample origin (row-level security).
         "NOCTORNAL_WORKER_DATABASE_URL":
-            "postgresql+psycopg://noctornal_worker:Rt8vWq@db:5432/noctornal",
+            "postgresql+psycopg://noctornal_worker:Rt8vWq@db:5432/noctornal"
+            "?sslmode=verify-full&sslrootcert=/certs/ca.crt",
     }
 
 

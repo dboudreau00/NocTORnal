@@ -97,9 +97,9 @@ and none has a classifier of its own.
   integration rule may name one (the exception for `localhost` is in 2.5).
 - `internal_networks(env, production=...)`: the deployment's own networks,
   from `NOCTORNAL_EGRESS_INTERNAL_CIDRS` (a comma list). Blank is unset,
-  and unset means 172.31.243.0/24 and 172.31.244.0/24 in production (the
-  compose networks `noctornal` and `edge`, which a test holds equal) and
-  nothing elsewhere. A malformed value is one sentence; configuration
+  and unset means 172.31.243.0/24, 172.31.244.0/24, 172.31.247.0/24 and
+  172.31.248.0/24 in production (the compose networks `noctornal`, `edge`,
+  `frontend` and `ingress`, which a test holds equal) and nothing elsewhere. A malformed value is one sentence; configuration
   refuses it in production and `route_for` answers it with `config_error`.
   No rule may overlap these networks and no answer inside them is admitted,
   on any route.

@@ -23,7 +23,9 @@ What the child can still reach: the environment it is started with holds no cred
 `analysis_runner`), but on Linux a process can read `/proc/<pid>/environ` of any dumpable process running
 as the same user, which includes its parent, the other API workers and a container's PID 1, and it shares
 the container's network. So a parser exploit in a child started beside the application is a compromise of
-the process that started it. The selftest reports both facts (`exposure`) and readiness shows them.
+the process that started it. The selftest reports both facts (`exposure`) and readiness shows them. It
+also compiles and scans a one-rule test with yara-x where yara-x is installed (`yara`), so readiness can
+tell an engine that is installed from one that runs under the child's limits.
 
 Production starts this module in the isolated analysis worker instead (`analysis_worker`, compose.yml's
 `analysis-worker`): a container with no secrets to read and no network to reach, where the same selftest
@@ -525,6 +527,37 @@ def yara_compile_step(source_json: bytes) -> tuple[dict, bytes]:
     return report, blob
 
 
+#: The selftest's rule, and the two buffers scanned with it: one it matches, one it does not.
+SELFTEST_RULE = 'rule selftest { strings: $a = "nocto" condition: $a }'
+SELFTEST_HIT = b"nocto"
+SELFTEST_MISS = b"xxxxx"
+
+
+def yara_selftest() -> dict:
+    """Whether yara-x runs under this child's limits: compile a one-rule source with the flags the compile
+    step uses, serialise and load the build as a scan does, and scan a buffer the rule matches and one it
+    does not. In the isolated worker that is the worker's own confinement, which the engine's precompiled
+    code and its timer thread must fit. `ok` is None when yara-x is not installed; a failure is reported
+    by its exception class, never its text."""
+    if _version("yara-x") is None:
+        return {"ok": None, "installed": False}
+    try:
+        import yara_x
+        compiler = yara_x.Compiler(relaxed_re_syntax=True, includes_enabled=False)
+        compiler.add_source(SELFTEST_RULE)
+        out = _Writer()
+        compiler.build().serialize_into(out)
+        rules = yara_x.Rules.deserialize_from(_Reader(b"".join(out.parts)))
+        scanner = yara_x.Scanner(rules)
+        scanner.set_timeout(5)
+        scanner.console_log(lambda _msg: None)
+        hit = len(scanner.scan(SELFTEST_HIT).matching_rules)
+        miss = len(scanner.scan(SELFTEST_MISS).matching_rules)
+    except (Exception, MemoryError, RecursionError) as exc:
+        return {"ok": False, "installed": True, "error_class": type(exc).__name__}
+    return {"ok": hit == 1 and miss == 0, "installed": True}
+
+
 def frame_compile(report: dict, blob: bytes) -> bytes:
     """An 8-byte big-endian length, the report, then the blob."""
     body = json.dumps(report, separators=(",", ":")).encode()
@@ -581,6 +614,7 @@ def main() -> int:
         out["capabilities"] = capabilities()
         out["environment_keys"] = sorted(os.environ)
         out["exposure"] = _exposure(header.get("probe"))
+        out["yara"] = yara_selftest()
     else:
         data = _read_exact(stdin, int(header.get("sample_len", 0)))
         if mode == "pe":

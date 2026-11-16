@@ -31,7 +31,7 @@ from test_egress_topology import Reader, _env_files
 
 ROOT = Path(__file__).resolve().parents[3]
 PROD = ROOT / "infra" / "production"
-OWNER_DSN = "postgresql+psycopg://noctornal:Hq7vX2-owner@postgres:5432/noctornal"
+OWNER_DSN = "postgresql+psycopg://noctornal:Hq7vX2-owner@postgres:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
 OWNER_PASSWORD = "Hq7vX2-owner"
 
 
@@ -107,7 +107,7 @@ def test_the_owner_variables_are_blanked_where_a_secrets_file_reaches():
     anchor = anchor[:anchor.index("\n\n")]
     assert anchor.splitlines()[1:] == ['  POSTGRES_PASSWORD: ""',
                                        '  NOCTORNAL_MIGRATION_DATABASE_URL: ""']
-    assert text.count("<<: *no-owner-credential") == 12
+    assert text.count("<<: *no-owner-credential") == 13
 
 
 def test_the_templates_put_each_owner_variable_where_it_lives():
@@ -311,7 +311,7 @@ def test_the_job_refuses_a_published_owner_password(dsn):
 
 def test_the_job_refuses_a_dsn_that_names_no_role():
     problems = config.migration_job_problems({"NOCTORNAL_ENV": "production",
-                                              config.MIGRATION_DSN_ENV: "postgresql://postgres/n"})
+                                              config.MIGRATION_DSN_ENV: "postgresql://postgres/n?sslmode=verify-full"})
     assert problems and "names no role" in problems[0]
 
 
@@ -340,7 +340,8 @@ def test_the_job_without_a_dsn_outside_production_still_refuses():
 def test_the_job_runs_alembic_as_the_owner():
     calls = []
     env = {"NOCTORNAL_ENV": "production", config.MIGRATION_DSN_ENV: f" {OWNER_DSN} ",
-           "DATABASE_URL": "postgresql+psycopg://noctornal_app:x@postgres/noctornal"}
+           "DATABASE_URL": "postgresql+psycopg://noctornal_app:x@postgres/noctornal"
+                           "?sslmode=verify-full&sslrootcert=/certs/ca.crt"}
     status = _job().main(env, execvpe=lambda *a: calls.append(a), err=io.StringIO())
     assert status == 0
     (program, argv, child), = calls

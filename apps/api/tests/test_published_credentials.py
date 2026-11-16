@@ -220,7 +220,10 @@ def test_redis_authenticated_another_way_is_accepted(url):
     secured deployment for looking unlike the compose file."""
     env = _production()
     env["REDIS_URL"] = url
-    assert _refused(env) == []
+    # A plain redis:// hop is refused on its own, for the transport (config.redis_hop_problems,
+    # test_database_and_redis_transport_refusals.py); what is held here is that none of these is
+    # refused for asking no password.
+    assert [p for p in _refused(env) if not p.startswith("REDIS_URL is not a rediss://")] == []
 
 
 @pytest.mark.parametrize("url", [

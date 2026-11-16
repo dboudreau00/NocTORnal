@@ -1,8 +1,8 @@
 """Bring the production secrets files in infra/production to the layout
 this release reads: the schema owner's credential out of secrets.env, a
-Redis password and REDIS_URL for the limiter's own Redis user, and the
-pepper the audit log's hashes are keyed with. Nothing it prints carries a
-value.
+Redis password and REDIS_URL for the limiter's own Redis user, the pepper the
+audit log's hashes are keyed with, and TLS that checks the server on every DSN
+naming the bundled database. Nothing it prints carries a value.
 
     python3 scripts/production_secrets.py [--dir infra/production] [--new-database]
 
@@ -18,9 +18,10 @@ release/install.sh --production-secrets and release/install.ps1
    was initialised with is the operator's question, not a script's guess.
 3. Writes REDIS_PASSWORD when it is missing, a placeholder or not URL-safe (the production Redis
    rebuilds its ACL from it at every start), and makes REDIS_URL sign in as noctornal_limiter with
-   it, since the production Redis disables its default user. Every REDIS_URL the redis service's
-   start check would refuse is one this rewrites, so the two never send an operator in a circle; a
-   REDIS_URL naming another host is the operator's own Redis, left alone and said.
+   it over TLS (rediss://, naming the deployment's CA), since the production Redis disables its
+   default user and speaks TLS alone. Every REDIS_URL the redis service's start check would refuse
+   is one this rewrites, so the two never send an operator in a circle; a REDIS_URL naming another
+   host is the operator's own Redis, left alone and said.
 4. With --new-database, and only when no owner password was ever chosen, generates one into
    postgres-init.env and migrate.env. The installers pass it when the database volume does not
    exist yet: initdb fixes the owner's password for good.
@@ -28,6 +29,12 @@ release/install.sh --production-secrets and release/install.ps1
    the same value as the ingest pepper or the TOTP key, with the template's comment above a line it
    adds to an older secrets.env. A value the API accepts is never replaced: rotating it is the
    operator's choice, and costs the correlation of new audit rows with older ones.
+6. Makes every DSN naming the bundled `postgres` service (DATABASE_URL and
+   NOCTORNAL_WORKER_DATABASE_URL in secrets.env, NOCTORNAL_MIGRATION_DATABASE_URL in migrate.env,
+   NOCTORNAL_EGRESS_DATABASE_URL in egress-proxy.env when that file exists) ask for
+   sslmode=verify-full against the deployment's CA, since that database admits the network over
+   TLS alone and production refuses any other sslmode. A DSN naming another host is the operator's
+   own database, left alone and said.
 
 Every file it changes is first copied to NAME.backup-UTCSTAMP (mode 600), the way back
 (release/secrets-upgrade/README.md). It writes nothing when it refuses. Exit 0 when the files are
@@ -50,7 +57,7 @@ import secrets
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 PROD_DIR = Path(__file__).resolve().parent.parent / "infra" / "production"
 
@@ -78,6 +85,23 @@ BUNDLED_REDIS_HOST = "redis"
 AUDIT_PEPPER = "NOCTORNAL_AUDIT_PEPPER"
 AUDIT_PEPPER_MIN = 16
 AUDIT_PEPPER_DISTINCT_FROM = ("NOCTORNAL_INGEST_PEPPER", "NOCTORNAL_TOTP_KEK")
+
+#: The egress proxy's env file: read when it exists, never created here (its keys come from
+#: scripts/egress_setup.py).
+EGRESS = "egress-proxy.env"
+#: The compose service the bundled database answers as, and the name on its certificate.
+BUNDLED_POSTGRES_HOST = "postgres"
+#: Every DSN a deployment holds, by file.
+DSNS = ((SECRETS, "DATABASE_URL"), (SECRETS, "NOCTORNAL_WORKER_DATABASE_URL"),
+        (MIGRATE, "NOCTORNAL_MIGRATION_DATABASE_URL"), (EGRESS, "NOCTORNAL_EGRESS_DATABASE_URL"))
+#: The query that makes a DSN check the database's certificate and name. Held equal to
+#: config.DATABASE_SSLMODE and config.DATABASE_CA_FILE by a test.
+DATABASE_SSLMODE = "verify-full"
+DATABASE_CA_FILE = "/certs/ca.crt"
+#: The bundled Redis's URL names the same CA, as redis-py reads it.
+REDIS_CA_QUERY = ("ssl_ca_certs", DATABASE_CA_FILE)
+#: Query arguments that would switch redis-py's check of the server off, as it reads them.
+REDIS_FALSE = ("0", "F", "FALSE", "N", "NO")
 #: The comment an older secrets.env.example put above each line this script moves or rewrites, by
 #: a phrase only that comment carried.
 STALE_COMMENTS = {
@@ -288,6 +312,56 @@ def _names_another_redis(url: str | None) -> bool:
     return bool(host) and host != BUNDLED_REDIS_HOST
 
 
+def _with_database_tls(url: str | None) -> str | None:
+    """`url` asking for sslmode=verify-full against the deployment's CA when it names the bundled
+    database, its other query parameters kept and an sslrootcert it already names left as it is;
+    None when it names another host, no host, or already asks for exactly that."""
+    try:
+        parts = urlsplit(url or "")
+        host = parts.hostname
+    except ValueError:
+        return None
+    if host != BUNDLED_POSTGRES_HOST:
+        return None
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    names = [name for name, _ in query]
+    if "sslmode" in names:
+        query = [(n, DATABASE_SSLMODE if n == "sslmode" else v) for n, v in query]
+    else:
+        query.append(("sslmode", DATABASE_SSLMODE))
+    if "sslrootcert" not in names:
+        query.append(("sslrootcert", DATABASE_CA_FILE))
+    want = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, safe="/"),
+                       parts.fragment))
+    return None if want == url else want
+
+
+def _another_database_unverified(url: str | None) -> bool:
+    """True when `url` names a database host other than the bundled one and does not ask for
+    sslmode=verify-full: production refuses it, and it is the operator's to change."""
+    try:
+        parts = urlsplit(url or "")
+        host = parts.hostname
+    except ValueError:
+        return False
+    if not host or host == BUNDLED_POSTGRES_HOST:
+        return False
+    return dict(parse_qsl(parts.query)).get("sslmode") != DATABASE_SSLMODE
+
+
+def _with_redis_tls(url: str) -> str:
+    """`url` (the bundled Redis's, already given the limiter's credentials) naming the CA, with any
+    argument that would switch off the check of the server dropped."""
+    parts = urlsplit(url)
+    query = [(n, v) for n, v in parse_qsl(parts.query, keep_blank_values=True)
+             if not (n == "ssl_cert_reqs" and v.lower() != "required")
+             and not (n == "ssl_check_hostname" and v.upper() in REDIS_FALSE)]
+    if REDIS_CA_QUERY[0] not in [n for n, _ in query]:
+        query.append(REDIS_CA_QUERY)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, safe="/"),
+                       parts.fragment))
+
+
 def _template_comment(directory: Path, key: str) -> list:
     """The comment secrets.env.example writes above `key`, or none when
     the template cannot be read."""
@@ -316,6 +390,12 @@ def plan(directory: Path, *, new_database: bool = False):
             # A root-owned mode 600 file read by anybody else: one sentence and the fix, not a
             # traceback.
             raise Refused(_cannot("read", Path(exc.filename or path), exc)) from None
+    egress_path = directory / EGRESS
+    try:
+        if egress_path.is_file():
+            files[EGRESS] = EnvFile.load(egress_path)
+    except OSError as exc:
+        raise Refused(_cannot("read", egress_path, exc)) from None
     sec = files[SECRETS]
 
     # 2. The owner's credential leaves secrets.env.
@@ -327,7 +407,10 @@ def plan(directory: Path, *, new_database: bool = False):
         ours = dest.get(key)
         reader = "the database" if home == POSTGRES_INIT else "the migration job"
         note = f"# {key} moved to {home} (docs/17 F52, 2026-10-02): only {reader} reads it."
-        if ours is not None and not _published(ours) and ours != theirs:
+        # A DSN step 5 already gave its TLS query (a run that stopped before secrets.env was
+        # written) is the same DSN, not a second one.
+        if ours is not None and not _published(ours) and ours != theirs \
+                and (_with_database_tls(ours) or ours) != (_with_database_tls(theirs) or theirs):
             if _published(theirs):
                 # secrets.env kept the template's placeholder while the
                 # real value was written where it belongs: drop the copy.
@@ -377,6 +460,23 @@ def plan(directory: Path, *, new_database: bool = False):
                     "signs in with the first and a new database is initialised with "
                     "the second, so make them the same.")
 
+    # 6. Every DSN naming the bundled database asks for TLS that checks it (after 2 and 4, so a DSN
+    # moved or written above is covered).
+    for name, key in DSNS:
+        envfile = files.get(name)
+        if envfile is None:
+            continue
+        url = envfile.get(key)
+        want = _with_database_tls(url)
+        if want is not None:
+            envfile.put(key, f"{key}={want}")
+            said.append(f"{key} in {name} now asks for TLS that checks the database's "
+                        f"certificate (sslmode={DATABASE_SSLMODE})")
+        elif _another_database_unverified(url):
+            said.append(f"note: {key} in {name} names a database on another host, so it was "
+                        f"left alone; production refuses it without sslmode={DATABASE_SSLMODE} "
+                        f"(infra/production/README.md, step 3)")
+
     # 3. The limiter's Redis user.
     password = sec.get("REDIS_PASSWORD")
     if _published(password) or not URL_SAFE.match(password or ""):
@@ -387,17 +487,19 @@ def plan(directory: Path, *, new_database: bool = False):
         said.append(f"generated REDIS_PASSWORD (it was {why})")
     url = sec.get("REDIS_URL")
     if not _names_another_redis(url):
-        # The bundled service, in the one scheme it speaks: the start check refuses a `rediss://`
-        # URL naming it, so the scheme is rewritten too.
+        # The bundled service, in the one scheme it speaks: the start check refuses a `redis://`
+        # URL naming it, so the scheme is rewritten too, and the CA is named.
         try:
             keep = None if _published(url) or not urlsplit(url or "").hostname else url
         except ValueError:
             keep = None
-        want = _with_credentials(keep, LIMITER_USER, password,
-                                 f"redis://x@{BUNDLED_REDIS_HOST}:6379/0", scheme="redis")
+        want = _with_redis_tls(_with_credentials(
+            keep, LIMITER_USER, password, f"rediss://x@{BUNDLED_REDIS_HOST}:6379/0",
+            scheme="rediss"))
         if want != url:
             sec.put("REDIS_URL", f"REDIS_URL={want}")
-            said.append(f"REDIS_URL now signs in as {LIMITER_USER} with REDIS_PASSWORD")
+            said.append(f"REDIS_URL now signs in as {LIMITER_USER} with REDIS_PASSWORD, "
+                        f"over TLS")
     else:
         said.append("note: REDIS_URL names a Redis on another host, so it was left alone, "
                     "and the bundled redis service starts with no client; that Redis "
@@ -427,7 +529,8 @@ def plan(directory: Path, *, new_database: bool = False):
         sec.put(AUDIT_PEPPER, f"{AUDIT_PEPPER}={_generate()}")
         said.append(f"generated {AUDIT_PEPPER} (it was {why})")
 
-    for name, envfile in files.items():
+    for name in (SECRETS, POSTGRES_INIT, MIGRATE):
+        envfile = files[name]
         held = sorted({m.group(1) for line in envfile.lines
                        if (m := EnvFile._LINE.match(line))
                        and "replace-me" in m.group(2).lower()})

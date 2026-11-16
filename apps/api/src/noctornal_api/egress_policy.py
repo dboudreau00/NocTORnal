@@ -162,10 +162,12 @@ RESERVED_SERVICE_NAMES = frozenset({
     "sample-origin", "cron", "caddy", "egress-proxy", "mailpit", "localhost",
 })
 
-#: The production compose networks `noctornal` and `edge`. The egress
-#: proxy's compose file fixes `edge` at the second subnet, and a test holds
-#: compose equal to this constant.
-DEFAULT_INTERNAL_NETWORKS = ("172.31.243.0/24", "172.31.244.0/24")
+#: The production compose networks `noctornal`, `edge`, `frontend` (Caddy, api and
+#: sample-origin) and `ingress` (Caddy's published ports). The compose file fixes each at its
+#: subnet, and a test holds compose equal to this constant: a network missing here would be one
+#: an administrator's route could reach.
+DEFAULT_INTERNAL_NETWORKS = ("172.31.243.0/24", "172.31.244.0/24", "172.31.247.0/24",
+                             "172.31.248.0/24")
 INTERNAL_CIDRS_ENV = "NOCTORNAL_EGRESS_INTERNAL_CIDRS"
 
 

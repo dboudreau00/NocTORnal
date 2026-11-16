@@ -310,6 +310,38 @@ class RedisBackend:
                 return str(value)
         return ""
 
+    def transport(self) -> dict:
+        """What the limiter's own connection negotiated: `answered` (PING came back), `tls` (the
+        live socket speaks TLS), `version` and `cipher` (as the socket reports them) and `not_after`
+        (the server certificate's end, from the verified peer certificate), with `read_from`
+        saying where `tls` came from: "socket", or "scheme" when this client keeps no socket this
+        reads (redis-py's `_sock` is private), and then the URL's scheme is all there is. Never a
+        host, a user or a value."""
+        out = {"answered": self.ping(), "tls": None, "version": None, "cipher": None,
+               "not_after": None, "read_from": "scheme"}
+        if not out["answered"]:
+            return out
+        pool = getattr(self._redis, "connection_pool", None)
+        try:
+            connection = pool.get_connection()
+        except Exception:  # noqa: BLE001 - a probe reports, it does not raise
+            return out
+        try:
+            sock = getattr(connection, "_sock", None)
+            if sock is None:
+                return out
+            version = getattr(sock, "version", None)
+            out["read_from"] = "socket"
+            out["tls"] = callable(version)
+            if out["tls"]:
+                out["version"] = version()
+                cipher = sock.cipher()
+                out["cipher"] = cipher[0] if cipher else None
+                out["not_after"] = (sock.getpeercert() or {}).get("notAfter")
+        finally:
+            pool.release(connection)
+        return out
+
     def close(self) -> None:
         try:
             self._redis.close()

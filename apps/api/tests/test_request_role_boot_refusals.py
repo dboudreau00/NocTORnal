@@ -20,7 +20,7 @@ import pytest
 from noctornal_api.config import verify_environment
 from test_config_boot import _only, _production
 
-OWNER_DSN = "postgresql+psycopg://dbowner:Zq8wLm@db:5432/noctornal"
+OWNER_DSN = "postgresql+psycopg://dbowner:Zq8wLm@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
 
 
 def _request_role_problems(env):
@@ -66,7 +66,7 @@ def test_the_owner_and_the_cluster_superuser_by_their_usual_names_are_refused(ro
     not), so the two names this repository and Postgres itself give are
     refused on their own."""
     env = _production()
-    env["DATABASE_URL"] = f"postgresql+psycopg://{role}:Xk9pQ@db:5432/noctornal"
+    env["DATABASE_URL"] = f"postgresql+psycopg://{role}:Xk9pQ@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
     _only(verify_environment(env), "DATABASE_URL")
 
 
@@ -79,7 +79,7 @@ def test_the_least_privilege_role_boots():
     env["POSTGRES_USER"] = "noctornal"
     assert env["DATABASE_URL"].startswith("postgresql+psycopg://noctornal_app:")
     assert verify_environment(env) == []
-    env["NOCTORNAL_MIGRATION_DATABASE_URL"] = "postgresql+psycopg://noctornal:Zq8wLm@db:5432/noctornal"
+    env["NOCTORNAL_MIGRATION_DATABASE_URL"] = "postgresql+psycopg://noctornal:Zq8wLm@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
     (problem,) = verify_environment(env)
     assert problem.startswith("NOCTORNAL_MIGRATION_DATABASE_URL is set on a runtime process")
     assert _request_role_problems(env) == []
@@ -87,8 +87,8 @@ def test_the_least_privilege_role_boots():
 
 def test_a_role_that_merely_starts_like_the_owner_is_not_refused():
     env = _production()
-    env["NOCTORNAL_MIGRATION_DATABASE_URL"] = "postgresql+psycopg://noctornal:Zq8wLm@db:5432/noctornal"
-    env["DATABASE_URL"] = "postgresql+psycopg://noctornal_runtime:Xk9pQ@db:5432/noctornal"
+    env["NOCTORNAL_MIGRATION_DATABASE_URL"] = "postgresql+psycopg://noctornal:Zq8wLm@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
+    env["DATABASE_URL"] = "postgresql+psycopg://noctornal_runtime:Xk9pQ@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
     assert _request_role_problems(env) == []
 
 
@@ -103,6 +103,6 @@ def test_none_of_it_applies_outside_production():
 def test_the_verifier_reproduction_from_the_review_is_closed():
     """A valid production environment with DATABASE_URL set to the owner DSN gets one refusal, not zero."""
     env = _production()
-    env["NOCTORNAL_MIGRATION_DATABASE_URL"] = "postgresql+psycopg://noctornal:Zq8wLm@db:5432/noctornal"
+    env["NOCTORNAL_MIGRATION_DATABASE_URL"] = "postgresql+psycopg://noctornal:Zq8wLm@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
     env["DATABASE_URL"] = env["NOCTORNAL_MIGRATION_DATABASE_URL"]
     assert len(_request_role_problems(env)) == 1

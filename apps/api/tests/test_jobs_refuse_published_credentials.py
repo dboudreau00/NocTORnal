@@ -77,7 +77,7 @@ def test_the_helper_refuses_in_production_and_names_variables_never_values(monke
 def test_the_helper_lets_a_clean_production_environment_through(monkeypatch):
     _environment(monkeypatch, NOCTORNAL_ENV="production",
                  NOCTORNAL_INGEST_PEPPER="9f2c1ad4e6b8a7d3c5e1",
-                 DATABASE_URL="postgresql+psycopg://noctornal_app:Xk9pQ7@db:5432/noctornal")
+                 DATABASE_URL="postgresql+psycopg://noctornal_app:Xk9pQ7@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt")
     assert config.refuse_unsafe_job_environment("job") == []
 
 
@@ -210,7 +210,7 @@ def test_the_proxy_refuses_the_templates_database_password():
 
 def test_the_proxy_starts_on_a_password_that_is_not_published():
     from noctornal_api import egress_proxy
-    env = _proxy_environment("postgresql://noctornal_egress:Xk9pQ7vWr2@postgres:5432/noctornal")
+    env = _proxy_environment("postgresql://noctornal_egress:Xk9pQ7vWr2@postgres:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt")
     assert egress_proxy.verify_proxy_environment(env) == []
 
 

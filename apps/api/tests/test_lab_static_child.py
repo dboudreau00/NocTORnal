@@ -48,6 +48,44 @@ def test_the_selftest_reports_what_the_child_can_run(settings):
     assert "exposure" in out
 
 
+def test_the_selftest_scans_with_yara_when_it_is_installed(settings):
+    """docs/17 "YARA in the worker": the selftest child compiles the one-rule test, loads the build as a
+    scan does and scans with it, under the limits every step runs under, so an engine that is installed
+    but cannot run there is told apart from one that runs. Skips only where yara-x is absent; CI's first
+    leg installs it and its no-skip gate holds that."""
+    pytest.importorskip("yara_x")
+    out = lab_triage.selftest(settings)
+    assert out["yara"] == {"ok": True, "installed": True}
+
+
+@pytest.mark.extras_absent
+def test_the_selftest_reports_not_installed_when_yara_is_absent(settings):
+    """On the leg with no extra, the selftest says the engine is absent, which readiness reads as a
+    caveat and never as a failure."""
+    out = lab_triage.selftest(settings)
+    assert out["yara"] == {"ok": None, "installed": False}
+
+
+def test_a_yara_selftest_failure_is_reported_by_class_never_by_text(monkeypatch):
+    """The engine's message can carry what it was handed, so only the exception's class crosses."""
+    yara_x = pytest.importorskip("yara_x")
+
+    class Refusing:
+        def __init__(self, *_a, **_k):
+            raise RuntimeError("a message that must not cross nocto")
+
+    monkeypatch.setattr(yara_x, "Scanner", Refusing)
+    out = lab_static.yara_selftest()
+    assert out == {"ok": False, "installed": True, "error_class": "RuntimeError"}
+
+
+def test_a_yara_selftest_that_matches_the_wrong_buffer_is_not_ok(monkeypatch):
+    """A scan that reports the rule on both buffers, or on neither, is an engine that does not work."""
+    pytest.importorskip("yara_x")
+    monkeypatch.setattr(lab_static, "SELFTEST_MISS", lab_static.SELFTEST_HIT)
+    assert lab_static.yara_selftest() == {"ok": False, "installed": True}
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"),
                     reason="RLIMIT_FSIZE is enforced on Linux; on Windows the "
                            "child has no rlimits and says so")

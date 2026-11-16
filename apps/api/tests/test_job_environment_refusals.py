@@ -32,7 +32,7 @@ from test_config_boot import _production
 
 ROOT = Path(__file__).resolve().parents[3]
 OWNER_PASSWORD = "Hq7vX2-owner"
-OWNER_DSN = f"postgresql+psycopg://noctornal:{OWNER_PASSWORD}@postgres:5432/noctornal"
+OWNER_DSN = f"postgresql+psycopg://noctornal:{OWNER_PASSWORD}@postgres:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt"
 
 #: (script, the exit code its docstring gives a refusal): one code for all.
 CRON_JOBS = [(name, config.JOB_REFUSAL_EXIT)

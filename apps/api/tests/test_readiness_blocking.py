@@ -132,7 +132,8 @@ def test_the_register_names_are_unique_and_in_register_order():
     # conversations_minimisable (decision 231), not blocking.
     # mail_stamp_key (docs/19 section 2.1), not blocking: with no key nothing is believed.
     # audit_pepper_set (decision 237), not blocking: an unset pepper costs only the audit hashes.
-    assert len(readiness.CHECK_NAMES) == 49, readiness.CHECK_NAMES
+    # internal_hops_encrypted (the TLS hops), not blocking.
+    assert len(readiness.CHECK_NAMES) == 50, readiness.CHECK_NAMES
     # Also not blocking: proxy_hops_declared (docs/17 "a missing hop count"), retention_sweep_current,
     # collector_split, the row-level security, Telegram, forum, screening and sandbox, outbound
     # integration and similarity index rows, the comms rows, egress_routes_cover_sources,

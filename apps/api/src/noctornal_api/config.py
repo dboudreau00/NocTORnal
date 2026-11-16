@@ -519,6 +519,9 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             "workers between them admit N times the configured rate: the login "
             "limit an attacker actually meets is the one this deployment thinks "
             "it set, multiplied by its own worker count.")
+    # The limiter's hop: the bundled Redis speaks TLS alone, so a plain URL would only fail; one
+    # naming another Redis is held to the same.
+    problems.extend(redis_hop_problems(env))
 
     # The limiter's own off-switch, not a copy of its off-value set:
     # `rate_limiting_disabled` is public precisely so that the readiness
@@ -570,6 +573,13 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             'PRESERVE_SECURE is set and not "true", so the preservation client '
             "speaks plain HTTP: rejected samples under a legal hold cross the "
             "network in clear text (docs/11).")
+
+    # The database hops, request and system role alike: TLS that checks the server's name, or a
+    # unix socket. The database refuses a plain connection from the network anyway (its hba file
+    # allows `hostssl` alone), so this names the variable before the first query fails.
+    from noctornal_api.db import WORKER_DSN_ENV
+
+    problems.extend(database_hop_problems(env, names=("DATABASE_URL", WORKER_DSN_ENV)))
 
     base_url = env.get("NOCTORNAL_BASE_URL", "").strip()
     if not base_url:
@@ -846,6 +856,123 @@ def owner_credential_problems(env: Mapping[str, str] | None = None, *,
     return problems
 
 
+#: The one sslmode that encrypts a database hop AND checks who answers it. `require` encrypts but
+#: takes any certificate, and `verify-ca` takes any certificate the CA signed, the Redis and MinIO
+#: ones included, so a process holding one of their keys could answer for the database.
+DATABASE_SSLMODE = "verify-full"
+#: Where the compose deployment's clients find the CA that signed the database's certificate
+#: (scripts/internal_tls.py, mounted from infra/production/tls/public).
+DATABASE_CA_FILE = "/certs/ca.crt"
+#: The query a bundled DSN carries, as the templates and the installer step write it.
+DATABASE_TLS_QUERY = f"sslmode={DATABASE_SSLMODE}&sslrootcert={DATABASE_CA_FILE}"
+
+
+def database_hop(dsn: str, env: Mapping[str, str] | None = None) -> str:
+    """How a connection made with `dsn` reaches its database: "socket" (a unix socket, on this
+    host), "verified" (TCP under sslmode=verify-full), "unverified" (TCP under any other sslmode,
+    or none, which libpq takes as `prefer` and lets anything on the path downgrade to plain text) or
+    "unreadable" (not a connection string the driver reads). The sslmode must be in the DSN itself:
+    PGSSLMODE is not read, so the one place an operator looks is the one this checks. A DSN naming
+    no host connects where PGHOST says, or to the default socket when that is unset."""
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict
+
+    env = os.environ if env is None else env
+    try:
+        params = conninfo_to_dict(dsn.strip().replace("postgresql+psycopg://", "postgresql://", 1))
+    except psycopg.ProgrammingError:
+        return "unreadable"
+    hosts = [h.strip() for h in str(params.get("host") or env.get("PGHOST", "")).split(",")]
+    tcp = bool(params.get("hostaddr")) or any(h and not h.startswith("/") for h in hosts)
+    if not tcp:
+        return "socket"
+    return "verified" if params.get("sslmode") == DATABASE_SSLMODE else "unverified"
+
+
+def database_hop_problems(env: Mapping[str, str] | None = None, *,
+                          names: tuple[str, ...] = ()) -> list[str]:
+    """One refusal for each variable in `names` that is set to a DSN reaching its database over TCP
+    without sslmode=verify-full (`database_hop`). Pure and mode-blind, like
+    `owner_credential_problems`; the production callers apply it. Names the variable, never the
+    value: these DSNs carry passwords. A variable carrying a published value is refused for that
+    already (`published_credentials`), and is not refused twice."""
+    if env is None:
+        env = os.environ
+    problems: list[str] = []
+    published = {p.variable for p in published_credentials(env)}
+    for name in names:
+        dsn = env.get(name, "").strip()
+        if not dsn or name in published:
+            continue
+        hop = database_hop(dsn, env)
+        if hop == "unreadable":
+            problems.append(
+                f"{name} is not a connection string the database driver can read, so "
+                f"where it connects, and whether that hop is encrypted, cannot be told.")
+        elif hop == "unverified":
+            problems.append(
+                f"{name} reaches its database over the network without "
+                f"sslmode={DATABASE_SSLMODE}, so every query and every row it returns can "
+                f"cross that hop in clear text, and nothing checks that the server "
+                f"answering is the database: add ?{DATABASE_TLS_QUERY} (for the compose "
+                f"deployment, {SECRETS_STEP} does it, and infra/production/README.md, "
+                f"step 3, issues the database's certificate).")
+    return problems
+
+
+#: Where the compose deployment's clients find the CA that signed the bundled Redis's certificate:
+#: the query its REDIS_URL carries (redis-py passes `ssl_ca_certs` to the TLS connection).
+REDIS_TLS_QUERY = f"ssl_ca_certs={DATABASE_CA_FILE}"
+#: redis-py's own reading of a false `ssl_check_hostname` (redis.connection.FALSE_STRINGS).
+_REDIS_FALSE = ("0", "F", "FALSE", "N", "NO")
+
+
+def redis_hop(url: str) -> str:
+    """How the limiter's connection made with `url` reaches Redis: "socket" (unix://, on this
+    host), "verified" (rediss:// with redis-py's defaults, which require a certificate the CA
+    vouches for and check the host's name), "unverified" (rediss:// with either switched off) or
+    "plaintext" (redis://, or anything else). The query is read as redis-py reads it: a later
+    value of a repeated argument wins."""
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    if scheme == "unix":
+        return "socket"
+    if scheme != "rediss":
+        return "plaintext"
+    query = {name: values[-1] for name, values in parse_qs(parts.query).items()}
+    if query.get("ssl_cert_reqs", "required").lower() != "required":
+        return "unverified"
+    if query.get("ssl_check_hostname", "").upper() in _REDIS_FALSE:
+        return "unverified"
+    return "verified"
+
+
+def redis_hop_problems(env: Mapping[str, str] | None = None) -> list[str]:
+    """The refusal for a REDIS_URL that would reach Redis over the network without TLS that checks
+    the server (`redis_hop`). Pure and mode-blind; `verify_environment` applies it in production.
+    Unset is refused elsewhere (rate limiting would be per process), and a published value is
+    refused for that already. Names the variable, never the value."""
+    if env is None:
+        env = os.environ
+    url = env.get("REDIS_URL", "").strip()
+    if not url or "REDIS_URL" in {p.variable for p in published_credentials(env)}:
+        return []
+    hop = redis_hop(url)
+    if hop == "plaintext":
+        return [
+            "REDIS_URL is not a rediss:// (or unix://) URL, so the limiter's password and every "
+            "meter it reads and writes cross the network in clear text, and anything on the path "
+            "can answer for Redis and admit whom it likes: use rediss:// with "
+            f"?{REDIS_TLS_QUERY} (for the compose deployment, {SECRETS_STEP} does it, and "
+            "infra/production/README.md, step 3, issues Redis's certificate)."]
+    if hop == "unverified":
+        return [
+            "REDIS_URL asks for TLS but switches off the check of the server's certificate "
+            "(ssl_cert_reqs) or of its name (ssl_check_hostname), so anything on the path can "
+            "answer for Redis: remove the setting and name the CA with ssl_ca_certs instead."]
+    return []
+
+
 #: The exit status of a job that refuses to run on its environment, one number for every job. It is
 #: 2, not 1, because 1 means a pass RAN and something in it failed, so an alert can tell "would not
 #: start" from "ran and had a bad pass". `argparse` also uses 2 for a usage error; the first words
@@ -885,7 +1012,11 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
     is for the two jobs that are the key's by design, the collector and the poll it starts as a
     child: the key half is not asked of them here, and each makes the collector's own half (the mark
     present and the ring usable) in its own way. They are still refused a published credential and
-    the owner's, and the collector never receives the owner's credential."""
+    the owner's, and the collector never receives the owner's credential.
+
+    A fourth, asked of every job: a DSN it holds (DATABASE_URL, the system role's) that reaches its
+    database over the network without sslmode=verify-full (`database_hop_problems`). The migration
+    job's own DSN is asked by `migration_job_problems`."""
     if env is None:
         env = os.environ
     if not is_production(env):
@@ -900,6 +1031,9 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
             env, skip={p.variable for p in published}))
     if not holds_persona_key:
         problems.extend(persona_key_problems(env, collector=False))
+    from noctornal_api.db import WORKER_DSN_ENV
+
+    problems.extend(database_hop_problems(env, names=("DATABASE_URL", WORKER_DSN_ENV)))
     return [f"{job}: refusing to run: {problem}" for problem in problems]
 
 
@@ -925,6 +1059,8 @@ def migration_job_problems(env: Mapping[str, str] | None = None) -> list[str]:
             f"in secrets.env, and {SECRETS_STEP} moves it there from an older "
             f"secrets.env and keeps a backup ({SECRETS_UPGRADE_NOTE})."]
     problems = refuse_unsafe_job_environment("migrate", env, holds_owner_credential=True)
+    problems.extend(f"migrate: refusing to run: {problem}"
+                    for problem in database_hop_problems(env, names=(MIGRATION_DSN_ENV,)))
     if not problems and not _dsn_user(dsn):
         problems.append(
             f"migrate: {MIGRATION_DSN_ENV} names no role, so the migration job would "

@@ -37,9 +37,12 @@
 #     python -m pip install -c constraints.txt -e packages/ontology -e "apps/api[dev,telegram,yara]"
 # run the suite, and commit the two together. A distribution a new
 # dependency brings in must be added here, or test_dependency_pins fails.
+# yara-x moves with requirements-yara.txt, which holds the hashes of its two
+# Linux wheels for the image; test_yara_worker_default holds the two equal.
 #
-# Not pinned here: pip itself (the installers upgrade it first), and the
-# build backend an editable install fetches into its own isolated build.
+# Not pinned here: pip itself, which requirements-pip.txt pins by version and
+# hash and the installers and CI install from it first, and the build backend
+# an editable install fetches into its own isolated build.
 
 alembic==1.19.2
 annotated-doc==0.0.5

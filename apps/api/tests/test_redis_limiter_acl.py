@@ -8,8 +8,9 @@ So infra/production/compose.yml starts Redis with an ACL file in which `default`
 Held here:
 
 * the compose file writes exactly `ratelimit_redis.limiter_acl_rules()`, disables `default`, uses no
-  `requirepass`, refuses a REDIS_URL naming it that does not sign in as the limiter and starts idle for one
-  naming another host (its start script is RUN under sh), and health-checks as the limiter;
+  `requirepass`, refuses a REDIS_URL naming it that does not sign in as the limiter over TLS and starts
+  idle for one naming another host, refuses to start without its certificate rather than listen in plain
+  text, and listens on TLS alone (its start script is RUN under sh), and health-checks as the limiter;
 * the limiter sends no CLIENT SETINFO, so the ACL grants none, and CI starts the ACL Redis the real-Redis
   leg below needs, so it never skips;
 * `LIMITER_ACL_COMMANDS` covers every command the limiter's code sends (the Lua script's calls included)
@@ -100,8 +101,8 @@ def _start(tmp_path, url, password=_PW):
 
 @needs_sh
 @pytest.mark.parametrize("url", [
-    f"redis://{LIMITER_ACL_USER}:{_PW}@redis:6379/0",
-    f"redis://{LIMITER_ACL_USER}:{_PW}@redis",
+    f"rediss://{LIMITER_ACL_USER}:{_PW}@redis:6379/0?ssl_ca_certs=/certs/ca.crt",
+    f"rediss://{LIMITER_ACL_USER}:{_PW}@redis",
 ])
 def test_the_limiters_url_on_this_redis_starts_it(tmp_path, url):
     code, out, err, acl = _start(tmp_path, url)
@@ -118,8 +119,8 @@ def test_the_limiters_url_on_this_redis_starts_it(tmp_path, url):
 @pytest.mark.parametrize("url", [
     f"redis://:{_PW}@redis:6379/0",                         # an older secrets.env: default
     "redis://redis:6379/0",                                 # no password at all
-    f"redis://{LIMITER_ACL_USER}:stale@redis:6379/0",       # another password
-    f"rediss://{LIMITER_ACL_USER}:{_PW}@redis:6379/0",      # TLS this Redis does not speak
+    f"rediss://{LIMITER_ACL_USER}:stale@redis:6379/0",      # another password
+    f"redis://{LIMITER_ACL_USER}:{_PW}@redis:6379/0",       # plain text this Redis does not speak
     f"redis://other:{_PW}@redis:6379/0",
     f"redis://:{_PW}@REDIS:6379/0",                         # a host name has no case: the
     f"redis://:{_PW}@Redis",                                # installer reads these as `redis`
@@ -165,6 +166,37 @@ def test_the_healthcheck_signs_in_as_the_limiter(redis_service):
     test = redis_service["healthcheck"]["test"]
     assert test[0] == "CMD-SHELL"
     assert f"--user {LIMITER_ACL_USER}" in test[1] and "ping" in test[1]
+    # Over TLS, against the CA, by the name on the certificate: there is no plain port to ask.
+    assert "redis-cli --tls --cacert /certs/ca.crt -h redis " in test[1]
+    assert "./tls/public:/certs:ro" in redis_service["volumes"]
+
+
+@needs_sh
+@pytest.mark.parametrize("present", [(), ("server.crt",), ("server.key",)])
+def test_the_start_script_refuses_without_certificates(tmp_path, present):
+    """With its pair missing or unreadable the server never starts, not even on a plain port."""
+    code, out, err, acl = run_start_script(
+        {"REDIS_PASSWORD": _PW, "REDIS_URL": f"rediss://{LIMITER_ACL_USER}:{_PW}@redis:6379/0"},
+        tmp_path, certificates=present)
+    assert code == 1 and out == "" and acl == "", (code, out, err)
+    assert "speaks TLS alone" in err and "refusing to start" in err
+    assert "scripts/internal_tls.py" in err and "step 3" in err
+    assert _PW not in err
+
+
+def test_the_start_script_passes_tls_flags_to_the_server(redis_service):
+    """`--port 0` closes the plain listener and 6379 is TLS 1.3, with the pair the compose file
+    mounts from tls/redis; clients sign in with the ACL password, not a certificate."""
+    script = _script(redis_service).replace("$$", "$")
+    server = re.sub(r"\\\n\s*", " ", script[script.index("exec redis-server"):]).split()
+    flags = dict(zip(server[2::2], server[3::2], strict=False))
+    assert flags["--port"] == "0" and flags["--tls-port"] == "6379"
+    assert flags["--tls-cert-file"] == "/tls/server.crt"
+    assert flags["--tls-key-file"] == "/tls/server.key"
+    assert flags["--tls-auth-clients"] == "no" and flags["--tls-protocols"] == "TLSv1.3"
+    assert "./tls/redis:/tls:ro" in redis_service["volumes"]
+    assert script.index("[ ! -r /tls/server.crt ] || [ ! -r /tls/server.key ]") < \
+        script.index("exec redis-server")
 
 
 def test_the_template_url_names_the_user():
@@ -172,6 +204,7 @@ def test_the_template_url_names_the_user():
     url = re.search(r"^REDIS_URL=(.*)$", text, re.M).group(1)
     assert urlsplit(url).username == LIMITER_ACL_USER
     assert urlsplit(url).hostname == "redis"
+    assert urlsplit(url).scheme == "rediss" and urlsplit(url).query == "ssl_ca_certs=/certs/ca.crt"
 
 
 def test_the_acl_prefix_is_the_limiters_own():
@@ -494,7 +527,12 @@ def test_ci_starts_the_acl_redis_and_names_both_urls(redis_service):
     assert f"127.0.0.1:{limiter.port}:6379" in step
     # Inside the container REDIS_URL names host `redis`, so the start
     # check takes its strict branch, the one production runs.
-    assert f"REDIS_URL=redis://{LIMITER_ACL_USER}:{limiter.password}@redis:6379/0" in step
+    assert f"REDIS_URL=rediss://{LIMITER_ACL_USER}:{limiter.password}@redis:6379/0" in step
+    # Over TLS, as production: a throwaway pair for the runner's own name, the CA the URLs name.
+    assert "-v /tmp/acl-redis-tls:/tls:ro" in step and "subjectAltName=DNS:localhost" in step
+    for url in (limiter, tenant):
+        assert url.scheme == "rediss" and url.query == "ssl_ca_certs=/tmp/acl-redis-tls/ca.crt"
+    assert "redis-cli --tls --cacert /tls/ca.crt" in step
     assert re.search(r"REDIS_PASSWORD=(\S+)", step).group(1) == limiter.password
     assert re.search(r"ACL_TENANT_PASSWORD=(\S+)", step).group(1) == tenant.password
 
@@ -638,7 +676,9 @@ def test_the_script_cannot_reach_a_key_outside_the_prefix():
 def test_the_default_user_is_off():
     import redis
     parts = urlsplit(ACL_URL)
-    anonymous = urlunsplit((parts.scheme, f"{parts.hostname}:{parts.port}", parts.path, "", ""))
+    # The query names the CA; without it the handshake, not the ACL, would refuse.
+    anonymous = urlunsplit((parts.scheme, f"{parts.hostname}:{parts.port}", parts.path,
+                            parts.query, ""))
     client = _client(anonymous)
     try:
         with pytest.raises(redis.exceptions.AuthenticationError):
@@ -646,7 +686,7 @@ def test_the_default_user_is_off():
     finally:
         client.close()
     as_default = urlunsplit((parts.scheme, f"default:{parts.password}@{parts.hostname}:{parts.port}",
-                            parts.path, "", ""))
+                            parts.path, parts.query, ""))
     client = _client(as_default)
     try:
         with pytest.raises(redis.exceptions.AuthenticationError):

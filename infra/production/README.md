@@ -58,9 +58,8 @@ sudo bash release/install.sh --production-secrets
 The parentheses are deliberate. The `umask` is there so the two files are
 created private from the first byte, and it must end with the subshell: left
 in force in your shell it would also make everything you create afterwards
-unreadable to the containers (the TLS directory and certificate in step 3,
-and the files a later `git pull` writes, which the containers read through
-bind mounts). Whatever your shell's own `umask` is, [check the modes
+unreadable to the containers (the files a later `git pull` writes, which
+the containers read through bind mounts). Whatever your shell's own `umask` is, [check the modes
 before you start the stack](#4-start-it).
 
 The second command (`release\install.ps1 -ProductionSecrets` on Windows,
@@ -237,9 +236,9 @@ keys, the egress proxy restarts in a loop, and cron, the collector, lab-cron
 and embed-pass, which wait for the proxy, never start: `up` itself exits 1
 with `dependency failed to start`. The keys are made by the application
 image, so build it first. Make the certificate directory first too, as
-yourself: the first `docker compose run` mounts it, and Docker creates a
-missing mount source as root, which would leave step 3 unable to write the
-certificate into it:
+yourself: the first `docker compose run` mounts `tls/public` from it, and
+Docker creates a missing mount source as root with a mode of its choosing,
+which step 3 then has to correct:
 
 ```sh
 mkdir -p -m 755 infra/production/tls
@@ -289,7 +288,7 @@ and `NOCTORNAL_WORKER_DATABASE_URL`, then `up -d`.
 
 ---
 
-## 3. Give MinIO a certificate
+## 3. Issue the internal certificates
 
 The API refuses to start unless `MINIO_SECURE` and `SAMPLE_SECURE` are both
 `true` (`apps/api/src/noctornal_api/config.py`). The argument is not about
@@ -298,46 +297,86 @@ that every exhibit's bytes do, and each request carries a signature
 anything on the path can lift and replay against the evidence bucket until
 it expires.
 
-MinIO looks for `public.crt` and `private.key` in its certificate
-directory, so those are exactly the names:
+The deployment has a certificate authority of its own, which signs one
+certificate for each server inside the compose network that speaks TLS:
 
 ```sh
-mkdir -p infra/production/tls
-openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
-  -keyout infra/production/tls/private.key \
-  -out    infra/production/tls/public.crt \
-  -subj   "/CN=minio" \
-  -addext "subjectAltName=DNS:minio"
-chmod 755 infra/production/tls
-chmod 644 infra/production/tls/public.crt
-sudo chown root:root infra/production/tls/private.key
-sudo chmod 600       infra/production/tls/private.key
+sudo python3 scripts/internal_tls.py init
+sudo python3 scripts/internal_tls.py check
 ```
 
-The two `chmod` lines state the modes instead of trusting your `umask`, and
-they are not decoration. Every container drops all Linux capabilities, so
-root inside one is an ordinary user to the files it is given: it reads only
-what it owns or what `other` may read. The application containers (uid
-10001) read `public.crt`, and MinIO and `minio-init` (root, without
-`DAC_OVERRIDE`) read it too without owning it. Only `private.key` is private,
-and it is root's, which is the one file MinIO opens as its owner. A directory
-or certificate left `0700` or `0600` by a `umask` of `077` breaks the stack
-without saying why: every loop service and the API stop at the
-`cat ... /certs/public.crt` step of their start-up, and MinIO, which cannot
-read its certificate, starts on plain HTTP and the stack never reaches
-"buckets ready".
+`init` lays them out under `infra/production/tls/` so that a private key is
+mounted into the server that uses it and into nothing else:
 
-`DNS:minio` is load-bearing. `minio` is the compose service name, it is
-what `MINIO_ENDPOINT` and `SAMPLE_ENDPOINT` address, and it is the name
-each client checks the handshake against. A certificate for anything else
-produces a hostname-mismatch error on the first exhibit.
+| Under `tls/` | Holds | Mounted into |
+|---|---|---|
+| `public/` | `ca.crt`, the CA every client trusts | every service that connects to one of the servers, at `/certs` |
+| `minio/` | `public.crt` and `private.key`, the names MinIO looks for | `minio` alone |
+| `postgres/` | `server.crt` and `server.key` | `postgres` alone |
+| `redis/` | `server.crt` and `server.key` | `redis` alone |
+| `ca/` | the CA's key and certificate | nothing |
 
-The certificate is self-signed and no public CA vouches for it, so the
-application containers are told to trust it: each one concatenates the
-system CA bundle with `public.crt` at start and points `SSL_CERT_FILE` at
+It runs with `sudo` because every file it writes is root's, and it states
+every mode rather than trusting your `umask`: `tls/` and `public/` 755,
+`ca.crt` 644, every other directory 700 and every key 600. That is not
+decoration. Every container drops all Linux capabilities, so root inside
+one is an ordinary user to the files it is given: it reads only what it
+owns or what `other` may read. The application containers (uid 10001) read
+`ca.crt` because anybody may, and MinIO (root, without `DAC_OVERRIDE`) reads
+its key because root owns it. Run as yourself, `init` says that MinIO will
+not be able to read its key, and `check` fails a key that is not root's.
+
+Postgres speaks TLS 1.3 to the network and nothing else. `pg_hba.conf`,
+beside `compose.yml`, admits a connection from the network over `hostssl`
+alone, so a client that leaves `sslmode` out is refused by the server, and
+every DSN asks for `sslmode=verify-full` against `/certs/ca.crt`, which also
+checks the server's name; production refuses to start on one that does not,
+naming the variable. The templates carry it, and on an existing deployment
+the installer step adds it (see [Upgrading](#upgrading)). Inside its own
+container, over the socket and the loopback address, the database trusts as
+the image's initdb does, so `docker compose exec postgres psql`, the backup
+and the healthcheck need no certificate. Postgres refuses a key that is not
+its own user's, so its entrypoint copies the pair onto a tmpfs it gives to
+that user before the database starts; the key is never written to a disk.
+
+Redis speaks TLS 1.3 and nothing else (`--port 0`): it starts on its
+certificate or refuses to start, never on a plain port. Clients sign in with
+the limiter's ACL password, not a certificate (see
+[The limiter's Redis](#the-limiters-redis)), and `REDIS_URL` is
+`rediss://` naming the same CA.
+
+`check` changes nothing. It verifies every certificate against `ca.crt`,
+checks that each names its own server and is the certificate of the key
+beside it, that `public/` holds no key and that the modes are as above, and
+it fails a certificate within 30 days of its end. Run it again whenever
+something under `tls/` changes.
+
+Each certificate names exactly its compose service in its subjectAltName,
+`DNS:minio` for MinIO, and that is load-bearing: `minio` is what
+`MINIO_ENDPOINT` and `SAMPLE_ENDPOINT` address, and it is the name each
+client checks the handshake against. The CA itself carries name constraints:
+it can vouch for `minio`, `postgres` and `redis` and for no other name and no
+address, so its key cannot make a certificate that a container would accept
+for anything else it reaches through the egress proxy.
+
+**Keep `ca/ca.key` off this host.** It is needed only to issue a
+certificate, so once the stack runs, copy it somewhere safe and delete it
+here; `check` notes when it is still present. The CA lasts ten years and
+each server certificate 1095 days, and nothing renews them by itself: a
+certificate past its end stops every client that verifies it. To renew one,
+put the key back (root's, mode 600), then:
+
+```sh
+sudo python3 scripts/internal_tls.py renew minio       # or postgres, redis; none names all three
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml restart minio
+sudo python3 scripts/internal_tls.py check
+```
+
+The application containers are told to trust the CA: each one concatenates
+the system CA bundle with `ca.crt` at start and points `SSL_CERT_FILE` at
 the result.
 
-It is a concatenation rather than the certificate alone because the clients
+It is a concatenation rather than the CA alone because the clients
 in this build do not read that variable the same way. The MinIO client
 hands it to urllib3 as `ca_certs`, which makes that file the *entire* set of
 roots the evidence, raw and sample clients will trust. Everything else,
@@ -345,12 +384,19 @@ RSS collection, the webhook channel, SMTP, the readiness probe, goes
 through OpenSSL's default verify paths, which are `SSL_CERT_FILE` **and**
 `SSL_CERT_DIR`; the directory still points at `/etc/ssl/certs` and the image
 ships the hashed symlinks, so those clients keep the public roots either
-way. Pointing the variable straight at `public.crt` would therefore not
+way. Pointing the variable straight at `ca.crt` would therefore not
 break them, whatever the certificate count suggests. The concatenation is
 kept because it costs one `cat` and removes the dependency on a base image
 that ships those symlinks.
 
-`infra/production/tls/` is gitignored.
+A server of the agency's own that the services must trust (an object store
+or a mail relay with a private CA) joins the same file:
+`sudo python3 scripts/internal_tls.py add-ca FILE` appends the certificates
+in `FILE` and refuses one that carries a private key or anything that is not
+a certificate. Restart the services to read it.
+
+`infra/production/tls/` is gitignored and left out of the image's build
+context.
 
 ---
 
@@ -359,14 +405,16 @@ that ships those symlinks.
 First check the modes of the files the containers read from this checkout.
 A clone or a `git pull` made under a restrictive `umask` (some hardened hosts
 default to `077`) leaves them `0600`, and the containers cannot read what they
-do not own: Caddy reads `Caddyfile`, `minio-init` reads `mc-alias.sh`, MinIO and
-the application read the `tls` directory and `public.crt`, and Postgres reads
-`db/init`. This prints nothing when they are right (`private.key` is skipped
-on purpose, it is root's and private):
+do not own: Caddy reads `Caddyfile`, `minio-init` reads `mc-alias.sh`, the
+application reads `tls/public`, and Postgres reads `db/init` and `pg_hba.conf`.
+This prints nothing when they are right (the key directories under `tls/` are
+left out on purpose: they are root's and 700, and `internal_tls.py check`
+reads them):
 
 ```sh
-find infra/production/Caddyfile infra/production/mc-alias.sh infra/production/tls db/init \
-  ! -name private.key \( -type f ! -perm -o=r -o -type d ! -perm -o=rx \) -print
+find infra/production/Caddyfile infra/production/mc-alias.sh infra/production/pg_hba.conf \
+  infra/production/tls/public db/init \
+  \( -type f ! -perm -o=r -o -type d ! -perm -o=rx \) -print
 ```
 
 Whatever it names, open up with `chmod go+rX <path>` (a directory needs `x` as
@@ -397,9 +445,19 @@ sudo docker compose -p noctornal-prod -f infra/production/compose.yml ps
 sudo docker compose -p noctornal-prod -f infra/production/compose.yml logs -f migrate api
 ```
 
-`migrate` and `minio-init` are one-shot and are expected to sit in `exited
-(0)`. Everything else should be `running`, and `api`, `sample-origin` and
+`caddy-init`, `migrate` and `minio-init` are one-shot and are expected to sit
+in `exited (0)`. Everything else should be `running`, and `api`, `sample-origin` and
 `analysis-worker` should reach `healthy`.
+
+`caddy-init` runs again at every `up`, over volumes Caddy has by then filled
+with directories only uid 10002 may open, and Caddy does not start unless it
+succeeds. Once Caddy has started, confirm a second run
+succeeds too:
+
+```sh
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml run --rm caddy-init; echo $?
+# 0
+```
 
 ### If the API refuses to start
 
@@ -411,30 +469,43 @@ over someone's shoulder.
 ### If `up` fails creating the network
 
 `Pool overlaps with other one on this address space` means another Docker
-network on this host already holds `172.31.243.0/24` (or one of the egress
-networks, `172.31.244.0/24` to `172.31.246.0/24`).
+network on this host already holds one of this file's subnets:
 
-`noctornal` (`172.31.243.0/24`) and `edge` (`172.31.244.0/24`) can move.
-Pick a free /24 and change every place in `compose.yml` that names the old
-one, all of them in the same edit:
+| Network | Subnet | Who is on it |
+|---|---|---|
+| `noctornal` | `172.31.243.0/24` | every application service, the database, Redis, MinIO and the egress proxy; internal |
+| `edge` | `172.31.244.0/24` | the egress proxy (and Caddy under `compose.acme.yml`); the one route out |
+| `frontend` | `172.31.247.0/24` | Caddy, api and sample-origin; internal |
+| `ingress` | `172.31.248.0/24` | Caddy alone, for its published ports; no masquerade |
+| `exits` | `172.31.245.0/24` | the egress proxy and its Tor or VPN sidecars |
+| `models` | `172.31.246.0/24` | the egress proxy and a local model server; internal |
 
-* the `subnet` in the `networks:` block at the bottom and, for `noctornal`, the
-  `ip_range` and `gateway` beside it: the range is the upper half of the /24
-  (`.128/25`), the gateway is `.1`, and the two fixed addresses below must
-  stay outside the range (see [After a host reboot](#after-a-host-reboot));
-* for `noctornal`, the `x-caddy-ip` and `x-egress-ip` addresses at the top
-  (the first is the address uvicorn is told to trust for `X-Forwarded-For`),
+`noctornal`, `edge`, `frontend` and `ingress` can move. Pick a free /24 and
+change every place that names the old one, all of them in the same edit:
+
+* the `subnet` in the `networks:` block at the bottom of `compose.yml` and,
+  for `noctornal` and `frontend`, the `ip_range` and `gateway` beside it: the
+  range is the upper half of the /24 (`.128/25`), the gateway is `.1`, and the
+  fixed addresses below must stay outside the range (see
+  [After a host reboot](#after-a-host-reboot));
+* for `noctornal`, the `x-egress-ip` address at the top,
   `NOCTORNAL_EGRESS_PROXY_URL` on api, cron, collector, lab-cron and
   embed-pass, and `NOCTORNAL_EGRESS_LISTEN` on the egress proxy, each of
   which repeats the egress address because a YAML alias cannot be spliced
   into a string;
-* for either, `NOCTORNAL_EGRESS_INTERNAL_CIDRS` on those six services. It
-  names the deployment's own networks, which no route may reach. Left naming
-  the old subnet, it would guard a network that is no longer there and leave
-  the new one open to a route.
+* for `frontend`, the `x-caddy-ip` address at the top (the address uvicorn is
+  told to trust for `X-Forwarded-For`), and the `ipv4_address` in
+  `compose.acme.yml`, which repeats it because an alias cannot reach across
+  files;
+* for any of the four, `NOCTORNAL_EGRESS_INTERNAL_CIDRS` on those six
+  services. It names the deployment's own networks, which no route may reach.
+  Left naming the old subnet, it would guard a network that is no longer
+  there and leave the new one open to a route. The code's default for a
+  process without the variable, `egress_policy.DEFAULT_INTERNAL_NETWORKS`,
+  is these four as shipped.
 
-`grep -n '172\.31\.243\.' infra/production/compose.yml` (or `244`) lists
-them; after the edit it should find nothing outside comments. A Compose
+`grep -n '172\.31\.24[3478]\.' infra/production/compose.yml infra/production/compose.acme.yml`
+lists them; after the edit it should find nothing outside comments. A Compose
 override file of your own can carry the same changes instead, with `!override`
 on the `ports`, `networks` and `ipam` keys it replaces (Compose 2.24 or later).
 
@@ -447,11 +518,11 @@ refused. Free those two on the host instead.
 
 Nothing to do. Every service restarts with Docker (`restart: unless-stopped`),
 Docker is enabled at boot by the packages from docs.docker.com, and the console
-answers about half a minute after the host is up. Caddy (`172.31.243.10`) and
-the egress proxy (`172.31.243.11`) hold fixed addresses on the internal
-network; every other container is dealt one from the upper half of its subnet
-only (`ip_range`), so however the services start, none of them can take those
-two.
+answers about half a minute after the host is up. Caddy (`172.31.247.10`, on
+`frontend`) and the egress proxy (`172.31.243.11`, on `noctornal`) hold fixed
+addresses; every other container is dealt one from the upper half of each
+subnet only (`ip_range`), so however the services start, none of them can take
+those two.
 
 A deployment started before Beta 1.3 had no such range. A reboot starts every
 service at once, two containers without a fixed address could be dealt the
@@ -538,7 +609,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Forty-nine checks, each with the evidence behind it and, when it fails, the
+Fifty checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -572,7 +643,7 @@ register is the one that answers for the deployment.
 
 ### What stays red, and what a red check refuses
 
-Four of the forty-nine are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the fifty are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -636,6 +707,18 @@ Minimisation gaps, names the cases, and the remedy is the case's Lead
 investigator assigning one who is cleared. It is not blocking, and a case not
 yet closed with such a conversation is a caveat on the green row.
 
+`internal_hops_encrypted` reads how this process reaches Postgres and the
+limiter's Redis: the register's own database session from `pg_stat_ssl`, the
+sslmode each DSN asks for, and the protocol, cipher and certificate end date of
+the limiter's own Redis connection. In production it is red when either hop is
+not TLS 1.3, when a DSN does not ask for `sslmode=verify-full`, or when
+`REDIS_URL` is not `rediss://` or switches off the check of the server, and it
+names the hop; a unix socket stays on the host and passes. Outside production
+it is green and says what it read, since the development stack is plain text
+on purpose. It is not blocking. The Redis certificate's end date in its
+evidence is the one to watch: `internal_tls.py check` fails within 30 days of
+it.
+
 **1. `prohibited_content_policy`**, `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
 `NOCTORNAL_DESIGNATED_PERSON` are set, and setting them is a declaration,
@@ -693,7 +776,8 @@ is blocking, and each row's action says the same:
   `SYS_ADMIN`, nobody can change that policy. That is the safe direction:
   every operation keeps the requirement it has. Grant the role (Admin,
   Accounts) when there is a second person.
-* **`pgp_verifier`**: the image's gnupg is Debian's `2.4.7-21+deb13u1`, whose
+* **`pgp_verifier`**: the image's gnupg is Debian's `2.4.7-21+deb13u1`, the
+  version the Dockerfile pins, whose
   version number is below the floor the verifier enforces, so every signature
   check records `NO_VERIFIER`. Debian carries the fixes under the older number.
   Once you have checked the package changelog, attest it with
@@ -726,14 +810,18 @@ and `ACL GETUSER` reads any user's rules and password hashes, which here
 means its own and the disabled default's, neither of which has a hash
 anybody else could use.
 
-`REDIS_URL` must sign in as that user with that password:
-`redis://noctornal_limiter:PASSWORD@redis:6379/0`. While `REDIS_URL` names
-this service (host `redis`), the `redis` service compares the two as text
-and refuses to start when they disagree, because a URL with no user name
-signs in as the disabled default user and every limit that fails closed,
-the login among them, would then refuse everyone. The installer step
-writes both. Changing the password costs a restart and nothing else: no
-data is stored with it.
+`REDIS_URL` must sign in as that user with that password, over TLS:
+`rediss://noctornal_limiter:PASSWORD@redis:6379/0?ssl_ca_certs=/certs/ca.crt`.
+While `REDIS_URL` names this service (host `redis`), the `redis` service
+compares the two as text and refuses to start when they disagree, because a
+URL with no user name signs in as the disabled default user and every limit
+that fails closed, the login among them, would then refuse everyone; it
+refuses a `redis://` URL too, since it has no plain port to answer one. The
+installer step writes both. Changing the password costs a restart and
+nothing else: no data is stored with it. In production the API refuses a
+`REDIS_URL` that is not `rediss://` (or `unix://`), and one that switches
+off the check of the server (`ssl_cert_reqs` other than `required`,
+`ssl_check_hostname` false), whichever Redis it names.
 
 `redis_limiter_isolated` reads this ACL back over the limiter's own
 connection (`ACL WHOAMI`, `ACL GETUSER`) and, under
@@ -770,9 +858,10 @@ An `up` without the flag starts it again, idle, and nothing else changes.
 ## Egress: the only way out
 
 In this deployment the `noctornal` network is internal. The API, the cron
-loop and the sample origin have no route to the internet. Two services do:
-Caddy, which publishes 80 and 443, and the **egress proxy**, which is how
-everything else leaves. The API and cron reach it at
+loop and the sample origin have no route to the internet. One service does:
+the **egress proxy**, which is how everything else leaves (and Caddy, under
+the ACME override alone; by default it publishes 80 and 443 and has no route
+out). The API and cron reach it at
 `NOCTORNAL_EGRESS_PROXY_URL` (`http://172.31.243.11:3128`). It speaks HTTP
 CONNECT and SOCKS5 on that one address. No port of it is published. It
 decides every connection by route, records each one in
@@ -879,6 +968,43 @@ the ones it cannot answer to the host's resolvers, so a name can still leave
 the host as a lookup even though no connection can. The readiness row says
 so as a standing caveat and sends no query itself.
 
+Caddy, the one container the internet reaches, is on `frontend` (internal)
+and `ingress`, which exists to carry the published ports and does not give
+what leaves it the host's address. Confirm once, and after every Docker or
+firewall change, that it runs unprivileged, has no route out and cannot reach
+the database:
+
+```sh
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec caddy id
+# uid=10002 gid=10002
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec caddy \
+  wget -T 5 -q -O /dev/null http://1.1.1.1
+# must FAIL (a timeout): it connects to 1.1.1.1 and nothing else, and only when you run it
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec caddy \
+  nc -z -w 3 postgres 5432
+# must FAIL (bad address): Caddy shares no network with the database
+```
+
+A connection Caddy starts still leaves the host's interface, with a private
+source address nothing routes back, unless the host drops it first. A rule in
+Docker's `DOCKER-USER` chain does that, and blocks only connections that start
+inside `ingress`, never replies to the ones that reach Caddy:
+
+```sh
+sudo iptables -I DOCKER-USER -s 172.31.248.0/24 -m conntrack --ctstate NEW -j DROP
+```
+
+It is described here and not installed by anything in this repository: the
+host's firewall is the operator's, and a rule added by a compose file would
+outlive the stack that added it. It does not survive a reboot unless your
+firewall's own persistence saves it. Leave it out under `compose.acme.yml`,
+where Caddy leaves through `edge` instead.
+
+Then sign in through the console's hostname and check, under Administration,
+that the sign-in audit row names your own address and not `172.31.247.10`,
+Caddy's: an address that has drifted from `x-caddy-ip` makes every request
+meter and audit as Caddy.
+
 ### Sidecars and local model servers
 
 A Tor or VPN sidecar goes on the `exits` network, and its address in
@@ -945,6 +1071,39 @@ request is one connection and one child. What `compose.yml` gives it:
   group) mount it read-only and can pass through it to the socket, which is
   mode `0660`.
   No child's user can even enter it.
+
+### YARA in the worker
+
+The image carries yara-x, so the worker scans each sample with the rule
+sets a Security Officer has activated (`docs/11`). `migrate`, the one
+service that builds the image, passes the build argument
+`NOCTORNAL_EXTRAS`, which is `yara` unless the shell that runs compose sets
+it, and the Dockerfile installs yara-x from `requirements-yara.txt`, by the
+sha256 of its wheel. It adds about 35 MiB to the image, which the API, cron
+and the other services carry too without loading it.
+
+Leave `NOCTORNAL_EXTRAS` unset. `NOCTORNAL_EXTRAS=telegram,yara` adds
+Telethon; any value that leaves out `yara` builds an image that scans
+nothing, and an empty value is the deliberate way to do that:
+
+```bash
+sudo NOCTORNAL_EXTRAS= docker compose -p noctornal-prod -f infra/production/compose.yml build
+```
+
+In the readiness register, `sample_static_analysis` names the engine
+(`yara-x 1.20.0`) and `yara_rules_active` the build each active rule set
+has for it. Without the engine both pass with a caveat that says it is not
+installed. The worker's selftest child, which readiness starts each time
+it runs, compiles a one-rule test with yara-x and scans with it under the
+same limits as every step; when that fails, `sample_static_analysis` is red
+and names the error's class, since every YARA step would fail the same way.
+Look at `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY` and the service's pids and
+memory limits before anything else.
+
+**Upgrading a deployment built before 2026-11-15**: its image has no
+yara-x unless it was built with the argument, and the tag does not change,
+so a plain `up -d` keeps it. Run `up -d --build` once;
+`sample_static_analysis` then names `yara-x 1.20.0` and drops the caveat.
 
 ### What a compromised child can and cannot do
 
@@ -1246,8 +1405,9 @@ On a host whose `umask` is `077`, a pull leaves the files it writes `0600`,
 which a container that does not own them cannot read: run the mode check from
 [step 4](#4-start-it) before the `up`. From a tree older than 2026-10-03, also
 know that every container drops its capabilities, so `Caddyfile`,
-`mc-alias.sh`, `tls/public.crt` and `db/init` must be readable by `other` (the
-check says so), and `tls/private.key` must be root's, mode 600.
+`mc-alias.sh`, `tls/public` and `db/init` must be readable by `other` (the
+check says so), and every key under `tls/` must be root's, mode 600
+(`internal_tls.py check` says so).
 
 Every image the stack pulls is pinned by digest (Hardening, below), so an
 update that changes one arrives as a change in this repository, never from a
@@ -1378,9 +1538,9 @@ preservation bucket below states.
 The second command runs `mc` in a one-off container of the `minio-init`
 service, because that service already has what `mc` needs: the compose
 network (MinIO publishes no port), the root credentials and bucket names
-from `secrets.env`, the certificate from step 3, and `mc-alias.sh`, which
+from `secrets.env`, the CA from step 3, and `mc-alias.sh`, which
 gives `mc` the root credential through its environment and trusts that
-certificate. The credential is deliberately not an argument of any command,
+CA. The credential is deliberately not an argument of any command,
 because an argument is readable by every local account on the host for as long
 as its process lives. The alias lives and dies with that container; nothing
 on the host defines one.
@@ -1438,6 +1598,71 @@ the property evidence is supposed to have.
 ---
 
 ## Upgrading
+
+### From a release before 2026-11-15: the internal CA
+
+`tls/` held MinIO's self-signed `public.crt` and `private.key`, and every
+application container mounted the whole directory, the key with it. Now
+every client mounts `tls/public`, which holds the CA alone, and MinIO's key
+moves to `tls/minio`, which MinIO alone mounts. `migrate` makes the move and
+issues the rest:
+
+```sh
+git pull
+sudo python3 scripts/internal_tls.py migrate
+sudo python3 scripts/internal_tls.py check
+sudo bash release/install.sh --production-secrets      # release\install.ps1 -ProductionSecrets on Windows
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml down
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+```
+
+Under the ACME override, add `-f infra/production/compose.acme.yml` to both
+compose commands. Do not skip the `down`: this release adds two networks and
+moves Caddy's fixed address to one of them, and a plain `up -d --build`
+recreates networks under containers that stay running, which leaves the stack
+half started, as the Beta 1.3 change did (below). `down` keeps the data
+volumes. The console is down for the length of the `up`.
+
+It copies the old pair to `tls/legacy-minio/`, issues the CA and a
+certificate for each server, MinIO's included, and only then removes the old
+pair from the top of `tls/`; a failure part way leaves the old layout as it
+was, and running it again starts from there. The old certificate is not
+trusted afterwards: it was made by `openssl req -x509`, which marks it a CA
+with no name constraint, so trusting it beside the new CA would let MinIO's
+old key vouch for any name. MinIO serves its new certificate from its next
+start, which `up -d` gives it. Nothing in the database or the object store
+changes.
+
+The installer step adds `?sslmode=verify-full&sslrootcert=/certs/ca.crt` to
+every DSN naming the bundled `postgres` service, in `secrets.env`,
+`migrate.env` and `egress-proxy.env`, keeping a backup of each file it
+changes, and prints each change by name. A DSN naming another host is your
+own database: it is left alone and named, and production refuses to start
+on it until it asks for `sslmode=verify-full` against a CA the services
+trust (`internal_tls.py add-ca`). Postgres reads `pg_hba.conf` from this
+checkout from its next start, whatever the data volume holds, so a client
+still asking for plain text is refused from then on.
+
+It also rewrites a `REDIS_URL` naming the bundled `redis` service as
+`rediss://`, naming the CA. Redis listens on TLS alone from its next start
+and refuses to start on a `redis://` URL naming it, with a sentence naming
+the installer step.
+
+Caddy runs as uid 10002 from this release. Its two volumes are root's on an
+existing host, and `caddy-init` gives them to that uid before Caddy starts,
+at every start, so there is nothing to run for it; the `chown` an earlier
+Hardening section offered is no longer needed.
+
+**The way back.** Put the old pair back at the top of `tls/`, then check the
+previous release out:
+
+```sh
+sudo cp -p infra/production/tls/legacy-minio/public.crt infra/production/tls/legacy-minio/private.key infra/production/tls/
+```
+
+The directories `migrate` made stay root's and 700, so the previous
+release's clients, which mount `tls/` whole, can read none of them. Once this
+release runs, delete `tls/legacy-minio/`.
 
 ### From Beta 1.2 or earlier: the internal network's address range
 
@@ -1548,7 +1773,7 @@ dead letters and unattached ingest records a sweep would destroy:
 ```sh
 sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
   run --rm --no-deps cron /bin/sh -c '
-    cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
+    cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt
     export SSL_CERT_FILE=/tmp/ca-bundle.crt
     python scripts/retention_sweep.py'
 # mode=dry-run past_clock=140 sweepable=120 held=20 dead_letters=3 unattached_records=17
@@ -1560,7 +1785,7 @@ sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
 sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
   run --rm --no-deps -e NOCTORNAL_RETENTION_SWEEP_AUTHORITY='RETSCHED-2026-014' \
   cron /bin/sh -c '
-    cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
+    cat /etc/ssl/certs/ca-certificates.crt /certs/ca.crt > /tmp/ca-bundle.crt
     export SSL_CERT_FILE=/tmp/ca-bundle.crt
     python scripts/retention_sweep.py --apply --actor you@example.org'
 # mode=apply passes=2 documents_purged=120 dead_letters_purged=3 records_purged=17 tombstones=3 held=20 remaining=0
@@ -1634,19 +1859,40 @@ What `compose.yml` does to every container, and what each one keeps:
 
 | Service | Capabilities kept | Why |
 |---|---|---|
-| caddy | `NET_BIND_SERVICE` | binds 80 and 443; the binary carries it as a file capability, so without it the container does not start |
+| caddy | `NET_BIND_SERVICE` | the binary carries it as a file capability, so without it the container does not start; Caddy runs as uid 10002, which no-new-privileges keeps from being granted it, and binds 80 and 443 through the `net.ipv4.ip_unprivileged_port_start` sysctl |
+| caddy-init | `CHOWN`, `DAC_READ_SEARCH` | gives `caddy-data` and `caddy-config` to uid 10002 at each start, then exits; it opens the mode 0700 directories Caddy has made there with `DAC_READ_SEARCH`, which reads and never writes |
 | postgres | `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID` | the image's entrypoint prepares the data directory as root and drops to the postgres user |
 | redis | `DAC_OVERRIDE` | runs as root over a volume the redis user owns |
 | minio, minio-init, and every application service | none | uid 10001 needs none, and MinIO and `mc` run as root without them |
 
 Every container also has `no-new-privileges`, and Caddy's root filesystem is
-read-only. Dropping `NET_RAW` from all of them takes the raw socket away from
+read-only. Caddy shares a network with api and sample-origin alone, and has
+no route out unless the ACME override below gives it one.
+
+**The ACME override.** `NOCTORNAL_TLS_MODE` set to an e-mail address makes
+Caddy obtain the two public hostnames' certificates from Let's Encrypt, which
+it can reach only through a network with a route out. `compose.acme.yml` is
+that, and nothing else: it replaces Caddy's `ingress` with `edge`, the bridge
+the egress proxy leaves through, and keeps its address on `frontend`. Name it
+on every compose command, after `compose.yml`:
+
+```sh
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
+  -f infra/production/compose.acme.yml up -d --build
+```
+
+A command without it puts Caddy back on `ingress`, where renewal fails and
+the certificates in `caddy-data` run until they expire. Under the override
+Compose no longer counts `ingress` as the project's, so a `down` leaves that
+network behind, unused; `sudo docker network rm noctornal-prod_ingress`
+removes it. Dropping `NET_RAW` from all of them takes the raw socket away from
 a compromised container on the shared bridge.
 
 The price is file modes. Without `DAC_OVERRIDE`, root in `caddy`, `minio` and
 `minio-init` is an ordinary user to a bind-mounted file: it reads what it owns
-or what `other` may read, and nothing else. That is why step 3 states the
-modes of `tls/` and `public.crt`, and step 4 checks the rest before `up`. A
+or what `other` may read, and nothing else. That is why
+`scripts/internal_tls.py` states every mode under `tls/`, and step 4 checks
+the rest before `up`. A
 checkout made as a non-root operator under a `umask` of `077` fails closed (Caddy
 and `minio-init` cannot read their files and do not start), not open.
 
@@ -1712,30 +1958,15 @@ both names resolve to the same digest, which is how that is checked.
 
 **What is still open.** Stated rather than hidden:
 
-* **Caddy still runs as uid 0**, with the capability set above and nothing
-  else. `caddy-data` and `caddy-config` already exist on a running deployment,
-  owned by root, and a non-root Caddy could not open the ACME account in them.
-  To run it unprivileged (Docker 20.10 or later), change the volumes once and
-  add `user:` to the caddy service:
-
-  ```sh
-  sudo docker compose -p noctornal-prod -f infra/production/compose.yml stop caddy
-  docker run --rm -v noctornal-prod_caddy-data:/data -v noctornal-prod_caddy-config:/config \
-    --entrypoint chown caddy:2-alpine -R 10002:10002 /data /config
-  # then, under `caddy:` in compose.yml:   user: "10002:10002"
-  ```
-* **Caddy still has a route out** (`edge`, for ACME) and shares a bridge with
-  Postgres, Redis and MinIO. It is the TLS terminator, not a service the egress
-  proxy fronts.
-* **The Postgres and Redis hops are plaintext** inside the compose network. Only
-  MinIO is TLS here, on the argument that a replayable request signature must
-  not cross the wire. With `NET_RAW` gone a compromised container cannot sniff
-  the bridge, but it has not been made impossible: enabling `sslmode` on Postgres
-  and TLS on Redis is open work.
-* **`./tls`, with MinIO's `private.key`, is mounted into every application
-  container.** Only `public.crt` is needed there; the host's `chmod 600` on the
-  key is what protects it from the application user. Splitting it into a CA
-  directory is open work.
+* **The ACME override gives Caddy a route out, by choice.** Under
+  `compose.acme.yml` Caddy joins `edge` in place of `ingress`, because Let's
+  Encrypt has to be reached; a compromised Caddy can then reach the internet,
+  though still none of the database, Redis, MinIO or the egress proxy. The
+  default, `NOCTORNAL_TLS_MODE=internal`, keeps it sealed.
+* **`tls/ca/ca.key` is yours to keep off the host.** `internal_tls.py`
+  writes it there to issue the certificates; while it stays, root on this host
+  can mint a certificate for `minio`, `postgres` or `redis` that every service
+  trusts.
 * **No read-only root filesystem, and no memory or process limits, on the
   application services** (the analysis worker has both). The CA bundle and the Lab's child processes write to
   `/tmp`, and the limits need a sizing for your host. `/tmp` itself is a
@@ -1757,28 +1988,36 @@ both names resolve to the same digest, which is how that is checked.
   which this file does not do.
 * **Images and tools that are not digest pinned.** The development stack
   (`infra/docker-compose.yml`) pins all five of its images by digest, as
-  `compose.yml` does (2026-10-08), and so does the CI step that starts the ACL
-  Redis. The CI workflow's other containers still pull by tag
-  (`pgvector/pgvector:pg16` and `redis:7-alpine` as service containers, and
-  the MinIO, `mc` and Mailpit images in its `docker run` steps); its two
-  actions (`actions/checkout`, `actions/setup-python`) are pinned to commits,
-  and the workflow has no `permissions:` block. The installers
-  `pip install` an unpinned `pip`, and the Dockerfile installs whatever `gnupg`
-  Debian ships that day (`docs/17` F34 depends on its version). The digest each
-  tag resolves to in its registry, which the files named below pin and CI's
-  "Pinned images resolve" job asks the registry about on every push:
+  `compose.yml` does (2026-10-08), and so does the CI workflow, for its two
+  service containers and every `docker run` step, each with the digest the
+  compose files pin for that tag; its two actions (`actions/checkout`,
+  `actions/setup-python`) are pinned to commits. The installers and CI install
+  `pip` from `requirements-pip.txt`, by version and hash. The Dockerfile
+  installs `gnupg` at one Debian version (`GNUPG_VERSION`), the version
+  `docs/17` F34's attestation is about, and refuses a build whose gnupg or gpg
+  is any other upload. Debian removes a superseded version from its archive,
+  so a security update to gnupg fails the build, in CI's "Production image
+  builds" job first, until the pin moves; move it with the base image's
+  digest and build with `--pull`. The digest pinned for each
+  tag, which CI's "Pinned images resolve" job asks its registry for on every
+  push; the same job fails when the workflow pulls an image by tag, or when
+  one tag carries two digests across the compose files, the Dockerfile and
+  the workflow:
 
   | Image (tag) | Pinned in | Digest |
   |---|---|---|
-  | `pgvector/pgvector:pg16` | development stack, `compose.yml` | `sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b` |
-  | `redis:7-alpine` | development stack, `compose.yml` | `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499` |
-  | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack, `compose.yml` | `sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb` |
-  | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack, `compose.yml` | `sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780` |
-  | `axllent/mailpit:v1.31.0` | development stack | `sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24` |
+  | `pgvector/pgvector:pg16` | development stack, `compose.yml`, CI | `sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b` |
+  | `redis:7-alpine` | development stack, `compose.yml`, CI | `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499` |
+  | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack, `compose.yml`, CI | `sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb` |
+  | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack, `compose.yml`, CI | `sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780` |
+  | `axllent/mailpit:v1.31.0` | development stack, CI | `sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24` |
 
-  A test holds this table to both files, so moving a pin in the development
-  file or in `compose.yml` without the table fails the suite. Mailpit is a
-  development mail sink and is not in the production stack.
+  A test holds this table to the three files, so moving a pin in the
+  development file, in `compose.yml` or in the workflow without the table fails
+  the suite. A tag moves on after it is pinned (`pg16` and `7-alpine` already
+  name newer builds), and the pin stays on the build it was taken from until
+  someone moves it in all three. Mailpit is a development mail sink and is not
+  in the production stack.
 
 ---
 

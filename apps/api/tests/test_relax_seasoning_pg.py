@@ -333,8 +333,8 @@ def test_the_production_boot_refuses_a_malformed_window_and_never_quotes_it():
     env = {
         "NOCTORNAL_ENV": "production",
         "DATABASE_URL":
-            "postgresql+psycopg://noctornal_app:Xk9pQ@db:5432/noctornal",
-        "REDIS_URL": "redis://:Zm4tR@redis:6379/0",
+            "postgresql+psycopg://noctornal_app:Xk9pQ@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt",
+        "REDIS_URL": "rediss://:Zm4tR@redis:6379/0?ssl_ca_certs=/certs/ca.crt",
         "NOCTORNAL_TOTP_KEK": base64.b64encode(bytes(range(1, 33))).decode(),
         "NOCTORNAL_INGEST_PEPPER": "9f2c1ad4e6b8",
         "NOCTORNAL_AUDIT_PEPPER": "Qz4-audit-pepper-of-its-own",
@@ -347,7 +347,7 @@ def test_the_production_boot_refuses_a_malformed_window_and_never_quotes_it():
         "SMTP_PASSWORD": "Td5mJ1cV",
         "NOCTORNAL_MAX_EVIDENCE_BYTES": "268435456",
         "NOCTORNAL_WORKER_DATABASE_URL":
-            "postgresql+psycopg://noctornal_worker:Rt8vWq@db:5432/noctornal",
+            "postgresql+psycopg://noctornal_worker:Rt8vWq@db:5432/noctornal?sslmode=verify-full&sslrootcert=/certs/ca.crt",
     }
     assert verify_environment(env) == []
     for good in ("0", "7", "30"):

@@ -503,7 +503,18 @@ CONSTRAINTS="$REPO_ROOT/constraints.txt"
   "Unpack the release again, or check out the whole repository, then run this
 installer again. The file pins every Python dependency to the version this
 release was tested on, and it ships with the release."
-"$VENV_PY" -m pip install --upgrade pip --quiet
+# pip itself first, by version and hash from requirements-pip.txt, rather than whatever PyPI serves
+# today. A hash that does not match stops here: the file pip was handed is not the one pinned.
+[[ -f "$REPO_ROOT/requirements-pip.txt" ]] || stop_with "requirements-pip.txt is missing from $REPO_ROOT." \
+  "Unpack the release again, or check out the whole repository, then run this
+installer again. The file pins pip itself, by version and hash, and it ships
+with the release."
+"$VENV_PY" -m pip install --quiet --require-hashes -r "$REPO_ROOT/requirements-pip.txt" \
+  || stop_with "pip could not be installed from requirements-pip.txt." \
+     "Check your internet connection, then run this installer again.
+The output above says why. If it reports a hash that does not match, the
+file that was downloaded is not the one this release pinned: do not work
+around it, and report it."
 # BOTH packages, editable. The ontology package is the single source of the
 # selector normalisers and the API imports it; installing only the API
 # produces an ImportError at the first comms request rather than here.

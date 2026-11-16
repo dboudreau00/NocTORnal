@@ -248,14 +248,26 @@ def test_the_application_network_is_internal_and_the_others_have_fixed_subnets(d
     assert _subnet(doc, "exits") == egress_routes.EXITS_NETWORK
     assert _subnet(doc, "models") == egress_routes.MODELS_NETWORK
     assert nets["models"]["internal"] is True
+    # Caddy's two (test_tls_hops_compose.py holds what each is for).
+    assert nets["frontend"]["internal"] is True
+    assert _subnet(doc, "frontend") == ipaddress.ip_network("172.31.247.0/24")
+    assert not nets["ingress"].get("internal", False)
+    assert _subnet(doc, "ingress") == ipaddress.ip_network("172.31.248.0/24")
 
 
 def test_the_internal_subnets_equal_the_policys_default(doc):
-    assert tuple(str(_subnet(doc, n)) for n in ("noctornal", "edge")) == \
-        egress_policy.DEFAULT_INTERNAL_NETWORKS
-    for name in ("api", "cron", "egress-proxy"):
+    """Every network of the deployment's own that a container sits on, so no administrator's route can
+    reach one; `exits` and `models` are the code's own (egress_routes)."""
+    own = ("noctornal", "edge", "frontend", "ingress")
+    assert set(doc["networks"]) == set(own) | {"exits", "models"}
+    assert tuple(str(_subnet(doc, n)) for n in own) == egress_policy.DEFAULT_INTERNAL_NETWORKS
+    carriers = [name for name, service in doc["services"].items()
+                if "NOCTORNAL_EGRESS_INTERNAL_CIDRS" in (service.get("environment") or {})]
+    assert sorted(carriers) == ["api", "collector", "cron", "egress-proxy", "embed-pass",
+                                "lab-cron"], carriers
+    for name in carriers:
         value = doc["services"][name]["environment"]["NOCTORNAL_EGRESS_INTERNAL_CIDRS"]
-        assert tuple(value.split(",")) == egress_policy.DEFAULT_INTERNAL_NETWORKS
+        assert tuple(value.split(",")) == egress_policy.DEFAULT_INTERNAL_NETWORKS, name
 
 
 def test_the_fixed_addresses_sit_outside_the_networks_dynamic_range(doc):
@@ -263,35 +275,39 @@ def test_the_fixed_addresses_sit_outside_the_networks_dynamic_range(doc):
     deals an address to every container without a fixed one from the bottom of the subnet, ten of them reach
     .10 and .11, and a reboot starts everything at once in no order, so two could take the addresses Caddy
     and the proxy own. The network therefore deals only from its upper half (`ip_range`), keeps the gateway
-    at .1, and every fixed address lies outside the range."""
-    conf = doc["networks"]["noctornal"]["ipam"]["config"][0]
-    subnet = ipaddress.ip_network(conf["subnet"])
-    dealt_from = ipaddress.ip_network(conf["ip_range"])
-    gateway = ipaddress.ip_address(conf["gateway"])
-    assert dealt_from.subnet_of(subnet) and dealt_from != subnet
-    assert gateway in subnet and gateway not in dealt_from
-    fixed, dealt = {}, []
-    for name, service in doc["services"].items():
-        joined = _nets(service)
-        if "noctornal" not in joined:
-            continue
-        settings = joined["noctornal"] or {}
-        if "ipv4_address" in settings:
-            fixed[name] = ipaddress.ip_address(settings["ipv4_address"])
-        else:
-            dealt.append(name)
-    assert set(fixed) == {"caddy", "egress-proxy"}, fixed
-    for name, address in fixed.items():
-        assert address in subnet and address not in dealt_from and address != gateway, name
-    assert str(fixed["caddy"]) == doc["x-caddy-ip"]
-    assert str(fixed["egress-proxy"]) == doc["x-egress-ip"]
-    # room for every container that is dealt one, and for a few more
-    assert len(dealt) + 16 <= dealt_from.num_addresses - 2, len(dealt)
+    at .1, and every fixed address lies outside the range: the egress proxy's on `noctornal`, Caddy's on
+    `frontend`."""
+    for network, owner, anchor in (("noctornal", "egress-proxy", "x-egress-ip"),
+                                   ("frontend", "caddy", "x-caddy-ip")):
+        conf = doc["networks"][network]["ipam"]["config"][0]
+        subnet = ipaddress.ip_network(conf["subnet"])
+        dealt_from = ipaddress.ip_network(conf["ip_range"])
+        gateway = ipaddress.ip_address(conf["gateway"])
+        assert dealt_from.subnet_of(subnet) and dealt_from != subnet
+        assert gateway in subnet and gateway not in dealt_from
+        fixed, dealt = {}, []
+        for name, service in doc["services"].items():
+            joined = _nets(service)
+            if network not in joined:
+                continue
+            settings = joined[network] or {}
+            if "ipv4_address" in settings:
+                fixed[name] = ipaddress.ip_address(settings["ipv4_address"])
+            else:
+                dealt.append(name)
+        assert set(fixed) == {owner}, (network, fixed)
+        address = fixed[owner]
+        assert address in subnet and address not in dealt_from and address != gateway, network
+        assert str(address) == doc[anchor], network
+        # room for every container that is dealt one, and for a few more
+        assert len(dealt) + 16 <= dealt_from.num_addresses - 2, (network, len(dealt))
 
 
 def test_application_services_sit_on_the_internal_network_only(doc):
+    """`noctornal`, and for the two processes Caddy proxies to, `frontend`: both internal."""
     for name in APP_ONLY:
-        assert set(_nets(doc["services"][name])) == {"noctornal"}, name
+        expected = {"noctornal", "frontend"} if name in ("api", "sample-origin") else {"noctornal"}
+        assert set(_nets(doc["services"][name])) == expected, name
 
 
 def test_only_the_proxy_joins_exits_and_models_and_only_it_and_caddy_join_edge(doc):
@@ -299,18 +315,24 @@ def test_only_the_proxy_joins_exits_and_models_and_only_it_and_caddy_join_edge(d
                for net in doc["networks"]}
     assert members["exits"] == {"egress-proxy"}
     assert members["models"] == {"egress-proxy"}
-    assert members["edge"] == {"caddy", "egress-proxy"}
+    # Caddy joins `edge` only under compose.acme.yml (test_tls_hops_compose.py).
+    assert members["edge"] == {"egress-proxy"}
     # The analysis worker joins no network at all: test_analysis_worker_compose.py holds it there.
-    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy",
+    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "caddy-init", "egress-proxy",
                                                     "analysis-worker"}
     assert not _nets(doc["services"]["analysis-worker"])
+    # caddy-init only gives Caddy's volumes away (test_tls_hops_compose.py) and needs no network.
+    assert not _nets(doc["services"]["caddy-init"])
+    assert doc["services"]["caddy-init"]["network_mode"] == "none"
 
 
 def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):
     caddy = doc["services"]["caddy"]
     nets = _nets(caddy)
-    assert set(nets) == {"noctornal", "edge"}
-    assert nets["noctornal"]["ipv4_address"] == doc["x-caddy-ip"]
+    assert set(nets) == {"frontend", "ingress"}
+    assert nets["frontend"]["ipv4_address"] == doc["x-caddy-ip"]
+    for name in ("api", "sample-origin"):
+        assert doc["services"][name]["environment"]["NOCTORNAL_TRUSTED_PROXY_IP"] == doc["x-caddy-ip"]
     assert caddy["ports"] == ["80:80", "443:443"]
     # caddy.env, not secrets.env: the TLS terminator holds its three values and none of the platform's
     # secrets.
@@ -322,7 +344,8 @@ def test_the_proxy_is_unpublished_on_its_own_address_with_its_own_env(doc):
     assert "ports" not in proxy
     assert _nets(proxy)["noctornal"]["ipv4_address"] == doc["x-egress-ip"]
     assert _env_files(proxy) == [("egress-proxy.env", False)]
-    assert proxy["volumes"] == []
+    # The CA alone, for its verify-full database hop (test_tls_hops_compose.py).
+    assert proxy["volumes"] == ["./tls/public:/certs:ro"]
     assert proxy["environment"]["NOCTORNAL_EGRESS_LISTEN"] == doc["x-egress-ip"] + ":3128"
     assert proxy["command"] == ["python", "-m", "noctornal_api.egress_proxy"]
     assert proxy["healthcheck"]["test"] == ["CMD", "python", "-m",
@@ -379,13 +402,17 @@ def test_the_readme_names_every_place_that_carries_a_movable_subnet():
     readme = (ROOT / "infra" / "production" / "README.md").read_text(encoding="utf-8")
     section = readme.split("### If `up` fails creating the network", 1)[1].split("\n## ", 1)[0]
     keys = set()
-    for line in COMPOSE.read_text(encoding="utf-8").splitlines():
-        code = _strip_comment(line.strip())
-        if re.search(r"172\.31\.24[34]\.", code):
-            keys.add(code.lstrip("- ").split(":", 1)[0])
+    for path in (COMPOSE, COMPOSE.with_name("compose.acme.yml")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            code = _strip_comment(line.strip())
+            if re.search(r"172\.31\.24[3478]\.", code):
+                keys.add(code.lstrip("- ").split(":", 1)[0])
     assert keys == {"x-caddy-ip", "x-egress-ip", "subnet", "ip_range", "gateway",
                     "NOCTORNAL_EGRESS_PROXY_URL", "NOCTORNAL_EGRESS_LISTEN",
-                    "NOCTORNAL_EGRESS_INTERNAL_CIDRS"}, keys
+                    "NOCTORNAL_EGRESS_INTERNAL_CIDRS", "ipv4_address"}, keys
     for key in keys:
         assert key in section, key
+    for name in ("noctornal", "edge", "frontend", "ingress", "compose.acme.yml",
+                 "DEFAULT_INTERNAL_NETWORKS"):
+        assert name in section, name
     assert "EXITS_NETWORK" in section and "MODELS_NETWORK" in section

@@ -11,6 +11,10 @@ The script is the compose file's, with compose's `$$` escape written back as `$`
 has one line more before the server starts: a second user, `acl_tenant`, with every key, channel and
 command, whose password is ACL_TENANT_PASSWORD at run time. It stands for another tenant of a shared
 Redis, so the tests can show the limiter cannot reach that tenant's keys, and can read ACL LOG.
+
+The server speaks TLS alone and reads its pair from /tls (TLS_DIR), as the compose file mounts it;
+run_start_script points that at a directory of its own, with stand-in files the stand-in server
+never opens, and CI mounts a real pair there.
 """
 from __future__ import annotations
 
@@ -23,12 +27,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 COMPOSE = ROOT / "infra" / "production" / "compose.yml"
 ACL_FILE = "/tmp/users.acl"
+TLS_DIR = "/tls/"
 TENANT_USER = "acl_tenant"
 
 
 def start_script(*, tenant: bool = False, acl_file: str = ACL_FILE,
-                 server: str = "redis-server") -> str:
-    """The redis service's start script, as the container's shell runs it."""
+                 server: str = "redis-server", tls_dir: str = TLS_DIR) -> str:
+    """The redis service's start script, as the container's shell runs it. `tls_dir` (ending in a
+    slash) replaces the directory the server reads its certificate and key from."""
     from test_egress_topology import Reader
 
     service = Reader(COMPOSE.read_text(encoding="utf-8")).document()["services"]["redis"]
@@ -38,12 +44,15 @@ def start_script(*, tenant: bool = False, acl_file: str = ACL_FILE,
     script = command[2].replace("$$", "$")
     if "exec redis-server" not in script or ACL_FILE not in script:
         raise ValueError("the redis start script no longer writes its ACL and execs redis-server")
+    if f"{TLS_DIR}server.crt" not in script or f"{TLS_DIR}server.key" not in script:
+        raise ValueError("the redis start script no longer reads its pair from /tls")
     if tenant:
         indent = script[:script.index("exec redis-server")].rsplit("\n", 1)[-1]
         line = (f"printf 'user {TENANT_USER} on >%s ~* &* +@all\\n' "
                 f"\"$ACL_TENANT_PASSWORD\" >> {ACL_FILE}\n{indent}")
         script = script.replace("exec redis-server", line + "exec redis-server", 1)
     return (script.replace(ACL_FILE, acl_file)
+                  .replace(f"{TLS_DIR}server.", f"{tls_dir}server.")
                   .replace("exec redis-server", f"exec {server}", 1))
 
 
@@ -58,15 +67,24 @@ def posix_shell() -> str | None:
     return shutil.which("sh")
 
 
-def run_start_script(env: dict[str, str], workdir: Path) -> tuple[int, str, str, str]:
+def run_start_script(env: dict[str, str], workdir: Path, *,
+                     certificates: tuple[str, ...] = ("server.crt", "server.key")
+                     ) -> tuple[int, str, str, str]:
     """Run the start script with `env` (REDIS_PASSWORD, REDIS_URL) and an
-    `echo` where redis-server would be exec'd. Returns the exit status,
-    stdout, stderr and the ACL file it wrote ("" when it wrote none)."""
+    `echo` where redis-server would be exec'd, with the files named in
+    `certificates` present in the directory it reads its pair from. Returns
+    the exit status, stdout, stderr and the ACL file it wrote ("" when it
+    wrote none)."""
     shell = posix_shell()
     if shell is None:
         raise RuntimeError("no POSIX sh on this machine")
     acl = workdir / "users.acl"
-    script = start_script(acl_file=acl.as_posix(), server="echo redis-server")
+    tls = workdir / "tls"
+    tls.mkdir(exist_ok=True)
+    for name in certificates:
+        (tls / name).write_text("stand-in\n", encoding="utf-8")
+    script = start_script(acl_file=acl.as_posix(), server="echo redis-server",
+                          tls_dir=tls.as_posix() + "/")
     child = {k: v for k, v in os.environ.items()
              if k in ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "LANG")}
     child.update(env)

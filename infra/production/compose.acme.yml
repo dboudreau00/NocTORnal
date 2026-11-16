@@ -1,0 +1,24 @@
+# The ACME override: Caddy obtains the two public hostnames' certificates from an ACME CA, which
+# needs a route out. Use it only with NOCTORNAL_TLS_MODE set to the ACME account's e-mail
+# (caddy.env), and on every command, in this order:
+#
+#   sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
+#     -f infra/production/compose.acme.yml up -d --build
+#
+# compose.yml gives Caddy no route out: it sits on `frontend` (internal, shared with api and
+# sample-origin alone) and `ingress` (its own, no masquerade, there only to carry the published
+# ports). This file replaces those two with `frontend` at the same fixed address and `edge`, the
+# bridge the egress proxy leaves through. That is the one thing the default refuses the TLS
+# terminator, given back by choice: a compromised Caddy can then reach the internet (and still no
+# database, Redis, MinIO or egress proxy port, which share no network with it). The default,
+# NOCTORNAL_TLS_MODE=internal, needs no override (infra/production/README.md, the ACME override).
+#
+# `!override` replaces the list rather than merging into it (Compose 2.24 or later, the stated
+# minimum). The address must stay x-caddy-ip's in compose.yml, the one api and sample-origin
+# trust for X-Forwarded-For; a YAML alias cannot reach across files, so a test holds the two equal.
+services:
+  caddy:
+    networks: !override
+      frontend:
+        ipv4_address: "172.31.247.10"
+      edge: {}

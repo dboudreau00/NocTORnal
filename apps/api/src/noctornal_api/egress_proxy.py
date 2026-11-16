@@ -61,7 +61,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from noctornal_api import egress, egress_authz, egress_ledger, egress_policy, egress_routes
-from noctornal_api.config import published_credentials
+from noctornal_api.config import database_hop_problems, published_credentials
 from noctornal_api.db import APP_ROLE, WORKER_ROLE
 from noctornal_api.egress_authz import Decision, Refused
 from noctornal_api.egress_policy import (
@@ -215,6 +215,8 @@ def verify_proxy_environment(env: Mapping[str, str] | None = None) -> list[str]:
             problems.append(f"{DATABASE_URL_ENV} is not set: the proxy connects as "
                             f"{egress_ledger.EGRESS_ROLE} to read routes and write the "
                             f"connection ledger.")
+        # The proxy's own database hop, held to what every other process's is.
+        problems.extend(database_hop_problems(env, names=(DATABASE_URL_ENV,)))
         try:
             egress_seal.ExitRing.from_env(env)
         except egress_seal.SealError as exc:

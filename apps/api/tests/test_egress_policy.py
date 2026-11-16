@@ -193,12 +193,13 @@ def test_an_internal_network_answer_is_refused_on_every_route():
 
 
 def test_internal_networks_reads_the_variable_and_the_production_default():
+    # noctornal, edge, frontend and ingress (test_egress_topology.py holds them to compose).
     assert [str(n) for n in internal_networks({}, production=True)] == [
-        "172.31.243.0/24", "172.31.244.0/24"]
+        "172.31.243.0/24", "172.31.244.0/24", "172.31.247.0/24", "172.31.248.0/24"]
     assert internal_networks({}, production=False) == ()
     # Blank is unset: a compose `VAR: ""` must not switch the guard off.
     assert len(internal_networks({egress_policy.INTERNAL_CIDRS_ENV: "  "},
-                                 production=True)) == 2
+                                 production=True)) == 4
     assert [str(n) for n in internal_networks(
         {egress_policy.INTERNAL_CIDRS_ENV: "10.9.0.0/24, fd00:9::/64"},
         production=False)] == ["10.9.0.0/24", "fd00:9::/64"]

@@ -167,7 +167,7 @@ def test_each_user_mounts_the_socket_read_only_and_names_the_same_one(doc, worke
     for name in USERS:
         svc = doc["services"][name]
         assert f"analysis-socket:{MOUNT}:ro" in svc["volumes"], name
-        assert "./tls:/certs:ro" in svc["volumes"], name
+        assert "./tls/public:/certs:ro" in svc["volumes"], name
         assert svc["environment"][ar.SOCKET_ENV] == path, name
         assert ar.LOCAL_ENV not in svc["environment"], name
         assert WORKER in svc["depends_on"], name
