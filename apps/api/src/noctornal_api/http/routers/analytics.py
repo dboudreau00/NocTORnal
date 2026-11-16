@@ -10,6 +10,7 @@ to entities) are added in one place.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from uuid import UUID
 
@@ -126,9 +127,12 @@ def _one_mode_meter(
 
 def _params(decay_half_life_months: float | None,
             leiden_resolution: float) -> AnalyticsParams:
-    if decay_half_life_months is not None and decay_half_life_months <= 0:
+    # `<= 0` is False for NaN and for infinity, which a query string spells `nan` and `inf`: either would
+    # run the analysis and fail only where the run's parameters are written as JSON, if at all.
+    if (decay_half_life_months is not None
+            and not 0 < decay_half_life_months < math.inf):
         raise Problem(400, "Invalid request",
-                      "decay_half_life_months must be positive")
+                      "decay_half_life_months must be a positive, finite number")
     return AnalyticsParams(decay_half_life_months=decay_half_life_months,
                            leiden_resolution=leiden_resolution)
 

@@ -5,6 +5,8 @@ a metric without its projection is meaningless (docs/03).
 """
 from __future__ import annotations
 
+import logging
+import math
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -26,6 +28,7 @@ from noctornal_api.http.body_ceiling import raise_body_ceiling
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/cases/{case_id}/graph", tags=["graph-view"])
+log = logging.getLogger("noctornal.graphview")
 
 
 def _svc(conn: psycopg.Connection, user: CurrentUser, case_id: UUID) -> GraphService:
@@ -187,8 +190,10 @@ def metrics(
 
 class LayoutPosition(BaseModel):
     node_id: UUID
-    x: float
-    y: float
+    # Finite only. JSON as Python parses it takes NaN, Infinity and 1e999 and double precision stores each,
+    # but the response writes a non-finite float as null, which is not the float this model promises.
+    x: float = Field(allow_inf_nan=False)
+    y: float = Field(allow_inf_nan=False)
     is_pinned: bool = False
 
 
@@ -235,8 +240,14 @@ def get_layout(
             WHERE projection_id = %s""",
         (row[0],),
     ).fetchall()
+    finite = [r for r in rows if math.isfinite(r[1]) and math.isfinite(r[2])]
+    if len(finite) != len(rows):
+        # Written before the model refused them. Left out, not zeroed: a made-up position would be saved
+        # back as if the analyst had placed it. Saving that node again replaces the row.
+        log.warning("layout of case %s: stored layout rows left out because a coordinate is not "
+                    "finite: %d", case_id, len(rows) - len(finite))
     return [LayoutPosition(node_id=r[0], x=r[1], y=r[2], is_pinned=r[3])
-            for r in rows]
+            for r in finite]
 
 
 @router.put("/layout", status_code=204,
