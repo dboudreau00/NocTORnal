@@ -1,5 +1,33 @@
 # Changelog
 
+## Beta 1.6c: 2026-11-16
+
+Seven fixes from a review of 2026-11-16, on Beta 1.6a, version 0.9.6. There is no
+migration, so the Alembic head stays 0200. It has not been audited, and it is still not
+lawful to operate against real material until docs/16 L1 to L5 are settled outside this
+codebase.
+
+- **The compromised emSign root is out of the trust stores.** `certifi` moves to
+  2026.10.19, which removed emSign ECC Root CA - G3 (its intermediates were
+  compromised), and the application image installs `ca-certificates` 20250419+deb13u1
+  in the same layer as gnupg, because the production image builds `SSL_CERT_FILE` from
+  its own bundle.
+- **The bundled MinIO refuses unsigned-trailer uploads.** The pinned community MinIO
+  lets a caller who knows only an access key write an object through
+  `STREAMING-UNSIGNED-PAYLOAD-TRAILER`. A Caddy sidecar in MinIO's network namespace now
+  rejects that header in production and in the development stack, and the external-store
+  override leaves it off. A published access key (`minioadmin`, a replace-me placeholder)
+  is refused at boot like a published password.
+- **`pyasn1` moves to 0.6.5**, which closes four decoder denial-of-service advisories.
+- **A password or recovery code hashed under older Argon2 parameters is rehashed** after
+  a successful sign-in (compare-and-set; a failed second factor never upgrades the
+  password hash; a lost race does not fail the sign-in).
+- **Feeds are parsed with `defusedxml`** after the prolog scanner has refused any
+  declaration (a new hard dependency, pinned at 0.7.1).
+- **The image installs its Python dependencies from hashed pins** (`requirements-lock.txt`,
+  `requirements-telegram.txt`).
+- **CI audits the pinned constraints** with `pip-audit` on every push.
+
 ## Beta 1.6a: 2026-11-16
 
 An optional integration on Beta 1.6, version 0.9.6, and one fix. There is no
