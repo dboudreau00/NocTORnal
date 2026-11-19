@@ -69,6 +69,7 @@ procedures.
 [What it is](#what-it-is) · [Install](#install) · [First run](#first-run) ·
 [The tour](#the-tour) · [How it works](#how-it-works) ·
 [The twelve invariants](#the-twelve-invariants) · [Tech stack](#tech-stack) ·
+[Trade-offs and limits](#design-trade-offs-and-known-limitations) ·
 [Project layout](#project-layout) · [Docs](#documentation) ·
 [Status](#status) · [Licence](#licence)
 
@@ -705,6 +706,69 @@ enforces it.
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
+
+---
+
+## Design trade-offs and known limitations
+
+The reasons are in [How it works](#how-it-works), [The twelve
+invariants](#the-twelve-invariants) and the "why this" column of [Tech
+stack](#tech-stack), and the numbered decisions are in
+[`docs/00-decisions.md`](docs/00-decisions.md). This is the short list of what
+those choices cost.
+
+### Trade-offs
+
+- **One transactional store, not a graph database.** The graph, the assertion
+  ledger and the audit log commit or fail together, so an inference and its
+  justification cannot part. The cost is that the analytics (`igraph` and
+  `leidenalg`) run in process on a projection of the graph, which gives them a
+  size ceiling (below).
+- **The database enforces provenance.** Deferred constraint triggers refuse a
+  node or an edge with no graded assertion, and row-level security covers every
+  case table. The cost is that every write path has to supply an assertion, and
+  that the rules change by migration.
+- **WORM evidence is only as strong as the store.** Each exhibit is written
+  under a per-object COMPLIANCE retention that not even a root credential can
+  shorten. A bucket default of GOVERNANCE is only a floor and is bypassable, so
+  an S3 store has to pass [`docs/22`](docs/22-object-store-requirements.md)
+  before it holds evidence.
+- **Preserve by default.** A rejected sample is kept under a legal hold, and
+  destroying it is an opt-in the deployment declares. The cost is that the
+  deployment holds material whose possession can be an offence until counsel
+  decides which disposition it needs.
+- **Two people for the dangerous verbs.** Lifting a legal hold, merging
+  entities, getting a rejected sample back out and authorising a forum or
+  Telegram read each take a second person. One person cannot do them alone, by
+  design.
+- **Machines propose, analysts dispose.** No code path runs from an extractor
+  to the graph, so every suggestion waits for an analyst.
+- **No build step on the front end.** Plain HTML, CSS and ES modules under a
+  strict CSP with no `unsafe-inline`, so the whole UI can be audited by reading
+  it and a stored XSS has no scripting context. The cost is developer
+  ergonomics, and a hand-written 2D canvas renderer with a size ceiling.
+- **One host by default.** Production is one host with Docker Compose, TLS and
+  the egress proxy. The application is laid out for a cluster, and no cluster
+  manifest is shipped.
+
+### Known limitations
+
+- **Beta, unaudited, not certified for evidential use.** It is not lawful to
+  operate against real material until the [five blocking
+  items](#five-blocking-items-none-of-them-a-software-problem) are settled.
+  Nine adversarial reviews each found real defects, so assume the next one
+  would too.
+- **Size ceilings.** Writes, reads, selectors, search and the audit log hold at
+  100,000 entities and 1,000,000 claims per case. The canvas, the metrics and
+  the report are built for about 5,000 entities a case, and the ego network and
+  the path search stop at 5,000.
+- **Deliberately absent.** WebAuthn (password and TOTP today), session IP and
+  client binding by default in development, perceptual matching of prohibited
+  content, expansion of RAR and 7-Zip archives, and live SIP interception.
+- **Scope.** Not an OSINT collection suite, an attribution oracle or a malware
+  sandbox; see [What it is *not*](#what-it-is-not).
+- **What is still open** is in [`docs/17`](docs/17-flagged-for-review.md), by
+  area, with the date and the test that closed each finding.
 
 ---
 
